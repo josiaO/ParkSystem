@@ -1,0 +1,24 @@
+---
+description: Wrap the working HVX camera/gate engine; do not replace it
+alwaysApply: true
+---
+
+# Working engine is the core
+
+Do not relocate or rewrite `tools/hvx_sdk_host/`, `app/services/hvx_client.py`, `app/services/gates.py`, or the port-30000 NetSDK sequence.
+
+Blueprint folders live **inside** `app/domain`, `app/application`, and `app/infrastructure` as wrappers. Do not create a parallel `smartpark/` tree or switch default cameras to ONVIF/RTSP.
+
+- Default `adapter_id` is `hvx`; unknown ids fall back to HVX
+- SQLite stays the live store; PostgreSQL is only `SMARTPARK_DATABASE_URL`
+- `DIRECT` is the live connection mode; `EDGE_AGENT` is reserved
+- Gate default remains `COMMISSIONING` (physical still allowed). SHADOW only dry-runs *automatic* opens
+- Docs are filled when a feature lands; do not empty-stub the 33-file list
+
+```python
+# BAD — new connect path that skips the host
+await onvif.identify(camera)
+
+# GOOD — wrap the working client
+await HVXCameraAdapter().connect(camera)  # calls HVXHostClient.connect
+```

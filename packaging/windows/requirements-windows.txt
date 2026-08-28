@@ -1,0 +1,22 @@
+fastapi
+python-multipart
+uvicorn
+httptools
+websockets>=12,<17.1
+sqlalchemy
+pydantic
+pydantic-settings
+httpx
+argon2-cffi
+shiboken6
+PySide6_Essentials
+pillow
+numpy
+opencv-python-headless>=4.9.0.80,<5
+onnxruntime
+protobuf
+fast-alpr[onnx]
+colorama
+qrcode
+# PostgreSQL later: psycopg[binary]
+# Do not add watchfiles — it is only used by uvicorn --reload and conflicts with production.
