@@ -1,0 +1,32 @@
+{
+  "verified": true,
+  "vendor": "QY/IVX/HVX",
+  "product": "OcxConfig NetSDK 3.2.3.6",
+  "arch": "x86",
+  "calling_convention": "stdcall",
+  "dll": "NetSDK.dll",
+  "source": "Export names from OcxConfig/NetSDK.dll plus published QY NetSDK prototypes that match log formats (Net_ConnCameraEx tHandle,Port,Timeout,UserName,PassWord).",
+  "note": "Load only from a 32-bit Windows process. 64-bit Python cannot LoadLibrary this PE32 image — use tools/hvx_sdk_host.",
+  "discover": "Net_FindDeviceEx",
+  "connect": "Net_ConnCameraEx",
+  "snapshot": "Net_ImageSnap",
+  "plate_event": "Net_RegReportMessEx",
+  "relay_open": "Net_WriteGPIOState",
+  "functions": {
+    "Net_Init": {"args": [], "restype": "int"},
+    "Net_UNinit": {"args": [], "restype": "int"},
+    "Net_AddCamera": {"args": ["char*"], "restype": "int"},
+    "Net_DelCamera": {"args": ["int"], "restype": "int"},
+    "Net_ConnCamera": {"args": ["int", "ushort", "int"], "restype": "int"},
+    "Net_ConnCameraEx": {"args": ["int", "ushort", "int", "char*", "char*"], "restype": "int"},
+    "Net_DisConnCamera": {"args": ["int"], "restype": "int"},
+    "Net_QueryConnState": {"args": ["int"], "restype": "int"},
+    "Net_ImageSnap": {"args": ["int"], "restype": "int"},
+    "Net_SaveJpgFile": {"args": ["int", "char*"], "restype": "int"},
+    "Net_WriteGPIOState": {"args": ["int", "byte", "byte"], "restype": "int"},
+    "Net_ReadGPIOState": {"args": ["int", "byte", "byte*"], "restype": "int"},
+    "Net_FindDevice": {"args": [], "restype": "int"},
+    "Net_FindDeviceEx": {"args": ["callback", "void*"], "restype": "int"},
+    "Net_RegReportMessEx": {"args": ["int", "callback", "void*"], "restype": "int"}
+  }
+}

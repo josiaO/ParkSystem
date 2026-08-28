@@ -1,0 +1,1707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmartPark Edge</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --text: #172033;
+      --muted: #5b6b82;
+      --card: #ffffff;
+      --line: #dfe5ef;
+      --accent: #1f5eff;
+      --nav: #111827;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    button { background: var(--accent); color: #fff; border: 0; border-radius: 7px; padding: 8px 14px; cursor: pointer; }
+    button.secondary { background: #eef2f8; color: var(--text); }
+    button.danger { background: #fef3f2; color: var(--danger); }
+    button:disabled { background: #aab5c8; cursor: not-allowed; }
+    input, select { width: 100%; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 10px; font: inherit; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #edf1f7; vertical-align: middle; }
+    th { background: #eef2f8; font-weight: 600; }
+    .error { color: var(--danger); min-height: 1.2em; }
+    .muted { color: var(--muted); }
+    .login { min-height: 100%; display: grid; place-items: center; padding: 24px; }
+    .card {
+      width: min(420px, 100%); background: var(--card); border: 1px solid var(--line);
+      border-radius: 12px; padding: 28px; box-shadow: 0 8px 30px rgba(23, 32, 51, 0.06);
+    }
+    dialog .card { box-shadow: none; border: 0; padding: 0; width: min(460px, 90vw); }
+    .card h1 { margin: 0 0 4px; font-size: 26px; }
+    .card h2 { margin: 0 0 12px; font-size: 20px; }
+    .card label, .field { display: block; margin: 12px 0 6px; }
+    .roles { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; }
+    .roles label { margin: 0; display: flex; gap: 8px; align-items: center; }
+    .roles input { width: auto; }
+    .app { display: grid; grid-template-columns: 190px 1fr; min-height: 100%; }
+    nav { background: var(--nav); color: #e5e7eb; padding: 16px 10px; display: flex; flex-direction: column; gap: 4px; }
+    nav .brand { font-weight: 700; padding: 8px 10px 16px; }
+    nav button { background: transparent; color: #e5e7eb; text-align: left; border-radius: 6px; padding: 10px; }
+    nav button.active { background: var(--accent); }
+    main { padding: 24px 28px; overflow: auto; }
+    h2 { margin: 0 0 8px; font-size: 24px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .row-actions button { padding: 6px 10px; }
+    .hidden { display: none !important; }
+    .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+    pre.receipt { white-space: pre-wrap; font-family: ui-monospace, monospace; }
+    tr.selected { background: #e8efff; }
+    .live-panel { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr); gap: 12px; margin-top: 16px; align-items: stretch; }
+    .live-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-height: 280px; }
+    .live-title { font-weight: 700; margin-bottom: 8px; }
+    .live-frame { position: relative; background: #0b1220; border-radius: 8px; min-height: 220px; }
+    #live-img { width: 100%; max-height: 420px; object-fit: contain; display: block; min-height: 220px; }
+    #live-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+    .plate-list { display: flex; flex-direction: column; gap: 10px; }
+    .plate-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #f8fafc; }
+    .plate-item img { width: 100%; max-height: 90px; object-fit: contain; background: #111; border-radius: 4px; }
+    .plate-item strong { font-size: 18px; letter-spacing: 0.04em; }
+    .plate-chars { font-size: 28px; font-weight: 700; letter-spacing: 0.18em; text-align: center; margin: 8px 0; }
+    .gates-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+    .gate-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .gate-card h3 { margin: 0 0 8px; font-size: 16px; }
+    .lane-side img { width: 100%; max-height: 200px; object-fit: contain; background: #0b1220; border-radius: 8px; display: block; min-height: 120px; }
+    .lane-side .crop-img { max-height: 80px; min-height: 48px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+    .stat-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+    .stat-card .value { font-size: 26px; font-weight: 700; }
+    .stat-card .label { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    nav .group { color: #9aa7bd; font-size: 11px; letter-spacing: .08em; padding: 14px 10px 4px; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <section id="login-view" class="login">
+    <form class="card" id="login-form">
+      <h1>SmartPark Edge</h1>
+      <p class="muted" id="login-hint">Parking camera operations</p>
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <p class="error" id="login-error"></p>
+      <button type="submit" id="login-btn">Sign In</button>
+    </form>
+  </section>
+
+  <section id="app-view" class="app hidden">
+    <nav>
+      <div class="brand">SmartPark Edge</div>
+      <div class="group">Overview</div>
+      <button data-page="dashboard" class="active">Dashboard</button>
+      <button data-page="lanes">Live Gates</button>
+      <button data-page="health" id="nav-health">System Health</button>
+      <div class="group">Operations</div>
+      <button data-page="sessions" id="nav-sessions">Sessions</button>
+      <button data-page="vehicles" id="nav-vehicles">Vehicles</button>
+      <button data-page="payments" id="nav-payments">Payments</button>
+      <div class="group">Management</div>
+      <button data-page="fees">Tariffs</button>
+      <div class="group">System</div>
+      <button data-page="cameras">Cameras</button>
+      <button data-page="gates">Gates</button>
+      <button data-page="users" id="nav-users">Users</button>
+      <button data-page="hardware" id="nav-hardware">Hardware Lab</button>
+      <button data-page="sim" id="nav-sim">Simulation</button>
+    </nav>
+    <main>
+      <div class="top">
+        <div>
+          <h2 id="page-title">Dashboard</h2>
+          <div class="muted" id="whoami"></div>
+        </div>
+        <button class="secondary" id="logout-btn" type="button">Sign out</button>
+      </div>
+
+      <div id="page-dashboard">
+        <div class="stat-grid" id="dashboard-cards"></div>
+        <p class="muted" id="dashboard-summary">Loading…</p>
+      </div>
+
+      <div id="page-health" class="hidden">
+        <p class="muted">Technician view. One failed camera or HVX host must not stop parking.</p>
+        <div class="stat-grid" id="health-cards"></div>
+        <pre id="health-details">Loading…</pre>
+      </div>
+
+      <div id="page-cameras" class="hidden">
+        <p class="muted">Add cameras and attach them to a gate. Default adapter is HVX. Live view is the moving SDK video — not the last car still. Connect all logs in camera IPs only on port 30000.</p>
+        <div class="toolbar">
+          <button type="button" id="add-camera">Add Camera</button>
+          <button class="secondary" type="button" id="discover-cameras">Discover</button>
+          <button class="secondary" type="button" id="seed-site">Add site cameras</button>
+          <button class="secondary" type="button" id="connect-all">Connect all</button>
+          <button class="secondary" type="button" id="refresh-cameras">Refresh</button>
+          <button class="secondary" type="button" id="sdk-connect">SDK Connect</button>
+          <button class="secondary" type="button" id="rtsp-probe">Probe RTSP</button>
+          <button class="secondary" type="button" id="fastalpr">FastALPR</button>
+          <button class="secondary" type="button" id="capture-snapshot">Capture snapshot</button>
+          <button class="secondary" type="button" id="sdk-disconnect">SDK Disconnect</button>
+          <button class="secondary" type="button" id="open-this-side">Open this side</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Name</th><th>Lane</th><th>Side</th><th>Camera</th><th>Controller</th><th>Display</th><th>Status</th><th>SDK</th><th>Error</th><th></th></tr>
+          </thead>
+          <tbody id="camera-rows"></tbody>
+        </table>
+        <p class="error" id="camera-error"></p>
+        <pre class="hidden" id="camera-result"></pre>
+        <div class="live-panel">
+          <div class="live-card">
+            <div class="live-title">Live view</div>
+            <div class="live-frame">
+              <img id="live-img" alt="Live camera">
+              <canvas id="live-overlay"></canvas>
+            </div>
+            <p class="muted" id="live-status">Select a camera to open live view.</p>
+          </div>
+          <div class="live-card">
+            <div class="live-title">Number plates</div>
+            <div class="plate-list" id="live-plates">
+              <p class="muted">These cameras read plates themselves after Connect all. FastALPR is a second, local OCR on the live JPEG or a simulation upload. Close any other SDK client if live video works but plates never arrive.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="page-lanes" class="hidden">
+        <p class="muted">Car snapshots only — the still taken when a vehicle is read at each gate. Moving live video is on Cameras. Add a gate, then attach cameras to grow the site.</p>
+        <div class="toolbar">
+          <button class="secondary" type="button" id="refresh-lanes">Refresh</button>
+        </div>
+        <div id="lane-overview" class="gates-overview"></div>
+        <pre id="lane-recent">No car snapshots yet.</pre>
+        <p class="error" id="lane-error"></p>
+      </div>
+
+      <div id="page-gates" class="hidden">
+        <p class="muted">Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane.</p>
+        <div class="toolbar">
+          <button type="button" id="add-gate">Add Gate</button>
+          <button class="secondary" type="button" id="refresh-gates">Refresh</button>
+          <button class="secondary" type="button" id="led-text">LED text</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Lane</th><th>Mode</th><th>Enabled</th><th>Verified</th><th>Sides (camera / controller / display)</th><th></th></tr>
+          </thead>
+          <tbody id="gate-rows"></tbody>
+        </table>
+        <p class="error" id="gate-error"></p>
+      </div>
+
+      <div id="page-sessions" class="hidden">
+        <p class="muted">Plate-first parking sessions. A vehicle may exit at a different gate from entry.</p>
+        <div class="toolbar">
+          <button type="button" id="pay-session">Record kiosk payment</button>
+          <button class="secondary" type="button" id="print-session-receipt">Show / print receipt</button>
+          <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Plate</th><th>Kind</th><th>Status</th><th>Receipt</th><th>Entry</th><th>Due</th><th>Paid</th></tr>
+          </thead>
+          <tbody id="session-rows"></tbody>
+        </table>
+        <p class="error" id="session-error"></p>
+        <pre id="session-receipt" class="receipt hidden">No receipt yet.</pre>
+      </div>
+
+      <div id="page-payments" class="hidden">
+        <p class="muted">Kiosk and mobile payments share one ledger. Browser success is not paid.</p>
+        <div class="toolbar">
+          <button class="secondary" type="button" id="refresh-payments">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>When</th><th>Session</th><th>Method</th><th>Amount</th><th>Status</th><th>Provider</th></tr>
+          </thead>
+          <tbody id="payment-rows"></tbody>
+        </table>
+        <p class="error" id="payment-error"></p>
+      </div>
+
+      <div id="page-vehicles" class="hidden">
+        <p class="muted">Register season, VIP, staff, and tenant plates. A live camera read of a registered plate opens the barrier. Casual cars still get a receipt.</p>
+        <div class="toolbar">
+          <button type="button" id="add-vehicle">Register plate</button>
+          <button class="secondary" type="button" id="refresh-vehicles">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Plate</th><th>Owner</th><th>Plan</th><th>Auto-open</th><th>Enabled</th><th>Valid until</th><th></th></tr>
+          </thead>
+          <tbody id="vehicle-rows"></tbody>
+        </table>
+        <p class="error" id="vehicle-error"></p>
+      </div>
+
+      <div id="page-fees" class="hidden">
+        <p class="muted">Current site tariff. Change rates in configuration, not in program constants.</p>
+        <div class="toolbar">
+          <button type="button" id="quote-fee">Quote fee</button>
+          <button class="secondary" type="button" id="refresh-tariff">Show tariff</button>
+        </div>
+        <label>Entry UTC <input id="fee-entry" placeholder="2026-08-25T08:00:00"></label>
+        <label>Exit UTC <input id="fee-exit" placeholder="2026-08-25T10:00:00"></label>
+        <pre id="fee-result">Loading tariff…</pre>
+        <p class="error" id="fee-error"></p>
+      </div>
+
+      <div id="page-users" class="hidden">
+        <p class="muted">Create, update, and disable operator accounts. The last Admin cannot be removed.</p>
+        <div class="toolbar">
+          <button type="button" id="add-user">Add User</button>
+          <button class="secondary" type="button" id="refresh-users">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Username</th><th>Name</th><th>Status</th><th>Roles</th><th></th></tr>
+          </thead>
+          <tbody id="user-rows"></tbody>
+        </table>
+        <p class="error" id="user-error"></p>
+      </div>
+
+      <div id="page-hardware" class="hidden">
+        <p class="muted">The HVX vendor SDK requires a 32-bit Windows host process.</p>
+        <div class="toolbar">
+          <button type="button" id="check-hvx">Check HVX SDK Host</button>
+          <button class="secondary" type="button" id="check-alpr">Check FastALPR</button>
+        </div>
+        <pre id="hvx-info">Loading…</pre>
+      </div>
+
+      <div id="page-sim" class="hidden">
+        <p class="muted">Does not need cameras. Type a registered plate, or upload a car photo. Registered plates open immediately. Casual ENTRY shows a receipt.</p>
+        <div class="toolbar">
+          <label>Lane <select id="sim-gate"></select></label>
+        </div>
+        <label>Number plate <input id="sim-plate" placeholder="T453ETH" style="max-width:220px"></label>
+        <div class="toolbar">
+          <button type="button" id="sim-plate-entry">Enter plate as ENTRY</button>
+          <button class="secondary" type="button" id="sim-plate-exit">Enter plate as EXIT</button>
+        </div>
+        <label>Car photo <input id="sim-file" type="file" accept="image/jpeg,image/png,image/*"></label>
+        <img id="sim-preview" alt="Car photo" style="max-height:180px;margin:8px 0;display:none;background:#0b1220;border-radius:8px">
+        <div class="toolbar">
+          <button type="button" id="sim-entry">Upload as ENTRY</button>
+          <button type="button" id="sim-taken">Receipt taken (open barrier)</button>
+          <button class="secondary" type="button" id="sim-pay">Mark paid</button>
+          <button class="secondary" type="button" id="sim-exit">Upload as EXIT</button>
+        </div>
+        <pre id="sim-receipt" class="receipt">No receipt yet.</pre>
+        <div id="sim-parking" class="hidden">
+          <p class="muted">Parking rules for this site (shared with live plates).</p>
+          <label>Receipt policy
+            <select id="park-policy">
+              <option value="REQUIRE_TAKEN_BEFORE_OPEN">Require taken before open</option>
+              <option value="PRINT_AND_OPEN">Print and open</option>
+              <option value="PRINT_OPTIONAL">Print optional (open now)</option>
+              <option value="OFF">No receipt (open now)</option>
+            </select>
+          </label>
+          <label><input type="checkbox" id="park-receipt"> Receipt must be taken before the entry barrier opens</label>
+          <label><input type="checkbox" id="park-pay"> Exit stays closed until the session is paid</label>
+          <label>Pay prompt <input id="park-prompt"></label>
+          <label>USB / A4 printer
+            <select id="park-printer">
+              <option value="">File only (no paper)</option>
+            </select>
+          </label>
+          <p class="muted">Plug a normal USB A4 printer into this PC, pick it, then Save. A detected car prints the receipt, then the gate opens. Simulation uses the same path.</p>
+          <div class="toolbar">
+            <button class="secondary" type="button" id="park-save">Save parking rules</button>
+            <button class="secondary" type="button" id="park-test">Print test page</button>
+          </div>
+        </div>
+        <p class="error" id="sim-error"></p>
+      </div>
+    </main>
+  </section>
+
+  <dialog id="camera-dialog">
+    <form class="card" id="camera-form">
+      <h2 id="camera-dialog-title">Add Camera</h2>
+      <input type="hidden" name="id">
+      <label>Name <input name="name" required></label>
+      <label>Camera IP <input name="ip_address" required></label>
+      <label>HVX SDK port <input name="sdk_port" value="30000" required></label>
+      <label>Username <input name="username" value="admin"></label>
+      <label>Password <input name="password" type="password" value="admin" placeholder="Camera default: admin"></label>
+      <label>Side
+        <select name="lane_direction">
+          <option>ENTRY</option>
+          <option>EXIT</option>
+        </select>
+      </label>
+      <label>Lane
+        <select name="gate_id">
+          <option value="">None</option>
+        </select>
+      </label>
+      <label>Adapter
+        <select name="adapter_id">
+          <option value="hvx">hvx (site default)</option>
+          <option value="rtsp">rtsp (media extra)</option>
+          <option value="onvif">onvif (stub)</option>
+          <option value="simulated">simulated</option>
+        </select>
+      </label>
+      <label>Controller IP (Board*) <input name="controller_ip" placeholder="barrier board, not SDK"></label>
+      <label>Display IP (IpAddr*) <input name="display_ip" placeholder="LED screen, not SDK"></label>
+      <label>RTSP URL (optional) <input name="rtsp_url"></label>
+      <p class="error" id="camera-dialog-error"></p>
+      <div class="toolbar">
+        <button type="submit">Save Camera</button>
+        <button class="secondary" type="button" id="camera-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gate-dialog">
+    <form class="card" id="gate-form">
+      <h2 id="gate-dialog-title">Add Gate</h2>
+      <input type="hidden" name="id">
+      <label>Name <input name="name" required></label>
+      <label>Mode
+        <select name="mode">
+          <option>COMMISSIONING</option>
+          <option>SHADOW</option>
+          <option>PRODUCTION</option>
+          <option>MAINTENANCE</option>
+        </select>
+      </label>
+      <label>Enabled
+        <select name="enabled">
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      </label>
+      <p class="error" id="gate-dialog-error"></p>
+      <div class="toolbar">
+        <button type="submit">Save Gate</button>
+        <button class="secondary" type="button" id="gate-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="vehicle-dialog">
+    <form class="card" id="vehicle-form">
+      <h2 id="vehicle-dialog-title">Register plate</h2>
+      <input type="hidden" name="id">
+      <label>Number plate <input name="plate" required placeholder="T453ETH"></label>
+      <label>Owner <input name="owner_name"></label>
+      <label>Access plan <select name="plan_id"></select></label>
+      <label>Enabled
+        <select name="enabled">
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      </label>
+      <label>Notes <input name="notes"></label>
+      <p class="error" id="vehicle-dialog-error"></p>
+      <div class="toolbar">
+        <button type="submit">Save vehicle</button>
+        <button class="secondary" type="button" id="vehicle-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="user-dialog">
+    <form class="card" id="user-form">
+      <h2 id="user-dialog-title">Add User</h2>
+      <input type="hidden" name="id">
+      <label>Username <input name="username" required></label>
+      <label>Full name <input name="full_name"></label>
+      <label>Password <input name="password" type="password" minlength="10" placeholder="At least 10 characters"></label>
+      <label>Status
+        <select name="status">
+          <option>ACTIVE</option>
+          <option>LOCKED</option>
+          <option>DISABLED</option>
+        </select>
+      </label>
+      <div class="muted">Roles</div>
+      <div class="roles" id="user-roles"></div>
+      <p class="error" id="user-dialog-error"></p>
+      <div class="toolbar">
+        <button type="submit">Save User</button>
+        <button class="secondary" type="button" id="user-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const state = { token: sessionStorage.getItem("smartpark_token") || "", user: "", userId: null, permissions: [], roles: [] };
+    let selectedCameraId = null;
+
+    const loginView = document.getElementById("login-view");
+    const appView = document.getElementById("app-view");
+    const pages = ["dashboard", "health", "lanes", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim"];
+    let liveAlprTimer = null;
+    let snapshotTimer = null;
+    let liveUseMjpeg = true;
+    let alprInstalled = null;
+    let liveOverlay = null;
+    let laneEventTimer = null;
+    let healthTimer = null;
+    let laneView = null;
+    let simSessionId = null;
+
+    function mediaUrl(path) {
+      const join = path.includes("?") ? "&" : "?";
+      return `${path}${join}access_token=${encodeURIComponent(state.token)}`;
+    }
+
+    function stopLive() {
+      if (liveAlprTimer) { clearInterval(liveAlprTimer); liveAlprTimer = null; }
+      if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
+      liveOverlay = null;
+      const img = document.getElementById("live-img");
+      img.onload = null;
+      img.onerror = null;
+      img.removeAttribute("src");
+      drawLiveOverlay();
+    }
+
+    function drawLiveOverlay() {
+      const img = document.getElementById("live-img");
+      const canvas = document.getElementById("live-overlay");
+      if (!img || !canvas) return;
+      const rect = img.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.round(rect.width));
+      canvas.height = Math.max(1, Math.round(rect.height));
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const box = liveOverlay;
+      if (!box || !img.naturalWidth) return;
+      const srcW = box.image_width || img.naturalWidth;
+      const srcH = box.image_height || img.naturalHeight;
+      const scale = Math.min(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+      const drawW = img.naturalWidth * scale;
+      const drawH = img.naturalHeight * scale;
+      const ox = (canvas.width - drawW) / 2;
+      const oy = (canvas.height - drawH) / 2;
+      const sx = drawW / srcW;
+      const sy = drawH / srcH;
+      const x = ox + box.x1 * sx;
+      const y = oy + box.y1 * sy;
+      const w = Math.max(2, (box.x2 - box.x1) * sx);
+      const h = Math.max(2, (box.y2 - box.y1) * sy);
+      ctx.strokeStyle = "#00dc5a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+      if (box.label) {
+        ctx.fillStyle = "#00dc5a";
+        ctx.font = "14px sans-serif";
+        ctx.fillText(box.label, x, Math.max(14, y - 6));
+      }
+    }
+
+    function startSnapshotLoop(id) {
+      if (snapshotTimer) clearInterval(snapshotTimer);
+      const img = document.getElementById("live-img");
+      const tick = () => { img.src = mediaUrl(`/cameras/${id}/snapshot.jpg`) + "&t=" + Date.now(); };
+      img.onload = () => drawLiveOverlay();
+      tick();
+      snapshotTimer = setInterval(tick, 400);
+    }
+
+    function renderPlates(data) {
+      const box = document.getElementById("live-plates");
+      if (!data) {
+        box.innerHTML = `<p class="muted">Waiting for the camera to read a plate. Connect all, then let a car pass. Close any other SDK client if it still owns the camera callback.</p>`;
+        return;
+      }
+      const alpr = data.alpr && typeof data.alpr === "object" ? data.alpr : (data.plates ? data : null);
+      const native = data.native || {};
+      const fusion = data.fusion || {};
+      const resolved = data.resolved_plate || fusion.resolved_plate || native.plate || "";
+      const plates = (alpr && alpr.plates) || [];
+      const parts = [];
+      if (resolved) {
+        parts.push(`<div class="plate-item"><strong>${resolved}</strong><div class="muted">${fusion.method || "NATIVE"} · native ${native.plate || "—"} · local ${(data.local && data.local.plate) || (alpr && alpr.best && alpr.best.plate) || "—"}</div></div>`);
+      } else if (native.plate) {
+        parts.push(`<div class="plate-item"><strong>${native.plate}</strong><div class="muted">Native camera · ${Math.round((native.confidence || 0) * 100)}%</div></div>`);
+      }
+      if (!resolved && !native.plate) {
+        parts.push(`<p class="muted">${(alpr && alpr.detail) || "Waiting for the camera to read a plate. These QY cameras send the characters over the SDK. Close any other SDK client if it is still running."}</p>`);
+      }
+      if (alpr && alpr.annotated_url) {
+        parts.push(`<img alt="Annotated frame" src="${mediaUrl(alpr.annotated_url)}">`);
+      }
+      plates.forEach((p) => {
+        parts.push(`
+          <div class="plate-item">
+            ${p.crop_url ? `<img alt="${p.plate}" src="${mediaUrl(p.crop_url)}">` : ""}
+            <strong>${p.plate || p.plate_raw || "—"}</strong>
+            <div class="muted">FastALPR · ${Math.round((p.confidence || 0) * 100)}%</div>
+          </div>
+        `);
+      });
+      if (!parts.length) {
+        box.innerHTML = `<p class="muted">${(alpr && alpr.detail) || "No plate yet. Connect the camera and wait for a car. FastALPR is optional."}</p>`;
+      } else {
+        box.innerHTML = parts.join("");
+      }
+      liveOverlay = data.overlay || null;
+      drawLiveOverlay();
+    }
+
+    async function refreshPlates(id, runAlpr) {
+      const status = document.getElementById("live-status");
+      try {
+        if (alprInstalled === null) {
+          try { alprInstalled = Boolean((await api("/alpr/status")).installed); }
+          catch (_) { alprInstalled = false; }
+        }
+        const data = await api(`/cameras/${id}/plates`);
+        if (data.live) {
+          const fps = data.live_fps ? ` · ${data.live_fps} fps` : "";
+          const src = data.live_source ? ` · ${data.live_source}` : "";
+          status.textContent = (data.url_redacted ? `Live${src}${fps} · ${data.url_redacted}` : `Live${src}${fps}`);
+        }
+        else status.textContent = data.error || "No live JPEG yet. SDK Connect still enables native plates.";
+        renderPlates(data);
+      } catch (err) {
+        status.textContent = err.message;
+        try { renderPlates(await api(`/cameras/${id}/plates`)); }
+        catch (_) {}
+      }
+    }
+
+    function startLive(id, force = false) {
+      const img = document.getElementById("live-img");
+      if (!force && img.dataset.cameraId === String(id) && img.getAttribute("src")) {
+        refreshPlates(id, false);
+        return;
+      }
+      stopLive();
+      const status = document.getElementById("live-status");
+      status.textContent = "Opening live view…";
+      img.dataset.cameraId = String(id);
+      liveUseMjpeg = true;
+      img.onload = () => {
+        if (liveUseMjpeg) status.textContent = "Live";
+        drawLiveOverlay();
+      };
+      img.onerror = () => {
+        if (!liveUseMjpeg) return;
+        liveUseMjpeg = false;
+        startSnapshotLoop(id);
+      };
+      img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
+      refreshPlates(id, false);
+      liveAlprTimer = setInterval(() => refreshPlates(id, false), 2000);
+    }
+
+    function can(permission) {
+      return state.permissions.includes("*") || state.permissions.includes(permission);
+    }
+
+    function detailMessage(detail, fallback) {
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
+      return fallback;
+    }
+
+    function stopLanes() {
+      if (laneEventTimer) { clearInterval(laneEventTimer); laneEventTimer = null; }
+    }
+
+    function sideCard(gateName, side) {
+      const cam = (side && side.camera) || {};
+      const last = (side && side.last) || {};
+      const plate = last.plate || "";
+      const chars = last.characters || (plate ? plate.split("").join(" ") : "—");
+      const snap = last.snapshot_url ? `<img class="lane-side" alt="snapshot" src="${mediaUrl(last.snapshot_url)}">` : `<p class="muted">No snapshot yet</p>`;
+      const crop = last.crop_url ? `<img class="crop-img" alt="crop" src="${mediaUrl(last.crop_url)}">` : "";
+      return `<div class="gate-card">
+        <h3>${gateName} · ${(side.side || "").toLowerCase()}</h3>
+        ${snap}
+        ${crop}
+        <div class="plate-chars">${chars}</div>
+        <p class="muted">${cam.name || "camera"} · ${last.plate_raw || plate || "no plate yet"} · ${Math.round((last.confidence || 0) * 100)}%</p>
+      </div>`;
+    }
+
+    async function loadLaneView() {
+      const error = document.getElementById("lane-error");
+      error.textContent = "";
+      try {
+        const data = await api("/lanes/overview");
+        const lanes = data.lanes || [];
+        document.getElementById("lane-overview").innerHTML = lanes.flatMap((lane) => {
+          const name = (lane.gate && lane.gate.name) || "Gate";
+          const sides = lane.sides && lane.sides.length ? lane.sides : [lane.entry, lane.exit].filter(Boolean).map((s, i) => ({ ...s, side: i === 0 ? "ENTRY" : "EXIT" }));
+          return sides.map((side) => sideCard(name, side));
+        }).join("") || `<p class="muted">No gates yet. Add a gate, then attach cameras.</p>`;
+        const lines = [];
+        lanes.forEach((lane) => {
+          (lane.recent || []).forEach((row) => {
+            const when = (row.created_at || "").slice(0, 19).replace("T", " ");
+            lines.push(`${when}  ${(lane.gate && lane.gate.name) || ""}  ${row.lane_direction}  ${row.plate || "—"}  ${row.characters || ""}`);
+          });
+        });
+        document.getElementById("lane-recent").textContent = lines.join("\n") || "No car snapshots yet. Connect the cameras and wait for a vehicle.";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function startLanes() {
+      stopLanes();
+      await loadLaneView();
+      laneEventTimer = setInterval(loadLaneView, 2000);
+    }
+
+    async function loadSim() {
+      const error = document.getElementById("sim-error");
+      error.textContent = "";
+      try {
+        const lanes = await api("/lanes");
+        const select = document.getElementById("sim-gate");
+        const current = select.value;
+        select.innerHTML = lanes.map((g) => `<option value="${g.id}">${g.name}</option>`).join("");
+        if (current && [...select.options].some((o) => o.value === current)) select.value = current;
+        const box = document.getElementById("sim-parking");
+        if (can("simulation.run")) {
+          box.classList.remove("hidden");
+          const cfg = await api("/settings/parking");
+          document.getElementById("park-receipt").checked = Boolean(cfg.receipt_required_before_open);
+          document.getElementById("park-policy").value = cfg.receipt_policy || "PRINT_AND_OPEN";
+          document.getElementById("park-pay").checked = Boolean(cfg.exit_requires_payment);
+          document.getElementById("park-prompt").value = cfg.pay_prompt || "";
+          const select = document.getElementById("park-printer");
+          const printers = await api("/printers/status");
+          const chosen = cfg.printer_name || printers.printer_name || "";
+          const options = [`<option value="">File only (no paper)</option>`];
+          (printers.printers || []).forEach((row) => {
+            const bits = [];
+            if (row.is_usb) bits.push("USB");
+            if (row.is_default) bits.push("default");
+            const label = bits.length ? `${row.name} (${bits.join(", ")})` : row.name;
+            options.push(`<option value="${row.name}">${label}</option>`);
+          });
+          if (chosen && !(printers.printers || []).some((row) => row.name === chosen)) {
+            options.push(`<option value="${chosen}">${chosen}</option>`);
+          }
+          select.innerHTML = options.join("");
+          select.value = chosen;
+        } else {
+          box.classList.add("hidden");
+        }
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function simAction(kind) {
+      const error = document.getElementById("sim-error");
+      const out = document.getElementById("sim-receipt");
+      error.textContent = "";
+      const gateId = Number(document.getElementById("sim-gate").value);
+      try {
+        let data;
+        if (kind === "entry" || kind === "exit") {
+          const input = document.getElementById("sim-file");
+          const file = input.files && input.files[0];
+          if (!file) throw new Error("Choose a JPEG photo of the car first");
+          const form = new FormData();
+          form.append("gate_id", String(gateId));
+          form.append("side", kind === "exit" ? "EXIT" : "ENTRY");
+          form.append("file", file, file.name || "car.jpg");
+          data = await apiUpload("/sim/capture", form);
+          simSessionId = (data.session && data.session.id) || simSessionId;
+        } else if (kind === "taken") {
+          if (!simSessionId) throw new Error("Upload an ENTRY photo first");
+          data = await api(`/sim/sessions/${simSessionId}/receipt-taken`, { method: "POST", body: "{}" });
+        } else if (kind === "pay") {
+          if (!simSessionId) throw new Error("Upload an ENTRY photo first");
+          data = await api(`/sim/sessions/${simSessionId}/pay`, { method: "POST", body: "{}" });
+        }
+        const parts = [];
+        if (data.receipt) parts.push(data.receipt);
+        if (data.say) parts.push(data.say);
+        if (data.message) parts.push(data.message);
+        const best = data.alpr && data.alpr.best;
+        if (best && best.plate) parts.push(`FastALPR: ${best.plate}`);
+        parts.push(JSON.stringify(data, null, 2));
+        out.textContent = parts.join("\n\n");
+        const preview = document.getElementById("sim-preview");
+        const shown = (best && best.crop_url) || (data.alpr && data.alpr.annotated_url);
+        if (shown) { preview.src = mediaUrl(shown); preview.style.display = "block"; }
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function simPlate(side) {
+      const error = document.getElementById("sim-error");
+      const out = document.getElementById("sim-receipt");
+      error.textContent = "";
+      const plate = document.getElementById("sim-plate").value.trim();
+      const gateId = Number(document.getElementById("sim-gate").value);
+      if (!plate) { error.textContent = "Enter a number plate."; return; }
+      try {
+        const path = side === "EXIT" ? "/sim/exit" : "/sim/entry";
+        const data = await api(path, { method: "POST", body: JSON.stringify({ plate, gate_id: gateId, side }) });
+        simSessionId = (data.session && data.session.id) || simSessionId;
+        const parts = [];
+        if (data.receipt) parts.push(data.receipt);
+        if (data.message) parts.push(data.message);
+        parts.push(JSON.stringify(data, null, 2));
+        out.textContent = parts.join("\n\n");
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function loadVehicles() {
+      const error = document.getElementById("vehicle-error");
+      error.textContent = "";
+      try {
+        const rows = await api("/vehicles");
+        document.getElementById("vehicle-rows").innerHTML = rows.map((v) => `
+          <tr>
+            <td><strong>${v.plate}</strong></td>
+            <td>${v.owner_name || "—"}</td>
+            <td>${v.plan_name || v.plan_kind || "—"}</td>
+            <td>${v.auto_open ? "Yes" : "No"}</td>
+            <td>${v.enabled ? "Yes" : "No"}</td>
+            <td>${(v.valid_until || "—").toString().slice(0, 10)}</td>
+            <td class="row-actions">
+              ${can("subscribers.manage") ? `<button type="button" data-edit-vehicle="${v.id}">Edit</button>
+              <button class="danger" type="button" data-del-vehicle="${v.id}">Delete</button>` : ""}
+            </td>
+          </tr>`).join("") || `<tr><td colspan="7">No registered plates yet.</td></tr>`;
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function openVehicleDialog(vehicle) {
+      const form = document.getElementById("vehicle-form");
+      form.reset();
+      document.getElementById("vehicle-dialog-error").textContent = "";
+      document.getElementById("vehicle-dialog-title").textContent = vehicle ? "Edit vehicle" : "Register plate";
+      const plans = await api("/access-plans");
+      form.elements.plan_id.innerHTML = plans.map((p) =>
+        `<option value="${p.id}" ${vehicle && vehicle.plan_id === p.id ? "selected" : ""}>${p.name}</option>`
+      ).join("");
+      if (vehicle) {
+        form.elements.id.value = vehicle.id;
+        form.elements.plate.value = vehicle.plate;
+        form.elements.owner_name.value = vehicle.owner_name || "";
+        form.elements.enabled.value = vehicle.enabled ? "true" : "false";
+        form.elements.notes.value = vehicle.notes || "";
+      }
+      document.getElementById("vehicle-dialog").showModal();
+    }
+
+    async function apiUpload(path, form) {
+      const headers = {};
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      const res = await fetch(path, { method: "POST", headers, body: form });
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+      if (!res.ok) {
+        const err = new Error(detailMessage(data && data.detail, res.statusText));
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    }
+
+    function showPage(name) {
+      document.querySelectorAll("nav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
+      pages.forEach((page) => document.getElementById(`page-${page}`).classList.toggle("hidden", page !== name));
+      document.getElementById("page-title").textContent = {
+        dashboard: "Dashboard", health: "System Health", cameras: "Cameras", lanes: "Live Gates", gates: "Gates",
+        sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
+        fees: "Tariffs", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
+      }[name];
+      if (name === "dashboard") loadDashboard();
+      if (name === "health") startHealth();
+      else stopHealth();
+      if (name === "cameras") loadCameras();
+      else stopLive();
+      if (name === "lanes") startLanes();
+      else stopLanes();
+      if (name === "gates") loadGates();
+      if (name === "sessions") loadSessions();
+      if (name === "vehicles") loadVehicles();
+      if (name === "payments") loadPayments();
+      if (name === "fees") loadFees();
+      if (name === "users") loadUsers();
+      if (name === "hardware") loadHardware();
+      if (name === "sim") loadSim();
+    }
+
+    async function api(path, options = {}) {
+      const { timeoutMs, ...rest } = options;
+      const headers = { ...(rest.headers || {}) };
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      if (rest.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      const ctrl = timeoutMs ? new AbortController() : null;
+      const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+      try {
+        const res = await fetch(path, { ...rest, headers, signal: ctrl ? ctrl.signal : rest.signal });
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+        if (!res.ok) {
+          const err = new Error(detailMessage(data && data.detail, res.statusText));
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          const timeout = new Error("Camera took too long to respond and was skipped.");
+          timeout.status = 504;
+          throw timeout;
+        }
+        throw err;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    function setManageVisibility() {
+      document.getElementById("add-camera").style.display = can("cameras.manage") ? "" : "none";
+      document.getElementById("seed-site").style.display = can("cameras.manage") ? "" : "none";
+      document.getElementById("add-gate").style.display = can("gates.manage") ? "" : "none";
+      document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
+      document.getElementById("nav-users").style.display = can("users.view") ? "" : "none";
+      const navVehicles = document.getElementById("nav-vehicles");
+      if (navVehicles) navVehicles.style.display = can("subscribers.view") ? "" : "none";
+      const addVehicle = document.getElementById("add-vehicle");
+      if (addVehicle) addVehicle.style.display = can("subscribers.manage") ? "" : "none";
+      const navSim = document.getElementById("nav-sim");
+      if (navSim) navSim.style.display = can("simulation.run") ? "" : "none";
+      const navFees = document.querySelector('nav button[data-page="fees"]');
+      if (navFees) navFees.style.display = can("fees.view") ? "" : "none";
+      const navSessions = document.getElementById("nav-sessions");
+      if (navSessions) navSessions.style.display = (can("sessions.view") || can("fees.view") || can("kiosk.use")) ? "" : "none";
+      const navPayments = document.getElementById("nav-payments");
+      if (navPayments) navPayments.style.display = (can("payments.view") || can("fees.view") || can("kiosk.use")) ? "" : "none";
+      const navHardware = document.getElementById("nav-hardware");
+      if (navHardware) navHardware.style.display = can("hardware.view") ? "" : "none";
+      const navHealth = document.getElementById("nav-health");
+      if (navHealth) navHealth.style.display = (can("hardware.view") || can("dashboard.view")) ? "" : "none";
+      const paySession = document.getElementById("pay-session");
+      if (paySession) paySession.style.display = (can("payments.create") || can("kiosk.use")) ? "" : "none";
+    }
+
+    function setSignedIn(data) {
+      state.token = data.token || data.access_token || state.token;
+      state.user = data.username || "";
+      state.userId = data.id || null;
+      state.permissions = data.permissions || [];
+      sessionStorage.setItem("smartpark_token", state.token);
+      document.getElementById("whoami").textContent = `Signed in as ${state.user}`;
+      loginView.classList.add("hidden");
+      appView.classList.remove("hidden");
+      setManageVisibility();
+      showPage("dashboard");
+    }
+
+    function setSignedOut() {
+      state.token = ""; state.user = ""; state.userId = null; state.permissions = [];
+      sessionStorage.removeItem("smartpark_token");
+      appView.classList.add("hidden");
+      loginView.classList.remove("hidden");
+    }
+
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const error = document.getElementById("login-error");
+      const btn = document.getElementById("login-btn");
+      error.textContent = "";
+      btn.disabled = true;
+      try {
+        const data = await api("/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("username").value.trim(),
+            password: document.getElementById("password").value,
+          }),
+        });
+        setSignedIn(data);
+      } catch (err) {
+        error.textContent = err.message || "Sign in failed";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+      try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
+      stopLive();
+      stopHealth();
+      setSignedOut();
+    });
+    document.querySelectorAll("nav button[data-page]").forEach((btn) => {
+      btn.addEventListener("click", () => showPage(btn.dataset.page));
+    });
+
+    async function loadDashboard() {
+      const el = document.getElementById("dashboard-summary");
+      const cards = document.getElementById("dashboard-cards");
+      try {
+        const stats = await api("/dashboard");
+        const items = [
+          ["Vehicles inside", stats.vehicles_inside],
+          ["Entries today", stats.entries_today],
+          ["Exits today", stats.exits_today],
+          ["Revenue today", `TZS ${Number(stats.revenue_today || 0).toLocaleString()}`],
+          ["Unpaid active", stats.unpaid_active],
+          ["Subscribers inside", stats.subscribers_inside],
+        ];
+        cards.innerHTML = items.map(([label, value]) =>
+          `<div class="stat-card"><div class="value">${value ?? 0}</div><div class="label">${label}</div></div>`
+        ).join("");
+        el.textContent = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
+      } catch (err) {
+        el.textContent = `Unable to load dashboard: ${err.message}`;
+      }
+    }
+
+    function stopHealth() {
+      if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+    }
+
+    async function loadHealth() {
+      const cards = document.getElementById("health-cards");
+      const pre = document.getElementById("health-details");
+      try {
+        const live = await api("/health/live");
+        let details = live;
+        try { details = await api("/health/details"); }
+        catch (_) {
+          try { details = await api("/health/ready"); } catch (e) { details = { live, error: e.message }; }
+        }
+        const proc = details.process || live.process || {};
+        const items = [
+          ["State", details.state || live.state || "—"],
+          ["Version", proc.version || "—"],
+          ["Uptime s", proc.uptime_seconds ?? "—"],
+          ["Threads", proc.thread_count ?? "—"],
+          ["HVX host", details.hvx_host && details.hvx_host.ok ? "ok" : "down"],
+          ["ALPR mode", details.alpr_mode || "NATIVE_ONLY"],
+        ];
+        cards.innerHTML = items.map(([label, value]) =>
+          `<div class="stat-card"><div class="value">${value}</div><div class="label">${label}</div></div>`
+        ).join("");
+        pre.textContent = JSON.stringify(details, null, 2);
+      } catch (err) {
+        pre.textContent = err.message;
+      }
+    }
+
+    function startHealth() {
+      stopHealth();
+      loadHealth();
+      healthTimer = setInterval(loadHealth, 3000);
+    }
+
+    let selectedSessionId = null;
+    async function loadSessions() {
+      const err = document.getElementById("session-error");
+      err.textContent = "";
+      try {
+        const rows = await api("/sessions");
+        document.getElementById("session-rows").innerHTML = rows.map((s) =>
+          `<tr data-id="${s.id}"><td>${s.plate || ""}</td><td>${s.parker_kind || "CASUAL"}</td><td>${s.status || ""}</td><td>${s.receipt_status || "—"}</td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${Number(s.amount_due || 0).toLocaleString()}</td><td>${Number(s.amount_paid || 0).toLocaleString()}</td></tr>`
+        ).join("") || `<tr><td colspan="7" class="muted">No sessions yet.</td></tr>`;
+        document.querySelectorAll("#session-rows tr[data-id]").forEach((tr) => {
+          tr.addEventListener("click", () => {
+            document.querySelectorAll("#session-rows tr").forEach((row) => row.classList.remove("selected"));
+            tr.classList.add("selected");
+            selectedSessionId = Number(tr.dataset.id);
+          });
+        });
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    }
+
+    async function loadPayments() {
+      const err = document.getElementById("payment-error");
+      err.textContent = "";
+      try {
+        const rows = await api("/payments");
+        document.getElementById("payment-rows").innerHTML = rows.map((p) =>
+          `<tr><td>${(p.confirmed_at || p.created_at || "").slice(0,19).replace("T"," ")}</td><td>${p.session_id || "—"}</td><td>${p.method || ""}</td><td>TZS ${Number(p.amount || 0).toLocaleString()}</td><td>${p.status || ""}</td><td>${p.provider_id || ""}</td></tr>`
+        ).join("") || `<tr><td colspan="6" class="muted">No payments yet.</td></tr>`;
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    }
+
+    async function fillGateOptions(selected) {
+      const select = document.querySelector("#camera-form [name=gate_id]");
+      const gates = can("gates.view") ? await api("/gates") : [];
+      select.innerHTML = `<option value="">None</option>` + gates.map((g) =>
+        `<option value="${g.id}" ${String(selected || "") === String(g.id) ? "selected" : ""}>${g.name}</option>`
+      ).join("");
+    }
+
+    async function openCameraDialog(camera) {
+      const form = document.getElementById("camera-form");
+      form.reset();
+      document.getElementById("camera-dialog-error").textContent = "";
+      document.getElementById("camera-dialog-title").textContent = camera ? "Edit Camera" : "Add Camera";
+        form.elements.password.placeholder = camera ? "Leave blank to keep current password" : "Camera default: admin";
+        if (!camera) form.elements.password.value = "admin";
+      await fillGateOptions(camera && camera.gate_id);
+      if (camera) {
+        form.elements.id.value = camera.id;
+        form.elements.name.value = camera.name;
+        form.elements.ip_address.value = camera.ip_address;
+        form.elements.sdk_port.value = camera.sdk_port;
+        form.elements.username.value = camera.username;
+        form.elements.lane_direction.value = camera.lane_direction;
+        form.elements.rtsp_url.value = camera.rtsp_url || "";
+        form.elements.controller_ip.value = camera.controller_ip || "";
+        form.elements.display_ip.value = camera.display_ip || "";
+        form.elements.adapter_id.value = camera.adapter_id || "hvx";
+      } else {
+        form.elements.id.value = "";
+        form.elements.sdk_port.value = "30000";
+        form.elements.username.value = "admin";
+        form.elements.adapter_id.value = "hvx";
+        form.elements.controller_ip.value = "";
+        form.elements.display_ip.value = "";
+      }
+      document.getElementById("camera-dialog").showModal();
+    }
+
+    async function loadCameras() {
+      const error = document.getElementById("camera-error");
+      error.textContent = "";
+      try {
+        const rows = await api("/cameras");
+        const body = document.getElementById("camera-rows");
+        body.innerHTML = "";
+        rows.forEach((c) => {
+          const tr = document.createElement("tr");
+          tr.dataset.id = c.id;
+          if (String(selectedCameraId) === String(c.id)) tr.classList.add("selected");
+          const err = (c.last_error || "").slice(0, 80);
+          tr.innerHTML = `<td>${c.id}</td><td>${c.name}</td><td>${c.lane_name || c.gate_name || "—"}</td><td>${c.side || c.lane_direction || "—"}</td><td>${c.ip_address}</td><td>${c.controller_ip || "—"}</td><td>${c.display_ip || "—"}</td><td>${c.status}</td><td>${c.sdk_handle == null ? "—" : "handle=" + c.sdk_handle}</td><td class="muted">${err || "—"}</td><td class="row-actions"></td>`;
+          tr.addEventListener("click", (ev) => {
+            if (ev.target.closest("button")) return;
+            selectedCameraId = c.id;
+            loadCameras();
+          });
+          const actions = tr.querySelector(".row-actions");
+          if (can("cameras.manage")) {
+            const edit = document.createElement("button");
+            edit.className = "secondary";
+            edit.textContent = "Edit";
+            edit.addEventListener("click", () => openCameraDialog(c));
+            const del = document.createElement("button");
+            del.className = "danger";
+            del.textContent = "Delete";
+            del.addEventListener("click", async () => {
+              if (!confirm(`Delete camera ${c.name}?`)) return;
+              try { await api(`/cameras/${c.id}`, { method: "DELETE" }); loadCameras(); }
+              catch (err) { error.textContent = err.message; }
+            });
+            actions.append(edit, del);
+          }
+          body.appendChild(tr);
+        });
+        if (selectedCameraId) startLive(selectedCameraId);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    document.getElementById("refresh-cameras").addEventListener("click", loadCameras);
+    document.getElementById("refresh-lanes").addEventListener("click", startLanes);
+    document.getElementById("sim-entry").addEventListener("click", () => simAction("entry"));
+    document.getElementById("sim-taken").addEventListener("click", () => simAction("taken"));
+    document.getElementById("sim-pay").addEventListener("click", () => simAction("pay"));
+    document.getElementById("sim-exit").addEventListener("click", () => simAction("exit"));
+    document.getElementById("sim-plate-entry").addEventListener("click", () => simPlate("ENTRY"));
+    document.getElementById("sim-plate-exit").addEventListener("click", () => simPlate("EXIT"));
+    document.getElementById("park-save").addEventListener("click", async () => {
+      const error = document.getElementById("sim-error");
+      error.textContent = "";
+      try {
+        await api("/settings/parking", {
+          method: "PATCH",
+          body: JSON.stringify({
+            receipt_policy: document.getElementById("park-policy").value,
+            receipt_required_before_open: document.getElementById("park-receipt").checked,
+            exit_requires_payment: document.getElementById("park-pay").checked,
+            pay_prompt: document.getElementById("park-prompt").value.trim(),
+            printer_adapter: document.getElementById("park-printer").value ? "system" : "simulated",
+            printer_name: document.getElementById("park-printer").value || "",
+          }),
+        });
+        error.textContent = "Parking rules saved. Entry prints, then the gate opens.";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("park-test").addEventListener("click", async () => {
+      const error = document.getElementById("sim-error");
+      error.textContent = "";
+      try {
+        await api("/settings/parking", {
+          method: "PATCH",
+          body: JSON.stringify({
+            receipt_policy: document.getElementById("park-policy").value,
+            receipt_required_before_open: document.getElementById("park-receipt").checked,
+            exit_requires_payment: document.getElementById("park-pay").checked,
+            pay_prompt: document.getElementById("park-prompt").value.trim(),
+            printer_adapter: document.getElementById("park-printer").value ? "system" : "simulated",
+            printer_name: document.getElementById("park-printer").value || "",
+          }),
+        });
+        const result = await api("/printers/test", { method: "POST", body: "{}" });
+        error.textContent = result.message || "Test page sent.";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("sim-file").addEventListener("change", () => {
+      const file = document.getElementById("sim-file").files && document.getElementById("sim-file").files[0];
+      const preview = document.getElementById("sim-preview");
+      if (!file) { preview.style.display = "none"; preview.removeAttribute("src"); return; }
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+    });
+    document.getElementById("add-camera").addEventListener("click", () => openCameraDialog(null));
+    document.getElementById("add-vehicle").addEventListener("click", () => openVehicleDialog(null));
+    document.getElementById("refresh-vehicles").addEventListener("click", loadVehicles);
+    document.getElementById("refresh-sessions").addEventListener("click", loadSessions);
+    document.getElementById("refresh-payments").addEventListener("click", loadPayments);
+    document.getElementById("print-session-receipt").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      const out = document.getElementById("session-receipt");
+      err.textContent = "";
+      if (!selectedSessionId) {
+        err.textContent = "Select a session first.";
+        return;
+      }
+      try {
+        const issued = await api(`/sessions/${selectedSessionId}/receipt`, { method: "POST", body: "{}" });
+        const body = (issued && issued.receipt) || "";
+        out.classList.remove("hidden");
+        out.textContent = body || "Receipt stored.";
+        const printer = window.open("", "smartpark-receipt", "width=480,height=640");
+        if (printer) {
+          printer.document.write(`<!DOCTYPE html><html><head><title>Parking receipt</title><style>body{font:14px/1.4 ui-monospace,monospace;padding:16px}</style></head><body><pre>${body.replace(/[&<>]/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[ch]))}</pre></body></html>`);
+          printer.document.close();
+          printer.focus();
+          printer.print();
+        }
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    });
+    document.getElementById("pay-session").addEventListener("click", async () => {
+      if (!selectedSessionId) {
+        document.getElementById("session-error").textContent = "Select a session first.";
+        return;
+      }
+      try {
+        await api(`/sessions/${selectedSessionId}/pay`, { method: "POST", body: JSON.stringify({ method: "KIOSK_CASH" }) });
+        selectedSessionId = null;
+        await loadSessions();
+        await loadPayments();
+      } catch (e) {
+        document.getElementById("session-error").textContent = e.message;
+      }
+    });
+    document.getElementById("vehicle-cancel").addEventListener("click", () => document.getElementById("vehicle-dialog").close());
+    document.getElementById("vehicle-rows").addEventListener("click", async (e) => {
+      const editId = e.target.getAttribute && e.target.getAttribute("data-edit-vehicle");
+      const delId = e.target.getAttribute && e.target.getAttribute("data-del-vehicle");
+      if (editId) {
+        const rows = await api("/vehicles");
+        openVehicleDialog(rows.find((v) => String(v.id) === String(editId)));
+      }
+      if (delId && confirm("Remove this registered plate?")) {
+        await api(`/vehicles/${delId}`, { method: "DELETE" });
+        loadVehicles();
+      }
+    });
+    document.getElementById("vehicle-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const error = document.getElementById("vehicle-dialog-error");
+      error.textContent = "";
+      const payload = {
+        plate: form.elements.plate.value,
+        owner_name: form.elements.owner_name.value,
+        plan_id: Number(form.elements.plan_id.value) || null,
+        enabled: form.elements.enabled.value === "true",
+        notes: form.elements.notes.value,
+      };
+      try {
+        if (form.elements.id.value) await api(`/vehicles/${form.elements.id.value}`, { method: "PATCH", body: JSON.stringify(payload) });
+        else await api("/vehicles", { method: "POST", body: JSON.stringify(payload) });
+        document.getElementById("vehicle-dialog").close();
+        loadVehicles();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("camera-cancel").addEventListener("click", () => document.getElementById("camera-dialog").close());
+    document.getElementById("camera-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const error = document.getElementById("camera-dialog-error");
+      const payload = {
+        name: form.elements.name.value.trim(),
+        ip_address: form.elements.ip_address.value.trim(),
+        sdk_port: Number(form.elements.sdk_port.value),
+        username: form.elements.username.value,
+        lane_direction: form.elements.lane_direction.value,
+        controller_ip: form.elements.controller_ip.value.trim(),
+        display_ip: form.elements.display_ip.value.trim(),
+        rtsp_url: form.elements.rtsp_url.value.trim(),
+        adapter_id: form.elements.adapter_id.value || "hvx",
+        gate_id: form.elements.gate_id.value ? Number(form.elements.gate_id.value) : null,
+      };
+      if (form.elements.password.value) payload.password = form.elements.password.value;
+      const id = form.elements.id.value;
+      try {
+        if (id) await api(`/cameras/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        else await api("/cameras", { method: "POST", body: JSON.stringify({ ...payload, password: form.elements.password.value }) });
+        document.getElementById("camera-dialog").close();
+        loadCameras();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+
+    async function cameraAction(path) {
+      const error = document.getElementById("camera-error");
+      const result = document.getElementById("camera-result");
+      error.textContent = "";
+      if (!selectedCameraId) { error.textContent = "Select a camera first."; return; }
+      try {
+        const data = await api(`/cameras/${selectedCameraId}${path}`, { method: "POST" });
+        result.classList.remove("hidden");
+        result.textContent = JSON.stringify(data, null, 2);
+        if (data.plates || data.annotated_url || data.native || data.fusion || data.alpr) renderPlates(data);
+        loadCameras();
+        startLive(selectedCameraId, true);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    document.getElementById("sdk-connect").addEventListener("click", () => cameraAction("/sdk/connect"));
+    document.getElementById("sdk-disconnect").addEventListener("click", () => cameraAction("/sdk/disconnect"));
+    document.getElementById("open-this-side").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      error.textContent = "";
+      if (!selectedCameraId) { error.textContent = "Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first."; return; }
+      const reason = prompt("Reason");
+      if (!reason) return;
+      if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
+      try {
+        alert(JSON.stringify(await api(`/cameras/${selectedCameraId}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("rtsp-probe").addEventListener("click", () => cameraAction("/rtsp/probe"));
+    document.getElementById("fastalpr").addEventListener("click", () => cameraAction("/alpr/recognize"));
+    document.getElementById("capture-snapshot").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      error.textContent = "";
+      if (!selectedCameraId) { error.textContent = "Select a camera first."; return; }
+      try {
+        const data = await api(`/cameras/${selectedCameraId}/snapshot/capture`, { method: "POST", body: "{}" });
+        document.getElementById("camera-result").classList.remove("hidden");
+        document.getElementById("camera-result").textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("discover-cameras").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      const result = document.getElementById("camera-result");
+      error.textContent = "";
+      result.classList.remove("hidden");
+      result.textContent = "Discovering cameras on SDK port 30000…";
+      try {
+        const data = await api("/cameras/discover");
+        const lines = (data.cameras || []).map((c) =>
+          `${c.ip_address}  ${c.name}  ${c.reachable ? "reachable" : "no TCP"}  ${c.already_added ? "already added" : "new"}  ${c.note}`
+        );
+        result.textContent = (lines.join("\n") || "No cameras listed.") + "\n\n" + (data.note || "");
+        if (data.hvx && data.hvx.error) result.textContent += "\nHVX: " + data.hvx.error;
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("seed-site").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      const result = document.getElementById("camera-result");
+      error.textContent = "";
+      const site = [
+        { name: "1# Entry", ip_address: "192.168.1.144", lane_direction: "ENTRY", controller_ip: "192.168.1.61", display_ip: "192.168.1.62" },
+        { name: "1# Exit", ip_address: "192.168.1.145", lane_direction: "EXIT", controller_ip: "192.168.1.69", display_ip: "192.168.1.70" },
+        { name: "2# Entry", ip_address: "192.168.1.49", lane_direction: "ENTRY", controller_ip: "192.168.1.65", display_ip: "192.168.1.66" },
+        { name: "2# Exit", ip_address: "192.168.1.50", lane_direction: "EXIT", controller_ip: "192.168.1.67", display_ip: "192.168.1.68" },
+      ];
+      try {
+        let data;
+        try {
+          data = await api("/cameras/seed-site", { method: "POST", body: "{}" });
+        } catch (err) {
+          if (!/405|404/.test(err.message) && err.status !== 404 && err.status !== 405) throw err;
+          const created = [];
+          const skipped = [];
+          for (const row of site) {
+            try {
+              created.push(await api("/cameras", { method: "POST", body: JSON.stringify({
+                name: row.name, ip_address: row.ip_address, sdk_port: 30000,
+                username: "admin", password: "admin", lane_direction: row.lane_direction,
+                controller_ip: row.controller_ip, display_ip: row.display_ip,
+              }) }));
+            } catch (addErr) {
+              if (addErr.status === 409) skipped.push(row);
+              else throw addErr;
+            }
+          }
+          data = { created, skipped, note: "Added through POST /cameras (older API)." };
+        }
+        result.classList.remove("hidden");
+        result.textContent = `Added ${data.created.length} site camera(s). Skipped ${data.skipped.length}.\n${data.note || ""}`;
+        loadCameras();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("connect-all").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      const result = document.getElementById("camera-result");
+      error.textContent = "";
+      result.classList.remove("hidden");
+      result.textContent = "Connecting cameras one at a time. Unreachable cameras are skipped…";
+      try {
+        const cameras = await api("/cameras");
+        const lines = [];
+        let connected = 0;
+        let attempted = 0;
+        let skipped = 0;
+        for (const cam of cameras) {
+          if (cam.enabled === false) continue;
+          attempted += 1;
+          result.textContent = `Connecting ${cam.name} (${attempted}/${cameras.length})…`;
+          try {
+            const item = await api(`/cameras/${cam.id}/sdk/connect`, { method: "POST", body: "{}", timeoutMs: 25000 });
+            if (item.status === "SDK_CONNECTED") connected += 1;
+            if (item.sdk_result && item.sdk_result.skipped) skipped += 1;
+            const err = item.last_error || (item.sdk_result && item.sdk_result.error);
+            if (err) lines.push(`${item.name || cam.name}: ${err}`);
+          } catch (e) {
+            skipped += 1;
+            lines.push(`${cam.name}: ${e.message}`);
+          }
+        }
+        result.textContent = [`Connected ${connected} / ${attempted}`, skipped ? `Skipped ${skipped} unreachable or slow camera(s).` : "", ...lines].filter(Boolean).join("\n");
+        loadCameras();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+
+    function openGateDialog(gate) {
+      const form = document.getElementById("gate-form");
+      form.reset();
+      document.getElementById("gate-dialog-error").textContent = "";
+      document.getElementById("gate-dialog-title").textContent = gate ? "Edit Gate" : "Add Gate";
+      if (gate) {
+        form.elements.id.value = gate.id;
+        form.elements.name.value = gate.name;
+        form.elements.mode.value = gate.mode;
+        form.elements.enabled.value = String(gate.enabled);
+      } else {
+        form.elements.id.value = "";
+        form.elements.mode.value = "COMMISSIONING";
+        form.elements.enabled.value = "true";
+      }
+      document.getElementById("gate-dialog").showModal();
+    }
+
+    async function loadGates() {
+      const error = document.getElementById("gate-error");
+      error.textContent = "";
+      try {
+        const rows = await api("/gates");
+        const body = document.getElementById("gate-rows");
+        body.innerHTML = "";
+        rows.forEach((g) => {
+          const tr = document.createElement("tr");
+          const cams = g.cameras || [];
+          const summary = cams.map((row) =>
+            `${row.side || row.lane_direction}: cam ${row.ip_address} / ctrl ${row.controller_ip || "—"} / disp ${row.display_ip || "—"}`
+          ).join("; ") || "—";
+          tr.innerHTML = `<td>${g.id}</td><td>${g.name}</td><td>${g.mode}</td><td>${g.enabled ? "Yes" : "No"}</td><td>${g.physical_control_verified ? "Yes" : "No"}</td><td>${summary}</td><td class="row-actions"></td>`;
+          const actions = tr.querySelector(".row-actions");
+          const sides = [];
+          const seen = new Set();
+          cams.forEach((row) => {
+            const side = (row.lane_direction || row.side || "").toUpperCase();
+            if ((side === "ENTRY" || side === "EXIT") && !seen.has(side)) {
+              seen.add(side);
+              sides.push(side);
+            }
+          });
+          sides.forEach((side) => {
+            const btn = document.createElement("button");
+            btn.className = "secondary";
+            btn.textContent = side === "ENTRY" ? "Open entry" : "Open exit";
+            btn.addEventListener("click", async () => {
+              const reason = prompt("Reason");
+              if (!reason) return;
+              if (!confirm(`Pulse only this lane's ${side.toLowerCase()} barrier (not the other side)?`)) return;
+              try { alert(JSON.stringify(await api(`/gates/${g.id}/open`, { method: "POST", body: JSON.stringify({ reason, side }) }))); }
+              catch (err) { error.textContent = err.message; }
+            });
+            actions.appendChild(btn);
+          });
+          if (can("gates.manage")) {
+            const edit = document.createElement("button");
+            edit.className = "secondary";
+            edit.textContent = "Edit";
+            edit.addEventListener("click", () => openGateDialog(g));
+            const del = document.createElement("button");
+            del.className = "danger";
+            del.textContent = "Delete";
+            del.addEventListener("click", async () => {
+              if (!confirm(`Delete gate ${g.name}? Linked cameras will be unassigned.`)) return;
+              try { await api(`/gates/${g.id}`, { method: "DELETE" }); loadGates(); }
+              catch (err) { error.textContent = err.message; }
+            });
+            actions.append(edit, del);
+          }
+          body.appendChild(tr);
+        });
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    document.getElementById("refresh-gates").addEventListener("click", loadGates);
+    document.getElementById("led-text").addEventListener("click", async () => {
+      const error = document.getElementById("gate-error");
+      error.textContent = "";
+      try {
+        const rows = await api("/gates");
+        const gate = rows[0];
+        const cams = (gate && gate.cameras) || [];
+        if (!cams.length) { error.textContent = "Select a lane with cameras first."; return; }
+        const text = prompt("LED message", "WELCOME");
+        if (!text) return;
+        alert(JSON.stringify(await api(`/cameras/${cams[0].id}/led`, { method: "POST", body: JSON.stringify({ text }) })));
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("add-gate").addEventListener("click", () => openGateDialog(null));
+    document.getElementById("gate-cancel").addEventListener("click", () => document.getElementById("gate-dialog").close());
+    document.getElementById("gate-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const error = document.getElementById("gate-dialog-error");
+      const payload = {
+        name: form.elements.name.value.trim(),
+        mode: form.elements.mode.value,
+        enabled: form.elements.enabled.value === "true",
+      };
+      try {
+        if (form.elements.id.value) await api(`/gates/${form.elements.id.value}`, { method: "PATCH", body: JSON.stringify(payload) });
+        else await api("/gates", { method: "POST", body: JSON.stringify(payload) });
+        document.getElementById("gate-dialog").close();
+        loadGates();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+
+    async function loadRoleOptions(selected) {
+      if (!state.roles.length && can("users.view")) state.roles = await api("/roles");
+      const box = document.getElementById("user-roles");
+      box.innerHTML = state.roles.map((role) => {
+        const checked = (selected || []).includes(role.name) ? "checked" : "";
+        return `<label><input type="checkbox" name="roles" value="${role.name}" ${checked}> ${role.name}</label>`;
+      }).join("");
+    }
+
+    async function openUserDialog(user) {
+      const form = document.getElementById("user-form");
+      form.reset();
+      document.getElementById("user-dialog-error").textContent = "";
+      document.getElementById("user-dialog-title").textContent = user ? "Edit User" : "Add User";
+      form.elements.username.readOnly = Boolean(user);
+      form.elements.password.required = !user;
+      form.elements.password.placeholder = user ? "Leave blank to keep current password" : "At least 10 characters";
+      await loadRoleOptions(user ? user.roles : ["Operator"]);
+      if (user) {
+        form.elements.id.value = user.id;
+        form.elements.username.value = user.username;
+        form.elements.full_name.value = user.full_name || "";
+        form.elements.status.value = user.status;
+      } else {
+        form.elements.id.value = "";
+        form.elements.status.value = "ACTIVE";
+      }
+      document.getElementById("user-dialog").showModal();
+    }
+
+    async function loadUsers() {
+      const error = document.getElementById("user-error");
+      error.textContent = "";
+      try {
+        const rows = await api("/users");
+        const body = document.getElementById("user-rows");
+        body.innerHTML = "";
+        rows.forEach((u) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${u.id}</td><td>${u.username}</td><td>${u.full_name || "—"}</td><td>${u.status}</td><td>${u.roles.join(", ")}</td><td class="row-actions"></td>`;
+          const actions = tr.querySelector(".row-actions");
+          if (can("users.manage")) {
+            const edit = document.createElement("button");
+            edit.className = "secondary";
+            edit.textContent = "Edit";
+            edit.addEventListener("click", () => openUserDialog(u));
+            const del = document.createElement("button");
+            del.className = "danger";
+            del.textContent = "Delete";
+            del.addEventListener("click", async () => {
+              if (!confirm(`Delete user ${u.username}?`)) return;
+              try { await api(`/users/${u.id}`, { method: "DELETE" }); loadUsers(); }
+              catch (err) { error.textContent = err.message; }
+            });
+            actions.append(edit, del);
+          }
+          body.appendChild(tr);
+        });
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    document.getElementById("refresh-users").addEventListener("click", loadUsers);
+    document.getElementById("add-user").addEventListener("click", () => openUserDialog(null));
+    document.getElementById("user-cancel").addEventListener("click", () => document.getElementById("user-dialog").close());
+    document.getElementById("user-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const error = document.getElementById("user-dialog-error");
+      const roles = [...form.querySelectorAll("input[name=roles]:checked")].map((el) => el.value);
+      const payload = {
+        full_name: form.elements.full_name.value.trim(),
+        status: form.elements.status.value,
+        roles,
+      };
+      if (form.elements.password.value) payload.password = form.elements.password.value;
+      try {
+        if (form.elements.id.value) {
+          await api(`/users/${form.elements.id.value}`, { method: "PATCH", body: JSON.stringify(payload) });
+        } else {
+          await api("/users", { method: "POST", body: JSON.stringify({
+            username: form.elements.username.value.trim(),
+            password: form.elements.password.value,
+            ...payload,
+          }) });
+        }
+        document.getElementById("user-dialog").close();
+        loadUsers();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+
+    async function loadFees() {
+      const error = document.getElementById("fee-error");
+      error.textContent = "";
+      const entry = document.getElementById("fee-entry");
+      const exit = document.getElementById("fee-exit");
+      if (!entry.value || !exit.value) {
+        const now = new Date();
+        const earlier = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+        const iso = (d) => d.toISOString().slice(0, 19);
+        if (!entry.value) entry.value = iso(earlier);
+        if (!exit.value) exit.value = iso(now);
+      }
+      try {
+        document.getElementById("fee-result").textContent = JSON.stringify(await api("/fees/tariff"), null, 2);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    document.getElementById("refresh-tariff").addEventListener("click", loadFees);
+    document.getElementById("quote-fee").addEventListener("click", async () => {
+      const error = document.getElementById("fee-error");
+      error.textContent = "";
+      try {
+        const data = await api("/fees/quote", { method: "POST", body: JSON.stringify({
+          entry_time: document.getElementById("fee-entry").value.trim(),
+          exit_time: document.getElementById("fee-exit").value.trim(),
+          car_type: "Car1",
+        }) });
+        document.getElementById("fee-result").textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+
+    async function loadHardware() {
+      const el = document.getElementById("hvx-info");
+      try { el.textContent = JSON.stringify(await api("/hardware/hvx/info"), null, 2); }
+      catch (err) { el.textContent = err.message; }
+    }
+    document.getElementById("check-hvx").addEventListener("click", loadHardware);
+    document.getElementById("check-alpr").addEventListener("click", async () => {
+      const el = document.getElementById("hvx-info");
+      try { el.textContent = JSON.stringify(await api("/alpr/status"), null, 2); }
+      catch (err) { el.textContent = err.message; }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopLive();
+        stopLanes();
+        stopHealth();
+      }
+    });
+
+    (async function boot() {
+      try {
+        const setup = await fetch("/auth/setup").then((r) => r.json());
+        if (setup.username) document.getElementById("username").value = setup.username;
+        if (setup.password) document.getElementById("password").value = setup.password;
+        else document.getElementById("password").value = "";
+        if (setup.hint) document.getElementById("login-hint").textContent = setup.hint;
+      } catch (_) {}
+      if (!state.token) return;
+      try {
+        const me = await api("/auth/me");
+        setSignedIn({ token: state.token, id: me.id, username: me.username, permissions: me.permissions });
+      } catch (_) {
+        setSignedOut();
+      }
+    })();
+  </script>
+</body>
+</html>
