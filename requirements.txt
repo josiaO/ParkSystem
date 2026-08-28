@@ -1,0 +1,22 @@
+fastapi>=0.116,<1
+python-multipart>=0.0.9,<1
+uvicorn>=0.35,<1
+httptools>=0.6,<1
+websockets>=12,<17.1
+sqlalchemy>=2.0,<3
+pydantic>=2.11,<3
+pydantic-settings>=2.10,<3
+httpx>=0.28,<1
+argon2-cffi>=23.1,<26
+PySide6>=6.8,<7
+# PostgreSQL later (keep SQLite for now):
+# pip install "psycopg[binary]"
+# SMARTPARK_DATABASE_URL=postgresql+psycopg://user:pass@host/smartpark
+# Local OCR for simulation uploads and live JPEGs (not required for HVX SDK connect):
+fast-alpr[onnx]
+pillow
+onnxruntime
+opencv-python-headless>=4.9.0.80,<5
+numpy
+qrcode
+# Do not install watchfiles / uvicorn[standard] — that extra is for --reload only and stalls Windows installs.

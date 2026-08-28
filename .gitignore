@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+develop-eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+env/
+
+# Tests and type checkers
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+!config/default.env.example
+smartpark.db
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+media/
+*.log
+
+# FastALPR models (downloaded by packaging/make_windows_kit.sh)
+models/
+*.onnx
+
+# USB install kit and download cache
+dist/
+packaging/cache/
+*.whl
+SmartParkEdge-USB.zip
+
+# Vendor SDK binaries (copy OcxConfig/ onto the Windows PC locally)
+OcxConfig/
+tools/hvx_sdk_host/vendor/*
+!tools/hvx_sdk_host/vendor/README.md
+
+# Site dump of the previous ParkWatch install (binaries, logs, backups)
+Current_ParkSystem_configs/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Windows compile leftovers
+*.pdb
+*.ilk
+*.exp
+*.obj
