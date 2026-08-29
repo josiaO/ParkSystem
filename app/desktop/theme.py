@@ -11,6 +11,9 @@ QListWidget { background:#111827; color:#e5e7eb; border:none; padding:8px; }
 QListWidget::item { padding:10px; border-radius:6px; }
 QListWidget::item:selected { background:#1f5eff; color:white; }
 QLabel#video { background:#0b1220; color:#8b9bb4; border-radius:10px; padding:8px; }
+QTabWidget::pane { border:1px solid #dfe5ef; background:#f5f7fb; border-radius:8px; }
+QTabBar::tab { background:#eef2f8; color:#172033; padding:8px 16px; border-radius:6px; margin-right:4px; }
+QTabBar::tab:selected { background:#1f5eff; color:white; }
 """
 
 DARK = """
@@ -26,4 +29,7 @@ QListWidget { background:#080f1f; color:#e5e7eb; border:none; padding:8px; }
 QListWidget::item { padding:10px; border-radius:6px; }
 QListWidget::item:selected { background:#2563eb; color:white; }
 QLabel#video { background:#020617; color:#94a3b8; border-radius:10px; padding:8px; }
+QTabWidget::pane { border:1px solid #2c3b52; background:#0f172a; border-radius:8px; }
+QTabBar::tab { background:#1e293b; color:#e5e7eb; padding:8px 16px; border-radius:6px; margin-right:4px; }
+QTabBar::tab:selected { background:#2563eb; color:white; }
 """

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=".env", extra="ignore")
 
     app_name: str = "SmartPark Edge"
-    app_version: str = "0.2.0"
+    app_version: str = "0.3.0"
     site_name: str = "Parking Site"
     api_host: str = "127.0.0.1"
     api_port: int = 8760
@@ -28,10 +28,18 @@ class Settings(BaseSettings):
     db_pool_timeout_seconds: float = 8.0
     hvx_host_url: str = "http://127.0.0.1:8765"
     alpr_mode: str = "NATIVE_ONLY"
-    live_idle_seconds: float = 8.0
-    live_sdk_interval_seconds: float = 0.05
-    snapshot_cache_seconds: float = 0.4
+    live_idle_seconds: float = 20.0
+    live_sdk_interval_seconds: float = 0.04
+    snapshot_cache_seconds: float = 0.04
+    stale_stream_seconds: float = 2.5
+    detect_fps: float = 5.0
+    ffmpeg_profile: str = "LOW_LATENCY_LAN"
+    rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
+    local_alpr_cooldown_seconds: float = 2.0
+    coil_gpio_index: int = 1
+    coil_active_value: int = 1
+    coil_poll_indexes: str = "1,2,3,4,5,6,7"
     media_retention_days: int = 14
     log_level: str = "INFO"
     log_max_bytes: int = 5_000_000
@@ -63,6 +71,18 @@ class Settings(BaseSettings):
     printer_name: str = ""
     printer_escpos_host: str = ""
     printer_escpos_port: int = 9100
+    media_gateway_enabled: bool = False
+    media_gateway_camera_ids: str = ""
+    fastalpr_new_pipeline_enabled: bool = False
+    webrtc_live_enabled: bool = False
+    native_alpr_enabled: bool = True
+    live_view_provider: str = "DIRECT_LEGACY"
+    recognition_pipeline: str = "FASTALPR_LEGACY"
+    site_timezone: str = "UTC"
+    site_locale: str = "en"
+    site_language: str = "en"
+    plate_normalization: str = "ALNUM_UPPER"
+    plate_validation: str = "NONE"
 
     @property
     def data_dir(self) -> Path:

@@ -22,7 +22,7 @@ from app.security import hash_password
 from app.services.cache import TtlCache
 from app.services.circuit import CircuitBreaker, ReconnectPolicy, BACKOFF_STEPS
 from app.services.dedup import EventDeduper
-from app.services.ocr_policy import NATIVE_ONLY, should_run_local
+from app.services.ocr_policy import NATIVE_ONLY, LOCAL_ONLY, should_run_local
 from app.services.preview import CameraLiveSpec, acquire_live, live_metrics, release_live, remember_frame, stop_live_pumps, viewers_for
 from app.services.queues import BoundedQueue, DurableOutbox
 from app.services.runtime import READY_CORE, set_startup_state, startup_state
@@ -97,6 +97,14 @@ class QueueAndCircuitTests(unittest.TestCase):
         with patch("app.services.ocr_policy.alpr_mode", return_value=NATIVE_ONLY):
             self.assertFalse(should_run_local(native_plate="T123ABC", native_confidence=0.9))
             self.assertTrue(should_run_local(native_plate="T123ABC", explicit=True))
+            self.assertFalse(should_run_local(native_plate="", native_confidence=0.0))
+            self.assertTrue(should_run_local(native_plate="", presence=True))
+            self.assertTrue(should_run_local(native_plate="", native_plates=False))
+            self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, native_plates=False))
+
+    def test_local_only_always_runs(self):
+        with patch("app.services.ocr_policy.alpr_mode", return_value=LOCAL_ONLY):
+            self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99))
 
 
 class HealthApiTests(unittest.TestCase):

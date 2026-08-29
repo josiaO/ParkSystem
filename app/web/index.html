@@ -46,18 +46,43 @@
     nav button.active { background: var(--accent); }
     main { padding: 24px 28px; overflow: auto; }
     h2 { margin: 0 0 8px; font-size: 24px; }
-    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    .inline-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 8px 0 12px; }
+    .inline-fields label { margin: 0; min-width: 140px; flex: 0 1 180px; }
+    #discover-table { margin-bottom: 12px; }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .row-actions button { padding: 6px 10px; }
     .hidden { display: none !important; }
     .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
     pre.receipt { white-space: pre-wrap; font-family: ui-monospace, monospace; }
     tr.selected { background: #e8efff; }
-    .live-panel { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr); gap: 12px; margin-top: 16px; align-items: stretch; }
-    .live-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-height: 280px; }
+    .subnav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+    .subnav button { background: #eef2f8; color: var(--text); }
+    .subnav button.active { background: var(--accent); color: #fff; }
+    .dual-live { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    .live-pane .live-card { height: 100%; display: flex; flex-direction: column; min-width: 0; }
+    .live-pane .live-frame { height: min(34vh, 360px); max-height: 360px; min-height: 200px; flex: 1; }
+    .live-pane img[data-role="video"] { width: 100%; height: min(34vh, 360px); max-height: 360px; object-fit: contain; display: block; background: #0b1220; }
+    .live-pane img[data-role="video"]:not([src]) { display: none; }
+    .live-pane canvas[data-role="overlay"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+    .live-pane .live-title { display: flex; flex-direction: column; gap: 6px; }
+    .live-pane .live-title select { font-weight: 500; }
+    .live-pane .live-frame { cursor: pointer; }
+    .car-stills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .car-stills img { width: 100%; height: 92px; object-fit: contain; background: #0b1220; border-radius: 6px; display: block; }
+    .car-meta { margin-top: 8px; }
+    .pane-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    @media (max-width: 980px) { .dual-live { grid-template-columns: 1fr; } }
+    .last-car { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .last-car img { width: 100%; height: 160px; max-height: 160px; object-fit: contain; background: #0b1220; border-radius: 6px; display: block; }
+    .last-car .crop-img { height: 72px; max-height: 72px; }
+    .live-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
     .live-title { font-weight: 700; margin-bottom: 8px; }
-    .live-frame { position: relative; background: #0b1220; border-radius: 8px; min-height: 220px; }
-    #live-img { width: 100%; max-height: 420px; object-fit: contain; display: block; min-height: 220px; }
+    .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 8px; }
+    .stream-card { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 13px; }
+    .stream-card strong { display: block; margin-bottom: 4px; }
+    .warn-list { color: #b45309; margin: 6px 0 0; padding-left: 18px; }
+    .live-frame { position: relative; background: #0b1220; border-radius: 8px; height: min(56vh, 620px); max-height: 620px; overflow: hidden; }
+    #live-img { width: 100%; height: min(56vh, 620px); max-height: 620px; object-fit: contain; display: block; }
     #live-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
     .plate-list { display: flex; flex-direction: column; gap: 10px; }
     .plate-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #f8fafc; }
@@ -95,7 +120,7 @@
       <div class="brand">SmartPark Edge</div>
       <div class="group">Overview</div>
       <button data-page="dashboard" class="active">Dashboard</button>
-      <button data-page="lanes">Live Gates</button>
+      <button data-page="cameras">Live Gates</button>
       <button data-page="health" id="nav-health">System Health</button>
       <div class="group">Operations</div>
       <button data-page="sessions" id="nav-sessions">Sessions</button>
@@ -104,7 +129,6 @@
       <div class="group">Management</div>
       <button data-page="fees">Tariffs</button>
       <div class="group">System</div>
-      <button data-page="cameras">Cameras</button>
       <button data-page="gates">Gates</button>
       <button data-page="users" id="nav-users">Users</button>
       <button data-page="hardware" id="nav-hardware">Hardware Lab</button>
@@ -121,6 +145,7 @@
 
       <div id="page-dashboard">
         <div class="stat-grid" id="dashboard-cards"></div>
+        <div class="gates-overview" id="dashboard-lanes"></div>
         <p class="muted" id="dashboard-summary">Loading…</p>
       </div>
 
@@ -131,15 +156,90 @@
       </div>
 
       <div id="page-cameras" class="hidden">
-        <p class="muted">Add cameras and attach them to a gate. Default adapter is HVX. Live view is the moving SDK video — not the last car still. Connect all logs in camera IPs only on port 30000.</p>
+        <p class="muted">Pick any camera for the left and right views — click a view or use its camera list. A lane preset can fill both. Live shows the newest JPEG (not a buffered video). Detection keeps running if you leave this page.</p>
+        <div class="subnav" id="cameras-subnav">
+          <button type="button" data-sub="live" class="active">Live</button>
+          <button type="button" data-sub="ips">IPs</button>
+        </div>
+        <div id="cameras-sub-live">
+          <div class="toolbar">
+            <label>Lane preset <select id="live-lane"></select></label>
+            <button class="secondary" type="button" id="apply-lane">Fill both from lane</button>
+            <button class="secondary" type="button" id="refresh-live">Refresh live</button>
+          </div>
+          <div class="dual-live">
+            <div class="live-pane" data-slot="0">
+              <div class="live-card">
+                <label class="live-title">Left camera
+                  <select data-role="camera"></select>
+                </label>
+                <div class="live-frame" data-role="pick" title="Click to choose a camera">
+                  <img data-role="video" alt="Live camera">
+                  <canvas data-role="overlay"></canvas>
+                </div>
+                <p class="muted" data-role="status">Click this view or the list to choose a camera.</p>
+                <div class="car-stills">
+                  <div>
+                    <div class="live-title">Snapshot</div>
+                    <div data-role="snap"><p class="muted">Waiting for a car</p></div>
+                  </div>
+                  <div>
+                    <div class="live-title">Cropped plate</div>
+                    <div data-role="crop"><p class="muted">—</p></div>
+                  </div>
+                </div>
+                <div class="car-meta">
+                  <div class="plate-chars" data-role="plate">—</div>
+                  <p class="muted" data-role="details">No car yet. Connect all on the IPs tab, then wait for a vehicle.</p>
+                </div>
+                <div class="pane-actions">
+                  <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                </div>
+              </div>
+            </div>
+            <div class="live-pane" data-slot="1">
+              <div class="live-card">
+                <label class="live-title">Right camera
+                  <select data-role="camera"></select>
+                </label>
+                <div class="live-frame" data-role="pick" title="Click to choose a camera">
+                  <img data-role="video" alt="Live camera">
+                  <canvas data-role="overlay"></canvas>
+                </div>
+                <p class="muted" data-role="status">Click this view or the list to choose a camera.</p>
+                <div class="car-stills">
+                  <div>
+                    <div class="live-title">Snapshot</div>
+                    <div data-role="snap"><p class="muted">Waiting for a car</p></div>
+                  </div>
+                  <div>
+                    <div class="live-title">Cropped plate</div>
+                    <div data-role="crop"><p class="muted">—</p></div>
+                  </div>
+                </div>
+                <div class="car-meta">
+                  <div class="plate-chars" data-role="plate">—</div>
+                  <p class="muted" data-role="details">No car yet. Connect all on the IPs tab, then wait for a vehicle.</p>
+                </div>
+                <div class="pane-actions">
+                  <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="cameras-sub-ips" class="hidden">
         <div class="toolbar">
           <button type="button" id="add-camera">Add Camera</button>
+          <button class="secondary" type="button" id="onboard-camera">Onboard wizard</button>
           <button class="secondary" type="button" id="discover-cameras">Discover</button>
+          <button class="secondary" type="button" id="add-ip-cameras">Add IP cameras &amp; connect</button>
           <button class="secondary" type="button" id="seed-site">Add site cameras</button>
           <button class="secondary" type="button" id="connect-all">Connect all</button>
           <button class="secondary" type="button" id="refresh-cameras">Refresh</button>
-          <button class="secondary" type="button" id="sdk-connect">SDK Connect</button>
+          <button class="secondary" type="button" id="sdk-connect">Connect</button>
           <button class="secondary" type="button" id="rtsp-probe">Probe RTSP</button>
+          <button class="secondary" type="button" id="onvif-discover">ONVIF profiles</button>
           <button class="secondary" type="button" id="fastalpr">FastALPR</button>
           <button class="secondary" type="button" id="capture-snapshot">Capture snapshot</button>
           <button class="secondary" type="button" id="sdk-disconnect">SDK Disconnect</button>
@@ -152,33 +252,22 @@
           <tbody id="camera-rows"></tbody>
         </table>
         <p class="error" id="camera-error"></p>
+        <div class="inline-fields">
+          <label>Camera user <input id="ipcam-user" value="admin" autocomplete="off"></label>
+          <label>Camera password <input id="ipcam-pass" type="password" value="admin" autocomplete="off"></label>
+        </div>
+        <table id="discover-table" class="hidden">
+          <thead>
+            <tr><th>IP</th><th>Kind</th><th>Adapter</th><th>Reachable</th><th>Plates</th><th>Note</th></tr>
+          </thead>
+          <tbody id="discover-rows"></tbody>
+        </table>
         <pre class="hidden" id="camera-result"></pre>
-        <div class="live-panel">
-          <div class="live-card">
-            <div class="live-title">Live view</div>
-            <div class="live-frame">
-              <img id="live-img" alt="Live camera">
-              <canvas id="live-overlay"></canvas>
-            </div>
-            <p class="muted" id="live-status">Select a camera to open live view.</p>
-          </div>
-          <div class="live-card">
-            <div class="live-title">Number plates</div>
-            <div class="plate-list" id="live-plates">
-              <p class="muted">These cameras read plates themselves after Connect all. FastALPR is a second, local OCR on the live JPEG or a simulation upload. Close any other SDK client if live video works but plates never arrive.</p>
-            </div>
-          </div>
+        <div class="live-card" style="margin-top:12px">
+          <div class="live-title">Stream profiles</div>
+          <div id="stream-profiles"><p class="muted">Select a camera to see MAIN / SUB / DETECT roles, codec, FPS, GOP, transport, and frame age.</p></div>
         </div>
-      </div>
-
-      <div id="page-lanes" class="hidden">
-        <p class="muted">Car snapshots only — the still taken when a vehicle is read at each gate. Moving live video is on Cameras. Add a gate, then attach cameras to grow the site.</p>
-        <div class="toolbar">
-          <button class="secondary" type="button" id="refresh-lanes">Refresh</button>
         </div>
-        <div id="lane-overview" class="gates-overview"></div>
-        <pre id="lane-recent">No car snapshots yet.</pre>
-        <p class="error" id="lane-error"></p>
       </div>
 
       <div id="page-gates" class="hidden">
@@ -271,10 +360,12 @@
       </div>
 
       <div id="page-hardware" class="hidden">
-        <p class="muted">The HVX vendor SDK requires a 32-bit Windows host process.</p>
+        <p class="muted">The HVX vendor SDK requires a 32-bit Windows host process. Stream profiles and decoder path are diagnostics, not a second camera login.</p>
         <div class="toolbar">
           <button type="button" id="check-hvx">Check HVX SDK Host</button>
           <button class="secondary" type="button" id="check-alpr">Check FastALPR</button>
+          <button class="secondary" type="button" id="check-media">Check media gateway</button>
+          <button class="secondary" type="button" id="check-decode">Check decode path</button>
         </div>
         <pre id="hvx-info">Loading…</pre>
       </div>
@@ -321,6 +412,30 @@
             <button class="secondary" type="button" id="park-save">Save parking rules</button>
             <button class="secondary" type="button" id="park-test">Print test page</button>
           </div>
+          <p class="muted">Site locale (fees, clocks, and plate checks). Not tied to one country.</p>
+          <label>Timezone <input id="site-timezone" placeholder="UTC"></label>
+          <label>Currency <input id="site-currency" placeholder="TZS"></label>
+          <label>Language
+            <select id="site-language">
+              <option value="en">en</option>
+              <option value="sw">sw</option>
+              <option value="ar">ar</option>
+              <option value="fr">fr</option>
+              <option value="pt">pt</option>
+            </select>
+          </label>
+          <label>Plate validation
+            <select id="site-plate-validation">
+              <option value="NONE">NONE</option>
+              <option value="TZ">TZ</option>
+              <option value="KE">KE</option>
+              <option value="ZA">ZA</option>
+              <option value="AE">AE</option>
+            </select>
+          </label>
+          <div class="toolbar">
+            <button class="secondary" type="button" id="site-save">Save site locale</button>
+          </div>
         </div>
         <p class="error" id="sim-error"></p>
       </div>
@@ -349,19 +464,64 @@
       </label>
       <label>Adapter
         <select name="adapter_id">
-          <option value="hvx">hvx (site default)</option>
-          <option value="rtsp">rtsp (media extra)</option>
+          <option value="hvx">hvx (this site, onboard ALPR)</option>
+          <option value="rtsp">rtsp — generic IP + FastALPR</option>
+          <option value="dahua">dahua — IP camera + FastALPR</option>
+          <option value="hikvision">hikvision — IP camera + FastALPR</option>
           <option value="onvif">onvif (stub)</option>
           <option value="simulated">simulated</option>
         </select>
       </label>
       <label>Controller IP (Board*) <input name="controller_ip" placeholder="barrier board, not SDK"></label>
       <label>Display IP (IpAddr*) <input name="display_ip" placeholder="LED screen, not SDK"></label>
-      <label>RTSP URL (optional) <input name="rtsp_url"></label>
+      <label>RTSP URL (optional) <input name="rtsp_url" placeholder="leave blank to auto-try Dahua/Hikvision paths"></label>
+      <label>FFmpeg profile
+        <select name="ffmpeg_profile">
+          <option value="LOW_LATENCY_LAN">LOW_LATENCY_LAN</option>
+          <option value="COMPATIBLE">COMPATIBLE</option>
+          <option value="LOSSY_NETWORK">LOSSY_NETWORK</option>
+          <option value="VENDOR_SPECIAL">VENDOR_SPECIAL</option>
+        </select>
+      </label>
+      <label>RTSP transport
+        <select name="rtsp_transport">
+          <option value="TCP">TCP</option>
+          <option value="UDP">UDP</option>
+          <option value="AUTO">AUTO</option>
+        </select>
+      </label>
+      <label>Recognition
+        <select name="recognition_mode">
+          <option value="">Default for adapter</option>
+          <option value="NATIVE_ONLY">NATIVE_ONLY</option>
+          <option value="FASTALPR_ONLY">FASTALPR_ONLY</option>
+          <option value="HYBRID">HYBRID</option>
+        </select>
+      </label>
+      <p class="muted">Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.</p>
       <p class="error" id="camera-dialog-error"></p>
       <div class="toolbar">
         <button type="submit">Save Camera</button>
         <button class="secondary" type="button" id="camera-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="onboard-dialog">
+    <form class="card" id="onboard-form">
+      <h2>Onboard camera</h2>
+      <p class="muted">Tries HVX, then ONVIF, RTSP, HTTP. HVX stays the site default when port 30000 answers.</p>
+      <label>IP / hostname <input name="ip_address" required></label>
+      <label>Username <input name="username" value="admin"></label>
+      <label>Password <input name="password" type="password" value="admin"></label>
+      <label>Optional port <input name="sdk_port" placeholder="30000"></label>
+      <label>Manual RTSP URL <input name="rtsp_url" placeholder="optional"></label>
+      <p class="error" id="onboard-error"></p>
+      <pre class="hidden" id="onboard-result"></pre>
+      <div class="toolbar">
+        <button type="submit">Discover</button>
+        <button class="secondary" type="button" id="onboard-test">Test path</button>
+        <button class="secondary" type="button" id="onboard-close">Close</button>
       </div>
     </form>
   </dialog>
@@ -445,43 +605,176 @@
 
     const loginView = document.getElementById("login-view");
     const appView = document.getElementById("app-view");
-    const pages = ["dashboard", "health", "lanes", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim"];
+    const pages = ["dashboard", "health", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim"];
     let liveAlprTimer = null;
-    let snapshotTimer = null;
-    let liveUseMjpeg = true;
     let alprInstalled = null;
-    let liveOverlay = null;
-    let laneEventTimer = null;
     let healthTimer = null;
-    let laneView = null;
     let simSessionId = null;
+    let cameraSub = "live";
+    let cameraRowsCache = [];
+    const liveCameras = [null, null];
+    const liveWatchIds = [null, null];
+    const liveFrameSeq = [0, 0];
+    const liveObjectUrls = [null, null];
+    const liveFetchBusy = [false, false];
+    const liveOverlays = [null, null];
+    const liveLastCars = [null, null];
+    const snapshotTimers = [null, null];
 
     function mediaUrl(path) {
       const join = path.includes("?") ? "&" : "?";
       return `${path}${join}access_token=${encodeURIComponent(state.token)}`;
     }
 
-    function stopLive() {
-      if (liveAlprTimer) { clearInterval(liveAlprTimer); liveAlprTimer = null; }
-      if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
-      liveOverlay = null;
-      const img = document.getElementById("live-img");
-      img.onload = null;
-      img.onerror = null;
-      img.removeAttribute("src");
-      drawLiveOverlay();
+    let lastDiscover = null;
+
+    function camerasPageVisible() {
+      const page = document.getElementById("page-cameras");
+      return page && !page.classList.contains("hidden");
     }
 
-    function drawLiveOverlay() {
-      const img = document.getElementById("live-img");
-      const canvas = document.getElementById("live-overlay");
+    function liveTabVisible() {
+      return camerasPageVisible() && cameraSub === "live";
+    }
+
+    function paneEls(slot) {
+      const pane = document.querySelector(`.live-pane[data-slot="${slot}"]`);
+      return {
+        pane,
+        camera: pane.querySelector('[data-role="camera"]'),
+        pick: pane.querySelector('[data-role="pick"]'),
+        img: pane.querySelector('[data-role="video"]'),
+        canvas: pane.querySelector('[data-role="overlay"]'),
+        status: pane.querySelector('[data-role="status"]'),
+        snap: pane.querySelector('[data-role="snap"]'),
+        crop: pane.querySelector('[data-role="crop"]'),
+        plate: pane.querySelector('[data-role="plate"]'),
+        details: pane.querySelector('[data-role="details"]'),
+      };
+    }
+
+    function cameraSide(camera) {
+      return String((camera && (camera.lane_direction || camera.side)) || "").toUpperCase();
+    }
+
+    function pairLaneCameras(cameras, gateId) {
+      let cams = Array.isArray(cameras) ? cameras.slice() : [];
+      if (gateId !== "" && gateId != null) {
+        cams = cams.filter((c) => String(c.gate_id) === String(gateId));
+      }
+      const entry = cams.find((c) => cameraSide(c).includes("ENTRY"));
+      const exitCam = cams.find((c) => cameraSide(c).includes("EXIT"));
+      const leftover = cams.filter((c) => c !== entry && c !== exitCam);
+      let left = entry || leftover.shift() || null;
+      let right = exitCam || leftover.shift() || null;
+      if (!left && !right && cams.length) {
+        left = cams[0];
+        right = cams[1] || null;
+      }
+      return [left, right];
+    }
+
+    function formatWhen(iso) {
+      if (!iso) return "—";
+      return String(iso).slice(0, 19).replace("T", " ");
+    }
+
+    function cameraOptionLabel(camera) {
+      return [camera.name, camera.lane_name || camera.gate_name || "", camera.side || camera.lane_direction || "", camera.ip_address || ""]
+        .filter(Boolean).join(" · ");
+    }
+
+    function slotStorageKey(slot) { return `smartpark_live_slot_${slot}`; }
+
+    function savedSlotId(slot) {
+      const raw = sessionStorage.getItem(slotStorageKey(slot));
+      return raw ? Number(raw) : null;
+    }
+
+    function saveSlotId(slot, id) {
+      if (id == null || id === "") sessionStorage.removeItem(slotStorageKey(slot));
+      else sessionStorage.setItem(slotStorageKey(slot), String(id));
+    }
+
+    function cameraFromSelect(slot) {
+      const id = paneEls(slot).camera && paneEls(slot).camera.value;
+      if (!id) return null;
+      return cameraRowsCache.find((c) => String(c.id) === String(id)) || null;
+    }
+
+    function fillPaneSelects(rows) {
+      [0, 1].forEach((slot) => {
+        const sel = paneEls(slot).camera;
+        if (!sel) return;
+        const current = sel.value || String(savedSlotId(slot) || "");
+        sel.innerHTML = `<option value="">Choose camera…</option>` +
+          (rows || []).map((c) => `<option value="${c.id}">${cameraOptionLabel(c)}</option>`).join("");
+        if (current && [...sel.options].some((o) => o.value === current)) sel.value = current;
+      });
+    }
+
+    function openCameraPicker(slot) {
+      const sel = paneEls(slot).camera;
+      if (!sel) return;
+      sel.focus();
+      if (typeof sel.showPicker === "function") {
+        try { sel.showPicker(); } catch (_) {}
+      }
+    }
+
+    async function watchCamera(id) {
+      if (!id) return;
+      try { await api(`/cameras/${id}/live/watch`, { method: "POST", body: "{}" }); }
+      catch (_) {}
+    }
+
+    async function unwatchCamera(id) {
+      if (!id) return;
+      try { await api(`/cameras/${id}/live/unwatch`, { method: "POST", body: "{}" }); }
+      catch (_) {}
+    }
+
+    function stopLiveSlot(slot, release = true) {
+      if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
+      liveFetchBusy[slot] = false;
+      liveFrameSeq[slot] = 0;
+      const prev = liveWatchIds[slot];
+      liveWatchIds[slot] = null;
+      if (release) unwatchCamera(prev);
+      const els = paneEls(slot);
+      if (els.img) {
+        els.img.onload = null;
+        els.img.onerror = null;
+        els.img.removeAttribute("src");
+        delete els.img.dataset.cameraId;
+      }
+      if (liveObjectUrls[slot]) {
+        URL.revokeObjectURL(liveObjectUrls[slot]);
+        liveObjectUrls[slot] = null;
+      }
+      liveOverlays[slot] = null;
+    }
+
+    function stopLive() {
+      if (liveAlprTimer) { clearInterval(liveAlprTimer); liveAlprTimer = null; }
+      stopLiveSlot(0);
+      stopLiveSlot(1);
+      liveCameras[0] = null;
+      liveCameras[1] = null;
+    }
+
+    function drawLiveOverlay(slot) {
+      const els = paneEls(slot);
+      const img = els.img;
+      const canvas = els.canvas;
       if (!img || !canvas) return;
-      const rect = img.getBoundingClientRect();
+      const frame = canvas.parentElement;
+      const rect = (frame || img).getBoundingClientRect();
       canvas.width = Math.max(1, Math.round(rect.width));
       canvas.height = Math.max(1, Math.round(rect.height));
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const box = liveOverlay;
+      const box = liveOverlays[slot];
       if (!box || !img.naturalWidth) return;
       const srcW = box.image_width || img.naturalWidth;
       const srcH = box.image_height || img.naturalHeight;
@@ -506,101 +799,229 @@
       }
     }
 
-    function startSnapshotLoop(id) {
-      if (snapshotTimer) clearInterval(snapshotTimer);
-      const img = document.getElementById("live-img");
-      const tick = () => { img.src = mediaUrl(`/cameras/${id}/snapshot.jpg`) + "&t=" + Date.now(); };
-      img.onload = () => drawLiveOverlay();
+    function startSnapshotLoop(slot, id) {
+      if (snapshotTimers[slot]) clearInterval(snapshotTimers[slot]);
+      const els = paneEls(slot);
+      const tick = () => {
+        if (liveFetchBusy[slot] || els.img.dataset.cameraId !== String(id)) return;
+        liveFetchBusy[slot] = true;
+        fetch(mediaUrl(`/cameras/${id}/snapshot.jpg`) + "&t=" + Date.now(), { cache: "no-store" })
+          .then((res) => {
+            if (!res.ok) throw new Error(res.status === 409 ? "Waiting for live video" : res.statusText);
+            const seq = Number(res.headers.get("X-Frame-Seq") || 0);
+            if (seq && seq === liveFrameSeq[slot]) return null;
+            if (seq) liveFrameSeq[slot] = seq;
+            return res.blob();
+          })
+          .then((blob) => {
+            if (!blob || els.img.dataset.cameraId !== String(id)) return;
+            const url = URL.createObjectURL(blob);
+            const prev = liveObjectUrls[slot];
+            liveObjectUrls[slot] = url;
+            els.img.onload = () => {
+              if (prev) URL.revokeObjectURL(prev);
+              if (els.status) els.status.textContent = "Live";
+              drawLiveOverlay(slot);
+            };
+            els.img.src = url;
+          })
+          .catch((err) => {
+            if (els.status && els.img.dataset.cameraId === String(id)) els.status.textContent = err.message || "Waiting for live video";
+          })
+          .finally(() => { liveFetchBusy[slot] = false; });
+      };
       tick();
-      snapshotTimer = setInterval(tick, 400);
+      snapshotTimers[slot] = setInterval(tick, 40);
     }
 
-    function renderPlates(data) {
-      const box = document.getElementById("live-plates");
-      if (!data) {
-        box.innerHTML = `<p class="muted">Waiting for the camera to read a plate. Connect all, then let a car pass. Close any other SDK client if it still owns the camera callback.</p>`;
+    function startLiveSlot(slot, camera, force = false) {
+      const els = paneEls(slot);
+      if (els.camera && camera) els.camera.value = String(camera.id);
+      if (els.camera && !camera) els.camera.value = "";
+      if (!camera) {
+        stopLiveSlot(slot);
+        liveCameras[slot] = null;
+        saveSlotId(slot, null);
+        els.status.textContent = "Click this view or the list to choose a camera.";
+        els.details.textContent = "Any added camera can go on the left or the right.";
+        els.plate.textContent = "—";
+        els.snap.innerHTML = `<p class="muted">Waiting for a car</p>`;
+        els.crop.innerHTML = `<p class="muted">—</p>`;
         return;
       }
-      const alpr = data.alpr && typeof data.alpr === "object" ? data.alpr : (data.plates ? data : null);
-      const native = data.native || {};
-      const fusion = data.fusion || {};
-      const resolved = data.resolved_plate || fusion.resolved_plate || native.plate || "";
-      const plates = (alpr && alpr.plates) || [];
-      const parts = [];
-      if (resolved) {
-        parts.push(`<div class="plate-item"><strong>${resolved}</strong><div class="muted">${fusion.method || "NATIVE"} · native ${native.plate || "—"} · local ${(data.local && data.local.plate) || (alpr && alpr.best && alpr.best.plate) || "—"}</div></div>`);
-      } else if (native.plate) {
-        parts.push(`<div class="plate-item"><strong>${native.plate}</strong><div class="muted">Native camera · ${Math.round((native.confidence || 0) * 100)}%</div></div>`);
+      const id = camera.id;
+      liveCameras[slot] = camera;
+      saveSlotId(slot, id);
+      if (!force && els.img.dataset.cameraId === String(id) && snapshotTimers[slot]) {
+        refreshPlates(slot);
+        return;
       }
-      if (!resolved && !native.plate) {
-        parts.push(`<p class="muted">${(alpr && alpr.detail) || "Waiting for the camera to read a plate. These QY cameras send the characters over the SDK. Close any other SDK client if it is still running."}</p>`);
-      }
-      if (alpr && alpr.annotated_url) {
-        parts.push(`<img alt="Annotated frame" src="${mediaUrl(alpr.annotated_url)}">`);
-      }
-      plates.forEach((p) => {
-        parts.push(`
-          <div class="plate-item">
-            ${p.crop_url ? `<img alt="${p.plate}" src="${mediaUrl(p.crop_url)}">` : ""}
-            <strong>${p.plate || p.plate_raw || "—"}</strong>
-            <div class="muted">FastALPR · ${Math.round((p.confidence || 0) * 100)}%</div>
-          </div>
-        `);
-      });
-      if (!parts.length) {
-        box.innerHTML = `<p class="muted">${(alpr && alpr.detail) || "No plate yet. Connect the camera and wait for a car. FastALPR is optional."}</p>`;
-      } else {
-        box.innerHTML = parts.join("");
-      }
-      liveOverlay = data.overlay || null;
-      drawLiveOverlay();
+      if (els.img.dataset.cameraId !== String(id)) liveLastCars[slot] = null;
+      const prev = liveWatchIds[slot];
+      stopLiveSlot(slot, false);
+      if (prev && prev !== id) unwatchCamera(prev);
+      liveCameras[slot] = camera;
+      liveWatchIds[slot] = id;
+      els.status.textContent = "Opening live view…";
+      els.img.dataset.cameraId = String(id);
+      watchCamera(id);
+      startSnapshotLoop(slot, id);
+      refreshPlates(slot);
     }
 
-    async function refreshPlates(id, runAlpr) {
-      const status = document.getElementById("live-status");
+    function applyLanePreset() {
+      const gateId = document.getElementById("live-lane").value;
+      const pair = pairLaneCameras(cameraRowsCache, gateId);
+      [0, 1].forEach((slot) => {
+        const cam = pair[slot];
+        const sel = paneEls(slot).camera;
+        if (sel) sel.value = cam ? String(cam.id) : "";
+        saveSlotId(slot, cam ? cam.id : null);
+        startLiveSlot(slot, cam, true);
+      });
+    }
+
+    function startDualLive(force = false) {
+      if (!liveTabVisible()) { stopLive(); return; }
+      fillPaneSelects(cameraRowsCache);
+      const anyChosen = [0, 1].some((slot) => cameraFromSelect(slot));
+      if (!anyChosen && cameraRowsCache.length) {
+        const left = cameraRowsCache[0];
+        const right = cameraRowsCache[1] || null;
+        if (paneEls(0).camera) paneEls(0).camera.value = left ? String(left.id) : "";
+        if (paneEls(1).camera) paneEls(1).camera.value = right ? String(right.id) : "";
+      }
+      [0, 1].forEach((slot) => startLiveSlot(slot, cameraFromSelect(slot), force));
+      if (!liveAlprTimer) {
+        liveAlprTimer = setInterval(() => {
+          liveCameras.forEach((cam, slot) => { if (cam) refreshPlates(slot); });
+        }, 2000);
+      }
+    }
+
+    function fillLiveLanes(rows) {
+      const select = document.getElementById("live-lane");
+      if (!select) return;
+      const current = select.value;
+      const seen = new Map();
+      (rows || []).forEach((c) => {
+        if (c.gate_id == null) return;
+        if (!seen.has(String(c.gate_id))) seen.set(String(c.gate_id), c.lane_name || c.gate_name || `Lane ${c.gate_id}`);
+      });
+      let html = `<option value="">All cameras</option>`;
+      seen.forEach((name, id) => { html += `<option value="${id}">${name}</option>`; });
+      select.innerHTML = html;
+      if (current && [...select.options].some((o) => o.value === current)) select.value = current;
+    }
+
+    function showCameraSub(name) {
+      cameraSub = name;
+      document.querySelectorAll("#cameras-subnav button").forEach((b) => b.classList.toggle("active", b.dataset.sub === name));
+      document.getElementById("cameras-sub-live").classList.toggle("hidden", name !== "live");
+      document.getElementById("cameras-sub-ips").classList.toggle("hidden", name !== "ips");
+      if (name === "live") startDualLive();
+      else stopLive();
+    }
+
+    function streamLine(role, row) {
+      if (!row || !Object.keys(row).length) return "";
+      const bits = [role];
+      if (row.codec) bits.push(String(row.codec).toUpperCase());
+      if (row.width && row.height) bits.push(`${row.width}x${row.height}`);
+      if (row.fps) bits.push(`${row.fps} FPS`);
+      if (row.gop) bits.push(`GOP ${row.gop}`);
+      if (row.transport) bits.push(row.transport);
+      if (row.source) bits.push(`Source: ${row.source}`);
+      if (row.ai_fps) bits.push(`AI sampling: ${row.ai_fps} FPS`);
+      if (row.protocol) bits.push(row.protocol);
+      return bits.join(" · ");
+    }
+
+    function renderStreamProfiles(data) {
+      const box = document.getElementById("stream-profiles");
+      if (!box) return;
+      if (!data) {
+        box.innerHTML = `<p class="muted">Select a camera to see MAIN / SUB / DETECT roles, codec, FPS, GOP, transport, and frame age.</p>`;
+        return;
+      }
+      const profiles = data.stream_profiles || {};
+      const media = data.media || {};
+      const cards = ["MAIN", "SUB", "LIVE", "DETECT", "EVIDENCE"].map((role) => {
+        const line = streamLine(role, profiles[role]);
+        if (!line) return "";
+        return `<div class="stream-card"><strong>${role}</strong>${line.replace(role + " · ", "").replace(role, "") || line}</div>`;
+      }).filter(Boolean);
+      const age = [];
+      if (media.live_frame_age_ms != null) age.push(`Live frame age ${Math.round(media.live_frame_age_ms)} ms`);
+      if (media.ai_frame_age_ms != null) age.push(`AI frame age ${Math.round(media.ai_frame_age_ms)} ms`);
+      if (media.fps) age.push(`Live ${media.fps} FPS`);
+      if (media.ai_fps) age.push(`AI ${media.ai_fps} FPS`);
+      if (media.connection_state) age.push(media.connection_state);
+      const warnings = (data.warnings || media.warnings || []).map((w) => `<li>${w}</li>`).join("");
+      box.innerHTML = `
+        <div class="stream-grid">${cards.join("") || "<p class='muted'>No profiles stored yet. Probe RTSP or ONVIF profiles after Connect.</p>"}</div>
+        <p class="muted">${age.join(" · ") || "Frame age appears after the media gateway produces frames."}</p>
+        ${warnings ? `<ul class="warn-list">${warnings}</ul>` : ""}
+      `;
+    }
+
+    async function refreshStreamProfiles(id) {
+      try {
+        renderStreamProfiles(await api(`/cameras/${id}/streams`));
+      } catch (_) {}
+    }
+
+    function renderSlotCar(slot, data) {
+      const els = paneEls(slot);
+      const last = (data && (data.last_car || data.capture)) || {};
+      if (last.snapshot_url || last.crop_url || last.plate) liveLastCars[slot] = last;
+      const shown = liveLastCars[slot] || last;
+      const plate = shown.plate || shown.plate_raw || (data && data.resolved_plate) || "";
+      const chars = shown.characters || (plate ? plate.split("").join(" ") : "—");
+      els.plate.textContent = chars;
+      els.snap.innerHTML = shown.snapshot_url
+        ? `<img alt="snapshot" src="${mediaUrl(shown.snapshot_url)}">`
+        : `<p class="muted">Waiting for a car</p>`;
+      els.crop.innerHTML = shown.crop_url
+        ? `<img alt="cropped plate" src="${mediaUrl(shown.crop_url)}">`
+        : `<p class="muted">—</p>`;
+      const cam = liveCameras[slot] || {};
+      const conf = shown.confidence != null ? `${Math.round(shown.confidence * 100)}%` : "—";
+      const source = shown.source || (data && data.fusion && data.fusion.method) || "—";
+      const side = shown.lane_direction || cam.side || cam.lane_direction || "—";
+      const when = formatWhen(shown.created_at);
+      if (plate) {
+        els.details.textContent = `Time ${when} · ${side} · ${conf} · ${source}`;
+      } else {
+        els.details.textContent = "No car yet. Connect all on the IPs tab, then wait for a vehicle.";
+      }
+      liveOverlays[slot] = (data && data.overlay) || null;
+      drawLiveOverlay(slot);
+    }
+
+    async function refreshPlates(slot) {
+      const camera = liveCameras[slot];
+      const els = paneEls(slot);
+      if (!camera) return;
       try {
         if (alprInstalled === null) {
           try { alprInstalled = Boolean((await api("/alpr/status")).installed); }
           catch (_) { alprInstalled = false; }
         }
-        const data = await api(`/cameras/${id}/plates`);
+        const data = await api(`/cameras/${camera.id}/plates`);
+        if (liveCameras[slot] && liveCameras[slot].id !== camera.id) return;
         if (data.live) {
           const fps = data.live_fps ? ` · ${data.live_fps} fps` : "";
           const src = data.live_source ? ` · ${data.live_source}` : "";
-          status.textContent = (data.url_redacted ? `Live${src}${fps} · ${data.url_redacted}` : `Live${src}${fps}`);
+          const age = data.live_frame_age_ms != null ? ` · ${Math.round(data.live_frame_age_ms)} ms` : "";
+          els.status.textContent = (data.url_redacted ? `Live${src}${fps}${age} · ${data.url_redacted}` : `Live${src}${fps}${age}`);
+        } else {
+          els.status.textContent = data.error || "No live JPEG yet. SDK Connect still enables native plates.";
         }
-        else status.textContent = data.error || "No live JPEG yet. SDK Connect still enables native plates.";
-        renderPlates(data);
+        renderSlotCar(slot, data);
       } catch (err) {
-        status.textContent = err.message;
-        try { renderPlates(await api(`/cameras/${id}/plates`)); }
-        catch (_) {}
+        if (els.status) els.status.textContent = err.message;
       }
-    }
-
-    function startLive(id, force = false) {
-      const img = document.getElementById("live-img");
-      if (!force && img.dataset.cameraId === String(id) && img.getAttribute("src")) {
-        refreshPlates(id, false);
-        return;
-      }
-      stopLive();
-      const status = document.getElementById("live-status");
-      status.textContent = "Opening live view…";
-      img.dataset.cameraId = String(id);
-      liveUseMjpeg = true;
-      img.onload = () => {
-        if (liveUseMjpeg) status.textContent = "Live";
-        drawLiveOverlay();
-      };
-      img.onerror = () => {
-        if (!liveUseMjpeg) return;
-        liveUseMjpeg = false;
-        startSnapshotLoop(id);
-      };
-      img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
-      refreshPlates(id, false);
-      liveAlprTimer = setInterval(() => refreshPlates(id, false), 2000);
     }
 
     function can(permission) {
@@ -611,56 +1032,6 @@
       if (typeof detail === "string") return detail;
       if (Array.isArray(detail)) return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
       return fallback;
-    }
-
-    function stopLanes() {
-      if (laneEventTimer) { clearInterval(laneEventTimer); laneEventTimer = null; }
-    }
-
-    function sideCard(gateName, side) {
-      const cam = (side && side.camera) || {};
-      const last = (side && side.last) || {};
-      const plate = last.plate || "";
-      const chars = last.characters || (plate ? plate.split("").join(" ") : "—");
-      const snap = last.snapshot_url ? `<img class="lane-side" alt="snapshot" src="${mediaUrl(last.snapshot_url)}">` : `<p class="muted">No snapshot yet</p>`;
-      const crop = last.crop_url ? `<img class="crop-img" alt="crop" src="${mediaUrl(last.crop_url)}">` : "";
-      return `<div class="gate-card">
-        <h3>${gateName} · ${(side.side || "").toLowerCase()}</h3>
-        ${snap}
-        ${crop}
-        <div class="plate-chars">${chars}</div>
-        <p class="muted">${cam.name || "camera"} · ${last.plate_raw || plate || "no plate yet"} · ${Math.round((last.confidence || 0) * 100)}%</p>
-      </div>`;
-    }
-
-    async function loadLaneView() {
-      const error = document.getElementById("lane-error");
-      error.textContent = "";
-      try {
-        const data = await api("/lanes/overview");
-        const lanes = data.lanes || [];
-        document.getElementById("lane-overview").innerHTML = lanes.flatMap((lane) => {
-          const name = (lane.gate && lane.gate.name) || "Gate";
-          const sides = lane.sides && lane.sides.length ? lane.sides : [lane.entry, lane.exit].filter(Boolean).map((s, i) => ({ ...s, side: i === 0 ? "ENTRY" : "EXIT" }));
-          return sides.map((side) => sideCard(name, side));
-        }).join("") || `<p class="muted">No gates yet. Add a gate, then attach cameras.</p>`;
-        const lines = [];
-        lanes.forEach((lane) => {
-          (lane.recent || []).forEach((row) => {
-            const when = (row.created_at || "").slice(0, 19).replace("T", " ");
-            lines.push(`${when}  ${(lane.gate && lane.gate.name) || ""}  ${row.lane_direction}  ${row.plate || "—"}  ${row.characters || ""}`);
-          });
-        });
-        document.getElementById("lane-recent").textContent = lines.join("\n") || "No car snapshots yet. Connect the cameras and wait for a vehicle.";
-      } catch (err) {
-        error.textContent = err.message;
-      }
-    }
-
-    async function startLanes() {
-      stopLanes();
-      await loadLaneView();
-      laneEventTimer = setInterval(loadLaneView, 2000);
     }
 
     async function loadSim() {
@@ -695,6 +1066,11 @@
             options.push(`<option value="${chosen}">${chosen}</option>`);
           }
           select.innerHTML = options.join("");
+          const site = await api("/settings/site");
+          document.getElementById("site-timezone").value = site.timezone || "UTC";
+          document.getElementById("site-currency").value = site.currency || "";
+          document.getElementById("site-language").value = site.language || "en";
+          document.getElementById("site-plate-validation").value = site.plate_validation || "NONE";
           select.value = chosen;
         } else {
           box.classList.add("hidden");
@@ -826,17 +1202,15 @@
       document.querySelectorAll("nav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
       pages.forEach((page) => document.getElementById(`page-${page}`).classList.toggle("hidden", page !== name));
       document.getElementById("page-title").textContent = {
-        dashboard: "Dashboard", health: "System Health", cameras: "Cameras", lanes: "Live Gates", gates: "Gates",
+        dashboard: "Dashboard", health: "System Health", cameras: "Live Gates", gates: "Gates",
         sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
         fees: "Tariffs", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
       }[name];
       if (name === "dashboard") loadDashboard();
       if (name === "health") startHealth();
       else stopHealth();
-      if (name === "cameras") loadCameras();
+      if (name === "cameras") { loadCameras(); showCameraSub(cameraSub || "live"); }
       else stopLive();
-      if (name === "lanes") startLanes();
-      else stopLanes();
       if (name === "gates") loadGates();
       if (name === "sessions") loadSessions();
       if (name === "vehicles") loadVehicles();
@@ -879,6 +1253,8 @@
 
     function setManageVisibility() {
       document.getElementById("add-camera").style.display = can("cameras.manage") ? "" : "none";
+      const onboardBtn = document.getElementById("onboard-camera");
+      if (onboardBtn) onboardBtn.style.display = can("cameras.manage") ? "" : "none";
       document.getElementById("seed-site").style.display = can("cameras.manage") ? "" : "none";
       document.getElementById("add-gate").style.display = can("gates.manage") ? "" : "none";
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
@@ -964,13 +1340,25 @@
           ["Vehicles inside", stats.vehicles_inside],
           ["Entries today", stats.entries_today],
           ["Exits today", stats.exits_today],
-          ["Revenue today", `TZS ${Number(stats.revenue_today || 0).toLocaleString()}`],
+          ["Revenue today", stats.revenue_today_label || stats.revenue_today],
           ["Unpaid active", stats.unpaid_active],
           ["Subscribers inside", stats.subscribers_inside],
         ];
         cards.innerHTML = items.map(([label, value]) =>
           `<div class="stat-card"><div class="value">${value ?? 0}</div><div class="label">${label}</div></div>`
         ).join("");
+        const lanes = document.getElementById("dashboard-lanes");
+        if (lanes) {
+          const rows = stats.lanes || [];
+          lanes.innerHTML = rows.map((lane) =>
+            `<div class="gate-card"><h3>${lane.label || lane.name || ""}</h3>
+              <p>Camera: ${lane.camera || "—"}</p>
+              <p>Live Video: ${lane.live_video || "—"}</p>
+              <p>Plate Recognition: ${lane.plate_recognition || "—"}</p>
+              <p>Barrier: ${lane.barrier || "—"}</p>
+            </div>`
+          ).join("");
+        }
         el.textContent = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
       } catch (err) {
         el.textContent = `Unable to load dashboard: ${err.message}`;
@@ -1076,6 +1464,9 @@
         form.elements.controller_ip.value = camera.controller_ip || "";
         form.elements.display_ip.value = camera.display_ip || "";
         form.elements.adapter_id.value = camera.adapter_id || "hvx";
+        if (form.elements.ffmpeg_profile) form.elements.ffmpeg_profile.value = camera.ffmpeg_profile || "LOW_LATENCY_LAN";
+        if (form.elements.rtsp_transport) form.elements.rtsp_transport.value = camera.rtsp_transport || "TCP";
+        if (form.elements.recognition_mode) form.elements.recognition_mode.value = camera.recognition_mode || "";
       } else {
         form.elements.id.value = "";
         form.elements.sdk_port.value = "30000";
@@ -1123,20 +1514,73 @@
           }
           body.appendChild(tr);
         });
-        if (selectedCameraId) startLive(selectedCameraId);
+        cameraRowsCache = rows;
+        fillLiveLanes(rows);
+        fillPaneSelects(rows);
+        if (selectedCameraId) refreshStreamProfiles(selectedCameraId);
+        if (liveTabVisible()) startDualLive();
       } catch (err) {
         error.textContent = err.message;
       }
     }
 
     document.getElementById("refresh-cameras").addEventListener("click", loadCameras);
-    document.getElementById("refresh-lanes").addEventListener("click", startLanes);
+    document.getElementById("refresh-live").addEventListener("click", () => startDualLive(true));
+    document.getElementById("apply-lane").addEventListener("click", applyLanePreset);
+    document.getElementById("live-lane").addEventListener("change", applyLanePreset);
+    document.querySelectorAll(".live-pane").forEach((pane) => {
+      const slot = Number(pane.dataset.slot);
+      const sel = pane.querySelector('[data-role="camera"]');
+      const pick = pane.querySelector('[data-role="pick"]');
+      if (sel) sel.addEventListener("change", () => startLiveSlot(slot, cameraFromSelect(slot), true));
+      if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
+    });
+    document.getElementById("cameras-subnav").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-sub]");
+      if (!btn) return;
+      showCameraSub(btn.dataset.sub);
+    });
+    document.querySelectorAll(".live-pane [data-role='open-side']").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const pane = btn.closest(".live-pane");
+        const slot = Number(pane.dataset.slot);
+        const cam = liveCameras[slot];
+        const error = document.getElementById("camera-error");
+        if (!cam) { error.textContent = "No camera on this side."; return; }
+        const reason = prompt("Reason");
+        if (!reason) return;
+        if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
+        try {
+          alert(JSON.stringify(await api(`/cameras/${cam.id}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
+        } catch (err) {
+          error.textContent = err.message;
+        }
+      });
+    });
     document.getElementById("sim-entry").addEventListener("click", () => simAction("entry"));
     document.getElementById("sim-taken").addEventListener("click", () => simAction("taken"));
     document.getElementById("sim-pay").addEventListener("click", () => simAction("pay"));
     document.getElementById("sim-exit").addEventListener("click", () => simAction("exit"));
     document.getElementById("sim-plate-entry").addEventListener("click", () => simPlate("ENTRY"));
     document.getElementById("sim-plate-exit").addEventListener("click", () => simPlate("EXIT"));
+    document.getElementById("site-save").addEventListener("click", async () => {
+      const error = document.getElementById("sim-error");
+      error.textContent = "";
+      try {
+        const saved = await api("/settings/site", {
+          method: "PATCH",
+          body: JSON.stringify({
+            timezone: document.getElementById("site-timezone").value.trim() || "UTC",
+            currency: document.getElementById("site-currency").value.trim().toUpperCase(),
+            language: document.getElementById("site-language").value,
+            plate_validation: document.getElementById("site-plate-validation").value,
+          }),
+        });
+        error.textContent = `Site locale saved: ${saved.timezone} / ${saved.currency}`;
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
     document.getElementById("park-save").addEventListener("click", async () => {
       const error = document.getElementById("sim-error");
       error.textContent = "";
@@ -1186,6 +1630,72 @@
       preview.style.display = "block";
     });
     document.getElementById("add-camera").addEventListener("click", () => openCameraDialog(null));
+    document.getElementById("onboard-camera").addEventListener("click", () => {
+      document.getElementById("onboard-error").textContent = "";
+      document.getElementById("onboard-result").classList.add("hidden");
+      document.getElementById("onboard-dialog").showModal();
+    });
+    document.getElementById("onboard-close").addEventListener("click", () => document.getElementById("onboard-dialog").close());
+    document.getElementById("onboard-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const error = document.getElementById("onboard-error");
+      const result = document.getElementById("onboard-result");
+      error.textContent = "";
+      try {
+        const data = await api("/cameras/onboard/probe", {
+          method: "POST",
+          body: JSON.stringify({
+            ip_address: form.elements.ip_address.value.trim(),
+            username: form.elements.username.value,
+            password: form.elements.password.value,
+            sdk_port: form.elements.sdk_port.value ? Number(form.elements.sdk_port.value) : null,
+            rtsp_url: form.elements.rtsp_url.value.trim(),
+          }),
+          timeoutMs: 20000,
+        });
+        result.classList.remove("hidden");
+        result.textContent = JSON.stringify(data, null, 2);
+        if (data.recommended_adapter) {
+          const camForm = document.getElementById("camera-form");
+          await openCameraDialog(null);
+          camForm.elements.ip_address.value = form.elements.ip_address.value.trim();
+          camForm.elements.username.value = form.elements.username.value;
+          camForm.elements.password.value = form.elements.password.value;
+          camForm.elements.adapter_id.value = data.recommended_adapter;
+          if (form.elements.sdk_port.value) camForm.elements.sdk_port.value = form.elements.sdk_port.value;
+          if (form.elements.rtsp_url.value) camForm.elements.rtsp_url.value = form.elements.rtsp_url.value;
+          if (data.recognition_mode && camForm.elements.recognition_mode) camForm.elements.recognition_mode.value = data.recognition_mode;
+        }
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("onboard-test").addEventListener("click", async () => {
+      const form = document.getElementById("onboard-form");
+      const error = document.getElementById("onboard-error");
+      const result = document.getElementById("onboard-result");
+      error.textContent = "";
+      try {
+        const data = await api("/cameras/onboard/test", {
+          method: "POST",
+          body: JSON.stringify({
+            ip_address: form.elements.ip_address.value.trim(),
+            username: form.elements.username.value,
+            password: form.elements.password.value,
+            adapter_id: "rtsp",
+            sdk_port: form.elements.sdk_port.value ? Number(form.elements.sdk_port.value) : 30000,
+            rtsp_url: form.elements.rtsp_url.value.trim(),
+            duration_seconds: 3,
+          }),
+          timeoutMs: 20000,
+        });
+        result.classList.remove("hidden");
+        result.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
     document.getElementById("add-vehicle").addEventListener("click", () => openVehicleDialog(null));
     document.getElementById("refresh-vehicles").addEventListener("click", loadVehicles);
     document.getElementById("refresh-sessions").addEventListener("click", loadSessions);
@@ -1277,6 +1787,9 @@
         display_ip: form.elements.display_ip.value.trim(),
         rtsp_url: form.elements.rtsp_url.value.trim(),
         adapter_id: form.elements.adapter_id.value || "hvx",
+        ffmpeg_profile: form.elements.ffmpeg_profile ? form.elements.ffmpeg_profile.value : "LOW_LATENCY_LAN",
+        rtsp_transport: form.elements.rtsp_transport ? form.elements.rtsp_transport.value : "TCP",
+        recognition_mode: form.elements.recognition_mode ? form.elements.recognition_mode.value : "",
         gate_id: form.elements.gate_id.value ? Number(form.elements.gate_id.value) : null,
       };
       if (form.elements.password.value) payload.password = form.elements.password.value;
@@ -1300,9 +1813,15 @@
         const data = await api(`/cameras/${selectedCameraId}${path}`, { method: "POST" });
         result.classList.remove("hidden");
         result.textContent = JSON.stringify(data, null, 2);
-        if (data.plates || data.annotated_url || data.native || data.fusion || data.alpr) renderPlates(data);
+        if (data.plates || data.annotated_url || data.native || data.fusion || data.alpr || data.last_car) {
+          liveCameras.forEach((cam, slot) => {
+            if (cam && String(cam.id) === String(selectedCameraId)) renderSlotCar(slot, data);
+          });
+        }
         loadCameras();
-        startLive(selectedCameraId, true);
+        if (path.includes("sdk/connect") || path.includes("sdk/disconnect")) {
+          if (liveTabVisible()) startDualLive(true);
+        }
       } catch (err) {
         error.textContent = err.message;
       }
@@ -1323,6 +1842,7 @@
       }
     });
     document.getElementById("rtsp-probe").addEventListener("click", () => cameraAction("/rtsp/probe"));
+    document.getElementById("onvif-discover").addEventListener("click", () => cameraAction("/onvif/discover"));
     document.getElementById("fastalpr").addEventListener("click", () => cameraAction("/alpr/recognize"));
     document.getElementById("capture-snapshot").addEventListener("click", async () => {
       const error = document.getElementById("camera-error");
@@ -1339,16 +1859,68 @@
     document.getElementById("discover-cameras").addEventListener("click", async () => {
       const error = document.getElementById("camera-error");
       const result = document.getElementById("camera-result");
+      const table = document.getElementById("discover-table");
+      const rows = document.getElementById("discover-rows");
       error.textContent = "";
       result.classList.remove("hidden");
-      result.textContent = "Discovering cameras on SDK port 30000…";
+      result.textContent = "Scanning the LAN for HVX (port 30000) and web/RTSP cameras…";
+      table.classList.add("hidden");
+      rows.innerHTML = "";
       try {
-        const data = await api("/cameras/discover");
-        const lines = (data.cameras || []).map((c) =>
-          `${c.ip_address}  ${c.name}  ${c.reachable ? "reachable" : "no TCP"}  ${c.already_added ? "already added" : "new"}  ${c.note}`
+        const data = await api("/cameras/discover?scan_lan=true", { timeoutMs: 45000 });
+        lastDiscover = data;
+        const cameras = data.cameras || [];
+        cameras.forEach((c) => {
+          const tr = document.createElement("tr");
+          const kind = c.kind || c.adapter_id || "hvx";
+          const plates = c.plate_engine === "fastalpr" ? "FastALPR" : "native";
+          tr.innerHTML = `<td>${c.ip_address}</td><td>${kind}</td><td>${c.adapter_id || "hvx"}</td><td>${c.reachable ? "yes" : "no"}</td><td>${plates}</td><td class="muted">${c.already_added ? "already added · " : ""}${c.note || ""}</td>`;
+          rows.appendChild(tr);
+        });
+        table.classList.toggle("hidden", cameras.length === 0);
+        const ipcams = cameras.filter((c) => (c.adapter_id || "hvx") !== "hvx" && c.reachable);
+        result.textContent = (
+          `${cameras.length} device(s). ${ipcams.length} web/RTSP camera(s) ready for username/password.\n` +
+          (data.note || "")
         );
-        result.textContent = (lines.join("\n") || "No cameras listed.") + "\n\n" + (data.note || "");
         if (data.hvx && data.hvx.error) result.textContent += "\nHVX: " + data.hvx.error;
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("add-ip-cameras").addEventListener("click", async () => {
+      const error = document.getElementById("camera-error");
+      const result = document.getElementById("camera-result");
+      error.textContent = "";
+      const cameras = ((lastDiscover && lastDiscover.cameras) || []).filter(
+        (c) => (c.adapter_id || "hvx") !== "hvx" && c.reachable
+      );
+      if (!cameras.length) {
+        error.textContent = "Click Discover first. Add IP cameras is for Dahua/Hikvision/web cameras, not HVX.";
+        return;
+      }
+      result.classList.remove("hidden");
+      result.textContent = `Adding and connecting ${cameras.length} IP camera(s)…`;
+      try {
+        const data = await api("/cameras/import-discovered", {
+          method: "POST",
+          timeoutMs: 60000,
+          body: JSON.stringify({
+            username: document.getElementById("ipcam-user").value.trim() || "admin",
+            password: document.getElementById("ipcam-pass").value,
+            connect: true,
+            cameras: cameras.map((c) => ({
+              ip_address: c.ip_address,
+              adapter_id: c.adapter_id || "rtsp",
+              name: c.name,
+              lane_direction: c.lane_direction || "ENTRY",
+            })),
+          }),
+        });
+        const connected = (data.connected || []).filter((row) => row.status === "VIDEO_CONNECTED");
+        result.textContent = `Added ${data.created.length}. Connected ${connected.length} for live video + FastALPR.\nHVX cameras are unchanged — use Connect all for NetSDK login.`;
+        await loadCameras();
+        if (liveTabVisible()) startDualLive(true);
       } catch (err) {
         error.textContent = err.message;
       }
@@ -1677,11 +2249,20 @@
       try { el.textContent = JSON.stringify(await api("/alpr/status"), null, 2); }
       catch (err) { el.textContent = err.message; }
     });
+    document.getElementById("check-media").addEventListener("click", async () => {
+      const el = document.getElementById("hvx-info");
+      try { el.textContent = JSON.stringify(await api("/media/gateway"), null, 2); }
+      catch (err) { el.textContent = err.message; }
+    });
+    document.getElementById("check-decode").addEventListener("click", async () => {
+      const el = document.getElementById("hvx-info");
+      try { el.textContent = JSON.stringify(await api("/hardware/decode"), null, 2); }
+      catch (err) { el.textContent = err.message; }
+    });
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         stopLive();
-        stopLanes();
         stopHealth();
       }
     });

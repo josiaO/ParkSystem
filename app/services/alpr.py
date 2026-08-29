@@ -167,16 +167,16 @@ def status() -> dict:
         "loaded": _engine is not None,
         "available": installed,
         "models": models,
-        "country": settings.alpr_country,
+        "country": settings.alpr_country or None,
         "csf": settings.alpr_csf,
         "native_engine": "qy_Net_RegImageRecvEx",
         "local_engine": "fastalpr" if installed else "none",
         "camera": contract,
         "detail": (
-            "Cameras read plates themselves (QY Net_RegImageRecvEx). "
-            "FastALPR is a second, local OCR on a JPEG (live frame or simulation upload)."
+            "FastALPR is the vendor-independent local OCR. HVX cameras may also send a native plate; "
+            "when they do not (or you change camera brand), FastALPR reads the JPEG automatically on a coil/presence trigger."
             if installed
-            else "Cameras read plates themselves after SDK Connect. FastALPR (local JPEG OCR) is not installed in this copy."
+            else "Local FastALPR is not installed in this copy. Native camera plates still work if the adapter provides them."
         ),
     }
 

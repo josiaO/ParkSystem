@@ -152,6 +152,36 @@ class WindowsReadyTests(unittest.TestCase):
             self.assertNotEqual(row.get("camera_status"), CameraStatus.SDK_CONNECTED.value)
         self.assertIn("not SDK_CONNECTED", body["note"])
 
+    def test_discover_lan_ip_cameras_are_not_sdk_connected(self):
+        headers = self._login_admin()
+        probed = {row["ip_address"]: True for row in KNOWN_SITE_CAMERAS}
+        generic = [{
+            "ip": "10.0.0.77",
+            "sdk_open": False,
+            "http_open": True,
+            "rtsp_open": True,
+            "vendor": "dahua",
+            "kind": "dahua",
+            "adapter_id": "dahua",
+        }]
+        with patch("app.api_main.HVXHostClient") as hvx:
+            hvx.return_value.discover = AsyncMock(side_effect=HVXHostUnavailable("host down"))
+            with patch("app.api_main.probe_ips", new=AsyncMock(return_value=probed)):
+                with patch("app.api_main.scan_lan_devices", new=AsyncMock(return_value=generic)):
+                    res = self.client.get("/cameras/discover?scan_lan=true", headers=headers)
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertTrue(body["scan_lan"])
+        by_ip = {row["ip_address"]: row for row in body["cameras"]}
+        self.assertEqual(by_ip["192.168.1.144"]["adapter_id"], "hvx")
+        self.assertEqual(by_ip["192.168.1.144"]["plate_engine"], "native")
+        dahua = by_ip["10.0.0.77"]
+        self.assertEqual(dahua["adapter_id"], "dahua")
+        self.assertEqual(dahua["plate_engine"], "fastalpr")
+        self.assertTrue(dahua["reachable"])
+        self.assertNotEqual(dahua.get("camera_status"), CameraStatus.SDK_CONNECTED.value)
+        self.assertIn("not SDK_CONNECTED", body["note"])
+
     def test_connect_all_uses_hvx_login(self):
         headers = self._login_admin()
         self.assertEqual(self.client.post("/cameras/seed-site", headers=headers, json={}).status_code, 200)

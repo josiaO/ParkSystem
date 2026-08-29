@@ -21,6 +21,8 @@ No Python install. No copying the source tree. No internet.
 Sign in:  admin / SmartPark1!
 Cameras:  Add site cameras  then  Connect all
 Camera login: admin / admin   SDK port 30000
+Onboard wizard: Live Gates → IPs → Onboard wizard (HVX first, then ONVIF/RTSP)
+MediaMTX is optional and off by default. Native HVX plates and boom control stay on.
 Vehicles: Register plate so that plate opens the gate
 Snapshot: Cameras -> Capture snapshot
 Receipts: Settings → pick the USB A4 printer. A detected car prints, then the

@@ -13,14 +13,16 @@ class EventDeduper:
     window_seconds: float = 2.0
     _seen: dict[str, float] = field(default_factory=dict)
 
-    def key(self, *, camera_id: int, plate: str = "", image_id: int = 0) -> str:
+    def key(self, *, camera_id: int, plate: str = "", image_id: int = 0, fingerprint: str = "") -> str:
         plate = normalize_plate(plate)
+        if fingerprint:
+            return f"{camera_id}:fp:{fingerprint}"
         if image_id:
             return f"{camera_id}:{image_id}"
         return f"{camera_id}:{plate}"
 
-    def seen(self, *, camera_id: int, plate: str = "", image_id: int = 0) -> bool:
-        token = self.key(camera_id=camera_id, plate=plate, image_id=image_id)
+    def seen(self, *, camera_id: int, plate: str = "", image_id: int = 0, fingerprint: str = "") -> bool:
+        token = self.key(camera_id=camera_id, plate=plate, image_id=image_id, fingerprint=fingerprint)
         now = time.monotonic()
         expires = self._seen.get(token)
         self._prune(now)

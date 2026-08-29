@@ -1,4 +1,4 @@
-"""Live camera video. Persistent SDK JPEG or RTSP ffmpeg stream — not still snapshots."""
+"""Live camera video. UI consumes the media gateway; FastALPR does not."""
 
 from __future__ import annotations
 
@@ -6,15 +6,51 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
-from app.services.frame_grab import ffmpeg_bin, grab_camera_frame
+from app.services.frame_grab import grab_camera_frame
 from app.services.http_snapshot import grab_http_snapshot
 from app.services.hvx_client import HVXHostClient
-from app.services.rtsp_probe import redact_url, vendor_candidates
+from app.services.media_gateway import CameraLiveSpec, gateway, take_latest_jpeg
+from app.services.rtsp_probe import redact_url
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 MJPEG_BOUNDARY = "smartparkframe"
 MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots"}
+
+# Re-export for callers/tests that import from preview.
+__all__ = [
+    "CameraLiveSpec",
+    "JPEG_EOI",
+    "JPEG_SOI",
+    "MEDIA_KINDS",
+    "MJPEG_BOUNDARY",
+    "PreviewState",
+    "acquire_detect",
+    "acquire_live",
+    "ffmpeg_jpeg_stream",
+    "get_state",
+    "live_metrics",
+    "media_path",
+    "mjpeg_from_cache",
+    "mjpeg_parts",
+    "pumping_spec",
+    "release_detect",
+    "release_live",
+    "remember_alpr",
+    "remember_frame",
+    "remember_last_car",
+    "resolve_playable",
+    "sdk_jpeg",
+    "snapshot_for_camera",
+    "start_idle_watch",
+    "start_live_pump",
+    "stop_idle_watch",
+    "stop_live_pump",
+    "stop_live_pumps",
+    "take_latest_jpeg",
+    "touch_live",
+    "viewers_for",
+]
 
 
 @dataclass
@@ -24,6 +60,7 @@ class PreviewState:
     url_redacted: str = ""
     captured_at: float = 0.0
     alpr: dict = field(default_factory=dict)
+    last_car: dict = field(default_factory=dict)
     seq: int = 0
     source: str = ""
     disk_at: float = 0.0
@@ -31,10 +68,12 @@ class PreviewState:
     _fps_at: float = 0.0
     _fps_n: int = 0
     fingerprint: int = 0
-    waiter: asyncio.Event | None = field(default=None, repr=False)
+    waiters: set[asyncio.Event] = field(default_factory=set, repr=False)
 
 
 _state: dict[int, PreviewState] = {}
+_viewers: dict[int, int] = {}
+_last_view: dict[int, float] = {}
 
 
 def get_state(camera_id: int) -> PreviewState:
@@ -46,14 +85,8 @@ def get_state(camera_id: int) -> PreviewState:
 
 
 def _notify(row: PreviewState) -> None:
-    waiter = row.waiter
-    if waiter is None:
-        try:
-            waiter = asyncio.Event()
-            row.waiter = waiter
-        except RuntimeError:
-            return
-    waiter.set()
+    for waiter in list(row.waiters):
+        waiter.set()
 
 
 def remember_frame(
@@ -104,6 +137,11 @@ def remember_frame(
 
 def remember_alpr(camera_id: int, result: dict) -> None:
     get_state(camera_id).alpr = result
+
+
+def remember_last_car(camera_id: int, payload: dict | None) -> None:
+    if payload:
+        get_state(camera_id).last_car = payload
 
 
 def media_path(kind: str, name: str):
@@ -173,6 +211,17 @@ async def snapshot_for_camera(
     explicit: str = "",
     sdk_handle: int | None = None,
 ) -> dict:
+    cached = await gateway.snapshot(camera_id)
+    if cached[:2] == JPEG_SOI:
+        row = get_state(camera_id)
+        return {
+            "ok": True,
+            "jpeg": cached,
+            "url": row.url,
+            "url_redacted": row.url_redacted,
+            "cached": True,
+            "source": row.source or "gateway",
+        }
     row = get_state(camera_id)
     from app.config import settings
     ttl = float(getattr(settings, "snapshot_cache_seconds", 0.4) or 0.4)
@@ -187,88 +236,50 @@ async def snapshot_for_camera(
         }
     grabbed = await resolve_playable(ip, username, password, explicit, row.url, sdk_handle=sdk_handle)
     if grabbed.get("ok"):
-        remember_frame(
+        gateway.publish(
             camera_id,
             grabbed["jpeg"],
-            url=grabbed.get("url") or "",
-            url_redacted=grabbed.get("url_redacted") or "",
             source=str(grabbed.get("source") or ""),
-            persist=False,
+            url=str(grabbed.get("url") or ""),
+            detect=False,
         )
     return grabbed
 
 
 async def mjpeg_from_cache(camera_id: int):
+    """Send the newest JPEG only. Never replay a backlog of frames."""
     last_seq = -1
-    while True:
-        row = get_state(camera_id)
-        jpeg = row.jpeg
-        if jpeg[:2] == JPEG_SOI and row.seq != last_seq:
-            last_seq = row.seq
-            header = (
-                f"--{MJPEG_BOUNDARY}\r\n"
-                f"Content-Type: image/jpeg\r\n"
-                f"Content-Length: {len(jpeg)}\r\n\r\n"
-            ).encode("ascii")
-            yield header + jpeg + b"\r\n"
-            if row.waiter is not None:
-                row.waiter.clear()
-            continue
-        waiter = row.waiter
-        if waiter is None:
-            waiter = asyncio.Event()
-            row.waiter = waiter
-        try:
-            await asyncio.wait_for(waiter.wait(), timeout=0.4)
-        except asyncio.TimeoutError:
-            pass
+    event = asyncio.Event()
+    row = get_state(camera_id)
+    row.waiters.add(event)
+    try:
+        while True:
+            row = get_state(camera_id)
+            jpeg = row.jpeg
+            if jpeg[:2] == JPEG_SOI and row.seq != last_seq:
+                last_seq = row.seq
+                gateway.note_displayed(camera_id)
+                header = (
+                    f"--{MJPEG_BOUNDARY}\r\n"
+                    f"Content-Type: image/jpeg\r\n"
+                    f"Content-Length: {len(jpeg)}\r\n\r\n"
+                ).encode("ascii")
+                yield header + jpeg + b"\r\n"
+                event.clear()
+                continue
+            try:
+                await asyncio.wait_for(event.wait(), timeout=0.4)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                event.clear()
+    finally:
+        row.waiters.discard(event)
 
 
 async def ffmpeg_jpeg_stream(url: str):
-    """Keep one ffmpeg process open so live view is a real stream, not one still per spawn."""
-    binary = ffmpeg_bin()
-    if not binary:
-        raise RuntimeError("ffmpeg is not installed")
-    cmd = [
-        binary,
-        "-hide_banner", "-loglevel", "error",
-        "-rtsp_transport", "tcp",
-        "-fflags", "nobuffer",
-        "-flags", "low_delay",
-        "-i", url,
-        "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "8",
-        "-vf", "scale=960:-2",
-        "pipe:1",
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    buf = b""
-    try:
-        while True:
-            chunk = await asyncio.wait_for(proc.stdout.read(32768), timeout=8)
-            if not chunk:
-                err = b""
-                if proc.stderr:
-                    err = await proc.stderr.read()
-                raise RuntimeError((err.decode(errors="replace") or "ffmpeg live stream ended")[-300:])
-            buf += chunk
-            if len(buf) > 6_000_000:
-                buf = buf[-400_000:]
-            while True:
-                start = buf.find(JPEG_SOI)
-                end = buf.find(JPEG_EOI, start + 2) if start >= 0 else -1
-                if start < 0 or end < 0:
-                    if start > 0:
-                        buf = buf[start:]
-                    break
-                jpeg = buf[start:end + 2]
-                buf = buf[end + 2:]
-                yield jpeg
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+    async for jpeg in gateway.ffmpeg_jpeg_stream(url):
+        yield jpeg
 
 
 async def mjpeg_parts(url: str):
@@ -281,92 +292,12 @@ async def mjpeg_parts(url: str):
         yield header + jpeg + b"\r\n"
 
 
-@dataclass(frozen=True)
-class CameraLiveSpec:
-    id: int
-    ip: str
-    username: str
-    password: str
-    rtsp_url: str
-    sdk_handle: int | None
-
-
-_pumps: dict[int, asyncio.Task] = {}
-_pump_specs: dict[int, CameraLiveSpec] = {}
-_viewers: dict[int, int] = {}
-_last_view: dict[int, float] = {}
-_idle_task: asyncio.Task | None = None
-
-
-async def _sdk_frames(spec: CameraLiveSpec) -> bool:
-    """Keep polling Net_GetJpgBuffer while SDK-connected. Empty gaps are normal between frames."""
-    if spec.sdk_handle is None:
-        return False
-    got = False
-    host = HVXHostClient()
-    from app.config import settings
-    interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
-    while spec.sdk_handle is not None:
-        started = time.monotonic()
-        try:
-            jpeg = await host.live_jpeg(int(spec.sdk_handle))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            jpeg = b""
-        if jpeg[:2] == JPEG_SOI:
-            remember_frame(
-                spec.id, jpeg,
-                url=f"sdk://handle/{int(spec.sdk_handle)}",
-                url_redacted=f"sdk://handle/{int(spec.sdk_handle)}",
-                source="sdk",
-            )
-            got = True
-        delay = interval - (time.monotonic() - started)
-        await asyncio.sleep(delay if delay > 0.005 else 0.005)
-    return got
-
-
-async def _rtsp_frames(spec: CameraLiveSpec) -> bool:
-    urls = vendor_candidates(spec.ip, spec.username, spec.password, spec.rtsp_url)
-    cached = get_state(spec.id).url
-    if cached.startswith("rtsp://"):
-        urls = [cached] + [url for url in urls if url != cached]
-    for url in urls:
-        stream = ffmpeg_jpeg_stream(url)
-        try:
-            first = await asyncio.wait_for(stream.__anext__(), timeout=4.0)
-            redacted = redact_url(url)
-            remember_frame(spec.id, first, url=url, url_redacted=redacted, source="rtsp")
-            async for jpeg in stream:
-                remember_frame(spec.id, jpeg, url=url, url_redacted=redacted, source="rtsp")
-            return True
-        except asyncio.CancelledError:
-            await stream.aclose()
-            raise
-        except Exception:
-            try:
-                await stream.aclose()
-            except Exception:
-                pass
-    return False
-
-
-async def _http_stills(spec: CameraLiveSpec) -> bool:
-    http = await grab_http_snapshot(spec.ip, spec.username, spec.password)
-    if http.get("ok"):
-        remember_frame(
-            spec.id, http["jpeg"],
-            url=http.get("url") or "",
-            url_redacted=http.get("url_redacted") or "",
-            source="http",
-        )
-        return True
-    return False
-
-
 def viewers_for(camera_id: int) -> int:
     return int(_viewers.get(camera_id) or 0)
+
+
+def pumping_spec(camera_id: int) -> CameraLiveSpec | None:
+    return gateway.pumping_spec(camera_id)
 
 
 def touch_live(spec: CameraLiveSpec) -> None:
@@ -383,112 +314,90 @@ def acquire_live(spec: CameraLiveSpec) -> None:
 def release_live(camera_id: int) -> None:
     _viewers[camera_id] = max(0, viewers_for(camera_id) - 1)
     _last_view[camera_id] = time.monotonic()
+    row = gateway.session(camera_id)
+    if row is not None:
+        row.viewers = viewers_for(camera_id)
+        row.last_view_at = time.monotonic()
+
+
+def acquire_detect(spec: CameraLiveSpec) -> None:
+    gateway.acquire_detect(spec)
+
+
+def release_detect(camera_id: int) -> None:
+    gateway.release_detect(camera_id)
 
 
 def live_metrics() -> list[dict]:
-    rows = []
-    ids = set(_pumps) | set(_state) | set(_viewers)
+    gateway_rows = {int(row["camera_id"]): row for row in gateway.live_metrics()}
+    ids = set(gateway_rows) | set(_state) | set(_viewers)
     now = time.monotonic()
+    rows = []
     for camera_id in sorted(ids):
-        row = get_state(camera_id)
-        pumping = camera_id in _pumps and not _pumps[camera_id].done()
+        preview = get_state(camera_id)
+        media = dict(gateway_rows.get(camera_id) or {})
+        pumping = bool(media.get("pumping"))
+        state = media.get("connection_state") or (
+            "STREAMING" if pumping else ("cached" if preview.jpeg[:2] == JPEG_SOI else "idle")
+        )
+        age = media.get("age_seconds")
+        if age is None and preview.captured_at:
+            age = round(now - preview.captured_at, 2)
         rows.append({
             "camera_id": camera_id,
-            "connection_state": "streaming" if pumping else ("cached" if row.jpeg[:2] == JPEG_SOI else "idle"),
+            "connection_state": state,
             "viewers": viewers_for(camera_id),
             "pumping": pumping,
-            "source": row.source,
-            "fps": row.fps,
-            "seq": row.seq,
-            "age_seconds": round(now - row.captured_at, 2) if row.captured_at else None,
-            "queue_depth": 1 if row.jpeg[:2] == JPEG_SOI else 0,
-            "rtsp": row.url.startswith("rtsp://"),
-            "sdk": row.source == "sdk",
+            "source": media.get("source") or preview.source,
+            "fps": media.get("fps") or preview.fps,
+            "seq": media.get("seq") or preview.seq,
+            "age_seconds": age,
+            "queue_depth": media.get("queue_depth") if "queue_depth" in media else (1 if preview.jpeg[:2] == JPEG_SOI else 0),
+            "rtsp": bool(media.get("rtsp") if "rtsp" in media else preview.url.startswith("rtsp://")),
+            "sdk": bool(media.get("sdk") if "sdk" in media else preview.source == "sdk"),
+            "live_frame_age_ms": media.get("live_frame_age_ms"),
+            "ai_frame_age_ms": media.get("ai_frame_age_ms"),
+            "ai_processed_fps": media.get("ai_processed_fps") or 0,
+            "ai_samples_dropped": media.get("ai_samples_dropped") or 0,
+            "codec": media.get("codec") or "",
+            "transport": media.get("transport") or "",
+            "ffmpeg_profile": media.get("ffmpeg_profile") or "",
+            "gop": media.get("gop") or 0,
+            "reconnects": media.get("reconnects") or 0,
+            "frames_received": media.get("frames_received") or preview.seq,
+            "frames_dropped_live": media.get("frames_dropped_live") or 0,
+            "frames_sampled_ai": media.get("frames_sampled_ai") or 0,
+            "frames_dropped_ai": media.get("frames_dropped_ai") or 0,
+            "child_pids": media.get("child_pids") or [],
+            "warnings": media.get("warnings") or [],
+            "stream_profiles": media.get("stream_profiles") or {},
         })
     return rows
 
 
-async def _idle_watch() -> None:
-    from app.config import settings
-    idle = float(getattr(settings, "live_idle_seconds", 8.0) or 8.0)
-    while True:
-        await asyncio.sleep(1.0)
-        now = time.monotonic()
-        for camera_id in list(_pumps):
-            if viewers_for(camera_id) > 0:
-                continue
-            last = _last_view.get(camera_id) or 0.0
-            if now - last >= idle:
-                stop_live_pump(camera_id)
-
-
 def start_idle_watch() -> None:
-    global _idle_task
-    if _idle_task is not None and not _idle_task.done():
-        return
-    try:
-        _idle_task = asyncio.get_running_loop().create_task(_idle_watch(), name="live-idle")
-    except RuntimeError:
-        _idle_task = None
+    gateway.start_watchers()
 
 
 def stop_idle_watch() -> None:
-    global _idle_task
-    task = _idle_task
-    _idle_task = None
-    if task is not None:
-        task.cancel()
+    gateway.stop_watchers()
 
 
 def start_live_pump(spec: CameraLiveSpec) -> None:
-    """Decode only while someone is watching. MJPEG readers share the latest JPEG."""
+    """One gateway producer. MJPEG readers and FastALPR share the latest JPEG."""
     start_idle_watch()
-    existing = _pumps.get(spec.id)
-    previous = _pump_specs.get(spec.id)
-    if existing is not None and not existing.done() and previous == spec:
-        return
-    if existing is not None and not existing.done():
-        existing.cancel()
-
-    async def loop():
-        try:
-            while True:
-                if spec.sdk_handle is not None:
-                    await _sdk_frames(spec)
-                    await asyncio.sleep(0.05)
-                    continue
-                streamed = await _rtsp_frames(spec)
-                if not streamed:
-                    await _http_stills(spec)
-                    await asyncio.sleep(0.35)
-                    continue
-                await asyncio.sleep(0.05)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            if _pumps.get(spec.id) is asyncio.current_task():
-                _pumps.pop(spec.id, None)
-                _pump_specs.pop(spec.id, None)
-
-    try:
-        _pumps[spec.id] = asyncio.get_running_loop().create_task(loop(), name=f"live-{spec.id}")
-        _pump_specs[spec.id] = spec
-    except RuntimeError:
-        pass
+    row = gateway._session_for(spec)
+    row.viewers = max(row.viewers, viewers_for(spec.id))
+    row.last_view_at = time.monotonic()
+    if spec.need_detect:
+        row.detect_consumers = max(row.detect_consumers, 1)
+    gateway.ensure_producer(spec)
 
 
 def stop_live_pump(camera_id: int) -> None:
-    task = _pumps.pop(camera_id, None)
-    _pump_specs.pop(camera_id, None)
-    if task is not None:
-        task.cancel()
+    gateway.stop_producer(camera_id, force=True)
 
 
 def stop_live_pumps() -> None:
-    stop_idle_watch()
-    tasks = list(_pumps.values())
-    _pumps.clear()
-    _pump_specs.clear()
+    gateway.stop_all()
     _viewers.clear()
-    for task in tasks:
-        task.cancel()

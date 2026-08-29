@@ -98,6 +98,8 @@ class VendorPackageTests(unittest.TestCase):
         self.assertTrue(any("/subvideo" in x for x in xs))
         self.assertTrue(any("password=secret" in x for x in xs))
         self.assertFalse(any("password=admin" in x for x in xs))
+        self.assertTrue(any("/Streaming/Channels/101" in x for x in xs))
+        self.assertTrue(any("cam/realmonitor" in x for x in xs))
 
 
 if __name__ == "__main__":

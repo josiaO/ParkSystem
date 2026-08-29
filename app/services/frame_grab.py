@@ -69,8 +69,11 @@ async def capture_frame(url: str, *, timeout: float | None = None) -> dict:
 
 async def grab_camera_frame(ip: str, username: str, password: str, explicit_rtsp: str = "") -> dict:
     attempts = []
-    for url in vendor_candidates(ip, username, password, explicit_rtsp):
-        result = await capture_frame(url)
+    urls = vendor_candidates(ip, username, password, explicit_rtsp)
+    hunt = min(2.0, float(settings.rtsp_probe_timeout_seconds or 5.0))
+    for index, url in enumerate(urls):
+        timeout = settings.rtsp_probe_timeout_seconds if index == 0 else hunt
+        result = await capture_frame(url, timeout=timeout)
         attempts.append({k: v for k, v in result.items() if k != "jpeg"})
         if result.get("ok"):
             result["attempts"] = attempts

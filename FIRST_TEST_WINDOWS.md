@@ -84,17 +84,19 @@ Only **camera** IPs use SDK port **30000** (`admin` / `admin`). Do not SDK-conne
 
 ## 4. Connect
 
-Click **Connect all** (or select one camera and **SDK Connect**). Cameras are tried one at a time. If a camera has no TCP on port 30000, it is **skipped** after about one second so the others still connect. A slow camera that is reachable is given about 20 seconds. The app stays open — it no longer times out and closes because one camera hung.
+Click **Connect all** (or select one camera and **Connect**). Cameras are tried one at a time. If an HVX camera has no TCP on port 30000, it is **skipped** after about one second so the others still connect. A slow camera that is reachable is given about 20 seconds. The app stays open — it no longer times out and closes because one camera hung.
 
-Wait until status is:
+Wait until HVX status is:
 
 ```text
 SDK_CONNECTED
 ```
 
-Skipped cameras show `SDK_FAILED` with “No TCP … skipped SDK login”. Connect those later when they are powered and on the LAN.
+Skipped HVX cameras show `SDK_FAILED` with “No TCP … skipped SDK login”. Connect those later when they are powered and on the LAN.
 
-If it fails, the Error column shows the SDK return code. Also record:
+For a **Dahua, Hikvision, or other IP camera without onboard ALPR**, click **Discover** (it scans the LAN web/RTSP ports as well as HVX 30000). Enter the camera username and password, then **Add IP cameras & connect**. Status becomes `VIDEO_CONNECTED` (not SDK login). Live video streams; FastALPR reads plates. The HVX NetSDK engine is unchanged — use **Connect all** for this site’s QY cameras. ffmpeg is needed only if a camera has no HTTP JPEG.
+
+If HVX login fails, the Error column shows the SDK return code. Also record:
 
 - HVX host `/info`
 - `connect_rc` / `connect_rc_name`
@@ -103,12 +105,13 @@ If it fails, the Error column shows the SDK return code. Also record:
 
 ## 5. Live view and plates
 
-Select a connected camera.
+Open **Live Gates**. The Live tab shows two cameras of the selected lane. IPs, Discover, and Connect all are on the inner **IPs** tab.
 
-- Live view uses SDK JPEG (and the camera HTTP still). RTSP / ffprobe is not required.
-- **Native plates** come from the QY cameras themselves after SDK login (`T 285 DQP` style). The camera already does ANPR and sends `szLprResult` on `Net_RegImageRecvEx`. Live video without plates usually means another SDK client still owns that callback — close it and Connect all again.
-- **FastALPR** is a second, local OCR on a live JPEG or a simulation upload. The USB kit now bundles FastALPR wheels and ONNX models so it works offline.
-- **Capture snapshot** saves one live JPEG from the selected camera.
+- Live view uses SDK JPEG (and the camera HTTP still). RTSP / ffprobe is not required. If the picture skips, close other SDK clients and keep only this live view open. Live Gates → IPs → Stream profiles shows live frame age and AI frame age; FastALPR must not freeze the picture.
+- **Native plates** come from the camera adapter after SDK login when the vendor provides them. Live video without plates often means another SDK client still owns the callback — close it and Connect all again. Many sites only fire a native read when the car is on the **ground loop**.
+- **FastALPR** is the local OCR. You do not have to open live view or click it for each car: after Connect all, every lane keeps detecting (native callback, ground loop, or periodic FastALPR). Opening a camera is only for watching. Snapshot, cropped plate, read time, and confidence sit under each live pane. Click FastALPR on the IPs tab only to force one extra read; that read is now saved.
+- **Ground loop**: you do not need the GPIO pin number. SmartPark scans camera inputs 1–7 and learns the pin that changes when a car hits the loop. If the camera already snaps on the coil, that is enough even without GPIO. `POST /cameras/{id}/presence` simulates a car on the loop.
+- **Capture snapshot** saves one live JPEG from the selected camera on the IPs tab. Parking and FastALPR do not require `OcxConfig.ocx`.
 
 ## 6. Registered plates
 

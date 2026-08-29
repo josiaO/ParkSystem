@@ -104,11 +104,21 @@ class Camera(Base):
     adapter_id: Mapped[str] = mapped_column(String(40), default="hvx")
     connection_mode: Mapped[str] = mapped_column(String(20), default="DIRECT")
     rtsp_url: Mapped[str] = mapped_column(Text, default="")
+    stream_profiles: Mapped[dict] = mapped_column(JSON, default=dict)
+    ffmpeg_profile: Mapped[str] = mapped_column(String(40), default="LOW_LATENCY_LAN")
+    rtsp_transport: Mapped[str] = mapped_column(String(16), default="TCP")
+    media_capabilities: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(30), default=CameraStatus.UNKNOWN.value)
     sdk_handle: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    recognition_mode: Mapped[str] = mapped_column(String(40), default="")
+    vendor: Mapped[str] = mapped_column(String(80), default="")
+    model_name: Mapped[str] = mapped_column(String(80), default="")
+    serial: Mapped[str] = mapped_column(String(80), default="")
+    timezone: Mapped[str] = mapped_column(String(80), default="")
+    camera_type: Mapped[str] = mapped_column(String(40), default="")
     gate: Mapped[Gate | None] = relationship(back_populates="cameras")
 
 
@@ -182,6 +192,11 @@ class VehicleCapture(Base):
     snapshot_path: Mapped[str] = mapped_column(String(260), default="")
     crop_path: Mapped[str] = mapped_column(String(260), default="")
     bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    plate_country: Mapped[str] = mapped_column(String(8), default="")
+    plate_region: Mapped[str] = mapped_column(String(40), default="")
+    plate_type: Mapped[str] = mapped_column(String(40), default="")
+    source: Mapped[str] = mapped_column(String(40), default="")
+    event_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -60,6 +60,13 @@ def _parse_hms(value: str) -> time:
 def is_daytime(when: datetime, rules: dict[str, Any] | None = None) -> bool:
     rules = rules or CAR1_RULES
     dt = _aware(when)
+    tz_name = str(rules.get("timezone") or "")
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            pass
     start = _parse_hms(str(rules["day_start"]))
     end = _parse_hms(str(rules["day_end"]))
     clock = dt.timetz().replace(tzinfo=None)
