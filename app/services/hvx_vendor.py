@@ -38,7 +38,8 @@ def resolve_vendor_dir() -> Path:
         return Path(env)
     ocx = repo_root() / "OcxConfig"
     copied = repo_root() / "tools" / "hvx_sdk_host" / "vendor"
-    for candidate in (ocx, copied):
+    configs_ocx = repo_root() / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
+    for candidate in (ocx, copied, configs_ocx):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else copied
@@ -94,5 +95,5 @@ def vendor_inventory() -> dict:
             "Net_StartVideo(handle, stream, HWND) then Net_GetJpgBuffer for live frames",
         ],
         "site": site_layout(),
-        "note": "NetSDK.dll is PE32/x86 stdcall. Load it only from a 32-bit Windows HVX host. Presence of this package is not an SDK connection.",
+        "note": "NetSDK.dll is PE32/x86 stdcall. Load it only from a 32-bit Windows HVX host. Parking, FastALPR, and a future camera vendor do not require OcxConfig.ocx — this folder is the current HVX DLL kit only.",
     }

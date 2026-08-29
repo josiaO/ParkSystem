@@ -116,6 +116,38 @@ def ensure_schema() -> None:
             conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN adapter_id VARCHAR(40) DEFAULT 'hvx'")
         if "connection_mode" not in cols:
             conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN connection_mode VARCHAR(20) DEFAULT 'DIRECT'")
+        if "stream_profiles" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN stream_profiles JSON")
+        if "ffmpeg_profile" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN ffmpeg_profile VARCHAR(40) DEFAULT 'LOW_LATENCY_LAN'")
+        if "rtsp_transport" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN rtsp_transport VARCHAR(16) DEFAULT 'TCP'")
+        if "media_capabilities" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN media_capabilities JSON")
+        if "recognition_mode" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN recognition_mode VARCHAR(40) DEFAULT ''")
+        if "vendor" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN vendor VARCHAR(80) DEFAULT ''")
+        if "model_name" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN model_name VARCHAR(80) DEFAULT ''")
+        if "serial" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN serial VARCHAR(80) DEFAULT ''")
+        if "timezone" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN timezone VARCHAR(80) DEFAULT ''")
+        if "camera_type" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN camera_type VARCHAR(40) DEFAULT ''")
+        capture_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(vehicle_captures)")}
+        if capture_cols:
+            if "plate_country" not in capture_cols:
+                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_country VARCHAR(8) DEFAULT ''")
+            if "plate_region" not in capture_cols:
+                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_region VARCHAR(40) DEFAULT ''")
+            if "plate_type" not in capture_cols:
+                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_type VARCHAR(40) DEFAULT ''")
+            if "source" not in capture_cols:
+                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN source VARCHAR(40) DEFAULT ''")
+            if "event_id" not in capture_cols:
+                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN event_id VARCHAR(64) DEFAULT ''")
         session_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(parking_sessions)")}
         if session_cols:
             if "public_token" not in session_cols:

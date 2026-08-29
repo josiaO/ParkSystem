@@ -22,6 +22,7 @@ flowchart LR
   desktop[Desktop / web]
   api[FastAPI Site Core]
   domain[domain + application]
+  media[MediaGateway]
   hvxAdapt[HVX adapters]
   host[32-bit HVX host]
   sqlite[(SQLite)]
@@ -31,6 +32,8 @@ flowchart LR
   public --> api
   api --> domain
   api --> sqlite
+  api --> media
+  media --> hvxAdapt
   domain --> hvxAdapt
   hvxAdapt --> host
   hvxAdapt --> gpio[GPIO + Board TCP + LED]
@@ -43,9 +46,10 @@ See [04-DOMAIN-MODEL.md](04-DOMAIN-MODEL.md). Hardware identity is projected fro
 ## Request / event flow
 
 1. Connect: `HVXCameraAdapter.connect` → `HVXHostClient` → port 30000 NetSDK sequence
-2. Plate callback ingested by the API camera-event loop
-3. `handle_plate_event` creates/updates a session, records `AccessDecision`, pulses via the gate adapter
-4. Payment writes `PaymentTransaction` then updates session paid state in the same service call
+2. Media: `LocalMediaGateway` owns one upstream producer per camera (HVX JPEG or FFmpeg RTSP). Live view and FastALPR are consumers of latest-frame buffers; FastALPR is not in the decode loop.
+3. Plate callback **or coil GPIO rising edge** ingested by the API camera-event loop (FastALPR fills in when native characters are missing). This loop runs for every connected lane even if live view is closed.
+4. `handle_plate_event` creates/updates a session, records `AccessDecision`, pulses via the gate adapter
+5. Payment writes `PaymentTransaction` then updates session paid state in the same service call
 
 ## Failure behavior
 

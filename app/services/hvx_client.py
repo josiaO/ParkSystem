@@ -21,7 +21,7 @@ def _shared_live_client(base_url: str) -> httpx.AsyncClient:
     if client is None or client.is_closed:
         client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(0.6, connect=0.4),
+            timeout=httpx.Timeout(1.2, connect=0.5),
             limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
         )
         _live_clients[key] = client
@@ -167,6 +167,44 @@ class HVXHostClient:
         except Exception:
             return None
         return None
+
+    async def drain_reports(self, handle: int) -> list[dict]:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{self.base_url}/reports/{int(handle)}")
+                if r.status_code != 200:
+                    return []
+                payload = r.json()
+                rows = payload.get("reports") if isinstance(payload, dict) else None
+                return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        except Exception:
+            return []
+
+    async def read_gpio(self, handle: int, index: int = 1) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+                r = await client.get(f"{self.base_url}/gpio/{int(handle)}", params={"index": int(index)})
+                if r.status_code != 200:
+                    return {"ok": False, "handle": int(handle), "index": int(index)}
+                return r.json()
+        except Exception as exc:
+            return {"ok": False, "handle": int(handle), "index": int(index), "error": str(exc)}
+
+    async def scan_gpio(self, handle: int, indexes: list[int] | None = None) -> list[dict]:
+        pins = indexes or [1, 2, 3, 4, 5, 6, 7]
+        try:
+            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+                r = await client.get(
+                    f"{self.base_url}/gpio-scan/{int(handle)}",
+                    params={"indexes": ",".join(str(i) for i in pins)},
+                )
+                if r.status_code != 200:
+                    return []
+                payload = r.json()
+                rows = payload.get("pins") if isinstance(payload, dict) else None
+                return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        except Exception:
+            return []
 
     async def live_jpeg(self, handle: int) -> bytes:
         """Net_GetJpgBuffer live frame. Never the last car-event still."""

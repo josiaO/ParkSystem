@@ -30,8 +30,7 @@ def vendor_candidates(ip: str, username: str, password: str, explicit: str = "")
         out.append(explicit)
     u=quote(username, safe="")
     p=quote(password, safe="")
-    # Literal templates from OcxConfig/RtspRecvSdk.dll, using configured credentials
-    # instead of the sample admin/admin baked into that DLL.
+    # HVX/QY templates from OcxConfig/RtspRecvSdk.dll, then common Hikvision / Dahua / generic paths.
     out += [
         f"rtsp://{ip}/av0_0&user={u}&password={p}",
         f"rtsp://{ip}/av0_1&user={u}&password={p}",
@@ -39,6 +38,13 @@ def vendor_candidates(ip: str, username: str, password: str, explicit: str = "")
         f"rtsp://{ip}:554/subvideo",
         f"rtsp://{u}:{p}@{ip}:554/video",
         f"rtsp://{u}:{p}@{ip}:554/subvideo",
+        f"rtsp://{u}:{p}@{ip}:554/Streaming/Channels/101",
+        f"rtsp://{u}:{p}@{ip}:554/Streaming/Channels/102",
+        f"rtsp://{u}:{p}@{ip}:554/h264/ch1/main/av_stream",
+        f"rtsp://{u}:{p}@{ip}:554/cam/realmonitor?channel=1&subtype=0",
+        f"rtsp://{u}:{p}@{ip}:554/cam/realmonitor?channel=1&subtype=1",
+        f"rtsp://{u}:{p}@{ip}:554/stream1",
+        f"rtsp://{u}:{p}@{ip}:554/live",
     ]
     seen=[]
     for x in out:

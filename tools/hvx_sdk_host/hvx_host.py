@@ -22,7 +22,8 @@ def resolve_vendor_dir() -> Path:
     here = Path(__file__).resolve().parent
     ocx = here.parent.parent / "OcxConfig"
     local = here / "vendor"
-    for candidate in (ocx, local):
+    configs_ocx = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
+    for candidate in (ocx, local, configs_ocx):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else local
@@ -43,6 +44,7 @@ def reply(handler, status, payload):
     handler.send_response(status)
     handler.send_header("Content-Type","application/json")
     handler.send_header("Content-Length",str(len(body)))
+    handler.send_header("Connection", "keep-alive")
     handler.end_headers(); handler.wfile.write(body)
 
 
@@ -50,11 +52,13 @@ def reply_jpeg(handler, jpeg: bytes, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "image/jpeg")
     handler.send_header("Content-Length", str(len(jpeg)))
+    handler.send_header("Connection", "keep-alive")
     handler.end_headers()
     handler.wfile.write(jpeg)
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     server_version="SmartParkHVXHost/0.1"
     def log_message(self, fmt, *args):
         sys.stdout.write("[hvx-host] "+fmt%args+"\n")
@@ -97,6 +101,28 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 handle=int(path.rsplit("/",1)[-1])
                 return reply(self,200,{"events": sdk.drain_events(handle)})
+            except Exception as exc: return reply(self,500,{"error":str(exc)})
+        if path.startswith("/reports/"):
+            if not sdk: return reply(self,503,{"error":startup_error})
+            try:
+                handle=int(path.rsplit("/",1)[-1])
+                return reply(self,200,{"reports": sdk.drain_reports(handle)})
+            except Exception as exc: return reply(self,500,{"error":str(exc)})
+        if path.startswith("/gpio-scan/"):
+            if not sdk: return reply(self,503,{"error":startup_error})
+            try:
+                handle=int(path.rsplit("/",1)[-1])
+                raw=(query.get("indexes") or ["1,2,3,4,5,6,7"])[0]
+                indexes=[int(part) for part in str(raw).split(",") if part.strip().isdigit()]
+                return reply(self,200,{"pins": sdk.gpio_states(handle, indexes or [1,2,3,4,5,6,7])})
+            except Exception as exc: return reply(self,500,{"error":str(exc)})
+        if path.startswith("/gpio/"):
+            if not sdk: return reply(self,503,{"error":startup_error})
+            try:
+                parts=[p for p in path.split("/") if p]
+                handle=int(parts[1])
+                index=int(query.get("index",[parts[2] if len(parts)>2 else 1])[0])
+                return reply(self,200,sdk.read_gpio(handle, index))
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/event-jpeg/"):
             if not sdk: return reply(self,503,{"error":startup_error})

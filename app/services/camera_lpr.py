@@ -1,12 +1,15 @@
-"""QY/HVX camera ANPR contract used by SmartPark Edge.
+"""Camera ANPR contract used by SmartPark Edge.
 
-Site cameras are DVCAM_QY. Native plates arrive on Net_RegImageRecvEx after
-SDK login on port 30000. FastALPR is the local JPEG OCR for simulation and
-as a second read on a live frame. Never invent plates when both are missing.
+Parking and FastALPR do not depend on OcxConfig. HVX/QY is the current site
+adapter (port 30000, Net_RegImageRecvEx). Another vendor or an in-house ALPR
+camera delivers plates into the same event path. FastALPR is the local JPEG
+OCR used when the camera has no native engine or the native plate is empty.
+Never invent plates when both are missing.
 """
 
 from __future__ import annotations
 
+from app.config import settings
 from app.core.plate import normalize_plate
 
 DVCAM_ZS = 1
@@ -88,21 +91,24 @@ def choose_overlay_box(native: dict | None = None, local: dict | None = None) ->
 
 
 def native_from_sdk_capture(capture: dict | None) -> dict:
-    """Map HVX Net_RegImageRecvEx last capture to a plate hit."""
+    """Map a camera capture (HVX callback or vendor-neutral payload) to a plate hit."""
     capture = capture or {}
     raw = str(capture.get("plate") or "").strip()
     box = capture.get("plate_box") or capture.get("bbox")
+    source = str(capture.get("source") or "").strip() or "qy_Net_RegImageRecvEx"
     return {
         "plate": normalize_plate(raw),
         "plate_raw": raw,
         "confidence": native_confidence(capture.get("score") if "score" in capture else capture.get("confidence")),
         "bbox": bbox_from_lp_box(box) if not isinstance(box, dict) else box,
-        "source": "qy_Net_RegImageRecvEx",
+        "source": source,
         "image_id": capture.get("image_id"),
         "image_width": int(capture.get("image_width") or 0),
         "image_height": int(capture.get("image_height") or 0),
         "jpeg_bytes": capture.get("jpeg_bytes") or 0,
         "crop_bytes": capture.get("crop_bytes") or 0,
+        "have_vehicle": bool(capture.get("have_vehicle")),
+        "snap_type": capture.get("snap_type"),
     }
 
 
@@ -129,6 +135,7 @@ def camera_contract() -> dict:
         "picture_port": QY_PICTURE_PORT,
         "http_ui_port": QY_HTTP_PORT,
         "do_not_use_port": CAMAPI_DEFAULT_PORT,
+        "parking_requires_ocxconfig": False,
         "official_config": {
             "ui": "OcxConfig/OcxConfig.ocx",
             "client": "OcxConfig/OcxConfigClient.exe",
@@ -137,18 +144,29 @@ def camera_contract() -> dict:
             "connect": "Net_AddCamera then Net_ConnCamera(handle, 30000, 5)",
             "autologin": "Net_ConnCameraEx(handle, port, 3, user, pass)",
             "native_plates": "Net_RegImageRecvEx2",
+            "note": "HVX vendor kit only. Not required for FastALPR, parking sessions, or a future camera brand.",
         },
         "native_engine": {
             "api": "Net_RegImageRecvEx / Net_RegImageRecvEx2",
+            "optional": True,
+            "adapter_id": "hvx",
             "plate_field": "CAM_PlateInfo.szPlateText / T_ImageUserInfo.szLprResult",
             "confidence": "0-100 (ucScore / nConfidence)",
-            "trigger": "CAM_Capture / Net_ImageSnap",
+            "trigger": "ground loop / GPIO IN / CAM_Capture / Net_ImageSnap",
         },
         "local_engine": {
             "name": "fastalpr",
-            "country": ALPR_COUNTRY,
+            "vendor_independent": True,
+            "country": settings.alpr_country or None,
             "csf": ALPR_CSF,
             "confidence": "0-1",
+            "trigger": "coil rising edge, native JPEG with no plate, or operator FastALPR",
+        },
+        "coil": {
+            "gpio_api": "Net_ReadGPIOState",
+            "default_index": 1,
+            "active_value": 1,
+            "note": "You do not need the pin number. SmartPark scans GPIO IN 1–7 and learns the loop pin when it changes. If the camera already snaps on the coil, that JPEG is enough without GPIO.",
         },
         "relay": {
             "open": CAMCMD_OPEN_RELAY,
@@ -157,5 +175,9 @@ def camera_contract() -> dict:
             "pulse_default_ms": CAMCMD_PULSE_DEFAULT_MS,
             "index": 0,
         },
-        "note": "QY cameras use SDK port 30000. Camera HTTP UI is port 80. FastALPR reads plates from a JPEG when the camera callback is not used.",
+        "note": (
+            "Parking is adapter + plate-event based. HVX uses NetSDK port 30000; "
+            "OcxConfig is only the current vendor DLL kit. FastALPR reads a JPEG when "
+            "the camera has no native plate or you ship your own ALPR later."
+        ),
     }

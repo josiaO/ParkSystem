@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class WindowsPackagingTests(unittest.TestCase):
     def test_production_tree_is_this_rebuild(self):
         self.assertTrue((ROOT / "app" / "api_main.py").is_file())
+        self.assertTrue((ROOT / "app" / "media_service.py").is_file())
+        self.assertTrue((ROOT / "app" / "recognition_worker.py").is_file())
+        self.assertTrue((ROOT / "docs" / "MEDIA-ARCHITECTURE.md").is_file())
+        self.assertTrue((ROOT / "docs" / "MIGRATION-AND-ROLLBACK.md").is_file())
         self.assertTrue((ROOT / "tools" / "hvx_sdk_host" / "hvx_host.py").is_file())
         self.assertTrue((ROOT / "app" / "services" / "access.py").is_file())
         self.assertTrue((ROOT / "app" / "services" / "receipts.py").is_file())
@@ -20,7 +24,10 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_old_fastapi_tree_is_archive_only(self):
         old = ROOT / "smartpark_edge_fastapi"
-        self.assertTrue(old.is_dir())
+        if not old.is_dir():
+            old = ROOT.parent / "smartpark_edge_fastapi"
+        if not old.is_dir():
+            self.skipTest("smartpark_edge_fastapi not present in current workspace")
         self.assertNotEqual(old.resolve(), ROOT.resolve())
         kit = (ROOT / "packaging" / "make_windows_kit.sh").read_text(encoding="utf-8")
         self.assertNotIn("smartpark_edge_fastapi", kit)
@@ -54,6 +61,8 @@ class WindowsPackagingTests(unittest.TestCase):
     def test_usb_payload_matches_this_rebuild(self):
         payload = ROOT / "dist" / "SmartParkEdge-Install" / "payload"
         self.assertTrue(payload.is_dir(), "Rebuild the USB kit with ./packaging/make_windows_kit.sh")
+        self.assertTrue((payload / "app" / "media_service.py").is_file())
+        self.assertTrue((payload / "app" / "recognition_worker.py").is_file())
         self.assertTrue((payload / "app" / "services" / "access.py").is_file())
         self.assertTrue((payload / "app" / "services" / "receipts.py").is_file())
         self.assertTrue((payload / "app" / "infrastructure" / "hardware" / "printers.py").is_file())

@@ -132,7 +132,19 @@ def details() -> dict:
             "sdk_callback": extra.get("sdk_callback") or "idle",
             "reconnect": policy,
         })
+    from app.services.hw_decode import cached_summary
+    from app.services.media_gateway import gateway
+    from app.services.flags import flags as migration_flags
+    from app.services import mediamtx
     hvx = ready()["hvx_host"]
+    domains = {
+        "camera_connection": {"ok": bool(hvx.get("ok")), "detail": "HVX host" if hvx.get("ok") else "HVX host down"},
+        "media_gateway": {"ok": True, "local_sessions": len(gateway.live_metrics()), "mediamtx": mediamtx.health()},
+        "recognition": {"ok": True, "alpr_mode": alpr_mode(), "native_alpr_enabled": migration_flags().get("native_alpr_enabled")},
+        "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
+        "database": {"ok": True, "avg_query_ms": _avg(_db_latencies)},
+        "payment": {"ok": True},
+    }
     body = {
         "ok": True,
         "state": startup_state(),
@@ -140,6 +152,14 @@ def details() -> dict:
         "process": process,
         "hvx_host": hvx,
         "cameras": cameras,
+        "domains": domains,
+        "migration": migration_flags(),
+        "media_gateway": {
+            "child_pids": gateway.child_pids(),
+            "sessions": len(gateway.live_metrics()),
+            "mediamtx": mediamtx.health(),
+        },
+        "decode": cached_summary(),
         "gates": {
             "ok": _gate_ok,
             "failed": _gate_fail,

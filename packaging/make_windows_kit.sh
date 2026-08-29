@@ -27,7 +27,8 @@ cp "$ROOT/tools/hvx_sdk_host/run_hvx_host.bat" "$OUT/payload/tools/hvx_sdk_host/
 cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
 shopt -s nullglob
-cp "$ROOT/OcxConfig/"*.dll "$OUT/payload/vendor/"
+cp "$ROOT/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
+cp "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
 shopt -u nullglob
 if [[ ! -f "$OUT/payload/vendor/NetSDK.dll" ]]; then
   echo "WARNING: OcxConfig/NetSDK.dll was not copied. SDK login will fail until it is in payload/vendor."

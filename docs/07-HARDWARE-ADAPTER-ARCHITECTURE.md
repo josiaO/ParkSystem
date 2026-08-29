@@ -32,9 +32,11 @@ flowchart TD
   host --> sdk
 ```
 
-Default `adapter_id` is `hvx`. Unknown adapter ids fall back to HVX.
+Default `adapter_id` is `hvx`. Unknown adapter ids fall back to HVX. `dahua`, `hikvision`, and `ipcam` map to the RTSP adapter (HTTP snapshot or RTSP + FastALPR).
 
-RTSP remains Probe RTSP / optional media. ONVIF is a registered stub that cannot report `SDK_CONNECTED`. `live_sources()` tells the live pump whether to stay on NetSDK video or optional RTSP.
+RTSP / Dahua / Hikvision cameras become `VIDEO_CONNECTED` after a live JPEG is obtained. They must not report `SDK_CONNECTED`. **Discover** (`scan_lan=true`) finds those cameras on HTTP 80 / RTSP 554 using username and password only; HVX discovery on port 30000 is unchanged. ONVIF **GetProfiles / GetStreamUri** can fill `stream_profiles` but ONVIF login is still not the site default. `live_sources()` tells the live pump whether to stay on NetSDK video or optional RTSP.
+
+Live view and FastALPR go through `app/services/media_gateway.py` (one producer per camera, latest-frame buffers, named FFmpeg profiles). They must not each open a new physical camera session.
 
 Adding a vendor: [10-ADDING-A-NEW-CAMERA-VENDOR.md](10-ADDING-A-NEW-CAMERA-VENDOR.md).
 

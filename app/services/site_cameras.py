@@ -67,7 +67,14 @@ def repo_root() -> Path:
 
 def site_ini_path() -> Path:
     """Optional site INI with camera/controller/display IPs. Not required at runtime."""
-    return repo_root() / "ParkingSystem" / "ParkWatch" / "ParkWatch.ini"
+    candidates = (
+        repo_root() / "ParkingSystem" / "ParkWatch" / "ParkWatch.ini",
+        repo_root() / "Current_ParkSystem_configs" / "ParkingSystem" / "ParkWatch" / "ParkWatch.ini",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]
 
 
 def _read_ini_text(path: Path) -> str:
@@ -276,12 +283,34 @@ async def tcp_open(ip: str, port: int, timeout: float = 0.4) -> bool:
 
 def local_ipv4s() -> list[str]:
     ips: list[str] = []
+
+    def add(ip: str) -> None:
+        if ip and not ip.startswith("127.") and ip not in ips:
+            ips.append(ip)
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("192.168.2.1", 80))
+        add(sock.getsockname()[0])
+        sock.close()
+    except Exception:
+        pass
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
-            if ip and not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
+            add(info[4][0])
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["ip", "-o", "-4", "addr", "show"], text=True, timeout=1.0,
+        )
+        for line in out.splitlines():
+            parts = line.split()
+            if "inet" in parts:
+                addr = parts[parts.index("inet") + 1].split("/", 1)[0]
+                add(addr)
     except Exception:
         pass
     return ips
@@ -289,9 +318,10 @@ def local_ipv4s() -> list[str]:
 
 def scan_prefix(local_ip: str) -> str | None:
     parts = local_ip.split(".")
-    if len(parts) != 4:
+    if len(parts) != 4 or not all(p.isdigit() for p in parts):
         return None
-    if parts[0] == "192" and parts[1] == "168":
+    a, b = int(parts[0]), int(parts[1])
+    if a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
         return ".".join(parts[:3])
     return None
 
@@ -309,15 +339,17 @@ async def probe_ips(ips: list[str], port: int) -> dict[str, bool]:
     return {ip: ok for ip, ok in rows}
 
 
-async def lan_sdk_candidates(port: int) -> list[str]:
+def lan_prefixes() -> list[str]:
     prefixes = []
     for ip in local_ipv4s():
         prefix = scan_prefix(ip)
         if prefix and prefix not in prefixes:
             prefixes.append(prefix)
-    if not prefixes:
-        prefixes = ["192.168.1"]
-    ips = [f"{prefix}.{n}" for prefix in prefixes[:1] for n in range(1, 255)]
+    return prefixes[:1] or ["192.168.1"]
+
+
+async def lan_sdk_candidates(port: int) -> list[str]:
+    ips = [f"{prefix}.{n}" for prefix in lan_prefixes() for n in range(1, 255)]
     found = await probe_ips(ips, port)
     return [ip for ip, ok in found.items() if ok]
 
@@ -329,7 +361,7 @@ def match_known(ip: str) -> dict | None:
     return None
 
 
-def camera_spec_for_ip(ip: str) -> dict:
+def camera_spec_for_ip(ip: str, *, adapter_id: str = "hvx") -> dict:
     known = match_known(ip)
     defaults = site_camera_defaults()
     return {
@@ -341,16 +373,22 @@ def camera_spec_for_ip(ip: str) -> dict:
         "controller_ip": (known or {}).get("controller_ip") or "",
         "display_ip": (known or {}).get("display_ip") or "",
         "gate_name": (known or {}).get("gate_name") or "",
+        "adapter_id": adapter_id or "hvx",
         **defaults,
     }
 
 
 def discovery_row(ip: str, *, tcp_open: bool, hvx_found: bool, existing: dict | None = None) -> dict:
-    spec = camera_spec_for_ip(ip)
+    spec = camera_spec_for_ip(ip, adapter_id="hvx")
     return {
         **spec,
         "tcp_open": tcp_open,
         "hvx_found": hvx_found,
+        "http_open": False,
+        "rtsp_open": False,
+        "kind": "hvx",
+        "vendor": "hvx",
+        "plate_engine": "native",
         "known_site": match_known(ip) is not None,
         "already_added": existing is not None,
         "camera_id": None if existing is None else existing.get("id"),

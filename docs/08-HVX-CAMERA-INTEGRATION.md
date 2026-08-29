@@ -12,8 +12,10 @@ Document the QY/HVX path used on this site so other vendors wrap beside it, not 
 - Timeout is **seconds** (`3` / `5`), not milliseconds
 - Success is `rc == 0`
 - Native plates: `Net_RegImageRecvEx` / `Ex2` after a real login
-- Live view: SDK JPEG (`Net_GetJpgBuffer`), not RTSP
-- Connect-all probes TCP on `{camera_ip}:30000` for about 1s first. A dead camera is marked `SDK_FAILED` and skipped so the rest still log in. HTTP to the 32-bit host waits up to 20s. The UI connects one camera at a time so a slow camera cannot close the app.
+- Live view: SDK JPEG (`Net_GetJpgBuffer`), not RTSP. Connect starts the substream. The host drains queued JPEGs and keeps only the newest frame so the picture flows instead of stacking. The Site Service **MediaGateway** polls that JPEG for live view; FastALPR samples a separate detect buffer. Opening live view is optional watching only.
+- Ground loop / coil: the detector’s dry contact should land on camera **GPIO IN** (default index 1, `SMARTPARK_COIL_GPIO_INDEX`). SmartPark polls `Net_ReadGPIOState`. A rising edge (car on the loop) queues `Net_ImageSnap` and, if the camera still has no plate, FastALPR on that JPEG. `POST /cameras/{id}/presence` simulates the same edge.
+- Dahua / Hikvision / generic IP: **Discover** scans HTTP 80 and RTSP 554 as well as HVX 30000. Username and password are enough. Status is `VIDEO_CONNECTED`; FastALPR reads plates. HVX login is unchanged.
+- Connect-all probes TCP on `{camera_ip}:30000` for about 1s first (HVX only). A dead camera is marked `SDK_FAILED` and skipped so the rest still log in. Generic IP cameras skip port 30000 and connect over HTTP/RTSP. HTTP to the 32-bit host waits up to 20s. The UI connects one camera at a time so a slow camera cannot close the app.
 
 ## Adapter wrap
 
