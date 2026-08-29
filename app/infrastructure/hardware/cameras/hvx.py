@@ -29,6 +29,9 @@ class HVXCameraAdapter:
             "native_plates": True,
             "live_jpeg": True,
             "gpio": True,
+            "coil_input": True,
+            "local_alpr": True,
+            "media_capabilities": ["NATIVE_ALPR", "HARDWARE_EVENTS", "SNAPSHOT", "MAIN_STREAM", "SUB_STREAM"],
             "connection_mode": getattr(device, "connection_mode", None) or DEFAULT_CONNECTION_MODE,
         }
 
@@ -69,3 +72,9 @@ class HVXCameraAdapter:
         if handle is None:
             return b""
         return await self._host().live_jpeg(int(handle))
+
+    async def disconnect(self, device: CameraLike) -> dict[str, Any]:
+        handle = device.sdk_handle
+        if handle is None:
+            return {"ok": True, "adapter_id": self.id, "disconnected": True}
+        return await self._host().disconnect(int(handle))

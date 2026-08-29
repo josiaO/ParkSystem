@@ -46,6 +46,7 @@ function Register-SmartParkTask {
 $envPrefix = "set SMARTPARK_HOME=$InstallDir&& set PYTHONPATH=$InstallDir&& set SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor&& set PATH=$InstallDir\python64;$InstallDir\python64\Scripts;$InstallDir\vendor;%PATH%"
 $siteCmd = "$envPrefix&& `"$Py64`" -m app.site_service"
 $hostCmd = "$envPrefix&& `"$Py32`" `"$HostPy`""
+# MediaMTX / recognition worker are optional. Do not register them unless SMARTPARK_MEDIA_GATEWAY_ENABLED=true.
 
 Write-Host "Registering SmartPark Site Service and HVX host tasks..."
 $failed = @()

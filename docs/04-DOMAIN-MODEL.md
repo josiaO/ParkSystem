@@ -31,7 +31,7 @@ erDiagram
 
 | Entity | Table | Notes |
 |---|---|---|
-| Gate / Camera | `gates`, `cameras` | Lane is `lane_direction` on the camera, not a separate table yet |
+| Gate / Camera | `gates`, `cameras` | Lane is `lane_direction` on the camera. Stream roles live in `cameras.stream_profiles` |
 | ParkingSession | `parking_sessions` | Site-wide; A→B exit is valid |
 | VehicleCapture | `vehicle_captures` | Image + crop + native plate |
 | AccessPlan / RegisteredVehicle | `access_plans`, `registered_vehicles` | Auto-open subscribers |

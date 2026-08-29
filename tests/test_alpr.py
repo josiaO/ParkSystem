@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -15,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.api_main import app, ensure_roles
+from app.config import Settings
 from app.core.fusion import resolve_readings
 from app.core.plate import normalize_plate, plate_similarity
 from app.db import Base, get_db
@@ -23,6 +26,7 @@ from app.security import hash_password
 from app.services.camera_lpr import (
     DVCAM_QY, QY_SDK_PORT, choose_overlay_box, native_confidence, native_from_sdk_capture, csf_from_contrast,
 )
+from app.services.presence import PresenceWatch
 from app.services.alpr import (
     DETECTOR_ONNX, OCR_CONFIG, OCR_ONNX, clean_ocr_text, ensure_alpr_model_cache, recognize_bytes, status as alpr_status,
 )
@@ -158,8 +162,13 @@ class AlprApiTests(unittest.TestCase):
         self.client = TestClient(app)
         token = self.client.post("/auth/login", json={"username": "admin", "password": "correct-horse"}).json()["token"]
         self.headers = {"Authorization": f"Bearer {token}"}
+        self.media = Path(tempfile.mkdtemp(prefix="smartpark-alpr-"))
+        self._media_patch = patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=self.media)
+        self._media_patch.start()
 
     def tearDown(self):
+        self._media_patch.stop()
+        shutil.rmtree(self.media, ignore_errors=True)
         self.client.close()
         app.dependency_overrides.clear()
         self.engine.dispose()
@@ -177,7 +186,33 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(body["camera"]["picture_port"], 40000)
         self.assertIn("OcxConfig.ocx", body["camera"]["official_config"]["ui"])
         self.assertEqual(body["camera"]["local_engine"]["name"], "fastalpr")
+        self.assertTrue(body["camera"]["local_engine"]["vendor_independent"])
+        self.assertFalse(body["camera"]["parking_requires_ocxconfig"])
         self.assertNotIn("parkwatch", body)
+
+    def test_coil_rising_edge_debounces(self):
+        watch = PresenceWatch(debounce_seconds=0.0, hold_seconds=4.0)
+        first = watch.observe(9, True, source="api")
+        self.assertTrue(first.rising)
+        self.assertTrue(first.occupied)
+        held = watch.observe(9, True, source="api")
+        self.assertFalse(held.rising)
+        left = watch.observe(9, False, source="api")
+        self.assertTrue(left.falling)
+        again = watch.observe(9, True, source="api")
+        self.assertTrue(again.rising)
+
+    def test_gpio_scan_learns_the_pin_that_changes(self):
+        watch = PresenceWatch(debounce_seconds=0.0, hold_seconds=4.0)
+        watch.observe(4, False, source="gpio", index=1, value=0)
+        watch.observe(4, False, source="gpio", index=2, value=0)
+        idle = watch.observe(4, False, source="gpio", index=3, value=0)
+        self.assertFalse(idle.rising)
+        self.assertIsNone(watch.learned_index(4))
+        hit = watch.observe(4, True, source="gpio", index=3, value=1)
+        self.assertTrue(hit.rising)
+        self.assertEqual(watch.learned_index(4), 3)
+        self.assertTrue(watch.occupied(4))
 
     def test_fuse_endpoint(self):
         res = self.client.post("/alpr/fuse", headers=self.headers, json={
@@ -211,6 +246,8 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(res.json()["camera_id"], cam_id)
         self.assertEqual(res.json()["fusion"]["method"], "AGREED")
         self.assertEqual(res.json()["fusion"]["resolved_plate"], "T123ABC")
+        self.assertEqual(res.json()["last_car"]["plate"], "T123ABC")
+        self.assertTrue(res.json()["last_car"]["snapshot_url"])
 
     def test_camera_alpr_no_frame(self):
         created = self.client.post("/cameras", headers=self.headers, json={

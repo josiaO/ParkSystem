@@ -12,6 +12,7 @@ from app.domain.devices import (
     DeviceRecord,
     DeviceType,
 )
+from app.infrastructure.hardware.cameras import adapter_has_native_plates
 from app.models import Camera, Gate
 from app.services.site_cameras import side_label
 
@@ -40,9 +41,10 @@ def camera_device(camera: Camera) -> DeviceRecord:
         enabled=bool(camera.enabled),
         connection_mode=camera_connection_mode(camera),
         capabilities={
-            "sdk_login": camera_adapter_id(camera) == DEFAULT_CAMERA_ADAPTER,
-            "gpio": camera_adapter_id(camera) == DEFAULT_CAMERA_ADAPTER,
-            "native_plates": camera_adapter_id(camera) == DEFAULT_CAMERA_ADAPTER,
+            "sdk_login": adapter_has_native_plates(camera),
+            "gpio": adapter_has_native_plates(camera),
+            "native_plates": adapter_has_native_plates(camera),
+            "local_alpr": True,
         },
         source_table="cameras",
         source_id=camera.id,

@@ -128,3 +128,24 @@ class LaneViewTests(unittest.TestCase):
         listed = self.client.get(f"/captures?gate_id={gate_id}", headers=self.headers).json()
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["lane_direction"], "ENTRY")
+
+    def test_fastalpr_fills_empty_native_capture(self):
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            empty = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 77, "plate": "", "score": 0, "have_vehicle": True},
+            )
+            self.assertEqual(empty.plate, "")
+            filled = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={
+                    "image_id": 77, "plate": "T349DLG", "score": 0.88,
+                    "bbox": {"x1": 10, "y1": 20, "x2": 80, "y2": 50},
+                    "source": "fastalpr",
+                },
+            )
+            self.assertEqual(filled.id, empty.id)
+            self.assertEqual(filled.plate, "T349DLG")
+            self.assertEqual(filled.bbox["source"], "fastalpr")

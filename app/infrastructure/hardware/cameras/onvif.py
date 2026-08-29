@@ -18,8 +18,10 @@ class ONVIFCameraAdapter:
             "adapter_id": self.id,
             "sdk_login": False,
             "native_plates": False,
-            "onvif": False,
-            "note": "ONVIF is not implemented. Site cameras stay on HVX.",
+            "onvif": True,
+            "onvif_login": False,
+            "media_capabilities": ["ONVIF", "RTSP"],
+            "note": "ONVIF discovers stream URIs. It is not the site camera login path — keep adapter_id=hvx for QY cameras.",
         }
 
     async def connect(self, device: CameraLike) -> dict[str, Any]:
@@ -36,4 +38,14 @@ class ONVIFCameraAdapter:
         return b""
 
     async def live_sources(self, device: CameraLike) -> list[dict[str, Any]]:
-        return []
+        from app.services.onvif_discover import discover_onvif_streams
+        try:
+            found = await discover_onvif_streams(device.ip_address, device.username, device.password_secret)
+        except Exception:
+            found = {"profiles": []}
+        rows = []
+        for profile in found.get("profiles") or []:
+            uri = profile.get("uri") or ""
+            if uri:
+                rows.append({"kind": "onvif", "url": uri, "adapter_id": self.id, **{k: v for k, v in profile.items() if k != "uri"}})
+        return rows

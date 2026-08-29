@@ -31,6 +31,10 @@ class GateControllerAdapter(Protocol):
 
     async def health(self, gate: Any | None = None) -> dict[str, Any]: ...
 
+    async def close(self, gate: Any, cameras: list, reason: str, **kwargs) -> Any: ...
+
+    async def get_state(self, gate: Any | None = None) -> dict[str, Any]: ...
+
 
 def should_pulse_physical(*, gate: GateLike | None, automatic: bool) -> bool:
     """Whether an open may hit GPIO/Board/LED for real.

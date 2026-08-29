@@ -31,11 +31,31 @@ class CameraCreate(BaseModel):
     rtsp_url: str = ""
     adapter_id: str = "hvx"
     connection_mode: str = "DIRECT"
+    ffmpeg_profile: str = "LOW_LATENCY_LAN"
+    rtsp_transport: str = "TCP"
+    stream_profiles: dict | None = None
+    recognition_mode: str = ""
+    vendor: str = ""
+    model_name: str = ""
+    serial: str = ""
+    timezone: str = ""
+    camera_type: str = ""
+
+
+class CameraImportItem(BaseModel):
+    ip_address: str
+    adapter_id: str = "rtsp"
+    name: str | None = None
+    lane_direction: str = "ENTRY"
 
 
 class CameraImport(BaseModel):
     ips: list[str] | None = None
+    cameras: list[CameraImportItem] | None = None
     scan_lan: bool = False
+    username: str = "admin"
+    password: str = "admin"
+    connect: bool = False
 
 
 class CameraUpdate(BaseModel):
@@ -51,7 +71,16 @@ class CameraUpdate(BaseModel):
     rtsp_url: str | None = None
     adapter_id: str | None = None
     connection_mode: str | None = None
+    ffmpeg_profile: str | None = None
+    rtsp_transport: str | None = None
+    stream_profiles: dict | None = None
     enabled: bool | None = None
+    recognition_mode: str | None = None
+    vendor: str | None = None
+    model_name: str | None = None
+    serial: str | None = None
+    timezone: str | None = None
+    camera_type: str | None = None
 
 
 class GateCreate(BaseModel):
@@ -90,6 +119,15 @@ class SessionCreate(BaseModel):
     gate_id: int | None = None
     camera_id: int | None = None
     car_type: str = "Car1"
+
+
+class StreamProfilesUpdate(BaseModel):
+    ffmpeg_profile: str | None = None
+    rtsp_transport: str | None = None
+    live_role: str | None = None
+    detect_source: str | None = None
+    ai_fps: float | None = Field(default=None, ge=1, le=15)
+    stream_profiles: dict | None = None
 
 
 class FusionRequest(BaseModel):
@@ -140,6 +178,51 @@ class ParkingSettingsUpdate(BaseModel):
     pay_prompt: str | None = None
     printer_adapter: str | None = None
     printer_name: str | None = None
+
+
+class SitePolicyUpdate(BaseModel):
+    name: str | None = None
+    timezone: str | None = None
+    locale: str | None = None
+    language: str | None = None
+    currency: str | None = None
+    currency_precision: int | None = None
+    date_format: str | None = None
+    time_format: str | None = None
+    distance_units: str | None = None
+    plate_normalization: str | None = None
+    plate_validation: str | None = None
+    tax_behavior: str | None = None
+    branding: str | None = None
+    support_contacts: str | None = None
+
+
+class MigrationFlagsUpdate(BaseModel):
+    media_gateway_enabled: bool | None = None
+    media_gateway_camera_ids: list[int] | str | None = None
+    fastalpr_new_pipeline_enabled: bool | None = None
+    webrtc_live_enabled: bool | None = None
+    native_alpr_enabled: bool | None = None
+    live_view_provider: str | None = None
+    recognition_pipeline: str | None = None
+
+
+class CameraOnboardProbe(BaseModel):
+    ip_address: str
+    username: str = "admin"
+    password: str = "admin"
+    sdk_port: int | None = Field(default=None, ge=1, le=65535)
+    rtsp_url: str = ""
+
+
+class CameraOnboardTest(BaseModel):
+    ip_address: str
+    username: str = "admin"
+    password: str = "admin"
+    adapter_id: str = "rtsp"
+    sdk_port: int = Field(default=30000, ge=1, le=65535)
+    rtsp_url: str = ""
+    duration_seconds: float = Field(default=8.0, ge=0.2, le=60)
 
 
 class AccessPlanCreate(BaseModel):

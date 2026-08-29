@@ -15,7 +15,7 @@ It is an **optional helper for FastALPR only**: `app/services/alpr.py` `_boost_c
 
 If `cv2` is missing, contrast boost is skipped (`return None`) and FastALPR continues. Removing the package is safe for the parking engine; keep it if you rely on local OCR in poor light.
 
-Default ALPR mode is `NATIVE_ONLY`. FastALPR is not run on every stream.
+Default ALPR mode is `NATIVE_ONLY`. FastALPR is not run on every stream frame; connected lanes still get it on a cooldown when native plates are missing, even if live view is closed.
 
 ## SoftDog
 

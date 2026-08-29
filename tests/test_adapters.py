@@ -61,20 +61,44 @@ class AdapterWrapTests(unittest.TestCase):
             ip="192.168.1.144", port=30000, username="admin", password="admin",
         )
 
-    def test_onvif_and_rtsp_cannot_replace_sdk_login(self):
+    def test_onvif_cannot_replace_sdk_login(self):
         onvif = camera_adapter_for(_cam(adapter_id="onvif"))
-        rtsp = camera_adapter_for(_cam(adapter_id="rtsp"))
         self.assertIsInstance(onvif, ONVIFCameraAdapter)
-        self.assertIsInstance(rtsp, RTSPCameraAdapter)
         onvif_result = asyncio.run(onvif.connect(_cam(adapter_id="onvif")))
-        rtsp_result = asyncio.run(rtsp.connect(_cam(adapter_id="rtsp")))
         self.assertFalse(onvif_result["connected"])
-        self.assertFalse(rtsp_result["connected"])
         self.assertFalse(asyncio.run(onvif.capabilities(_cam()))["sdk_login"])
-        self.assertFalse(asyncio.run(rtsp.capabilities(_cam()))["sdk_login"])
+        self.assertFalse(asyncio.run(onvif.capabilities(_cam()))["native_plates"])
+
+    def test_rtsp_connects_video_not_sdk_login(self):
+        rtsp = camera_adapter_for(_cam(adapter_id="rtsp"))
+        self.assertIsInstance(rtsp, RTSPCameraAdapter)
+        caps = asyncio.run(rtsp.capabilities(_cam(adapter_id="rtsp")))
+        self.assertFalse(caps["sdk_login"])
+        self.assertFalse(caps["native_plates"])
+        self.assertTrue(caps["local_alpr"])
+        jpeg = b"\xff\xd8\xff\xd9"
+        with patch(
+            "app.infrastructure.hardware.cameras.rtsp.grab_http_snapshot",
+            new=AsyncMock(return_value={
+                "ok": True, "jpeg": jpeg, "url": "http://192.168.1.144/cgi-bin/snapshot.cgi",
+                "url_redacted": "http://192.168.1.144/cgi-bin/snapshot.cgi",
+            }),
+        ):
+            result = asyncio.run(rtsp.connect(_cam(adapter_id="rtsp")))
+        self.assertTrue(result["connected"])
+        self.assertIsNone(result.get("handle"))
+        self.assertFalse(result.get("sdk_login"))
+        self.assertFalse(result.get("native_plates"))
+        self.assertTrue(result.get("local_alpr"))
 
     def test_unknown_adapter_falls_back_to_hvx(self):
-        self.assertEqual(camera_adapter_for(_cam(adapter_id="dahua")).id, "hvx")
+        self.assertEqual(camera_adapter_for(_cam(adapter_id="not-a-vendor")).id, "hvx")
+
+    def test_dahua_and_hikvision_use_generic_ip_adapter(self):
+        self.assertEqual(camera_adapter_for(_cam(adapter_id="dahua")).id, "rtsp")
+        self.assertEqual(camera_adapter_for(_cam(adapter_id="hikvision")).id, "rtsp")
+        self.assertEqual(camera_adapter_for(_cam(adapter_id="ipcam")).id, "rtsp")
+        self.assertFalse(asyncio.run(camera_adapter_for(_cam(adapter_id="dahua")).capabilities(_cam()))["sdk_login"])
 
     def test_registry_projects_existing_camera_row(self):
         row = camera_device(_cam())

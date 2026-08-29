@@ -73,7 +73,7 @@ SDK_CONNECT_SEQUENCE = [
     "Net_QueryConnState(handle)  # 2 = CONN_STATE_SUCC",
     "Net_RegOffLineClient(handle)",
     "Net_RegImageRecvEx(handle, cb)  # native plate + JPEG",
-    "Net_StartVideo(handle, stream=0/1, HWND)  # live video, then Net_GetJpgBuffer",
+    "Net_StartVideo(handle, stream=1/0, HWND)  # live video (sub then main), then Net_GetJpgBuffer",
 ]
 
 
@@ -179,6 +179,8 @@ class HVXSDK:
         self._last_event_jpeg = {}
         self._last_event_crop = {}
         self._pending_events = {}
+        self._pending_reports = {}
+        self._gpio_state = {}
         self._event_media = {}
         self._hwnds = {}
         self._video_handles = set()
@@ -271,6 +273,11 @@ class HVXSDK:
             self.dll.Net_FindDeviceIp.restype = c_int
 
     def _on_report(self, handle, msg_type, message, user):
+        row = {"msg_type": int(msg_type), "at": time.time()}
+        key = int(handle)
+        with self._lock:
+            queue = self._pending_reports.setdefault(key, deque(maxlen=64))
+            queue.append(dict(row))
         return 0
 
     def _copy_buffer(self, ptr, length: int) -> bytes:
@@ -290,6 +297,8 @@ class HVXSDK:
         crop = b""
         width = 0
         height = 0
+        have_vehicle = False
+        snap_type = None
         if pt_info:
             info = pt_info.contents
             plate = _decode_plate(bytes(info.szLprResult))
@@ -297,6 +306,8 @@ class HVXSDK:
             box = [int(info.usLpBox[i]) for i in range(4)]
             width = int(info.usWidth)
             height = int(info.usHeight)
+            have_vehicle = bool(int(info.ucHaveVehicle))
+            snap_type = int(info.ucSnapType)
         if pt_pic:
             pic = pt_pic.contents
             jpeg = self._copy_buffer(pic.ptPanoramaPicBuff, int(pic.uiPanoramaPicLen or 0))
@@ -312,6 +323,8 @@ class HVXSDK:
             "image_height": height,
             "jpeg_bytes": len(jpeg),
             "crop_bytes": len(crop),
+            "have_vehicle": have_vehicle,
+            "snap_type": snap_type,
         }
         key = int(handle)
         with self._lock:
@@ -335,12 +348,11 @@ class HVXSDK:
     def _register_image(self, handle: int) -> int:
         cb = self._FGetImageCbEx(self._on_image)
         self._image_cbs[handle] = cb
-        # OcxConfig.ocx uses Ex2. Register Ex first to match live cameras.
         rc = int(self.dll.Net_RegImageRecvEx(handle, cb, None))
-        if rc == DC_NO_ERROR:
-            return rc
         if hasattr(self.dll, "Net_RegImageRecvEx2"):
-            return int(self.dll.Net_RegImageRecvEx2(handle, cb, None))
+            rc2 = int(self.dll.Net_RegImageRecvEx2(handle, cb, None))
+            if rc != DC_NO_ERROR:
+                rc = rc2
         return rc
 
     def add_and_connect(self, ip: str, port: int, timeout: int, username: str, password: str):
@@ -458,6 +470,15 @@ class HVXSDK:
             queue.clear()
             return items
 
+    def drain_reports(self, handle: int) -> list[dict]:
+        with self._lock:
+            queue = self._pending_reports.get(int(handle))
+            if not queue:
+                return []
+            items = list(queue)
+            queue.clear()
+            return items
+
     def event_jpeg_for(self, handle: int, image_id: int | None = None) -> bytes:
         with self._lock:
             if image_id is not None:
@@ -491,6 +512,8 @@ class HVXSDK:
             self._last_event_jpeg.pop(handle, None)
             self._last_event_crop.pop(handle, None)
             self._pending_events.pop(handle, None)
+            self._pending_reports.pop(handle, None)
+            self._gpio_state.pop(handle, None)
             for key in [item for item in self._event_media if item[0] == int(handle)]:
                 self._event_media.pop(key, None)
         try:
@@ -506,6 +529,32 @@ class HVXSDK:
         snap.ucLightMode = 0
         snap.usGroupId = 0
         return self.dll.Net_ImageSnap(handle, ctypes.byref(snap))
+
+    def read_gpio(self, handle: int, index: int = 1) -> dict:
+        if not hasattr(self.dll, "Net_ReadGPIOState"):
+            raise HVXSDKError("Net_ReadGPIOState not exported")
+        value = ctypes.c_ubyte(0)
+        rc = int(self.dll.Net_ReadGPIOState(int(handle), index & 0xFF, ctypes.byref(value)))
+        row = {
+            "ok": rc == DC_NO_ERROR,
+            "rc": rc,
+            "rc_name": describe_rc(rc),
+            "handle": int(handle),
+            "index": int(index),
+            "value": int(value.value),
+        }
+        with self._lock:
+            self._gpio_state[(int(handle), int(index))] = row
+        return row
+
+    def gpio_states(self, handle: int, indexes: list[int] | None = None) -> list[dict]:
+        rows = []
+        for index in indexes or [1, 2]:
+            try:
+                rows.append(self.read_gpio(handle, index))
+            except Exception as exc:
+                rows.append({"ok": False, "handle": int(handle), "index": int(index), "error": str(exc)})
+        return rows
 
     def _hidden_hwnd(self, handle: int):
         """Paint live video onto an HWND. One hidden popup per camera."""
@@ -567,16 +616,17 @@ class HVXSDK:
         self._hwnds[int(handle)] = hwnd or None
         return hwnd or None
 
-    def start_video(self, handle: int, stream_type: int = 0) -> dict:
-        """Net_StartVideo then JPEG frames via Net_GetJpgBuffer. Stream 0=main, 1=sub."""
+    def start_video(self, handle: int, stream_type: int = 1) -> dict:
+        """Net_StartVideo then JPEG frames via Net_GetJpgBuffer. Stream 1=sub (live), 0=main fallback."""
         if not hasattr(self.dll, "Net_StartVideo"):
             return {"ok": False, "error": "Net_StartVideo not exported"}
         hwnd = self._hidden_hwnd(handle)
         rc = int(self.dll.Net_StartVideo(int(handle), int(stream_type), hwnd))
         used = stream_type
-        if rc != DC_NO_ERROR and stream_type == 0:
-            used = 1
-            rc = int(self.dll.Net_StartVideo(int(handle), 1, hwnd))
+        if rc != DC_NO_ERROR:
+            other = 0 if int(stream_type) == 1 else 1
+            used = other
+            rc = int(self.dll.Net_StartVideo(int(handle), other, hwnd))
         if rc != DC_NO_ERROR and hwnd:
             rc = int(self.dll.Net_StartVideo(int(handle), used, None))
         region_rc = None
@@ -633,6 +683,16 @@ class HVXSDK:
                     pass
         return data if data[:2] == b"\xff\xd8" else b""
 
+    def _latest_jpg_buffer(self, handle: int) -> bytes:
+        """Net_GetJpgBuffer is a queue. Drain it and keep only the newest frame."""
+        latest = b""
+        for _ in range(8):
+            jpeg = self._get_jpg_buffer(handle)
+            if not jpeg:
+                break
+            latest = jpeg
+        return latest
+
     def _pump_messages(self):
         try:
             user32 = ctypes.windll.user32
@@ -658,12 +718,12 @@ class HVXSDK:
             with self._lock:
                 handles = list(self._video_handles)
             for handle in handles:
-                jpeg = self._get_jpg_buffer(handle)
+                jpeg = self._latest_jpg_buffer(handle)
                 if jpeg:
                     with self._lock:
                         self._last_live_jpeg[handle] = jpeg
             self._pump_messages()
-            time.sleep(0.03 if handles else 0.2)
+            time.sleep(0.04 if handles else 0.2)
         self._video_thread = None
 
     def write_gpio(self, handle: int, index: int, value: int) -> int:

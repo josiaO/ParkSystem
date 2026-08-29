@@ -26,3 +26,22 @@ class HVXGateAdapter:
             "actuators": ["camera_gpio", "board_tcp", "led_udp"],
             "wraps": "app.services.gates.controller",
         }
+
+    async def close(self, gate: Any, cameras: list, reason: str, **kwargs) -> GateCommandResult:
+        inner = getattr(self._controller(), "close", None)
+        if callable(inner):
+            return await inner(gate, cameras, reason, **kwargs)
+        from datetime import datetime, timezone
+        return GateCommandResult(
+            ok=False,
+            simulated=False,
+            message="HVX boom is pulse-open on this site; close is not wired on the adapter.",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+    async def get_state(self, gate: Any | None = None) -> dict[str, Any]:
+        return {
+            "adapter_id": self.id,
+            "state": "UNKNOWN",
+            "note": "Physical boom state is not polled; last command is in gate_commands.",
+        }

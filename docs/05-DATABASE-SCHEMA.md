@@ -26,6 +26,8 @@ Ledger / decision tables: `payment_intents`, `payment_transactions`, `access_dec
 
 Indexes of note: plate + session status, `public_token`, payment `idempotency_key`, `provider_transaction_id`, `gate_commands.command_uuid`.
 
+`cameras` also stores `stream_profiles` (MAIN/SUB/LIVE/DETECT/EVIDENCE JSON), `ffmpeg_profile`, `rtsp_transport`, `media_capabilities`, `recognition_mode`, and optional `vendor` / `model_name` / `serial` / `camera_type`. `rtsp_url` remains the fallback URI. `vehicle_captures` may store `plate_country`, `plate_region`, `plate_type`, `source`, and `event_id`. Site locale/timezone/currency and migration flags live in `site_settings` (`site`, `migration`).
+
 ## Request / event flow
 
 `ensure_schema()` → `create_all` plus SQLite `ALTER TABLE` for columns added after the first file existed. New tables appear via `create_all`.

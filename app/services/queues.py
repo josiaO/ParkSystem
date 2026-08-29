@@ -140,6 +140,7 @@ class DurableOutbox:
 
 
 VIDEO_FRAMES = BoundedQueue("video-frames", maxsize=1, overflow="drop_oldest")
+AI_FRAMES = BoundedQueue("ai-frames", maxsize=1, overflow="drop_oldest")
 PARKING_EVENTS = BoundedQueue("parking-events", maxsize=200, overflow="reject")
 GATE_COMMANDS = BoundedQueue("gate-commands", maxsize=50, overflow="reject")
 
@@ -155,7 +156,7 @@ def parking_outbox() -> DurableOutbox:
 
 
 def queue_snapshots() -> list[dict]:
-    rows = [VIDEO_FRAMES.snapshot(), PARKING_EVENTS.snapshot(), GATE_COMMANDS.snapshot()]
+    rows = [VIDEO_FRAMES.snapshot(), AI_FRAMES.snapshot(), PARKING_EVENTS.snapshot(), GATE_COMMANDS.snapshot()]
     try:
         rows.append(parking_outbox().snapshot())
     except Exception:
