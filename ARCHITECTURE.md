@@ -27,7 +27,7 @@ Parking code talks to:
 
 - `CameraAdapter` — default `hvx` (wraps `HVXHostClient`)
 - `GateController` — GPIO + Board* + LED (`app/services/gates.py`)
-- `PrinterAdapter` — simulated files, USB/A4 system printer, or ESC/POS
+- `PrinterAdapter` — simulated files, USB thermal ESC/POS, or LAN ESC/POS
 
 Unknown camera `adapter_id` falls back to HVX. RTSP and ONVIF are registered extras; they are not the site default.
 

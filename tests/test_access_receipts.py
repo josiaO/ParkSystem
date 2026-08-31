@@ -119,7 +119,7 @@ class AccessReceiptTests(unittest.TestCase):
         self.assertIn("REQUIRE_TAKEN_BEFORE_OPEN", body["policies"])
         self.assertIn("printers", body)
 
-    def test_system_printer_stores_a4_without_device(self):
+    def test_system_printer_stores_file_without_device(self):
         saved = self.client.patch("/settings/parking", headers=self.headers, json={
             "printer_adapter": "system",
             "printer_name": "Missing USB Printer",
