@@ -38,15 +38,64 @@ class ApiClient:
         self.token=""
         self.permissions:set[str]=set()
         self.username=""
+        self.navigation:list[dict]=[]
+        self.modules:dict={}
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+    def nav_page(self, page: str) -> bool:
+        if self.navigation:
+            return any(row.get("page") == page for row in self.navigation)
+        # Fallback when API has no module navigation yet.
+        perm_for = {
+            "dashboard": "dashboard.view",
+            "health": "hardware.view",
+            "cameras": "cameras.view",
+            "sessions": "sessions.view",
+            "vehicles": "subscribers.view",
+            "payments": "payments.view",
+            "fees": "fees.view",
+            "gates": "gates.view",
+            "users": "users.view",
+            "hardware": "hardware.view",
+            "sim": "simulation.run",
+            "settings": "settings.view",
+            "onboarding": "settings.manage",
+        }
+        perm = perm_for.get(page)
+        if page == "dashboard":
+            return True
+        if page == "sessions":
+            return self.can("sessions.view") or self.can("fees.view") or self.can("kiosk.use")
+        if page == "payments":
+            return self.can("payments.view") or self.can("fees.view") or self.can("kiosk.use")
+        if page == "health":
+            return self.can("hardware.view") or self.can("dashboard.view")
+        return bool(perm and self.can(perm))
+
+    def nav_label(self, page: str, default: str) -> str:
+        for row in self.navigation:
+            if row.get("page") == page:
+                return str(row.get("label") or default)
+        return default
 
     def login(self, username, password):
         r=_check(httpx.post(f"{BASE}/auth/login", json={"username":username,"password":password}, timeout=5))
         data=r.json()
         self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
-        return data
+        self.navigation=list(data.get("navigation") or [])
+        self.modules=dict(data.get("modules") or {})
+        try:
+            me=self.get("/auth/me")
+            self.permissions=set(me.get("permissions") or data["permissions"])
+            if me.get("navigation"):
+                self.navigation=list(me.get("navigation") or [])
+            if me.get("modules"):
+                self.modules=dict(me.get("modules") or {})
+            return me
+        except Exception:
+            return data
 
     def get(self, path, timeout=8):
         r=_check(httpx.get(BASE+path, headers=self._headers(), timeout=timeout)); return r.json()

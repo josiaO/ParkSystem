@@ -1,109 +1,402 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#F2F4F6">
   <title>SmartPark Edge</title>
   <style>
     :root {
-      --bg: #f5f7fb;
-      --text: #172033;
-      --muted: #5b6b82;
-      --card: #ffffff;
-      --line: #dfe5ef;
-      --accent: #1f5eff;
-      --nav: #111827;
-      --danger: #b42318;
+      --bg: #F2F4F6; --surface: #FFFFFF; --surface-alt: #F7F9FB; --surface-alt-2: #EDF1F5;
+      --text-primary: #161C24; --text-secondary: #545E6C; --text-tertiary: #8A94A2;
+      --text: var(--text-primary); --muted: var(--text-secondary);
+      --card: var(--surface); --line: var(--border);
+      --border: #E2E6EC; --border-strong: #C9D1DB;
+      --accent: #0E7C72; --accent-strong: #0B6A61; --accent-fg: #FFFFFF;
+      --success: #17784B; --warning: #A05A0B; --danger: #C0372E; --info: #2B6CB0;
+      --overlay: rgba(22,28,36,.5);
+      --shadow-1: 0 1px 2px rgba(22,28,36,.05); --shadow-2: 0 12px 32px rgba(22,28,36,.16);
+      --r: 6px; --r-lg: 10px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --nav: var(--surface);
     }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
-    button { background: var(--accent); color: #fff; border: 0; border-radius: 7px; padding: 8px 14px; cursor: pointer; }
-    button.secondary { background: #eef2f8; color: var(--text); }
-    button.danger { background: #fef3f2; color: var(--danger); }
-    button:disabled { background: #aab5c8; cursor: not-allowed; }
-    input, select { width: 100%; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 10px; font: inherit; }
-    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #edf1f7; vertical-align: middle; }
-    th { background: #eef2f8; font-weight: 600; }
-    .error { color: var(--danger); min-height: 1.2em; }
-    .muted { color: var(--muted); }
-    .login { min-height: 100%; display: grid; place-items: center; padding: 24px; }
-    .card {
-      width: min(420px, 100%); background: var(--card); border: 1px solid var(--line);
-      border-radius: 12px; padding: 28px; box-shadow: 0 8px 30px rgba(23, 32, 51, 0.06);
+    [data-theme="dark"] {
+      --bg: #0D1117; --surface: #151B22; --surface-alt: #1A222B; --surface-alt-2: #212B36;
+      --text-primary: #E7EDF3; --text-secondary: #9AA5B1; --text-tertiary: #667180;
+      --border: #242E39; --border-strong: #33404E;
+      --accent: #2FBFAD; --accent-strong: #4ACEBD; --accent-fg: #04211D;
+      --success: #41B879; --warning: #E0A23E; --danger: #E4584E; --info: #5CA3E4;
+      --overlay: rgba(4,8,12,.62);
+      --shadow-1: 0 1px 2px rgba(0,0,0,.4); --shadow-2: 0 16px 40px rgba(0,0,0,.55);
     }
-    dialog .card { box-shadow: none; border: 0; padding: 0; width: min(460px, 90vw); }
-    .card h1 { margin: 0 0 4px; font-size: 26px; }
-    .card h2 { margin: 0 0 12px; font-size: 20px; }
-    .card label, .field { display: block; margin: 12px 0 6px; }
-    .roles { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; }
-    .roles label { margin: 0; display: flex; gap: 8px; align-items: center; }
-    .roles input { width: auto; }
-    .app { display: grid; grid-template-columns: 190px 1fr; min-height: 100%; }
-    nav { background: var(--nav); color: #e5e7eb; padding: 16px 10px; display: flex; flex-direction: column; gap: 4px; }
-    nav .brand { font-weight: 700; padding: 8px 10px 16px; }
-    nav button { background: transparent; color: #e5e7eb; text-align: left; border-radius: 6px; padding: 10px; }
-    nav button.active { background: var(--accent); }
-    main { padding: 24px 28px; overflow: auto; }
-    h2 { margin: 0 0 8px; font-size: 24px; }
-    .inline-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 8px 0 12px; }
-    .inline-fields label { margin: 0; min-width: 140px; flex: 0 1 180px; }
-    #discover-table { margin-bottom: 12px; }
-    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-    .row-actions button { padding: 6px 10px; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font: 13px/1.45 var(--sans); color: var(--text-primary); background: var(--bg);
+      -webkit-font-smoothing: antialiased; overflow: hidden;
+    }
+    button {
+      font: inherit; color: inherit; background: none; border: 0; cursor: pointer; text-align: left;
+    }
+    input, select, textarea { font: inherit; color: var(--text-primary); }
+    a { color: var(--accent); text-decoration: none; }
     .hidden { display: none !important; }
-    .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
-    pre.receipt { white-space: pre-wrap; font-family: ui-monospace, monospace; }
-    tr.selected { background: #e8efff; }
-    .subnav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
-    .subnav button { background: #eef2f8; color: var(--text); }
-    .subnav button.active { background: var(--accent); color: #fff; }
-    .dual-live { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    .mono { font-family: var(--mono); }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 2px solid var(--bg); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* Mapped primary actions — preserve legacy button.secondary / .danger */
+    .toolbar button:not(.secondary):not(.danger):not(.icobtn),
+    .pane-actions button:not(.secondary):not(.danger),
+    .ob-foot button:not(.secondary):not(.danger),
+    .login-card button[type="submit"],
+    dialog button[type="submit"],
+    #add-camera, #add-gate, #add-user, #add-vehicle, #pay-session, #quote-fee,
+    #sim-plate-entry, #sim-entry, #sim-taken, #check-hvx, #onboard-save-step, #onboard-activate,
+    #login-btn, .btn-prim {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      height: 30px; padding: 0 12px; border-radius: var(--r); font-size: 12.5px; font-weight: 600;
+      border: 1px solid transparent; background: var(--accent); color: var(--accent-fg); white-space: nowrap;
+    }
+    .toolbar button:not(.secondary):not(.danger):hover, #login-btn:hover, #add-camera:hover, #add-gate:hover, #add-user:hover,
+    #add-vehicle:hover, #pay-session:hover, #quote-fee:hover, #sim-plate-entry:hover, #sim-entry:hover,
+    #sim-taken:hover, #check-hvx:hover, #onboard-save-step:hover, #onboard-activate:hover,
+    dialog button[type="submit"]:hover, .btn-prim:hover { background: var(--accent-strong); }
+    button.secondary, .btn-sec, .toolbar button.secondary, .pane-actions button.secondary, .ob-foot button.secondary,
+    .hdr-r button.secondary, dialog button.secondary {
+      display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+      border-radius: var(--r); font-size: 12.5px; font-weight: 600;
+      background: var(--surface); border: 1px solid var(--border-strong); color: var(--text-primary);
+    }
+    button.secondary:hover, .btn-sec:hover, .toolbar button.secondary:hover { background: var(--surface-alt); }
+    button.danger, .btn-dgr, .toolbar button.danger {
+      display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+      border-radius: var(--r); font-size: 12.5px; font-weight: 600;
+      background: var(--danger); color: #fff; border: 1px solid transparent;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .icobtn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; border-radius: var(--r); color: var(--text-secondary);
+    }
+    .icobtn:hover { background: var(--surface-alt-2); color: var(--text-primary); }
+    .chip {
+      display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700;
+      letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; white-space: nowrap;
+    }
+    .c-ok { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
+    .c-wrn { color: var(--warning); background: color-mix(in srgb, var(--warning) 15%, transparent); }
+    .c-dgr { color: var(--danger); background: color-mix(in srgb, var(--danger) 13%, transparent); }
+    .c-info { color: var(--info); background: color-mix(in srgb, var(--info) 13%, transparent); }
+    .c-acc { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    .c-mut { color: var(--text-secondary); background: var(--surface-alt-2); }
+    .plate {
+      font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .05em;
+      background: var(--surface-alt-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 7px;
+    }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin: 10px 0; }
+    .field > label, label.field-label { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+    input:not([type="checkbox"]):not([type="file"]), select, textarea, .inp {
+      height: 32px; border: 1px solid var(--border-strong); border-radius: var(--r);
+      background: var(--surface); padding: 0 10px; width: 100%; font-size: 12.5px;
+    }
+    textarea { height: auto; padding: 8px 10px; }
+    input:focus, select:focus, textarea:focus, .inp:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+      box-shadow: var(--shadow-1);
+    }
+    .card-h {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 11px 14px; border-bottom: 1px solid var(--border);
+    }
+    .card-h h3 { font-size: 12.5px; font-weight: 700; }
+    .card-b { padding: 14px; }
+    .error { color: var(--danger); min-height: 1.2em; font-size: 12px; margin-top: 8px; }
+    .muted { color: var(--text-secondary); font-size: 12.5px; }
+    .notice {
+      display: flex; gap: 10px; align-items: flex-start;
+      border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+      background: color-mix(in srgb, var(--warning) 9%, transparent);
+      border-radius: var(--r); padding: 10px 12px; font-size: 12px; margin-bottom: 12px;
+    }
+
+    /* Login */
+    .login, #login-view {
+      position: fixed; inset: 0; z-index: 50; overflow: auto;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 20px;
+      background-image: radial-gradient(color-mix(in srgb, var(--border-strong) 60%, transparent) 1px, transparent 1px);
+      background-size: 26px 26px; background-color: var(--bg);
+    }
+    .login-top { position: absolute; top: 16px; right: 16px; display: flex; gap: 6px; }
+    .login-card {
+      width: 400px; max-width: 100%; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; box-shadow: var(--shadow-2); padding: 28px;
+    }
+    .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+    .login-brand .mark {
+      width: 34px; height: 34px; border-radius: 8px; background: var(--accent); color: var(--accent-fg);
+      display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px;
+    }
+    .login-brand .bn { font-size: 17px; font-weight: 700; }
+    .login-brand .bv { font-size: 10px; color: var(--text-tertiary); letter-spacing: .08em; text-transform: uppercase; font-weight: 600; }
+    .login-card h1 { display: none; }
+    .login-card label { display: block; font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 12px 0 4px; }
+    .login-card button[type="submit"] { width: 100%; margin-top: 16px; height: 36px; }
+    .login-foot { margin-top: 26px; text-align: center; font-size: 11px; color: var(--text-tertiary); line-height: 1.6; }
+
+    /* App shell */
+    .app {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; background: var(--bg);
+    }
+    #hdr {
+      height: 52px; flex: none; background: var(--surface); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px; padding: 0 14px; z-index: 5;
+    }
+    .hdr-l, .hdr-r { display: flex; align-items: center; gap: 8px; }
+    .hdr-l { flex: 1; min-width: 0; }
+    .brandname { font-weight: 700; font-size: 14.5px; letter-spacing: -.01em; white-space: nowrap; }
+    .healthchip {
+      height: 24px; padding: 0 9px; border-radius: 999px; display: inline-flex; align-items: center;
+      gap: 5px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .healthchip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .userbtn {
+      display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 3px; border-radius: var(--r);
+    }
+    .userbtn:hover { background: var(--surface-alt-2); }
+    .avatar {
+      width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+      display: flex; align-items: center; justify-content: center; font-size: 10.5px; font-weight: 700; flex: none;
+    }
+    .uname { display: flex; flex-direction: column; line-height: 1.2; }
+    .uname b { font-size: 12px; }
+    .uname i { font-style: normal; font-size: 10.5px; color: var(--text-secondary); }
+    .shell { flex: 1; display: grid; grid-template-columns: auto 1fr; min-height: 0; }
+    nav#sidebar, #sidebar {
+      width: 236px; background: var(--surface); border-right: 1px solid var(--border);
+      overflow-y: auto; overflow-x: hidden; transition: width .18s ease;
+      display: flex; flex-direction: column; padding: 8px 0 0; color: var(--text-primary);
+    }
+    #sidebar.collapsed { width: 58px; }
+    #sidebar.collapsed .sl-label, #sidebar.collapsed .group, #sidebar.collapsed .side-foot { display: none; }
+    #sidebar.collapsed .sitem { justify-content: center; padding: 0; margin: 1px 7px; }
+    nav .brand { display: none; }
+    nav .group, .sec {
+      font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+      color: var(--text-tertiary); padding: 14px 14px 5px;
+    }
+    nav button, .sitem {
+      display: flex; align-items: center; gap: 10px; height: 33px; padding: 0 12px; margin: 1px 7px;
+      border-radius: var(--r); color: var(--text-secondary); font-size: 12.5px; font-weight: 600;
+      position: relative; white-space: nowrap; background: transparent; width: auto;
+    }
+    nav button:hover, .sitem:hover { background: var(--surface-alt-2); color: var(--text-primary); }
+    nav button.active, .sitem.on, .sitem.active {
+      background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+    }
+    nav button.active::before, .sitem.on::before, .sitem.active::before {
+      content: ""; position: absolute; left: -7px; top: 6px; bottom: 6px; width: 3px;
+      border-radius: 2px; background: var(--accent);
+    }
+    .side-foot {
+      margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--border);
+      font-size: 10.5px; color: var(--text-tertiary); line-height: 1.5;
+    }
+    main {
+      overflow: auto; padding: 18px 22px 40px; min-width: 0; background: var(--bg);
+    }
+    .view-head, .top {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+      margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .view-head h1, .top h2, h2 {
+      margin: 0; font-size: 19px; font-weight: 700; letter-spacing: -.01em;
+    }
+    .view-head .sub { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; }
+    .inline-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 8px 0 12px; }
+    .inline-fields label { margin: 0; min-width: 140px; flex: 0 1 180px; font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .row-actions button { padding: 0 10px; height: 26px; font-size: 11.5px; }
+    pre, pre.receipt {
+      white-space: pre-wrap; font-family: var(--mono); font-size: 12px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
+      padding: 12px; color: var(--text-secondary); max-height: 420px; overflow: auto;
+    }
+    table {
+      width: 100%; border-collapse: collapse; background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden;
+      box-shadow: var(--shadow-1);
+    }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; font-size: 12.5px; }
+    th {
+      background: var(--surface); font-weight: 700; font-size: 10.5px; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--text-secondary); position: sticky; top: 0; z-index: 1;
+    }
+    tbody tr.click:hover, tr.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .subnav, .tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin: 0 0 14px; }
+    .subnav button, .tab {
+      padding: 8px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+      border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; border-radius: 0; height: auto;
+    }
+    .subnav button:hover, .tab:hover { color: var(--text-primary); background: transparent; }
+    .subnav button.active, .tab.on {
+      color: var(--text-primary); border-bottom-color: var(--accent); background: transparent;
+    }
+    .roles { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; }
+    .roles label { margin: 0; display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+    .roles input { width: auto; height: auto; }
+
+    /* Stats / cards */
+    .stat-grid, .statband {
+      display: flex; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r-lg); box-shadow: var(--shadow-1); margin-bottom: 16px; overflow: hidden;
+    }
+    .stat-card, .stat {
+      flex: 1 1 150px; min-width: 150px; padding: 13px 16px; border-left: 1px solid var(--border);
+      background: transparent; border-top: 0; border-right: 0; border-bottom: 0; border-radius: 0; box-shadow: none;
+    }
+    .stat-card:first-child, .stat:first-child { border-left: 0; }
+    .stat-card .label, .stat .k {
+      font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+    .stat-card .value, .stat .v {
+      font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 5px; letter-spacing: -.02em;
+    }
+    .gates-overview, .healthgrid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px;
+    }
+    .gate-card, .live-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+      padding: 12px; box-shadow: var(--shadow-1);
+    }
+    .gate-card h3 { margin: 0 0 8px; font-size: 13px; font-weight: 700; }
+    .gate-card p { font-size: 12px; color: var(--text-secondary); margin: 4px 0; }
+    .live-title { font-weight: 700; margin-bottom: 8px; font-size: 12.5px; color: var(--text-primary); }
+    .dual-live { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
     .live-pane .live-card { height: 100%; display: flex; flex-direction: column; min-width: 0; }
     .live-pane .live-frame { height: min(34vh, 360px); max-height: 360px; min-height: 200px; flex: 1; }
-    .live-pane img[data-role="video"] { width: 100%; height: min(34vh, 360px); max-height: 360px; object-fit: contain; display: block; background: #0b1220; }
+    .live-pane img[data-role="video"] {
+      width: 100%; height: min(34vh, 360px); max-height: 360px; object-fit: contain; display: block; background: #070B10;
+    }
     .live-pane img[data-role="video"]:not([src]) { display: none; }
     .live-pane canvas[data-role="overlay"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
     .live-pane .live-title { display: flex; flex-direction: column; gap: 6px; }
-    .live-pane .live-title select { font-weight: 500; }
     .live-pane .live-frame { cursor: pointer; }
     .car-stills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
-    .car-stills img { width: 100%; height: 92px; object-fit: contain; background: #0b1220; border-radius: 6px; display: block; }
+    .car-stills img { width: 100%; height: 92px; object-fit: contain; background: #070B10; border-radius: 6px; display: block; }
     .car-meta { margin-top: 8px; }
     .pane-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
     @media (max-width: 980px) { .dual-live { grid-template-columns: 1fr; } }
     .last-car { display: grid; grid-template-columns: 1fr; gap: 8px; }
-    .last-car img { width: 100%; height: 160px; max-height: 160px; object-fit: contain; background: #0b1220; border-radius: 6px; display: block; }
+    .last-car img { width: 100%; height: 160px; max-height: 160px; object-fit: contain; background: #070B10; border-radius: 6px; display: block; }
     .last-car .crop-img { height: 72px; max-height: 72px; }
-    .live-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .live-title { font-weight: 700; margin-bottom: 8px; }
     .stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 8px; }
-    .stream-card { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 13px; }
+    .stream-card { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 13px; }
     .stream-card strong { display: block; margin-bottom: 4px; }
-    .warn-list { color: #b45309; margin: 6px 0 0; padding-left: 18px; }
-    .live-frame { position: relative; background: #0b1220; border-radius: 8px; height: min(56vh, 620px); max-height: 620px; overflow: hidden; }
+    .warn-list { color: var(--warning); margin: 6px 0 0; padding-left: 18px; }
+    .live-frame { position: relative; background: #070B10; border-radius: 8px; height: min(56vh, 620px); max-height: 620px; overflow: hidden; }
     #live-img { width: 100%; height: min(56vh, 620px); max-height: 620px; object-fit: contain; display: block; }
     #live-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
     .plate-list { display: flex; flex-direction: column; gap: 10px; }
-    .plate-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #f8fafc; }
+    .plate-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface-alt); }
     .plate-item img { width: 100%; max-height: 90px; object-fit: contain; background: #111; border-radius: 4px; }
     .plate-item strong { font-size: 18px; letter-spacing: 0.04em; }
-    .plate-chars { font-size: 28px; font-weight: 700; letter-spacing: 0.18em; text-align: center; margin: 8px 0; }
-    .gates-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
-    .gate-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-    .gate-card h3 { margin: 0 0 8px; font-size: 16px; }
-    .lane-side img { width: 100%; max-height: 200px; object-fit: contain; background: #0b1220; border-radius: 8px; display: block; min-height: 120px; }
+    .plate-chars {
+      font-family: var(--mono); font-size: 28px; font-weight: 700; letter-spacing: 0.18em;
+      text-align: center; margin: 8px 0; color: var(--text-primary);
+    }
+    .lane-side img { width: 100%; max-height: 200px; object-fit: contain; background: #070B10; border-radius: 8px; display: block; min-height: 120px; }
     .lane-side .crop-img { max-height: 80px; min-height: 48px; }
-    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
-    .stat-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
-    .stat-card .value { font-size: 26px; font-weight: 700; }
-    .stat-card .label { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    nav .group { color: #9aa7bd; font-size: 11px; letter-spacing: .08em; padding: 14px 10px 4px; text-transform: uppercase; }
-  </style>
+
+    /* Onboarding wizard */
+    .ob-wrap { max-width: 860px; margin: 0 auto; }
+    .ob-steps { display: flex; gap: 8px; margin-bottom: 28px; align-items: center; flex-wrap: wrap; }
+    .ob-step { display: flex; gap: 8px; align-items: center; font-size: 11.5px; font-weight: 600; color: var(--text-tertiary); }
+    .ob-step .dot {
+      width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border-strong);
+      display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700;
+    }
+    .ob-step.on { color: var(--text-primary); }
+    .ob-step.on .dot { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+    .ob-step.done .dot {
+      background: color-mix(in srgb, var(--accent) 15%, transparent); border-color: var(--accent); color: var(--accent);
+    }
+    .ob-step .bar { width: 46px; height: 1px; background: var(--border); }
+    .ob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+    .ob-grid .span2 { grid-column: 1 / -1; }
+    @media (max-width: 700px) { .ob-grid { grid-template-columns: 1fr; } .ob-grid .span2 { grid-column: auto; } }
+    .choice {
+      border: 1px solid var(--border); border-radius: var(--r-lg); padding: 14px; display: flex; gap: 12px;
+      cursor: pointer; background: var(--surface); text-align: left; width: 100%; height: auto; color: inherit;
+    }
+    .choice:hover { border-color: var(--border-strong); background: var(--surface); }
+    .choice.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+    .choice .cic {
+      width: 34px; height: 34px; border-radius: 8px; background: var(--surface-alt-2);
+      display: flex; align-items: center; justify-content: center; color: var(--accent); flex: none;
+      font-weight: 700; font-size: 12px;
+    }
+    .choice b { font-size: 13px; display: block; }
+    .choice p { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+    .ob-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+    .mod-list { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
+    .mod-row {
+      display: flex; gap: 12px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border);
+    }
+    .mod-row:last-child { border-bottom: 0; }
+
+    /* Dialogs as modals */
+    dialog {
+      border: 1px solid var(--border); border-radius: var(--r-lg); padding: 0;
+      background: var(--surface); box-shadow: var(--shadow-2); max-width: calc(100vw - 32px);
+    }
+    dialog::backdrop { background: var(--overlay); }
+    dialog .card {
+      box-shadow: none; border: 0; padding: 16px; width: min(520px, 90vw); border-radius: 0;
+    }
+    dialog .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 700; }
+    dialog .card label { display: block; font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
+    dialog .toolbar { justify-content: flex-end; margin-top: 14px; }
+
+    /* Toasts */
+    #toast-root {
+      position: fixed; top: 62px; right: 16px; z-index: 130;
+      display: flex; flex-direction: column; gap: 8px; max-width: 360px; pointer-events: none;
+    }
+    .toast {
+      display: flex; gap: 9px; align-items: flex-start; background: var(--surface);
+      border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: var(--r);
+      box-shadow: var(--shadow-2); padding: 10px 13px; font-size: 12.5px; pointer-events: auto;
+    }
+    .toast.warn { border-left-color: var(--warning); }
+    .toast.dgr { border-left-color: var(--danger); }
+    .toast.info { border-left-color: var(--info); }
+
+    #page-onboarding.ob-focus { max-width: 900px; margin: 0 auto; }
+</style>
 </head>
 <body>
   <section id="login-view" class="login">
-    <form class="card" id="login-form">
+    <div class="login-top">
+      <button type="button" class="icobtn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
+    <form class="card login-card" id="login-form">
+      <div class="login-brand">
+        <div class="mark">SP</div>
+        <div>
+          <div class="bn">SmartPark Edge</div>
+          <div class="bv">Vehicle intelligence · edge platform</div>
+        </div>
+      </div>
       <h1>SmartPark Edge</h1>
       <p class="muted" id="login-hint">Parking camera operations</p>
       <label for="username">Username</label>
@@ -111,36 +404,55 @@
       <label for="password">Password</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <p class="error" id="login-error"></p>
-      <button type="submit" id="login-btn">Sign In</button>
+      <button type="submit" id="login-btn">Sign in</button>
     </form>
+    <div class="login-foot">Sign in with your site operator account.</div>
   </section>
 
   <section id="app-view" class="app hidden">
-    <nav>
-      <div class="brand">SmartPark Edge</div>
-      <div class="group">Overview</div>
-      <button data-page="dashboard" class="active">Dashboard</button>
-      <button data-page="cameras">Live Gates</button>
-      <button data-page="health" id="nav-health">System Health</button>
-      <div class="group">Operations</div>
-      <button data-page="sessions" id="nav-sessions">Sessions</button>
-      <button data-page="vehicles" id="nav-vehicles">Vehicles</button>
-      <button data-page="payments" id="nav-payments">Payments</button>
-      <div class="group">Management</div>
-      <button data-page="fees">Tariffs</button>
-      <div class="group">System</div>
-      <button data-page="gates">Gates</button>
-      <button data-page="users" id="nav-users">Users</button>
-      <button data-page="hardware" id="nav-hardware">Hardware Lab</button>
-      <button data-page="sim" id="nav-sim">Simulation</button>
-    </nav>
-    <main>
-      <div class="top">
-        <div>
-          <h2 id="page-title">Dashboard</h2>
-          <div class="muted" id="whoami"></div>
+    <header id="hdr">
+      <div class="hdr-l">
+        <button type="button" class="icobtn" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+        <span class="brandname">SmartPark Edge</span>
+        <span class="healthchip c-mut" id="hdr-health"><span class="dot"></span><span id="hdr-health-label">Checking</span></span>
+      </div>
+      <div class="hdr-r">
+        <button type="button" class="icobtn" id="theme-toggle-app" title="Toggle theme" aria-label="Toggle theme">◐</button>
+        <div class="userbtn" title="Signed-in operator">
+          <span class="avatar" id="user-avatar">SP</span>
+          <span class="uname"><b id="whoami-name">Operator</b><i id="whoami">Not signed in</i></span>
         </div>
         <button class="secondary" id="logout-btn" type="button">Sign out</button>
+      </div>
+    </header>
+    <div class="shell">
+    <nav id="sidebar">
+      <div class="brand">SmartPark Edge</div>
+      <div class="group">Overview</div>
+      <button data-page="dashboard" data-nav-id="dashboard" class="sitem active">Dashboard</button>
+      <button data-page="cameras" data-nav-id="cameras" class="sitem">Live Gates</button>
+      <button data-page="health" data-nav-id="health" id="nav-health" class="sitem">System Health</button>
+      <div class="group">Operations</div>
+      <button data-page="sessions" data-nav-id="sessions" id="nav-sessions" class="sitem">Sessions</button>
+      <button data-page="vehicles" data-nav-id="vehicles" id="nav-vehicles" class="sitem">Vehicles</button>
+      <button data-page="watchlists" data-nav-id="watchlists" id="nav-watchlists" class="sitem hidden">Watchlists</button>
+      <button data-page="payments" data-nav-id="payments" id="nav-payments" class="sitem">Payments</button>
+      <div class="group">Management</div>
+      <button data-page="fees" data-nav-id="fees" class="sitem">Tariffs</button>
+      <button data-page="onboarding" data-nav-id="onboarding" id="nav-onboarding" class="sitem hidden">Setup Wizard</button>
+      <div class="group">System</div>
+      <button data-page="gates" data-nav-id="gates" class="sitem">Gates</button>
+      <button data-page="users" data-nav-id="users" id="nav-users" class="sitem">Users</button>
+      <button data-page="hardware" data-nav-id="hardware" id="nav-hardware" class="sitem">Hardware Lab</button>
+      <button data-page="sim" data-nav-id="sim" id="nav-sim" class="sitem">Simulation</button>
+      <div class="side-foot"><b>SmartPark Edge</b><br>Modular edge platform</div>
+    </nav>
+    <main>
+      <div class="view-head top">
+        <div>
+          <h2 id="page-title">Dashboard</h2>
+          <div class="sub muted" id="page-subtitle">Operations overview</div>
+        </div>
       </div>
 
       <div id="page-dashboard">
@@ -150,13 +462,13 @@
       </div>
 
       <div id="page-health" class="hidden">
-        <p class="muted">Technician view. One failed camera or HVX host must not stop parking.</p>
+        <p class="muted">Technician view. One failed camera or HVX host must not stop parking. Disabled modules show as neutral — not an error.</p>
         <div class="stat-grid" id="health-cards"></div>
-        <pre id="health-details">Loading…</pre>
+        <div class="card" style="margin-top:14px"><div class="card-h"><h3>Health details</h3></div><div class="card-b"><pre id="health-details">Loading…</pre></div></div>
       </div>
 
       <div id="page-cameras" class="hidden">
-        <p class="muted">Pick any camera for the left and right views — click a view or use its camera list. A lane preset can fill both. Live shows the newest JPEG (not a buffered video). Detection keeps running if you leave this page.</p>
+        <div class="notice">Pick any camera for the left and right views — click a view or use its camera list. A lane preset can fill both. Live shows the newest JPEG (not a buffered video). Detection keeps running if you leave this page.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">IPs</button>
@@ -273,7 +585,7 @@
       </div>
 
       <div id="page-gates" class="hidden">
-        <p class="muted">Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane.</p>
+        <div class="notice">Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane.</div>
         <div class="toolbar">
           <button type="button" id="add-gate">Add Gate</button>
           <button class="secondary" type="button" id="refresh-gates">Refresh</button>
@@ -295,12 +607,14 @@
           <button class="secondary" type="button" id="print-session-receipt">Show / print receipt</button>
           <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
         </div>
+        <div class="tblwrap" style="overflow:auto">
         <table>
           <thead>
             <tr><th>Plate</th><th>Kind</th><th>Status</th><th>Receipt</th><th>Entry</th><th>Due</th><th>Paid</th></tr>
           </thead>
           <tbody id="session-rows"></tbody>
         </table>
+        </div>
         <p class="error" id="session-error"></p>
         <pre id="session-receipt" class="receipt hidden">No receipt yet.</pre>
       </div>
@@ -435,14 +749,46 @@
               <option value="AE">AE</option>
             </select>
           </label>
+          <label>Public receipt URL (QR scans)
+            <input id="site-public-url" placeholder="http://192.168.1.10:8760">
+          </label>
+          <p class="muted">Phones scan the QR on printed tickets. Set the address they can reach on your site network (this PC’s IP and port).</p>
           <div class="toolbar">
             <button class="secondary" type="button" id="site-save">Save site locale</button>
           </div>
         </div>
         <p class="error" id="sim-error"></p>
       </div>
+
+      <div id="page-onboarding" class="hidden ob-focus">
+        <div class="ob-wrap">
+          <div class="ob-steps" id="onboard-steps-ui"></div>
+          <div id="onboard-body"></div>
+          <div class="ob-foot">
+            <button type="button" class="secondary" id="onboard-back">Back</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button type="button" class="secondary" id="onboard-skip">Skip step</button>
+              <button type="button" id="onboard-next">Continue</button>
+              <button type="button" id="onboard-activate" class="hidden">Activate deployment</button>
+            </div>
+          </div>
+          <p class="error" id="onboard-error"></p>
+          <span id="onboard-step-num" class="hidden">1</span>
+          <span id="onboard-profile" class="hidden">—</span>
+          <select id="onboard-use-case" class="hidden" aria-hidden="true">
+            <option value="LPR">License Plate Recognition</option>
+            <option value="SECURITY">Security Monitoring</option>
+            <option value="ACCESS">Vehicle Access Control</option>
+            <option value="PARKING" selected>Parking Management</option>
+            <option value="CUSTOM">Custom</option>
+          </select>
+        </div>
+      </div>
     </main>
+    </div>
   </section>
+
+  <div id="toast-root"></div>
 
   <dialog id="camera-dialog">
     <form class="card" id="camera-form">
@@ -602,12 +948,48 @@
   </dialog>
 
   <script>
-    const state = { token: sessionStorage.getItem("smartpark_token") || "", user: "", userId: null, permissions: [], roles: [] };
+    const state = { token: sessionStorage.getItem("smartpark_token") || "", user: "", userId: null, permissions: [], roles: [], navigation: [], modules: {} };
     let selectedCameraId = null;
 
     const loginView = document.getElementById("login-view");
     const appView = document.getElementById("app-view");
-    const pages = ["dashboard", "health", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim"];
+    let pages = ["dashboard", "health", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim", "onboarding", "watchlists"];
+    let hdrHealthTimer = null;
+
+    function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+
+    function applyTheme(theme) {
+      const t = theme === "dark" ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+      lsSet("smartpark_theme", t);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", t === "dark" ? "#0D1117" : "#F2F4F6");
+    }
+    function cycleTheme() {
+      applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+    }
+    applyTheme(lsGet("smartpark_theme") || "light");
+
+    function toast(msg, tone) {
+      const root = document.getElementById("toast-root");
+      if (!root || !msg) return;
+      const el = document.createElement("div");
+      el.className = "toast" + (tone === "warn" || tone === "dgr" || tone === "info" ? " " + tone : "");
+      el.textContent = msg;
+      root.appendChild(el);
+      setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; }, 3200);
+      setTimeout(() => el.remove(), 3600);
+    }
+
+    function setHdrHealth(label, tone) {
+      const chip = document.getElementById("hdr-health");
+      const lab = document.getElementById("hdr-health-label");
+      if (!chip || !lab) return;
+      lab.textContent = label || "—";
+      chip.className = "healthchip " + (tone || "c-mut");
+    }
+
     let liveAlprTimer = null;
     let alprInstalled = null;
     let healthTimer = null;
@@ -1099,6 +1481,7 @@
           document.getElementById("site-currency").value = site.currency || "";
           document.getElementById("site-language").value = site.language || "en";
           document.getElementById("site-plate-validation").value = site.plate_validation || "NONE";
+          document.getElementById("site-public-url").value = site.public_base_url || "";
           select.value = chosen;
         } else {
           box.classList.add("hidden");
@@ -1227,13 +1610,41 @@
     }
 
     function showPage(name) {
-      document.querySelectorAll("nav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
-      pages.forEach((page) => document.getElementById(`page-${page}`).classList.toggle("hidden", page !== name));
-      document.getElementById("page-title").textContent = {
+      if (!pages.includes(name)) name = "dashboard";
+      document.querySelectorAll("nav button[data-page]").forEach((b) => {
+        const on = b.dataset.page === name;
+        b.classList.toggle("active", on);
+        b.classList.toggle("on", on);
+      });
+      pages.forEach((page) => {
+        const el = document.getElementById(`page-${page}`);
+        if (el) el.classList.toggle("hidden", page !== name);
+      });
+      const navItem = (state.navigation || []).find((n) => n.page === name);
+      document.getElementById("page-title").textContent = (navItem && navItem.label) || {
         dashboard: "Dashboard", health: "System Health", cameras: "Live Gates", gates: "Gates",
         sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
         fees: "Tariffs", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
-      }[name];
+        onboarding: "Setup Wizard", watchlists: "Watchlists",
+      }[name] || name;
+      const sub = document.getElementById("page-subtitle");
+      if (sub) {
+        sub.textContent = {
+          dashboard: "Site occupancy, lanes and alerts",
+          health: "Module and component status — disabled is neutral",
+          cameras: "Live views and camera commissioning",
+          gates: "Barrier control per entry/exit side",
+          sessions: "Plate-first parking sessions",
+          vehicles: "Registered plates and access plans",
+          payments: "Kiosk and mobile payment ledger",
+          fees: "Site tariff and fee quotes",
+          users: "Operator accounts and roles",
+          hardware: "Technician diagnostics",
+          sim: "Simulate entry/exit without cameras",
+          onboarding: "Module-aware deployment setup",
+          watchlists: "Security watchlists",
+        }[name] || "";
+      }
       if (name === "dashboard") loadDashboard();
       if (name === "health") startHealth();
       else stopHealth();
@@ -1247,6 +1658,7 @@
       if (name === "users") loadUsers();
       if (name === "hardware") loadHardware();
       if (name === "sim") loadSim();
+      if (name === "onboarding") loadOnboarding();
     }
 
     async function api(path, options = {}) {
@@ -1279,6 +1691,361 @@
       }
     }
 
+    function applyModuleNavigation() {
+      const nav = state.navigation || [];
+      const byId = Object.fromEntries(nav.map((n) => [n.id, n]));
+      const hasModuleNav = nav.length > 0;
+
+      document.querySelectorAll("nav button[data-nav-id]").forEach((btn) => {
+        const navId = btn.dataset.navId;
+        const item = byId[navId];
+        let visible = false;
+        if (hasModuleNav) {
+          visible = Boolean(item);
+          if (item) btn.textContent = item.label;
+        } else {
+          // Permission-only fallback when /auth/me has no navigation yet.
+          const permMap = {
+            dashboard: "dashboard.view",
+            cameras: "cameras.view",
+            health: "hardware.view",
+            sessions: "sessions.view",
+            vehicles: "subscribers.view",
+            watchlists: null,
+            payments: "payments.view",
+            fees: "fees.view",
+            onboarding: "settings.manage",
+            gates: "gates.view",
+            users: "users.view",
+            hardware: "hardware.view",
+            sim: "simulation.run",
+          };
+          const perm = permMap[navId];
+          if (navId === "dashboard") visible = true;
+          else if (navId === "sessions") visible = can("sessions.view") || can("fees.view") || can("kiosk.use");
+          else if (navId === "payments") visible = can("payments.view") || can("fees.view") || can("kiosk.use");
+          else if (navId === "health") visible = can("hardware.view") || can("dashboard.view");
+          else if (navId === "watchlists" || navId === "onboarding") visible = false;
+          else visible = Boolean(perm && can(perm));
+        }
+        btn.style.display = visible ? "" : "none";
+      });
+
+      pages = [...document.querySelectorAll("nav button[data-nav-id]")]
+        .filter((b) => b.style.display !== "none")
+        .map((b) => b.dataset.page);
+      if (!pages.includes("dashboard")) pages.unshift("dashboard");
+      if (!pages.includes("onboarding")) pages.push("onboarding");
+      if (!pages.includes("watchlists")) pages.push("watchlists");
+
+      document.querySelectorAll("nav .group").forEach((group) => {
+        let next = group.nextElementSibling;
+        let anyVisible = false;
+        while (next && !next.classList.contains("group")) {
+          if (next.matches("button[data-nav-id]") && next.style.display !== "none") anyVisible = true;
+          next = next.nextElementSibling;
+        }
+        group.style.display = anyVisible ? "" : "none";
+      });
+      setManageVisibility();
+    }
+
+    let onboardState = { step: 1, status: null, draft: {} };
+
+    function updateOnboardStepsUi(step) {
+      const n = Number(step) || 1;
+      const steps = (onboardState.status && onboardState.status.steps) || [
+        {id:1,label:"Purpose"},{id:2,label:"Topology"},{id:3,label:"Hardware"},{id:4,label:"Recognition"},
+        {id:5,label:"Modules"},{id:6,label:"Users"},{id:7,label:"Health"},{id:8,label:"Activate"}
+      ];
+      const root = document.getElementById("onboard-steps-ui");
+      if (!root) return;
+      root.innerHTML = steps.map((s, i) => {
+        const cls = s.id === n ? "on" : (s.id < n ? "done" : "");
+        const dot = s.id < n ? "✓" : String(s.id);
+        const bar = i < steps.length - 1 ? '<span class="bar"></span>' : "";
+        return `<div class="ob-step ${cls}" data-ob-step="${s.id}"><span class="dot">${dot}</span>${s.label}</div>${bar}`;
+      }).join("");
+      document.getElementById("onboard-step-num").textContent = String(n);
+      const back = document.getElementById("onboard-back");
+      const next = document.getElementById("onboard-next");
+      const act = document.getElementById("onboard-activate");
+      const skip = document.getElementById("onboard-skip");
+      if (back) back.style.visibility = n <= 1 ? "hidden" : "visible";
+      if (next) next.classList.toggle("hidden", n >= 8);
+      if (act) act.classList.toggle("hidden", n < 8);
+      if (skip) skip.classList.toggle("hidden", n === 1 || n === 8);
+    }
+
+    function syncOnboardChoices() {
+      const sel = document.getElementById("onboard-use-case");
+      if (!sel) return;
+      document.querySelectorAll("#onboard-choices .choice").forEach((btn) => {
+        btn.classList.toggle("on", btn.dataset.useCase === sel.value);
+      });
+    }
+
+    function renderOnboardBody() {
+      const body = document.getElementById("onboard-body");
+      if (!body) return;
+      const st = onboardState.status || {};
+      const step = onboardState.step;
+      const draft = onboardState.draft;
+      const counts = st.counts || {};
+      const profile = st.profile || "—";
+      document.getElementById("onboard-profile").textContent = profile;
+
+      if (step === 1) {
+        const cases = st.use_cases || [];
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700;letter-spacing:-.02em">Welcome to SmartPark</h1>
+          <p class="muted" style="margin:6px 0 22px">What do you want to use this site for? You can change modules later without reinstalling.</p>
+          <div class="ob-grid" id="onboard-choices">${cases.map((c) => `
+            <button type="button" class="choice ${c.id==='CUSTOM'?'span2':''} ${(draft.use_case||st.use_case||'PARKING')===c.id?'on':''}" data-use-case="${c.id}">
+              <span class="cic">${c.id.slice(0,2)}</span>
+              <div><b>${c.label}</b><p>${c.description||''}</p></div>
+            </button>`).join("")}</div>
+          <p class="muted">Profile: <b id="ob-profile-live">${profile}</b></p>`;
+        document.querySelectorAll("#onboard-choices .choice").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            document.getElementById("onboard-use-case").value = btn.dataset.useCase;
+            draft.use_case = btn.dataset.useCase;
+            syncOnboardChoices();
+          });
+        });
+        const sel = document.getElementById("onboard-use-case");
+        if (draft.use_case || st.use_case) sel.value = draft.use_case || st.use_case;
+        syncOnboardChoices();
+        return;
+      }
+
+      if (step === 2) {
+        const preset = draft.topo_preset || "1in1out";
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Site topology</h1>
+          <p class="muted" style="margin:6px 0 18px">Start from a preset. Gates and lanes are data-driven — add more later in Live Gates.</p>
+          <div class="ob-grid">
+            <button type="button" class="choice ${preset==='1in1out'?'on':''}" data-preset="1in1out"><span class="cic">1↔</span><div><b>1 entry / 1 exit</b><p>Parking lite default.</p></div></button>
+            <button type="button" class="choice ${preset==='bidirectional'?'on':''}" data-preset="bidirectional"><span class="cic">⇄</span><div><b>One bidirectional lane</b><p>Single shared lane.</p></div></button>
+            <button type="button" class="choice ${preset==='lpr_only'?'on':''}" data-preset="lpr_only"><span class="cic">0</span><div><b>No gates</b><p>LPR / security cameras only.</p></div></button>
+            <button type="button" class="choice ${preset==='keep'?'on':''}" data-preset="keep"><span class="cic">=</span><div><b>Keep current</b><p>${counts.gates||0} gates · ${counts.lanes||0} lanes · ${counts.cameras||0} cameras</p></div></button>
+          </div>
+          <div class="card card-b" style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="field" style="grid-column:1/-1"><label>Site name</label><input class="inp" id="ob-site-name" value="${(draft.site&&draft.site.name)||(st.topology&&st.topology.site&&st.topology.site.name)||'Default Site'}"></div>
+            <div class="field"><label>Timezone</label><input class="inp" id="ob-site-tz" value="${(draft.site&&draft.site.timezone)||(st.topology&&st.topology.site&&st.topology.site.timezone)||'UTC'}" placeholder="UTC"></div>
+            <div class="field"><label>Currency</label><input class="inp" id="ob-site-cur" value="${(draft.site&&draft.site.currency)||(st.topology&&st.topology.site&&st.topology.site.currency)||'USD'}" placeholder="USD"></div>
+            <div class="field"><label>Language</label><select class="inp" id="ob-site-lang"><option value="en">en</option><option value="sw">sw</option><option value="ar">ar</option><option value="fr">fr</option><option value="pt">pt</option></select></div>
+            <div class="field"><label>Plate validation</label><select class="inp" id="ob-site-plate"><option value="NONE">NONE</option><option value="TZ">TZ</option><option value="KE">KE</option><option value="ZA">ZA</option><option value="AE">AE</option></select></div>
+          </div>`;
+        document.querySelectorAll("[data-preset]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            draft.topo_preset = btn.dataset.preset;
+            document.querySelectorAll("[data-preset]").forEach((b) => b.classList.toggle("on", b === btn));
+          });
+        });
+        return;
+      }
+
+      if (step === 3) {
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Hardware</h1>
+          <p class="muted" style="margin:6px 0 18px">Add cameras now, or skip and commission them later under Live Gates. Technician terms (SDK / RTSP) stay in Advanced settings.</p>
+          <div class="statband">
+            <div class="stat"><div class="k">Cameras</div><div class="v">${counts.cameras||0}</div></div>
+            <div class="stat"><div class="k">Gates</div><div class="v">${counts.gates||0}</div></div>
+            <div class="stat"><div class="k">Lanes</div><div class="v">${counts.lanes||0}</div></div>
+          </div>
+          <div class="toolbar" style="margin-top:14px">
+            <button type="button" id="ob-discover">Discover cameras on LAN</button>
+            <button type="button" class="secondary" id="ob-goto-ips">Open Live Gates → IPs</button>
+          </div>
+          <pre id="ob-hw-result" class="muted" style="margin-top:12px">No discovery run yet.</pre>
+          <p class="muted" style="margin-top:10px">Printers and kiosks can be configured after activation in Simulation / Hardware Lab.</p>`;
+        document.getElementById("ob-discover").addEventListener("click", async () => {
+          const out = document.getElementById("ob-hw-result");
+          out.textContent = "Scanning…";
+          try {
+            const data = await api("/cameras/discover?scan_lan=true");
+            const cams = data.cameras || data || [];
+            out.textContent = Array.isArray(cams)
+              ? `${cams.length} device(s) found. Use Live Gates → IPs to import and connect.`
+              : JSON.stringify(data, null, 2);
+            draft.hardware = { discovered: Array.isArray(cams) ? cams.length : 0 };
+          } catch (e) { out.textContent = e.message; }
+        });
+        document.getElementById("ob-goto-ips").addEventListener("click", () => {
+          showPage("cameras");
+          if (typeof showCameraSub === "function") showCameraSub("ips");
+        });
+        return;
+      }
+
+      if (step === 4) {
+        const mode = draft.recognition_mode || st.recognition_default || "HYBRID";
+        const modes = st.recognition_modes || [];
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Recognition per camera</h1>
+          <p class="muted" style="margin:6px 0 18px">Default mode for this site. Applied to existing cameras; new cameras inherit it.</p>
+          <div class="ob-grid">${modes.map((m) => `
+            <button type="button" class="choice ${mode===m.id?'on':''}" data-rec="${m.id}">
+              <span class="cic">${m.id==='VIDEO_ONLY'?'VID':m.id.slice(0,2)}</span>
+              <div><b>${m.label}</b><p>${m.description||''}</p></div>
+            </button>`).join("")}</div>`;
+        document.querySelectorAll("[data-rec]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            draft.recognition_mode = btn.dataset.rec;
+            document.querySelectorAll("[data-rec]").forEach((b) => b.classList.toggle("on", b === btn));
+          });
+        });
+        return;
+      }
+
+      if (step === 5) {
+        const choices = st.optional_module_choices || [];
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Optional modules</h1>
+          <p class="muted" style="margin:6px 0 18px">Disabled modules disappear from navigation — nothing is deleted. Core recognition stays available.</p>
+          <div class="mod-list" id="ob-mod-list">${choices.map((m) => `
+            <label class="mod-row" style="cursor:pointer">
+              <input type="checkbox" class="bigck ob-mod" data-mid="${m.id}" ${m.enabled?'checked':''}>
+              <div style="flex:1"><b style="font-size:13px">${m.label}</b><div class="muted" style="font-size:11.5px">${m.description} · <span class="mono">${m.id}</span></div></div>
+            </label>`).join("")}</div>`;
+        return;
+      }
+
+      if (step === 6) {
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Users &amp; roles</h1>
+          <p class="muted" style="margin:6px 0 18px">${counts.users||0} account(s) on this site. Create an operator now, or skip and manage users later.</p>
+          <div class="card card-b" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:640px">
+            <div class="field"><label>Username</label><input class="inp" id="ob-user-name" placeholder="operator"></div>
+            <div class="field"><label>Full name</label><input class="inp" id="ob-user-full" placeholder="Site Operator"></div>
+            <div class="field"><label>Password</label><input class="inp" type="password" id="ob-user-pass" placeholder="••••••••"></div>
+            <div class="field"><label>Role</label><select class="inp" id="ob-user-role"><option>Operator</option><option>Admin</option><option>Cashier</option><option>Technician</option></select></div>
+          </div>
+          <p class="muted" style="margin-top:12px">Leave blank to skip creating a user on this step.</p>`;
+        return;
+      }
+
+      if (step === 7) {
+        const comps = (st.health && st.health.components) || {};
+        const rows = Object.keys(comps).map((k) => {
+          const c = comps[k] || {};
+          const state = c.state || "—";
+          const tone = !c.enabled || String(state).toLowerCase()==="disabled" ? "c-mut"
+            : String(state).toLowerCase().includes("degrad") ? "c-wrn"
+            : String(state).toLowerCase().includes("online") || String(state).toLowerCase()==="healthy" || String(state).toLowerCase()==="ready" ? "c-ok"
+            : "c-info";
+          return `<div class="stat"><div class="k">${k}</div><div class="v"><span class="chip ${tone}">${state}</span></div></div>`;
+        }).join("") || `<div class="stat"><div class="k">CORE</div><div class="v"><span class="chip c-ok">Healthy</span></div></div>`;
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Health &amp; capability</h1>
+          <p class="muted" style="margin:6px 0 18px">Disabled is neutral — not an error. One failed camera must not stop the whole site.</p>
+          <div class="statband">${rows}</div>
+          <div class="toolbar" style="margin-top:14px"><button type="button" class="secondary" id="ob-refresh-health">Refresh health</button></div>`;
+        document.getElementById("ob-refresh-health").addEventListener("click", async () => {
+          try {
+            onboardState.status = await api("/onboarding/status");
+            renderOnboardBody();
+            updateOnboardStepsUi(onboardState.step);
+          } catch (e) { document.getElementById("onboard-error").textContent = e.message; }
+        });
+        draft.health_ok = true;
+        return;
+      }
+
+      // step 8
+      const enabled = st.enabled_modules || [];
+      body.innerHTML = `<div style="text-align:center;padding:20px 0">
+        <div style="width:58px;height:58px;border-radius:50%;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;font-weight:700">✓</div>
+        <h1 style="font-size:22px;font-weight:700">Ready to activate</h1>
+        <p class="muted" style="margin:8px 0 18px">Profile <b>${profile}</b> · ${enabled.length} modules enabled</p>
+        <div class="chips" style="justify-content:center;display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${enabled.map((m)=>`<span class="chip c-acc">${m}</span>`).join("")}</div>
+        <p class="muted">Activation unlocks the full operator UI. You can re-run Setup Wizard from navigation while you still have permission.</p>
+      </div>`;
+    }
+
+    async function loadOnboarding() {
+      const err = document.getElementById("onboard-error");
+      if (err) err.textContent = "";
+      try {
+        const status = await api("/onboarding/status");
+        onboardState.status = status;
+        onboardState.step = Math.max(1, Math.min(Number(status.step) || 1, 8));
+        if (status.use_case) {
+          document.getElementById("onboard-use-case").value = status.use_case;
+          onboardState.draft.use_case = status.use_case;
+        }
+        if (status.recognition_default) onboardState.draft.recognition_mode = status.recognition_default;
+        updateOnboardStepsUi(onboardState.step);
+        renderOnboardBody();
+      } catch (e) {
+        if (err) err.textContent = e.message;
+      }
+    }
+
+    function collectOnboardPayload(nextStep, { activate = false, skip = false } = {}) {
+      const step = onboardState.step;
+      const draft = onboardState.draft;
+      const payload = {
+        step: nextStep,
+        use_case: document.getElementById("onboard-use-case").value || draft.use_case || "PARKING",
+        activate: Boolean(activate),
+        skip: Boolean(skip),
+      };
+      if (step === 2 && !skip) {
+        const preset = draft.topo_preset || "1in1out";
+        payload.site = {
+          name: (document.getElementById("ob-site-name") || {}).value,
+          timezone: (document.getElementById("ob-site-tz") || {}).value,
+          currency: (document.getElementById("ob-site-cur") || {}).value,
+          language: (document.getElementById("ob-site-lang") || {}).value,
+          locale: (document.getElementById("ob-site-lang") || {}).value,
+          plate_validation: (document.getElementById("ob-site-plate") || {}).value,
+        };
+        if (preset !== "keep") payload.topology = { preset };
+      }
+      if (step === 3 && !skip) {
+        payload.hardware = draft.hardware || { reviewed: true };
+      }
+      if (step === 4 && !skip) {
+        payload.recognition_mode = draft.recognition_mode || "HYBRID";
+      }
+      if (step === 5 && !skip) {
+        payload.optional_modules = [...document.querySelectorAll(".ob-mod:checked")].map((el) => el.dataset.mid);
+      }
+      if (step === 6 && !skip) {
+        const username = ((document.getElementById("ob-user-name") || {}).value || "").trim();
+        const password = (document.getElementById("ob-user-pass") || {}).value || "";
+        if (username && password) {
+          payload.user = {
+            username,
+            password,
+            full_name: ((document.getElementById("ob-user-full") || {}).value || username).trim(),
+            role: (document.getElementById("ob-user-role") || {}).value || "Operator",
+          };
+        }
+      }
+      if (step === 7) payload.health_ok = true;
+      return payload;
+    }
+
+    async function submitOnboardStep(nextStep, opts = {}) {
+      const err = document.getElementById("onboard-error");
+      if (err) err.textContent = "";
+      try {
+        const payload = collectOnboardPayload(nextStep, opts);
+        await api("/onboarding/step", { method: "POST", body: JSON.stringify(payload) });
+        await refreshSessionContext();
+        if (opts.activate) {
+          toast("Deployment activated", "info");
+          showPage("dashboard");
+          return;
+        }
+        onboardState.step = nextStep;
+        await loadOnboarding();
+        onboardState.step = nextStep;
+        updateOnboardStepsUi(nextStep);
+        renderOnboardBody();
+      } catch (e) {
+        if (err) err.textContent = e.message;
+        toast(e.message || "Onboarding step failed", "dgr");
+      }
+    }
+
     function setManageVisibility() {
       document.getElementById("add-camera").style.display = can("cameras.manage") ? "" : "none";
       const onboardBtn = document.getElementById("onboard-camera");
@@ -1286,25 +2053,18 @@
       document.getElementById("seed-site").style.display = can("cameras.manage") ? "" : "none";
       document.getElementById("add-gate").style.display = can("gates.manage") ? "" : "none";
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
-      document.getElementById("nav-users").style.display = can("users.view") ? "" : "none";
-      const navVehicles = document.getElementById("nav-vehicles");
-      if (navVehicles) navVehicles.style.display = can("subscribers.view") ? "" : "none";
-      const addVehicle = document.getElementById("add-vehicle");
-      if (addVehicle) addVehicle.style.display = can("subscribers.manage") ? "" : "none";
-      const navSim = document.getElementById("nav-sim");
-      if (navSim) navSim.style.display = can("simulation.run") ? "" : "none";
-      const navFees = document.querySelector('nav button[data-page="fees"]');
-      if (navFees) navFees.style.display = can("fees.view") ? "" : "none";
-      const navSessions = document.getElementById("nav-sessions");
-      if (navSessions) navSessions.style.display = (can("sessions.view") || can("fees.view") || can("kiosk.use")) ? "" : "none";
-      const navPayments = document.getElementById("nav-payments");
-      if (navPayments) navPayments.style.display = (can("payments.view") || can("fees.view") || can("kiosk.use")) ? "" : "none";
-      const navHardware = document.getElementById("nav-hardware");
-      if (navHardware) navHardware.style.display = can("hardware.view") ? "" : "none";
-      const navHealth = document.getElementById("nav-health");
-      if (navHealth) navHealth.style.display = (can("hardware.view") || can("dashboard.view")) ? "" : "none";
       const paySession = document.getElementById("pay-session");
       if (paySession) paySession.style.display = (can("payments.create") || can("kiosk.use")) ? "" : "none";
+    }
+
+    async function refreshSessionContext() {
+      const me = await api("/auth/me");
+      state.permissions = me.permissions || [];
+      state.navigation = me.navigation || [];
+      state.modules = me.modules || {};
+      state.roles = me.roles || [];
+      applyModuleNavigation();
+      return me;
     }
 
     function setSignedIn(data) {
@@ -1312,17 +2072,33 @@
       state.user = data.username || "";
       state.userId = data.id || null;
       state.permissions = data.permissions || [];
+      state.navigation = data.navigation || [];
+      state.modules = data.modules || {};
+      state.roles = data.roles || state.roles || [];
       sessionStorage.setItem("smartpark_token", state.token);
-      document.getElementById("whoami").textContent = `Signed in as ${state.user}`;
+      const nameEl = document.getElementById("whoami-name");
+      const who = document.getElementById("whoami");
+      const av = document.getElementById("user-avatar");
+      if (nameEl) nameEl.textContent = state.user || "Operator";
+      if (who) {
+        const role = Array.isArray(state.roles) && state.roles.length ? state.roles[0] : "Signed in";
+        who.textContent = typeof role === "string" ? role : (role.name || role.id || "Signed in");
+      }
+      if (av) av.textContent = (state.user || "SP").slice(0, 2).toUpperCase();
       loginView.classList.add("hidden");
       appView.classList.remove("hidden");
-      setManageVisibility();
-      showPage("dashboard");
+      applyModuleNavigation();
+      startHdrHealth();
+      const onboardingDone = state.modules.onboarding_completed !== false;
+      showPage(onboardingDone ? "dashboard" : "onboarding");
     }
 
     function setSignedOut() {
       state.token = ""; state.user = ""; state.userId = null; state.permissions = [];
+      state.navigation = []; state.modules = {};
       sessionStorage.removeItem("smartpark_token");
+      stopHdrHealth();
+      setHdrHealth("Offline", "c-mut");
       appView.classList.add("hidden");
       loginView.classList.remove("hidden");
     }
@@ -1341,9 +2117,12 @@
             password: document.getElementById("password").value,
           }),
         });
-        setSignedIn(data);
+        state.token = data.token;
+        const me = await refreshSessionContext();
+        setSignedIn({ ...data, ...me });
       } catch (err) {
         error.textContent = err.message || "Sign in failed";
+        toast(err.message || "Sign in failed", "dgr");
       } finally {
         btn.disabled = false;
       }
@@ -1353,10 +2132,47 @@
       try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
       stopLive();
       stopHealth();
+      stopHdrHealth();
       setSignedOut();
     });
     document.querySelectorAll("nav button[data-page]").forEach((btn) => {
       btn.addEventListener("click", () => showPage(btn.dataset.page));
+    });
+
+    const themeLogin = document.getElementById("theme-toggle");
+    const themeApp = document.getElementById("theme-toggle-app");
+    if (themeLogin) themeLogin.addEventListener("click", cycleTheme);
+    if (themeApp) themeApp.addEventListener("click", cycleTheme);
+    const sideToggle = document.getElementById("sidebar-toggle");
+    if (sideToggle) {
+      sideToggle.addEventListener("click", () => {
+        document.getElementById("sidebar").classList.toggle("collapsed");
+      });
+    }
+    const hdrHealthBtn = document.getElementById("hdr-health");
+    if (hdrHealthBtn) {
+      hdrHealthBtn.style.cursor = "pointer";
+      hdrHealthBtn.addEventListener("click", () => {
+        if (!appView.classList.contains("hidden")) showPage("health");
+      });
+    }
+
+    document.getElementById("onboard-back").addEventListener("click", async () => {
+      const prev = Math.max(1, onboardState.step - 1);
+      onboardState.step = prev;
+      updateOnboardStepsUi(prev);
+      renderOnboardBody();
+    });
+    document.getElementById("onboard-next").addEventListener("click", async () => {
+      const next = Math.min(8, onboardState.step + 1);
+      await submitOnboardStep(next);
+    });
+    document.getElementById("onboard-skip").addEventListener("click", async () => {
+      const next = Math.min(8, onboardState.step + 1);
+      await submitOnboardStep(next, { skip: true });
+    });
+    document.getElementById("onboard-activate").addEventListener("click", async () => {
+      await submitOnboardStep(8, { activate: true });
     });
 
     async function loadDashboard() {
@@ -1372,22 +2188,36 @@
           ["Unpaid active", stats.unpaid_active],
           ["Subscribers inside", stats.subscribers_inside],
         ];
+        cards.className = "statband";
         cards.innerHTML = items.map(([label, value]) =>
-          `<div class="stat-card"><div class="value">${value ?? 0}</div><div class="label">${label}</div></div>`
+          `<div class="stat"><div class="k">${label}</div><div class="v">${value ?? 0}</div></div>`
         ).join("");
         const lanes = document.getElementById("dashboard-lanes");
         if (lanes) {
           const rows = stats.lanes || [];
-          lanes.innerHTML = rows.map((lane) =>
-            `<div class="gate-card"><h3>${lane.label || lane.name || ""}</h3>
+          lanes.innerHTML = rows.map((lane) => {
+            const video = String(lane.live_video || "—");
+            const alpr = String(lane.plate_recognition || "—");
+            const barrier = String(lane.barrier || "—");
+            const chip = (v) => {
+              const s = v.toLowerCase();
+              if (s.includes("ok") || s.includes("online") || s.includes("ready") || s.includes("open")) return "c-ok";
+              if (s.includes("disabled") || s.includes("off") || s === "—") return "c-mut";
+              if (s.includes("warn") || s.includes("degraded")) return "c-wrn";
+              if (s.includes("down") || s.includes("fail") || s.includes("error")) return "c-dgr";
+              return "c-info";
+            };
+            return `<div class="gate-card"><h3>${lane.label || lane.name || ""}</h3>
               <p>Camera: ${lane.camera || "—"}</p>
-              <p>Live Video: ${lane.live_video || "—"}</p>
-              <p>Plate Recognition: ${lane.plate_recognition || "—"}</p>
-              <p>Barrier: ${lane.barrier || "—"}</p>
-            </div>`
-          ).join("");
+              <p>Live Video: <span class="chip ${chip(video)}">${video}</span></p>
+              <p>Plate Recognition: <span class="chip ${chip(alpr)}">${alpr}</span></p>
+              <p>Barrier: <span class="chip ${chip(barrier)}">${barrier}</span></p>
+            </div>`;
+          }).join("") || `<div class="card card-b empty"><b>No lanes yet</b><p>Add gates and cameras to see lane status here.</p></div>`;
         }
-        el.textContent = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
+        const alerts = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
+        el.className = (stats.alerts && stats.alerts.length) ? "notice" : "muted";
+        el.textContent = alerts;
       } catch (err) {
         el.textContent = `Unable to load dashboard: ${err.message}`;
       }
@@ -1395,6 +2225,38 @@
 
     function stopHealth() {
       if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+    }
+
+    function healthTone(value) {
+      const s = String(value == null ? "" : value).toLowerCase();
+      if (s === "disabled" || s === "off" || s === "n/a" || s === "—") return "c-mut";
+      if (s === "ok" || s === "healthy" || s === "ready" || s === "online" || s === "up") return "c-ok";
+      if (s === "warn" || s === "degraded" || s === "warning") return "c-wrn";
+      if (s === "down" || s === "critical" || s === "error" || s === "fail") return "c-dgr";
+      return "c-info";
+    }
+
+    function stopHdrHealth() {
+      if (hdrHealthTimer) { clearInterval(hdrHealthTimer); hdrHealthTimer = null; }
+    }
+
+    async function refreshHdrHealth() {
+      if (!state.token || appView.classList.contains("hidden")) return;
+      try {
+        const live = await api("/health/live");
+        const st = String(live.state || live.status || "ok").toLowerCase();
+        if (st.includes("critical") || st.includes("down")) setHdrHealth("Critical", "c-dgr");
+        else if (st.includes("degrad") || st.includes("warn")) setHdrHealth("Degraded", "c-wrn");
+        else setHdrHealth("Operational", "c-ok");
+      } catch (_) {
+        setHdrHealth("Unreachable", "c-wrn");
+      }
+    }
+
+    function startHdrHealth() {
+      stopHdrHealth();
+      refreshHdrHealth();
+      hdrHealthTimer = setInterval(refreshHdrHealth, 8000);
     }
 
     async function loadHealth() {
@@ -1408,20 +2270,34 @@
           try { details = await api("/health/ready"); } catch (e) { details = { live, error: e.message }; }
         }
         const proc = details.process || live.process || {};
+        const modules = details.modules || live.modules || {};
         const items = [
           ["State", details.state || live.state || "—"],
           ["Version", proc.version || "—"],
           ["Uptime s", proc.uptime_seconds ?? "—"],
           ["Threads", proc.thread_count ?? "—"],
-          ["HVX host", details.hvx_host && details.hvx_host.ok ? "ok" : "down"],
+          ["HVX host", details.hvx_host && details.hvx_host.ok ? "ok" : (details.hvx_host ? "down" : "disabled")],
           ["ALPR mode", details.alpr_mode || "NATIVE_ONLY"],
         ];
+        const components = (modules && modules.components) || modules || {};
+        Object.keys(components).forEach((key) => {
+          if (key === "components" || key === "profile" || key === "enabled_modules") return;
+          const m = components[key];
+          const val = (m && (m.state || m.status)) || (typeof m === "string" ? m : "—");
+          items.push([String(key).toUpperCase(), val]);
+        });
+        cards.className = "statband";
         cards.innerHTML = items.map(([label, value]) =>
-          `<div class="stat-card"><div class="value">${value}</div><div class="label">${label}</div></div>`
+          `<div class="stat"><div class="k">${label}</div><div class="v"><span class="chip ${healthTone(value)}">${value}</span></div></div>`
         ).join("");
+        const st = String(details.state || live.state || "ok").toLowerCase();
+        if (st.includes("critical") || st.includes("down")) setHdrHealth("Critical", "c-dgr");
+        else if (st.includes("degrad") || st.includes("warn")) setHdrHealth("Degraded", "c-wrn");
+        else setHdrHealth("Operational", "c-ok");
         pre.textContent = JSON.stringify(details, null, 2);
       } catch (err) {
         pre.textContent = err.message;
+        setHdrHealth("Unreachable", "c-wrn");
       }
     }
 
@@ -1602,6 +2478,7 @@
             currency: document.getElementById("site-currency").value.trim().toUpperCase(),
             language: document.getElementById("site-language").value,
             plate_validation: document.getElementById("site-plate-validation").value,
+            public_base_url: document.getElementById("site-public-url").value.trim().replace(/\/+$/, ""),
           }),
         });
         error.textContent = `Site locale saved: ${saved.timezone} / ${saved.currency}`;
@@ -2305,8 +3182,8 @@
       } catch (_) {}
       if (!state.token) return;
       try {
-        const me = await api("/auth/me");
-        setSignedIn({ token: state.token, id: me.id, username: me.username, permissions: me.permissions });
+        const me = await refreshSessionContext();
+        setSignedIn({ token: state.token, ...me });
       } catch (_) {
         setSignedOut();
       }
