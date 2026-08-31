@@ -57,6 +57,10 @@ SmartParkEdge-USB.zip
 OcxConfig/
 tools/hvx_sdk_host/vendor/*
 !tools/hvx_sdk_host/vendor/README.md
+vendor/mediamtx/mediamtx
+vendor/mediamtx/mediamtx.exe
+vendor/mediamtx/mediamtx.tar.gz
+vendor/mediamtx/*.zip
 
 # Site dump of the previous ParkWatch install (binaries, logs, backups)
 Current_ParkSystem_configs/

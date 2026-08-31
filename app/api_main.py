@@ -114,6 +114,17 @@ async def lifespan(app: FastAPI):
         from .services import mediamtx
         if migration_flags().get("media_gateway_enabled") and mediamtx.available():
             mediamtx.start()
+            from .services.mediamtx_sources import sync_camera
+            from .models import Camera
+            with SessionLocal() as db:
+                cfg = migration_flags(db)
+                from .services.flags import media_mtx_for_camera
+                for camera in db.scalars(select(Camera).where(Camera.enabled == True)).all():
+                    if media_mtx_for_camera(int(camera.id), db):
+                        try:
+                            sync_camera(camera, db=db)
+                        except Exception:
+                            pass
     except Exception:
         pass
     ingest = asyncio.create_task(_camera_event_loop(), name="camera-events")
@@ -671,7 +682,17 @@ async def apply_video_connect(camera: Camera, db: Session, user: User, *, raise_
                     url_redacted=str(result.get("url_redacted") or ""),
                     source=str(result.get("source") or "rtsp"),
                 )
-            acquire_detect(_live_spec(camera, need_detect=True))
+            from .infrastructure.media.registry import mediamtx_detect_active
+            if not mediamtx_detect_active(camera.id, db):
+                acquire_detect(_live_spec(camera, need_detect=True))
+            else:
+                from .services.mediamtx_detect import ensure_detect_consumer
+                ensure_detect_consumer(_live_spec(camera, need_detect=True))
+            try:
+                from .services.mediamtx_sources import sync_camera
+                sync_camera(camera, db=db)
+            except Exception:
+                pass
         else:
             camera.status = CameraStatus.OFFLINE.value
             camera.sdk_handle = None
@@ -726,6 +747,11 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
             camera.stream_profiles = hvx_profiles(camera.sdk_handle)
             camera.media_capabilities = default_capabilities(native_alpr=True, sdk=True)
             db.commit()
+            try:
+                from .services.mediamtx_sources import sync_camera
+                sync_camera(camera, db=db)
+            except Exception:
+                pass
         else:
             camera.status = CameraStatus.SDK_FAILED.value
             name = result.get("connect_rc_name") or result.get("connect_rc")
@@ -1062,6 +1088,11 @@ async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = De
             if c.status == CameraStatus.SDK_CONNECTED.value:
                 c.status=CameraStatus.VIDEO_CONNECTED.value
             db.commit()
+            try:
+                from app.services.mediamtx_sources import sync_camera
+                sync_camera(c, db=db)
+            except Exception:
+                pass
             break
     return {
         "camera_id": c.id,
@@ -1084,6 +1115,9 @@ async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User 
     from .services.ffmpeg_profiles import list_profiles
     profiles = getattr(c, "stream_profiles", None) or {}
     health = await gateway.health(c.id)
+    from app.infrastructure.media import registry as media_registry
+    live_endpoint = await media_registry.get_live_endpoint(c.id, db)
+    detect_endpoint = await media_registry.get_detect_endpoint(c.id, db)
     return {
         "camera": camera_dict(c),
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
@@ -1095,7 +1129,8 @@ async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User 
         "profiles": list_profiles(),
         "live_url": f"/cameras/{c.id}/live.mjpeg",
         "main_url": f"/cameras/{c.id}/live.mjpeg?role=MAIN",
-        "detect": await gateway.get_detect_endpoint(c.id),
+        "live_endpoint": live_endpoint,
+        "detect": detect_endpoint,
     }
 
 
@@ -1276,6 +1311,13 @@ def _camera_live_spec(camera_id: int) -> CameraLiveSpec:
     with short_session() as db:
         c = get_camera_or_404(db, camera_id)
         return _live_spec(c)
+
+
+@app.get("/cameras/{camera_id}/live/endpoint")
+async def camera_live_endpoint(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+    get_camera_or_404(db, camera_id)
+    from app.infrastructure.media import registry as media_registry
+    return await media_registry.get_live_endpoint(camera_id, db)
 
 
 @app.get("/cameras/{camera_id}/snapshot.jpg")
@@ -1694,16 +1736,24 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             return
         fp = get_state(camera_id).fingerprint
     else:
-        if not _local_alpr_due(camera_id):
+        from app.infrastructure.media.registry import mediamtx_detect_active
+        if mediamtx_detect_active(camera_id):
+            sample = gateway.peek_detect(camera_id)
+            if not sample or sample.jpeg[:2] != b"\xff\xd8":
+                return
+            jpeg = sample.jpeg
+            fp = hash(jpeg)
+        elif not _local_alpr_due(camera_id):
             return
-        try:
-            jpeg = await HVXHostClient().live_jpeg(handle)
-        except Exception:
-            jpeg = b""
-        if jpeg[:2] != b"\xff\xd8":
-            return
-        remember_frame(camera_id, jpeg, source="sdk")
-        fp = get_state(camera_id).fingerprint
+        else:
+            try:
+                jpeg = await HVXHostClient().live_jpeg(handle)
+            except Exception:
+                jpeg = b""
+            if jpeg[:2] != b"\xff\xd8":
+                return
+            remember_frame(camera_id, jpeg, source="sdk")
+            fp = get_state(camera_id).fingerprint
     if fp and _alpr_fp.get(camera_id) == fp:
         if not watching:
             _mark_local_alpr(camera_id)
@@ -1789,6 +1839,15 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
     jpeg = sample.jpeg if sample else get_state(camera_id).jpeg
     if jpeg[:2] != b"\xff\xd8":
+        from app.infrastructure.media.registry import mediamtx_detect_active
+        if mediamtx_detect_active(camera_id):
+            from app.services.mediamtx_detect import ensure_detect_consumer
+            with short_session() as db:
+                camera = db.get(Camera, camera_id)
+                if camera is None or adapter_has_native_plates(camera):
+                    return
+                ensure_detect_consumer(_live_spec(camera, need_detect=True))
+            return
         with short_session() as db:
             camera = db.get(Camera, camera_id)
             if camera is None or adapter_has_native_plates(camera):

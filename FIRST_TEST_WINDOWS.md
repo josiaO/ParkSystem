@@ -122,3 +122,37 @@ On **Vehicles**, click **Register plate**. Monthly / Annual / Staff / VIP / Cont
 **Open barrier** pulses the live camera GPIO (`Net_GateSetup` then `Net_WriteGPIOState`), sends Board* TCP on port 5000, and writes the IpAddr* LED over UDP 6666. Connect cameras first so GPIO has an SDK handle. Confirm in the UI before you press it. Registered-plate entry uses the same pulse in COMMISSIONING mode.
 
 Fees use the Car1 tariff on local SQLite. PostgreSQL later: `SMARTPARK_DATABASE_URL=postgresql+psycopg://user:pass@host/smartpark`.
+
+## 7. MediaMTX (optional, bundled in USB kit)
+
+MediaMTX is **off by default**. Native HVX plates and boom gates are unchanged.
+
+After install, three background tasks run at logon:
+
+| Task | Role |
+|------|------|
+| SmartPark Site Service | API + parking (port 8760) |
+| SmartPark HVX Host | 32-bit NetSDK (port 8765) |
+| SmartPark Media Service | Supervises MediaMTX (idle until enabled) |
+
+**Staged rollout — one camera (2# Entry = id 3):**
+
+```powershell
+cd "$env:LOCALAPPDATA\Programs\SmartPark Edge"
+
+# 1. Normal site setup first (Add site cameras → Connect all)
+
+# 2. Ten-minute soak on local proxy (needs ffmpeg/ffplay on PATH)
+powershell -ExecutionPolicy Bypass -File .\MediaMTX-SoakTest.ps1 -CameraId 3 -Minutes 10
+
+# 3. Enable MediaMTX parallel (live view still DIRECT_LEGACY)
+powershell -ExecutionPolicy Bypass -File .\Enable-MediaMTX.ps1 -CameraId 3
+
+# 4. After soak passes — switch live view for that camera only
+powershell -ExecutionPolicy Bypass -File .\Enable-MediaMTX.ps1 -CameraId 3 -LiveView
+```
+
+Check `http://127.0.0.1:8760/media/gateway` — `mediamtx.ok` should be `true`.
+
+Rollback: `setx SMARTPARK_LIVE_VIEW_PROVIDER DIRECT_LEGACY` then restart the Site Service task.
+

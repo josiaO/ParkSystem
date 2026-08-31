@@ -174,6 +174,7 @@
                   <select data-role="camera"></select>
                 </label>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
+                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
@@ -203,6 +204,7 @@
                   <select data-role="camera"></select>
                 </label>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
+                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
@@ -644,6 +646,7 @@
         camera: pane.querySelector('[data-role="camera"]'),
         pick: pane.querySelector('[data-role="pick"]'),
         img: pane.querySelector('[data-role="video"]'),
+        webrtc: pane.querySelector('[data-role="webrtc"]'),
         canvas: pane.querySelector('[data-role="overlay"]'),
         status: pane.querySelector('[data-role="status"]'),
         snap: pane.querySelector('[data-role="snap"]'),
@@ -742,7 +745,12 @@
       liveWatchIds[slot] = null;
       if (release) unwatchCamera(prev);
       const els = paneEls(slot);
+      if (els.webrtc) {
+        els.webrtc.style.display = "none";
+        els.webrtc.removeAttribute("src");
+      }
       if (els.img) {
+        els.img.style.display = "block";
         els.img.onload = null;
         els.img.onerror = null;
         els.img.removeAttribute("src");
@@ -834,7 +842,7 @@
       snapshotTimers[slot] = setInterval(tick, 40);
     }
 
-    function startLiveSlot(slot, camera, force = false) {
+    async function startLiveSlot(slot, camera, force = false) {
       const els = paneEls(slot);
       if (els.camera && camera) els.camera.value = String(camera.id);
       if (els.camera && !camera) els.camera.value = "";
@@ -852,7 +860,7 @@
       const id = camera.id;
       liveCameras[slot] = camera;
       saveSlotId(slot, id);
-      if (!force && els.img.dataset.cameraId === String(id) && snapshotTimers[slot]) {
+      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || (els.webrtc && els.webrtc.style.display !== "none"))) {
         refreshPlates(slot);
         return;
       }
@@ -865,6 +873,26 @@
       els.status.textContent = "Opening live view…";
       els.img.dataset.cameraId = String(id);
       watchCamera(id);
+      try {
+        const ep = await api(`/cameras/${id}/live/endpoint`);
+        if (ep.provider === "MEDIAMTX" && ep.webrtc) {
+          if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
+          els.img.style.display = "none";
+          if (els.webrtc) {
+            els.webrtc.style.display = "block";
+            els.webrtc.src = ep.webrtc;
+          }
+          els.status.textContent = "Live (MediaMTX)";
+          startSnapshotLoop(slot, id);
+          refreshPlates(slot);
+          return;
+        }
+      } catch (_) {}
+      if (els.webrtc) {
+        els.webrtc.style.display = "none";
+        els.webrtc.removeAttribute("src");
+      }
+      els.img.style.display = "block";
       startSnapshotLoop(slot, id);
       refreshPlates(slot);
     }

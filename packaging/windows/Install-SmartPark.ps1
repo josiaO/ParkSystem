@@ -44,6 +44,8 @@ function Stop-SmartParkProcesses {
             $cmd -like "*app.desktop.launch*" -or
             $cmd -like "*app.desktop.main*" -or
             $cmd -like "*app.site_service*" -or
+            $cmd -like "*app.media_service*" -or
+            $cmd -like "*mediamtx.exe*" -or
             ($root -and $cmd -like "*$root*")
         )) -or ($root -and $exe -and $exe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase))
     } | ForEach-Object {
@@ -186,6 +188,7 @@ $ScriptsDir = Join-Path $Py64Dir "Scripts"
 $PySideDir = Join-Path $Py64Dir "Lib\site-packages\PySide6"
 $ShibokenDir = Join-Path $Py64Dir "Lib\site-packages\shiboken6"
 $VendorDir = Join-Path $InstallDir "vendor"
+$MediaMtxExe = Join-Path $VendorDir "mediamtx\mediamtx.exe"
 $PluginsDir = Join-Path $PySideDir "plugins"
 $PlatformsDir = Join-Path $PluginsDir "platforms"
 $PathDirs = @($Py64Dir, $ScriptsDir, $PySideDir, $ShibokenDir, $VendorDir)
@@ -196,6 +199,9 @@ $UserVars = @{
     PYTHONPATH                     = $InstallDir
     QT_PLUGIN_PATH                 = $PluginsDir
     QT_QPA_PLATFORM_PLUGIN_PATH    = $PlatformsDir
+}
+if (Test-Path $MediaMtxExe) {
+    $UserVars["SMARTPARK_MEDIAMTX_BIN"] = $MediaMtxExe
 }
 Write-Host "Setting user environment variables..."
 foreach ($name in $UserVars.Keys) {
@@ -270,10 +276,11 @@ $UninstallBody = @"
 `$root = '$($InstallDir.Replace("'","''"))'
 Unregister-ScheduledTask -TaskName 'SmartPark Site Service' -Confirm:`$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'SmartPark HVX Host' -Confirm:`$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'SmartPark Media Service' -Confirm:`$false -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
     `$cmd = [string]`$_.CommandLine
     `$exe = [string]`$_.ExecutablePath
-    (`$cmd -and (`$cmd -like '*hvx_host.py*' -or `$cmd -like '*app.desktop.launch*' -or `$cmd -like '*app.site_service*' -or `$cmd -like "*`$root*")) -or (`$exe -and `$exe.StartsWith(`$root, [StringComparison]::OrdinalIgnoreCase))
+    (`$cmd -and (`$cmd -like '*hvx_host.py*' -or `$cmd -like '*app.desktop.launch*' -or `$cmd -like '*app.site_service*' -or `$cmd -like '*app.media_service*' -or `$cmd -like '*mediamtx.exe*' -or `$cmd -like "*`$root*")) -or (`$exe -and `$exe.StartsWith(`$root, [StringComparison]::OrdinalIgnoreCase))
 } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 800
 `$pathDirs = @(
@@ -315,7 +322,15 @@ Set-Content -Path $Uninstall -Value $UninstallBody -Encoding ASCII
 $svcScript = Join-Path $KitRoot "Install-SmartParkServices.ps1"
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
-    Write-Host "Starting Site Service and HVX host (they keep running after you close the Desktop)..."
+}
+foreach ($helper in @("Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1")) {
+    $src = Join-Path $KitRoot $helper
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $InstallDir $helper) -Force
+    }
+}
+if (Test-Path $svcScript) {
+    Write-Host "Starting Site Service, HVX host, and Media Service (MediaMTX idle until enabled)..."
     try {
         & $svcScript -InstallDir $InstallDir
     } catch {
@@ -327,7 +342,10 @@ if (Test-Path $svcScript) {
 Write-Host ""
 Write-Host "Installed."
 Write-Host "  Open: Desktop shortcut 'SmartPark Edge'"
-Write-Host "  Background: Site Service + HVX host start at Windows logon"
+Write-Host "  Background: Site Service + HVX host + Media Service start at Windows logon"
+if (Test-Path $MediaMtxExe) {
+    Write-Host "  MediaMTX: bundled (off until Enable-MediaMTX.ps1)"
+}
 Write-Host "  Login: admin  /  SmartPark1!"
 Write-Host "  Then: Add site cameras  ->  Connect all"
 Write-Host "  Vehicles: register plates that should open the gate"
