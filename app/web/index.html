@@ -404,15 +404,15 @@
           <label><input type="checkbox" id="park-receipt"> Receipt must be taken before the entry barrier opens</label>
           <label><input type="checkbox" id="park-pay"> Exit stays closed until the session is paid</label>
           <label>Pay prompt <input id="park-prompt"></label>
-          <label>USB / A4 printer
+          <label>Thermal receipt printer
             <select id="park-printer">
               <option value="">File only (no paper)</option>
             </select>
           </label>
-          <p class="muted">Plug a normal USB A4 printer into this PC, pick it, then Save. A detected car prints the receipt, then the gate opens. Simulation uses the same path.</p>
+          <p class="muted">Plug in a 58 mm or 80 mm USB thermal roll printer, pick it, then Save. A detected car prints the ticket, then the gate opens. Simulation uses the same path.</p>
           <div class="toolbar">
             <button class="secondary" type="button" id="park-save">Save parking rules</button>
-            <button class="secondary" type="button" id="park-test">Print test page</button>
+            <button class="secondary" type="button" id="park-test">Print test ticket</button>
           </div>
           <p class="muted">Site locale (fees, clocks, and plate checks). Not tied to one country.</p>
           <label>Timezone <input id="site-timezone" placeholder="UTC"></label>

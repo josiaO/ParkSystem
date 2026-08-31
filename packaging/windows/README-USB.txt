@@ -49,9 +49,10 @@ ffmpeg must be on PATH for RTSP soak tests and generic IP cameras.
 
 Vehicles: Register plate so that plate opens the gate
 Snapshot: Cameras -> Capture snapshot
-Receipts: Settings → pick the USB A4 printer. A detected car prints, then the
-gate opens. Simulation uses the same printer. If no printer is selected, the
-slip is stored as an A4 PNG + text file.
+Receipts: Settings → pick your thermal receipt printer (58 mm or 80 mm roll,
+USB or network). A detected car prints the ticket, then the gate opens.
+Simulation uses the same printer. If no printer is selected, the receipt is
+stored as a text file (and backup image) on disk.
 
 Each numbered lane (1# / 2#) is entry + exit.
 Each side is camera + controller (Board*) + display (IpAddr*).
@@ -66,8 +67,12 @@ does not need internet on the parking PC.
 If reinstall fails because a file is in use, the installer now stops
 the previous SmartPark process and retries.
 
-The 32-bit camera SDK host is included. COMMISSIONING pulses the live barrier
-(GPIO + Board* + LED). Confirm the lane in the UI before you press Open.
+Requires 64-bit Windows 10 or 11. The kit includes both 64-bit SmartPark and a
+32-bit camera SDK helper (NetSDK needs 32-bit Python). This is normal — you do
+not choose between them. Old 32-bit-only PCs are not supported.
+
+COMMISSIONING mode pulses the live barrier (GPIO + Board* + LED). Confirm the
+lane in the UI before you press Open.
 
 The installer registers Site Service, HVX host, and Media Service as logon tasks
 and starts them immediately. The Desktop is a client. Live video decodes only

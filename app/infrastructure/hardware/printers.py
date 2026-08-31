@@ -1,4 +1,4 @@
-"""Printer adapters. Store a slip always; send to USB/A4, LAN ESC/POS, or a file."""
+"""Printer adapters. Store a slip always; send ESC/POS to USB or LAN thermal, or file-only."""
 
 from __future__ import annotations
 
@@ -57,12 +57,6 @@ def store_slip_files(document: ReceiptDocument) -> str:
     path.write_text(document.body_text, encoding="utf-8")
     if document.qr_png.startswith(b"\x89PNG"):
         (folder / f"{stem}.png").write_bytes(document.qr_png)
-    try:
-        a4 = render_a4_png(document)
-        a4_path = folder / f"{stem}-a4.png"
-        a4_path.write_bytes(a4)
-    except Exception:
-        pass
     return str(path)
 
 
@@ -266,6 +260,87 @@ def _cups_printers() -> list[dict[str, Any]]:
     return rows
 
 
+def send_escpos_to_system_printer(printer_name: str, payload: bytes) -> None:
+    """Send raw ESC/POS bytes to a USB or shared Windows/CUPS printer."""
+    name = (printer_name or "").strip()
+    if not name:
+        raise ValueError("printer name required")
+    if not payload:
+        raise ValueError("empty receipt payload")
+    if os.name == "nt":
+        _windows_raw_print(name, payload)
+        return
+    _cups_raw_print(name, payload)
+
+
+def _windows_raw_print(printer_name: str, payload: bytes) -> None:
+    try:
+        import win32print  # type: ignore
+    except Exception:
+        win32print = None
+    if win32print is not None:
+        handle = win32print.OpenPrinter(printer_name)
+        try:
+            win32print.StartDocPrinter(handle, 1, ("SmartPark Receipt", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(handle)
+                try:
+                    win32print.WritePrinter(handle, payload)
+                finally:
+                    win32print.EndPagePrinter(handle)
+            finally:
+                win32print.EndDocPrinter(handle)
+        finally:
+            win32print.ClosePrinter(handle)
+        return
+    import base64
+    import ctypes
+    from ctypes import wintypes
+
+    encoded = base64.b64encode(payload).decode("ascii")
+    quoted_name = printer_name.replace("'", "''")
+    script = (
+        f"$name = '{quoted_name}'; $bytes = [Convert]::FromBase64String('{encoded}'); "
+        "Add-Type @'\n"
+        "using System; using System.Runtime.InteropServices;\n"
+        "public class RawPrinter {\n"
+        " [DllImport(\"winspool.drv\", CharSet=CharSet.Unicode, SetLastError=true)]\n"
+        " public static extern bool OpenPrinter(string p, out IntPtr h, IntPtr d);\n"
+        " [DllImport(\"winspool.drv\", SetLastError=true)] public static extern bool ClosePrinter(IntPtr h);\n"
+        " [DllImport(\"winspool.drv\", CharSet=CharSet.Unicode, SetLastError=true)]\n"
+        " public static extern bool StartDocPrinter(IntPtr h, int lvl, [In] ref DOCINFO di);\n"
+        " [DllImport(\"winspool.drv\", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr h);\n"
+        " [DllImport(\"winspool.drv\", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr h);\n"
+        " [DllImport(\"winspool.drv\", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr h);\n"
+        " [DllImport(\"winspool.drv\", SetLastError=true)]\n"
+        " public static extern bool WritePrinter(IntPtr h, byte[] b, int n, out int w);\n"
+        " [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]\n"
+        " public struct DOCINFO { public string DocName; public string OutputFile; public string DataType; }\n"
+        "}\n"
+        "'@; "
+        "$h = [IntPtr]::Zero; if (-not [RawPrinter]::OpenPrinter($name, [ref]$h, [IntPtr]::Zero)) { throw 'OpenPrinter failed' }; "
+        "try { "
+        "$di = New-Object RawPrinter+DOCINFO; $di.DocName='SmartPark Receipt'; $di.DataType='RAW'; "
+        "if (-not [RawPrinter]::StartDocPrinter($h, 1, [ref]$di)) { throw 'StartDocPrinter failed' }; "
+        "try { "
+        "if (-not [RawPrinter]::StartPagePrinter($h)) { throw 'StartPagePrinter failed' }; "
+        "try { $written = 0; if (-not [RawPrinter]::WritePrinter($h, $bytes, $bytes.Length, [ref]$written)) { throw 'WritePrinter failed' } } "
+        "finally { [void][RawPrinter]::EndPagePrinter($h) } "
+        "} finally { [void][RawPrinter]::EndDocPrinter($h) } "
+        "} finally { [void][RawPrinter]::ClosePrinter($h) }"
+    )
+    proc = _run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], timeout=20)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "Windows raw print failed").strip()[:300])
+
+
+def _cups_raw_print(printer_name: str, payload: bytes) -> None:
+    cmd = ["lp", "-d", printer_name, "-o", "raw"]
+    proc = subprocess.run(cmd, input=payload, capture_output=True, timeout=15, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "lp raw failed").decode("utf-8", "replace").strip()[:300])
+
+
 def send_to_system_printer(path: str, printer_name: str) -> None:
     target = Path(path)
     if not target.is_file():
@@ -317,7 +392,7 @@ class SimulatedPrinterAdapter:
             "adapter_id": self.id,
             "configured": True,
             "printers": printers,
-            "note": "Receipts are stored as A4 PNG + text. Choose a USB printer in Settings to print on paper.",
+            "note": "Receipts are stored as text files. Choose a thermal receipt printer in Settings to print tickets.",
         }
 
     async def print_receipt(self, document: ReceiptDocument) -> PrintResult:
@@ -385,7 +460,7 @@ class EscPosPrinterAdapter:
 
 
 class SystemPrinterAdapter:
-    """Windows USB / CUPS A4 printer selected in Settings."""
+    """USB or shared thermal receipt printer selected in Settings (ESC/POS raw)."""
 
     id = "system"
 
@@ -402,7 +477,7 @@ class SystemPrinterAdapter:
             "configured": bool(chosen),
             "printer_name": chosen,
             "printers": printers,
-            "note": "Plug in a USB A4 printer, pick it in Settings, then entry prints and the gate opens.",
+            "note": "Plug in a USB thermal receipt printer (58 mm or 80 mm), pick it in Settings, then entry prints and the gate opens.",
         }
 
     async def print_receipt(self, document: ReceiptDocument) -> PrintResult:
@@ -413,15 +488,14 @@ class SystemPrinterAdapter:
                 ok=True,
                 adapter_id=self.id,
                 status="READY",
-                message=f"Receipt stored at {path}. Select a USB printer in Settings.",
+                message=f"Receipt stored at {path}. Select a thermal printer in Settings.",
                 simulated=True,
                 path=path,
             )
-        a4 = Path(path).with_name(f"{Path(path).stem}-a4.png")
-        send_path = str(a4 if a4.is_file() else path)
+        payload = escpos_bytes(document)
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(send_to_system_printer, send_path, name),
+                asyncio.to_thread(send_escpos_to_system_printer, name, payload),
                 timeout=12.0,
             )
             return PrintResult(
@@ -451,6 +525,6 @@ ADAPTERS: dict[str, PrinterAdapter] = {
 
 def printer_adapter(adapter_id: str | None = None, printer_name: str | None = None) -> PrinterAdapter:
     key = (adapter_id or settings.printer_adapter or "simulated").strip().lower()
-    if key in {"system", "usb", "a4"}:
+    if key in {"system", "usb", "a4", "thermal"}:
         return SystemPrinterAdapter(printer_name or settings.printer_name)
     return ADAPTERS.get(key) or ADAPTERS["simulated"]

@@ -23,7 +23,7 @@ The site must keep running if one camera dies, the UI is closed, or FastALPR is 
 | Web | Static UI served by the same API (`http://127.0.0.1:8760`) |
 | Camera SDK | 32-bit `hvx_sdk_host` loading `NetSDK.dll` (port **30000**) |
 | Optional OCR | FastALPR + ONNX; OpenCV only to improve a JPEG for that OCR |
-| Receipts | A4 / USB system printer, or file-only, or LAN ESC/POS |
+| Receipts | USB thermal ESC/POS (58/80 mm), file-only, or LAN ESC/POS |
 | Gates | Camera GPIO + Board* TCP + LED UDP, wrapped by `GateController` |
 
 Ubuntu can run the API and UI for development. The vendor SDK host is **Windows x86 only**.
@@ -35,7 +35,7 @@ Ubuntu can run the API and UI for development. The vendor SDK host is **Windows 
 - **Another camera vendor** — implement `CameraAdapter` (`connect`, `snapshot`, `live_sources`, `capabilities`) and register it in `app/infrastructure/hardware/cameras/`. Parking (`handle_plate_event`) does not import `Net_*`.
 - **A camera you design** — if it speaks this site’s NetSDK login, keep `adapter_id=hvx`. If it is RTSP/HTTP JPEG, extend the existing RTSP adapter. If it is a new DLL, add a **new sidecar** like `hvx_sdk_host`; do not load that DLL inside the 64-bit API.
 - **Python / packages** — bump versions in `requirements.txt` and `packaging/windows/requirements-windows.txt`, run tests, then run `./packaging/make_windows_kit.sh` if the parking PC install must pick up new wheels. Keep the 32-bit host on a ctypes-only 32-bit Python; do not pull PySide or FastALPR into it.
-- **Printers** — Settings picks a Windows USB A4 printer. Simulation uses the same path.
+- **Printers** — Settings picks a USB thermal receipt printer (ESC/POS). Simulation uses the same path.
 - **Payments** — kiosk cash is live; a mobile-money provider plugs into `PaymentProvider` without changing the boom.
 
 **What you must not do:** rewrite `tools/hvx_sdk_host/`, `app/services/hvx_client.py`, or `app/services/gates.py`, or make ONVIF/RTSP the default while this site’s cameras are HVX. Unknown `adapter_id` falls back to `hvx`.
@@ -45,7 +45,7 @@ Ubuntu can run the API and UI for development. The vendor SDK host is **Windows 
 - SDK login on port 30000, live JPEG, native plate callbacks
 - Connect-all skips dead cameras so the rest still log in
 - Registered plates open the gate; casuals print then open (default policy)
-- USB A4 receipt print from Settings; Simulation uses the same printer
+- USB thermal receipt print from Settings; Simulation uses the same printer
 - Site-wide sessions (enter 1#, leave 2# is valid)
 - System Health, bounded queues, logon tasks for Site Service + HVX host
 - Roles: Admin, Operator, Kiosk Operator

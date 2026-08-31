@@ -41,7 +41,7 @@ Open set: `WAITING_RECEIPT`, `ACTIVE`, `PAID`, `OPEN`.
 
 ## Request / event flow
 
-**Entry (default PRINT_AND_OPEN):** create session → print the A4/USB (or file) slip → pulse the barrier. A printer hang is time-limited; the boom still opens if print fails. `GET/POST /sessions/{id}/receipt` reprints.
+**Entry (default PRINT_AND_OPEN):** create session → print the thermal ticket (or store file) → pulse the barrier. A printer hang is time-limited; the boom still opens if print fails. `GET/POST /sessions/{id}/receipt` reprints.
 
 **Entry (REQUIRE_TAKEN_BEFORE_OPEN):** WAITING_RECEIPT until `POST /sessions/{id}/receipt-taken`.
 
