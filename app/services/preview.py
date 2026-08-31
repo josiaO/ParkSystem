@@ -211,6 +211,26 @@ async def snapshot_for_camera(
     explicit: str = "",
     sdk_handle: int | None = None,
 ) -> dict:
+    from app.infrastructure.media.registry import mediamtx_live_active
+    from app.services import mediamtx
+
+    if mediamtx_live_active(camera_id):
+        local = mediamtx.live_endpoint(camera_id).get("rtsp") or ""
+        if local.startswith("rtsp://"):
+            from app.services.frame_grab import capture_frame
+            grabbed = await capture_frame(local)
+            if grabbed.get("ok"):
+                remember_frame(
+                    camera_id,
+                    grabbed["jpeg"],
+                    url=local,
+                    url_redacted=str(grabbed.get("url_redacted") or ""),
+                    source="mediamtx",
+                )
+                grabbed["cached"] = False
+                grabbed["source"] = "mediamtx"
+                grabbed["url"] = local
+                return grabbed
     cached = await gateway.snapshot(camera_id)
     if cached[:2] == JPEG_SOI:
         row = get_state(camera_id)
@@ -308,6 +328,12 @@ def touch_live(spec: CameraLiveSpec) -> None:
 
 def acquire_live(spec: CameraLiveSpec) -> None:
     _viewers[spec.id] = viewers_for(spec.id) + 1
+    _last_view[spec.id] = time.monotonic()
+    from app.infrastructure.media.registry import mediamtx_live_active
+    if mediamtx_live_active(spec.id):
+        from app.services.mediamtx_detect import ensure_detect_consumer
+        ensure_detect_consumer(spec)
+        return
     touch_live(spec)
 
 
@@ -321,6 +347,11 @@ def release_live(camera_id: int) -> None:
 
 
 def acquire_detect(spec: CameraLiveSpec) -> None:
+    from app.infrastructure.media.registry import mediamtx_detect_active
+    if mediamtx_detect_active(spec.id):
+        from app.services.mediamtx_detect import ensure_detect_consumer
+        ensure_detect_consumer(spec)
+        return
     gateway.acquire_detect(spec)
 
 
@@ -385,6 +416,11 @@ def stop_idle_watch() -> None:
 
 def start_live_pump(spec: CameraLiveSpec) -> None:
     """One gateway producer. MJPEG readers and FastALPR share the latest JPEG."""
+    from app.infrastructure.media.registry import mediamtx_live_active
+    if mediamtx_live_active(spec.id):
+        from app.services.mediamtx_detect import ensure_detect_consumer
+        ensure_detect_consumer(spec)
+        return
     start_idle_watch()
     row = gateway._session_for(spec)
     row.viewers = max(row.viewers, viewers_for(spec.id))
@@ -399,5 +435,7 @@ def stop_live_pump(camera_id: int) -> None:
 
 
 def stop_live_pumps() -> None:
+    from app.services.mediamtx_detect import stop_all as stop_mediamtx_detect
+    stop_mediamtx_detect()
     gateway.stop_all()
     _viewers.clear()

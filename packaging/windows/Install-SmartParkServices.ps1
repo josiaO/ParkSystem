@@ -20,6 +20,7 @@ if (-not $InstallDir) {
 $Py64 = Join-Path $InstallDir "python64\python.exe"
 $Py32 = Join-Path $InstallDir "python32\python.exe"
 $HostPy = Join-Path $InstallDir "tools\hvx_sdk_host\hvx_host.py"
+$MediaMtx = Join-Path $InstallDir "vendor\mediamtx\mediamtx.exe"
 if (-not (Test-Path $Py64)) {
     throw "Install SmartPark Edge first. Missing $Py64"
 }
@@ -43,12 +44,16 @@ function Register-SmartParkTask {
     Start-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
 }
 
-$envPrefix = "set SMARTPARK_HOME=$InstallDir&& set PYTHONPATH=$InstallDir&& set SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor&& set PATH=$InstallDir\python64;$InstallDir\python64\Scripts;$InstallDir\vendor;%PATH%"
+$mtxBin = ""
+if (Test-Path $MediaMtx) {
+    $mtxBin = "set SMARTPARK_MEDIAMTX_BIN=$MediaMtx&& "
+}
+$envPrefix = "set SMARTPARK_HOME=$InstallDir&& set PYTHONPATH=$InstallDir&& set SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor&& ${mtxBin}set PATH=$InstallDir\python64;$InstallDir\python64\Scripts;$InstallDir\vendor;%PATH%"
 $siteCmd = "$envPrefix&& `"$Py64`" -m app.site_service"
 $hostCmd = "$envPrefix&& `"$Py32`" `"$HostPy`""
-# MediaMTX / recognition worker are optional. Do not register them unless SMARTPARK_MEDIA_GATEWAY_ENABLED=true.
+$mediaCmd = "$envPrefix&& `"$Py64`" -m app.media_service"
 
-Write-Host "Registering SmartPark Site Service and HVX host tasks..."
+Write-Host "Registering SmartPark background tasks..."
 $failed = @()
 try {
     Register-SmartParkTask -Name "SmartPark Site Service" -Command $siteCmd -WorkingDirectory $InstallDir
@@ -62,7 +67,16 @@ if (Test-Path $Py32) {
         $failed += "HVX host: $_"
     }
 } else {
-    Write-Host "HVX host skipped: 32-bit Python is not in this install."
+    Write-Host "HVX host skipped: 32-bit Python is not in this kit."
+}
+if (Test-Path $MediaMtx) {
+    try {
+        Register-SmartParkTask -Name "SmartPark Media Service" -Command $mediaCmd -WorkingDirectory $InstallDir
+    } catch {
+        $failed += "Media Service: $_"
+    }
+} else {
+    Write-Host "Media Service skipped: vendor\mediamtx\mediamtx.exe not in this kit."
 }
 if ($failed.Count -gt 0) {
     throw ($failed -join "; ")
@@ -70,7 +84,11 @@ if ($failed.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Background tasks:"
-Write-Host "  SmartPark Site Service  (API + camera events, port 8760)"
-Write-Host "  SmartPark HVX Host      (32-bit NetSDK, port 8765)"
+Write-Host "  SmartPark Site Service   (API + camera events, port 8760)"
+Write-Host "  SmartPark HVX Host       (32-bit NetSDK, port 8765)"
+if (Test-Path $MediaMtx) {
+    Write-Host "  SmartPark Media Service  (MediaMTX sidecar; idle until SMARTPARK_MEDIA_GATEWAY_ENABLED=true)"
+}
 Write-Host "Desktop is only a client. Parking continues if the UI is closed."
+Write-Host "MediaMTX: off by default. After soak, run Enable-MediaMTX.ps1 from the install/USB folder."
 Write-Host "Recovery: Windows restarts each task up to 3 times, 1 minute apart."

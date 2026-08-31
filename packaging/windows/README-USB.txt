@@ -22,7 +22,31 @@ Sign in:  admin / SmartPark1!
 Cameras:  Add site cameras  then  Connect all
 Camera login: admin / admin   SDK port 30000
 Onboard wizard: Live Gates → IPs → Onboard wizard (HVX first, then ONVIF/RTSP)
-MediaMTX is optional and off by default. Native HVX plates and boom control stay on.
+
+MediaMTX (optional, bundled, OFF by default)
+--------------------------------------------
+The kit includes vendor\mediamtx\mediamtx.exe. Three background tasks start
+at logon: Site Service (API), HVX Host (SDK), Media Service (MediaMTX
+supervisor). MediaMTX does nothing until you enable it.
+
+Staged rollout (one camera first — 2# Entry = camera id 3):
+
+  1. Install + Connect all as usual (native HVX plates unchanged).
+  2. Probe RTSP on camera 3: Live Gates → IPs → RTSP probe (optional).
+  3. Soak test (10+ min smooth local proxy):
+       powershell -ExecutionPolicy Bypass -File MediaMTX-SoakTest.ps1 -CameraId 3
+     Watch rtsp://127.0.0.1:8554/cam3 in VLC/ffplay. If it stutters, fix
+     camera/network — do not change SmartPark decode.
+  4. Enable parallel MediaMTX:
+       powershell -ExecutionPolicy Bypass -File Enable-MediaMTX.ps1 -CameraId 3
+  5. After soak, switch live view for that camera only:
+       powershell -ExecutionPolicy Bypass -File Enable-MediaMTX.ps1 -CameraId 3 -LiveView
+
+Rollback: set SMARTPARK_LIVE_VIEW_PROVIDER=DIRECT_LEGACY in user env, or
+PATCH /settings/migration in the API.
+
+ffmpeg must be on PATH for RTSP soak tests and generic IP cameras.
+
 Vehicles: Register plate so that plate opens the gate
 Snapshot: Cameras -> Capture snapshot
 Receipts: Settings → pick the USB A4 printer. A detected car prints, then the
@@ -45,7 +69,6 @@ the previous SmartPark process and retries.
 The 32-bit camera SDK host is included. COMMISSIONING pulses the live barrier
 (GPIO + Board* + LED). Confirm the lane in the UI before you press Open.
 
-The installer registers Site Service and HVX host as logon tasks and starts them
-immediately. The Desktop is a client. Live video decodes only while Cameras is
-visible; Live Gates shows car snapshots.
-
+The installer registers Site Service, HVX host, and Media Service as logon tasks
+and starts them immediately. The Desktop is a client. Live video decodes only
+while Cameras is visible; Live Gates shows car snapshots.
