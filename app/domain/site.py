@@ -23,6 +23,7 @@ DEFAULT_SITE_POLICY: dict[str, Any] = {
     "tax_behavior": "NONE",
     "branding": "",
     "support_contacts": "",
+    "public_base_url": "",
 }
 
 # Named validators a site may opt into. NONE is the product default.

@@ -136,6 +136,10 @@ def details() -> dict:
     from app.services.media_gateway import gateway
     from app.services.flags import flags as migration_flags
     from app.services import mediamtx
+    from app.services.modules import module_health
+    from app.db import short_session
+    with short_session() as _db:
+        modules_snapshot = module_health(_db)
     hvx = ready()["hvx_host"]
     domains = {
         "camera_connection": {"ok": bool(hvx.get("ok")), "detail": "HVX host" if hvx.get("ok") else "HVX host down"},
@@ -153,6 +157,7 @@ def details() -> dict:
         "hvx_host": hvx,
         "cameras": cameras,
         "domains": domains,
+        "modules": modules_snapshot,
         "migration": migration_flags(),
         "media_gateway": {
             "child_pids": gateway.child_pids(),

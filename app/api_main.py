@@ -20,6 +20,7 @@ from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ParkingSettingsUpdate, PaymentConfirm, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
+    ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep,
 )
 from .security import authenticate_user, create_session, current_user, oauth2_scheme, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
@@ -70,15 +71,18 @@ DEFAULT_ROLES = {
         "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
         "gates.open", "gates.open_simulated", "fees.view",
         "subscribers.view", "sessions.view", "payments.view", "payments.create",
+        "settings.view",
     ]),
     "Developer": ",".join([
         "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
         "gates.open", "hardware.view", "fees.view", "simulation.run",
         "subscribers.view", "subscribers.manage", "sessions.view",
-        "payments.view", "payments.create",
+        "payments.view", "payments.create", "settings.view", "settings.manage",
+        "users.view",
     ]),
     "Kiosk Operator": ",".join([
         "kiosk.use", "sessions.view", "payments.view", "payments.create",
+        "dashboard.view",
     ]),
 }
 
@@ -107,6 +111,12 @@ async def lifespan(app: FastAPI):
         ensure_bootstrap_admin(db)
         ensure_car1_tariff(db)
         ensure_access_plans(db)
+        from .services.modules import ensure_modules_initialized
+        from .services.topology import ensure_default_site, sync_gate_lanes_from_cameras
+
+        ensure_modules_initialized(db)
+        ensure_default_site(db)
+        sync_gate_lanes_from_cameras(db)
     mark_core_ready()
     start_idle_watch()
     try:
@@ -149,14 +159,25 @@ app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=li
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
+    from .services.modules import ensure_modules_initialized, load_config, navigation_items
+
     user = authenticate_user(db, username, password)
     token = create_session(db, user)
+    ensure_modules_initialized(db)
+    perms = user_permissions(user)
+    cfg = load_config(db)
     return LoginResponse(
         token=token,
         access_token=token,
         token_type="bearer",
         username=user.username,
-        permissions=sorted(user_permissions(user)),
+        permissions=sorted(perms),
+        navigation=navigation_items(db, perms),
+        modules={
+            "profile": cfg.get("profile"),
+            "enabled": cfg.get("enabled"),
+            "onboarding_completed": cfg.get("onboarding_completed"),
+        },
     )
 
 
@@ -165,7 +186,15 @@ def web_app():
     index = WEB_DIR / "index.html"
     if not index.exists():
         raise HTTPException(404, "Web UI not found")
-    return FileResponse(index)
+    # Avoid stale browser cache after UI token/shell updates.
+    return FileResponse(
+        index,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/health")
@@ -218,8 +247,141 @@ def logout(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get
 
 
 @app.get("/auth/me")
-def me(user: User = Depends(current_user)):
-    return {"id": user.id, "username": user.username, "full_name": user.full_name, "permissions": sorted(user_permissions(user))}
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    from .services.modules import ensure_modules_initialized, load_config, navigation_items
+    from .security import user_permissions
+
+    ensure_modules_initialized(db)
+    perms = user_permissions(user)
+    cfg = load_config(db)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "permissions": sorted(perms),
+        "modules": {
+            "profile": cfg.get("profile"),
+            "enabled": cfg.get("enabled"),
+            "onboarding_completed": cfg.get("onboarding_completed"),
+        },
+        "navigation": navigation_items(db, perms),
+    }
+
+
+@app.get("/modules")
+def modules_list(db: Session = Depends(get_db), _: User = Depends(require("settings.view"))):
+    from .services.modules import list_modules, load_config
+
+    return {"modules": list_modules(db), "config": load_config(db)}
+
+
+@app.get("/modules/profiles")
+def modules_profiles(_: User = Depends(require("settings.view"))):
+    from .services.modules import list_profiles
+
+    return {"profiles": list_profiles()}
+
+
+@app.get("/modules/navigation")
+def modules_navigation(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    from .services.modules import navigation_items
+    from .security import user_permissions
+
+    return {"navigation": navigation_items(db, user_permissions(user))}
+
+
+@app.get("/modules/health")
+def modules_health(db: Session = Depends(get_db), _: User = Depends(require("dashboard.view"))):
+    from .services.modules import module_health
+
+    return module_health(db)
+
+
+@app.put("/modules/profile")
+def modules_apply_profile(
+    payload: ModuleProfileApply,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("settings.manage")),
+):
+    from .services.modules import apply_profile
+
+    try:
+        return apply_profile(db, payload.profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/modules/enabled")
+def modules_set_enabled(
+    payload: ModuleEnablement,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("settings.manage")),
+):
+    from .services.modules import set_enabled
+
+    try:
+        return set_enabled(db, payload.enabled, profile=payload.profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/topology")
+def topology_get(db: Session = Depends(get_db), _: User = Depends(require("settings.view"))):
+    from .services.topology import site_topology
+
+    return site_topology(db)
+
+
+@app.post("/topology/zones")
+def topology_create_zone(
+    payload: ZoneCreate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("settings.manage")),
+):
+    from .services.topology import create_zone, zone_dict
+
+    row = create_zone(db, site_id=payload.site_id, name=payload.name)
+    return zone_dict(row)
+
+
+@app.post("/topology/lanes")
+def topology_create_lane(
+    payload: LaneCreate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("settings.manage")),
+):
+    from .services.topology import create_lane, lane_dict
+
+    row = create_lane(
+        db,
+        name=payload.name,
+        gate_id=payload.gate_id,
+        zone_id=payload.zone_id,
+        direction=payload.direction,
+        bidirectional=payload.bidirectional,
+    )
+    return lane_dict(row)
+
+
+@app.get("/onboarding/status")
+def onboarding_status_route(db: Session = Depends(get_db), _: User = Depends(require("settings.view"))):
+    from .services.modules import onboarding_status
+
+    return onboarding_status(db)
+
+
+@app.post("/onboarding/step")
+def onboarding_step_route(
+    payload: OnboardingStep,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("settings.manage")),
+):
+    from .services.modules import save_onboarding_step
+
+    try:
+        return save_onboarding_step(db, payload.step, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/cameras")
@@ -2476,8 +2638,8 @@ def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     path = Path(row.qr_path) if row and row.qr_path else None
     if path and path.exists():
         return FileResponse(path, media_type="image/png")
-    from app.services.receipts import _qr_png
-    png = _qr_png(f"/p/{token}")
+    from app.services.receipts import _qr_png, public_receipt_url
+    png = _qr_png(public_receipt_url(token))
     if not png:
         raise HTTPException(404, "QR not available")
     return Response(content=png, media_type="image/png")
@@ -2583,10 +2745,10 @@ async def printer_test(
     user: User = Depends(require_any("hardware.view", "simulation.run")),
 ):
     from app.infrastructure.hardware.printers import ReceiptDocument
-    from app.services.receipts import _qr_png
+    from app.services.receipts import _qr_png, public_receipt_url, resolve_public_base_url
     cfg = parking_settings(db)
     token = "TEST"
-    public_url = "/p/TEST"
+    public_url = public_receipt_url(token, base_url=resolve_public_base_url(db))
     document = ReceiptDocument(
         site_name=settings.site_name or settings.app_name,
         plate="T000TST",
@@ -2594,7 +2756,7 @@ async def printer_test(
         entry_gate="Simulation",
         public_reference=token,
         public_url=public_url,
-        payment_instructions="SmartPark thermal printer test ticket.",
+        payment_instructions="SmartPark thermal printer test ticket. Scan the QR code.",
         body_text="SmartPark test receipt\nPlate: T000TST\n",
         qr_payload=public_url,
         qr_png=_qr_png(public_url),

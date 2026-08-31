@@ -69,6 +69,12 @@ def save_site_policy(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     if current.get("plate_validation"):
         value = str(current["plate_validation"]).upper()
         current["plate_validation"] = value if value in PLATE_VALIDATION_POLICIES else "NONE"
+    if "public_base_url" in current:
+        current["public_base_url"] = str(current.get("public_base_url") or "").strip().rstrip("/")
+    if not str(current.get("public_base_url") or "").strip():
+        env_base = str(getattr(settings, "public_base_url", "") or "").strip().rstrip("/")
+        if env_base:
+            current["public_base_url"] = env_base
     current["currency"] = str(current.get("currency") or "USD").upper()[:8]
     row = db.get(SiteSetting, "site")
     if row is None:

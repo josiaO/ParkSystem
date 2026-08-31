@@ -78,6 +78,27 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Site(Base):
+    __tablename__ = "sites"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), default="Default Site")
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    locale: Mapped[str] = mapped_column(String(20), default="en")
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    zones: Mapped[list["Zone"]] = relationship(back_populates="site")
+
+
+class Zone(Base):
+    __tablename__ = "zones"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    site: Mapped[Site] = relationship(back_populates="zones")
+    lanes: Mapped[list["Lane"]] = relationship(back_populates="zone")
+
+
 class Gate(Base):
     __tablename__ = "gates"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -85,8 +106,24 @@ class Gate(Base):
     mode: Mapped[str] = mapped_column(String(30), default=GateMode.COMMISSIONING.value)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     physical_control_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id"), nullable=True)
+    zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id"), nullable=True)
     cameras: Mapped[list["Camera"]] = relationship(back_populates="gate")
     sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate")
+    lanes: Mapped[list["Lane"]] = relationship(back_populates="gate")
+
+
+class Lane(Base):
+    __tablename__ = "lanes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True, index=True)
+    zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
+    bidirectional: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    gate: Mapped[Gate | None] = relationship(back_populates="lanes")
+    zone: Mapped[Zone | None] = relationship(back_populates="lanes")
 
 
 class Camera(Base):
@@ -98,6 +135,7 @@ class Camera(Base):
     username: Mapped[str] = mapped_column(String(120), default="admin")
     password_secret: Mapped[str] = mapped_column(String(300), default="")  # local MVP; replace with OS secret store
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
+    lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
     lane_direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
     controller_ip: Mapped[str] = mapped_column(String(64), default="")
     display_ip: Mapped[str] = mapped_column(String(64), default="")

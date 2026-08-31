@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class LiveGatesUiTests(unittest.TestCase):
     def test_web_live_gates_has_dual_panes_and_ips_tab(self):
         html = (ROOT / "app" / "web" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('data-page="cameras">Live Gates</button>', html)
+        self.assertIn('data-page="cameras"', html)
+        self.assertIn("Live Gates", html)
         self.assertNotIn('data-page="lanes"', html)
         self.assertNotIn('id="page-lanes"', html)
         self.assertIn('id="cameras-sub-live"', html)
@@ -33,7 +34,7 @@ class LiveGatesUiTests(unittest.TestCase):
 
     def test_desktop_live_gates_replaces_old_lanes_page(self):
         desktop = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('add_page("Live Gates", Cameras)', desktop)
+        self.assertIn('add_page(api.nav_label("cameras", "Live Gates"), Cameras)', desktop)
         self.assertNotIn('add_page("Cameras", Cameras)', desktop)
         self.assertNotIn('add_page("Live Gates", Lanes)', desktop)
         self.assertNotIn("class Lanes", desktop)

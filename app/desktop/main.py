@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog
 )
 
@@ -248,16 +248,20 @@ def _pop_raw_jpegs(buf: bytes) -> tuple[bytes | None, bytes]:
 class Login(QDialog):
     def __init__(self):
         super().__init__(); self.setWindowTitle("SmartPark Edge — Sign In")
-        self.setMinimumWidth(320); self.setMaximumWidth(460)
-        l=QVBoxLayout(self); l.setContentsMargins(20,20,20,20)
-        title=QLabel("SmartPark Edge"); title.setStyleSheet("font-size:26px;font-weight:700")
+        self.setMinimumWidth(360); self.setMaximumWidth(460)
+        l=QVBoxLayout(self); l.setContentsMargins(28,28,28,28); l.setSpacing(8)
+        brand=QLabel("SmartPark Edge"); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
+        tag=QLabel("Vehicle intelligence · edge platform")
+        tag.setStyleSheet("font-size:10px;font-weight:600;color:#8A94A2;letter-spacing:0.08em;text-transform:uppercase")
+        title=QLabel("Sign in"); title.setStyleSheet("font-size:22px;font-weight:700;margin-top:10px")
         self.sub=QLabel("Sign in as admin / SmartPark1!")
-        self.sub.setWordWrap(True)
+        self.sub.setObjectName("muted"); self.sub.setWordWrap(True)
         self.user=QLineEdit("admin"); self.user.setPlaceholderText("Username")
         self.pwd=QLineEdit("SmartPark1!"); self.pwd.setPlaceholderText("Password"); self.pwd.setEchoMode(QLineEdit.Password)
-        btn=QPushButton("Sign In"); btn.clicked.connect(self.login)
-        l.addWidget(title); l.addWidget(self.sub); l.addSpacing(15); l.addWidget(self.user); l.addWidget(self.pwd); l.addWidget(btn)
-        fit_window_to_screen(self, (390, 280), min_size=(320, 220))
+        btn=QPushButton("Sign in"); btn.clicked.connect(self.login)
+        l.addWidget(brand); l.addWidget(tag); l.addWidget(title); l.addWidget(self.sub)
+        l.addSpacing(8); l.addWidget(self.user); l.addWidget(self.pwd); l.addSpacing(6); l.addWidget(btn)
+        fit_window_to_screen(self, (400, 320), min_size=(340, 260))
         QTimer.singleShot(0, self._prefill)
     def _prefill(self):
         try:
@@ -1543,6 +1547,259 @@ class SimPage(QWidget):
         w.done.connect(self._show_result); w.failed.connect(lambda e: self.out.setPlainText(str(e))); self._keep(w); w.start()
 
 
+class OnboardingWizard(QWidget):
+    """Full 8-step deployment setup (prompt §9), driven by /onboarding/*."""
+    def __init__(self):
+        super().__init__()
+        self._status = {}
+        self._step = 1
+        root = QVBoxLayout(self)
+        title = QLabel("Setup Wizard")
+        title.setStyleSheet("font-size:24px;font-weight:700")
+        root.addWidget(title)
+        self.subtitle = QLabel("Configure this deployment in eight steps.")
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setObjectName("muted")
+        root.addWidget(self.subtitle)
+        self.step_label = QLabel("Step 1 of 8")
+        self.step_label.setStyleSheet("font-weight:700;color:#0E7C72")
+        root.addWidget(self.step_label)
+
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
+
+        # 1 purpose
+        p1 = QWidget(); l1 = QVBoxLayout(p1)
+        l1.addWidget(QLabel("What is this site for?"))
+        self.use_case = QComboBox()
+        for cid, label in [
+            ("LPR", "License Plate Recognition"),
+            ("SECURITY", "Security Monitoring"),
+            ("ACCESS", "Vehicle Access Control"),
+            ("PARKING", "Parking Management"),
+            ("CUSTOM", "Custom"),
+        ]:
+            self.use_case.addItem(label, cid)
+        l1.addWidget(self.use_case)
+        self.stack.addWidget(p1)
+
+        # 2 topology
+        p2 = QWidget(); l2 = QVBoxLayout(p2)
+        l2.addWidget(QLabel("Site topology preset"))
+        self.topo_preset = QComboBox()
+        self.topo_preset.addItem("1 entry / 1 exit", "1in1out")
+        self.topo_preset.addItem("One bidirectional lane", "bidirectional")
+        self.topo_preset.addItem("No gates (LPR / security)", "lpr_only")
+        self.topo_preset.addItem("Keep current topology", "keep")
+        l2.addWidget(self.topo_preset)
+        form2 = QFormLayout()
+        self.site_name = QLineEdit("Default Site")
+        self.site_tz = QLineEdit("UTC")
+        self.site_cur = QLineEdit("USD")
+        form2.addRow("Site name", self.site_name)
+        form2.addRow("Timezone", self.site_tz)
+        form2.addRow("Currency", self.site_cur)
+        l2.addLayout(form2)
+        self.stack.addWidget(p2)
+
+        # 3 hardware
+        p3 = QWidget(); l3 = QVBoxLayout(p3)
+        l3.addWidget(QLabel("Hardware — discover cameras or skip and commission later in Live Gates."))
+        self.hw_info = QPlainTextEdit(); self.hw_info.setReadOnly(True)
+        l3.addWidget(self.hw_info)
+        disc = QPushButton("Discover cameras on LAN")
+        disc.clicked.connect(self._discover)
+        l3.addWidget(disc)
+        self.stack.addWidget(p3)
+
+        # 4 recognition
+        p4 = QWidget(); l4 = QVBoxLayout(p4)
+        l4.addWidget(QLabel("Default recognition mode for cameras"))
+        self.rec_mode = QComboBox()
+        for mid, label in [
+            ("NATIVE_ONLY", "Native ALPR"),
+            ("FASTALPR_ONLY", "SmartPark FastALPR"),
+            ("HYBRID", "Hybrid"),
+            ("VIDEO_ONLY", "Video only"),
+        ]:
+            self.rec_mode.addItem(label, mid)
+        self.rec_mode.setCurrentIndex(2)
+        l4.addWidget(self.rec_mode)
+        self.stack.addWidget(p4)
+
+        # 5 modules
+        p5 = QWidget(); l5 = QVBoxLayout(p5)
+        l5.addWidget(QLabel("Optional modules (disabled modules disappear from navigation)"))
+        self.mod_list = QListWidget()
+        self.mod_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        l5.addWidget(self.mod_list)
+        self.stack.addWidget(p5)
+
+        # 6 users
+        p6 = QWidget(); l6 = QVBoxLayout(p6)
+        l6.addWidget(QLabel("Optional: create an operator account (leave blank to skip)"))
+        form6 = QFormLayout()
+        self.new_user = QLineEdit(); self.new_full = QLineEdit()
+        self.new_pass = QLineEdit(); self.new_pass.setEchoMode(QLineEdit.Password)
+        self.new_role = QComboBox(); self.new_role.addItems(["Operator", "Admin", "Cashier", "Technician"])
+        form6.addRow("Username", self.new_user)
+        form6.addRow("Full name", self.new_full)
+        form6.addRow("Password", self.new_pass)
+        form6.addRow("Role", self.new_role)
+        l6.addLayout(form6)
+        self.stack.addWidget(p6)
+
+        # 7 health
+        p7 = QWidget(); l7 = QVBoxLayout(p7)
+        l7.addWidget(QLabel("Module health — Disabled is neutral, not an error."))
+        self.health_view = QPlainTextEdit(); self.health_view.setReadOnly(True)
+        l7.addWidget(self.health_view)
+        refresh = QPushButton("Refresh health")
+        refresh.clicked.connect(self._load)
+        l7.addWidget(refresh)
+        self.stack.addWidget(p7)
+
+        # 8 activate
+        p8 = QWidget(); l8 = QVBoxLayout(p8)
+        self.ready = QLabel("Ready to activate this deployment.")
+        self.ready.setWordWrap(True)
+        self.ready.setStyleSheet("font-size:16px;font-weight:600")
+        l8.addWidget(self.ready)
+        self.stack.addWidget(p8)
+
+        nav = QHBoxLayout()
+        self.back_btn = QPushButton("Back"); self.back_btn.clicked.connect(self._back)
+        self.skip_btn = QPushButton("Skip step"); self.skip_btn.setObjectName("secondary"); self.skip_btn.clicked.connect(lambda: self._next(skip=True))
+        self.next_btn = QPushButton("Continue"); self.next_btn.clicked.connect(lambda: self._next(skip=False))
+        self.act_btn = QPushButton("Activate deployment"); self.act_btn.clicked.connect(self._activate)
+        nav.addWidget(self.back_btn); nav.addStretch(); nav.addWidget(self.skip_btn); nav.addWidget(self.next_btn); nav.addWidget(self.act_btn)
+        root.addLayout(nav)
+        self.err = QLabel(""); self.err.setStyleSheet("color:#C0372E"); self.err.setWordWrap(True)
+        root.addWidget(self.err)
+        QTimer.singleShot(0, self._load)
+
+    def _discover(self):
+        try:
+            data = api.get("/cameras/discover?scan_lan=true")
+            cams = data.get("cameras") if isinstance(data, dict) else data
+            n = len(cams) if isinstance(cams, list) else 0
+            self.hw_info.setPlainText(f"{n} device(s) found.\nImport and connect them under Live Gates → IPs.")
+        except Exception as e:
+            self.hw_info.setPlainText(str(e))
+
+    def _load(self):
+        self.err.setText("")
+        try:
+            self._status = api.get("/onboarding/status")
+            self._step = max(1, min(int(self._status.get("step") or 1), 8))
+            uc = self._status.get("use_case")
+            if uc:
+                idx = self.use_case.findData(uc)
+                if idx >= 0:
+                    self.use_case.setCurrentIndex(idx)
+            site = ((self._status.get("topology") or {}).get("site") or {})
+            if site.get("name"):
+                self.site_name.setText(site["name"])
+            if site.get("timezone"):
+                self.site_tz.setText(site["timezone"])
+            if site.get("currency"):
+                self.site_cur.setText(site["currency"])
+            self.mod_list.clear()
+            for row in self._status.get("optional_module_choices") or []:
+                item = QListWidgetItem(f"{row.get('label')} — {row.get('description', '')}")
+                item.setData(Qt.ItemDataRole.UserRole, row.get("id"))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if row.get("enabled") else Qt.CheckState.Unchecked)
+                self.mod_list.addItem(item)
+            comps = ((self._status.get("health") or {}).get("components") or {})
+            lines = [f"{k}: {v.get('state', '—')}" for k, v in comps.items()]
+            self.health_view.setPlainText("\n".join(lines) or "No health data.")
+            enabled = self._status.get("enabled_modules") or []
+            self.ready.setText(
+                f"Profile {self._status.get('profile') or '—'} · {len(enabled)} modules enabled.\n"
+                + ", ".join(enabled)
+            )
+            counts = self._status.get("counts") or {}
+            self.hw_info.setPlainText(
+                f"Cameras: {counts.get('cameras', 0)} · Gates: {counts.get('gates', 0)} · Lanes: {counts.get('lanes', 0)}"
+            )
+            self._show_step()
+        except Exception as e:
+            self.err.setText(str(e))
+
+    def _show_step(self):
+        self.stack.setCurrentIndex(self._step - 1)
+        self.step_label.setText(f"Step {self._step} of 8")
+        self.back_btn.setEnabled(self._step > 1)
+        self.skip_btn.setVisible(self._step not in (1, 8))
+        self.next_btn.setVisible(self._step < 8)
+        self.act_btn.setVisible(self._step >= 8)
+
+    def _payload(self, next_step, *, activate=False, skip=False):
+        body = {
+            "step": next_step,
+            "use_case": self.use_case.currentData(),
+            "activate": activate,
+            "skip": skip,
+        }
+        if self._step == 2 and not skip:
+            body["site"] = {
+                "name": self.site_name.text().strip(),
+                "timezone": self.site_tz.text().strip() or "UTC",
+                "currency": self.site_cur.text().strip() or "USD",
+            }
+            preset = self.topo_preset.currentData()
+            if preset != "keep":
+                body["topology"] = {"preset": preset}
+        if self._step == 3 and not skip:
+            body["hardware"] = {"reviewed": True}
+        if self._step == 4 and not skip:
+            body["recognition_mode"] = self.rec_mode.currentData()
+        if self._step == 5 and not skip:
+            selected = []
+            for i in range(self.mod_list.count()):
+                item = self.mod_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    selected.append(item.data(Qt.ItemDataRole.UserRole))
+            body["optional_modules"] = selected
+        if self._step == 6 and not skip:
+            u = self.new_user.text().strip()
+            p = self.new_pass.text()
+            if u and p:
+                body["user"] = {
+                    "username": u,
+                    "password": p,
+                    "full_name": self.new_full.text().strip() or u,
+                    "role": self.new_role.currentText(),
+                }
+        if self._step == 7:
+            body["health_ok"] = True
+        return body
+
+    def _back(self):
+        self._step = max(1, self._step - 1)
+        self._show_step()
+
+    def _next(self, skip=False):
+        self.err.setText("")
+        nxt = min(8, self._step + 1)
+        try:
+            api.post("/onboarding/step", self._payload(nxt, skip=skip))
+            self._step = nxt
+            self._load()
+        except Exception as e:
+            self.err.setText(str(e))
+
+    def _activate(self):
+        self.err.setText("")
+        try:
+            api.post("/onboarding/step", self._payload(8, activate=True))
+            QMessageBox.information(self, "Activated", "Deployment activated. Restart navigation by signing out and back in if needed.")
+            self._load()
+        except Exception as e:
+            self.err.setText(str(e))
+
+
 class SettingsPage(QWidget):
     def __init__(self, window):
         super().__init__(); self.window=window; l=QVBoxLayout(self)
@@ -1554,10 +1811,13 @@ class SettingsPage(QWidget):
         self.currency=QLineEdit()
         self.language=QComboBox(); self.language.addItems(["en","sw","ar","fr","pt"])
         self.plate_validation=QComboBox(); self.plate_validation.addItems(["NONE","TZ","KE","ZA","AE"])
+        self.public_base_url=QLineEdit()
+        self.public_base_url.setPlaceholderText("http://192.168.1.10:8760")
         form.addRow("Timezone (IANA)", self.timezone)
         form.addRow("Currency (ISO 4217)", self.currency)
         form.addRow("Language", self.language)
         form.addRow("Plate validation", self.plate_validation)
+        form.addRow("Public receipt URL (QR scans)", self.public_base_url)
         site_save=QPushButton("Save site locale")
         site_save.clicked.connect(self.save_site)
         form.addRow("", site_save)
@@ -1595,6 +1855,7 @@ class SettingsPage(QWidget):
             self.site_status.setText(str(e)); return
         self.timezone.setText(str(data.get("timezone") or "UTC"))
         self.currency.setText(str(data.get("currency") or ""))
+        self.public_base_url.setText(str(data.get("public_base_url") or ""))
         idx=self.language.findText(str(data.get("language") or "en"))
         if idx>=0: self.language.setCurrentIndex(idx)
         idx=self.plate_validation.findText(str(data.get("plate_validation") or "NONE"))
@@ -1606,6 +1867,7 @@ class SettingsPage(QWidget):
                 "currency": self.currency.text().strip().upper(),
                 "language": self.language.currentText(),
                 "plate_validation": self.plate_validation.currentText(),
+                "public_base_url": self.public_base_url.text().strip().rstrip("/"),
             })
             self.site_status.setText(f"Saved {saved.get('timezone')} / {saved.get('currency')}")
         except Exception as e:
@@ -1681,19 +1943,34 @@ class MainWindow(QMainWindow):
         root.addWidget(self.nav); root.addWidget(self.stack,1)
         self.pages=[]
         self._makers=[]
-        self.add_page("Dashboard", Dashboard)
-        if api.can("hardware.view") or api.can("dashboard.view"):
-            self.add_page("System Health", SystemHealth)
-        if api.can("cameras.view"): self.add_page("Live Gates", Cameras)
-        if api.can("sessions.view") or api.can("fees.view"): self.add_page("Sessions", Sessions)
-        if api.can("subscribers.view"): self.add_page("Vehicles", Vehicles)
-        if api.can("payments.view") or api.can("fees.view"): self.add_page("Payments", Payments)
-        if api.can("fees.view"): self.add_page("Tariffs", Fees)
-        if api.can("gates.view"): self.add_page("Gates", Gates)
-        if api.can("users.view"): self.add_page("Users", Users)
-        self.add_page("Settings", lambda: SettingsPage(self))
-        if api.can("hardware.view"): self.add_page("Hardware Lab", Hardware)
-        if api.can("simulation.run"): self.add_page("Simulation", SimPage)
+        if api.nav_page("dashboard"):
+            self.add_page(api.nav_label("dashboard", "Dashboard"), Dashboard)
+        if api.nav_page("health"):
+            self.add_page(api.nav_label("health", "System Health"), SystemHealth)
+        if api.nav_page("cameras"):
+            self.add_page(api.nav_label("cameras", "Live Gates"), Cameras)
+        if api.nav_page("onboarding") or (
+            api.can("settings.manage") and not (api.modules or {}).get("onboarding_completed", True)
+        ):
+            self.add_page(api.nav_label("onboarding", "Setup Wizard"), OnboardingWizard)
+        if api.nav_page("sessions"):
+            self.add_page(api.nav_label("sessions", "Sessions"), Sessions)
+        if api.nav_page("vehicles"):
+            self.add_page(api.nav_label("vehicles", "Vehicles"), Vehicles)
+        if api.nav_page("payments"):
+            self.add_page(api.nav_label("payments", "Payments"), Payments)
+        if api.nav_page("fees"):
+            self.add_page(api.nav_label("fees", "Tariffs"), Fees)
+        if api.nav_page("gates"):
+            self.add_page(api.nav_label("gates", "Gates"), Gates)
+        if api.nav_page("users"):
+            self.add_page(api.nav_label("users", "Users"), Users)
+        if api.nav_page("settings") or api.can("settings.view") or api.can("dashboard.view"):
+            self.add_page(api.nav_label("settings", "Settings"), lambda: SettingsPage(self))
+        if api.nav_page("hardware"):
+            self.add_page(api.nav_label("hardware", "Hardware Lab"), Hardware)
+        if api.nav_page("sim"):
+            self.add_page(api.nav_label("sim", "Simulation"), SimPage)
         self.nav.currentRowChanged.connect(self._show_page)
         self.apply_theme("Light")
         geom=available_screen()
