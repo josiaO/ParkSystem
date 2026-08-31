@@ -115,7 +115,7 @@ Open **Live Gates**. The Live tab shows two cameras of the selected lane. IPs, D
 
 ## 6. Registered plates
 
-On **Vehicles**, click **Register plate**. Monthly / Annual / Staff / VIP / Contractor plates **open the barrier** when the live camera (or Simulation ENTRY) reads that plate. Casual unknown plates get a receipt. In **Settings**, pick a USB A4 printer so entry prints then the gate opens. **Sessions → Show / print receipt** reprints. File-only slips live under the SmartPark media folder.
+On **Vehicles**, click **Register plate**. Monthly / Annual / Staff / VIP / Contractor plates **open the barrier** when the live camera (or Simulation ENTRY) reads that plate. Casual unknown plates get a receipt. In **Settings**, pick a USB thermal receipt printer (58 mm / 80 mm roll) so entry prints a ticket then the gate opens. **Sessions → Show / print receipt** reprints. File-only slips live under the SmartPark media folder.
 
 ## Gate / LED / fees
 

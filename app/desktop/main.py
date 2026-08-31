@@ -1571,13 +1571,13 @@ class SettingsPage(QWidget):
             self.pay=QCheckBox("Exit stays closed until the session is paid")
             self.prompt=QLineEdit()
             self.printer=QComboBox(); self.printer.setEditable(False)
-            printer_note=QLabel("USB A4 printer: plug it in, pick it here, Save. A detected car prints then the gate opens.")
+            printer_note=QLabel("Thermal receipt printer (58 mm / 80 mm USB roll): plug it in, pick it here, Save. A detected car prints a ticket, then the gate opens.")
             printer_note.setWordWrap(True)
-            l.addWidget(self.receipt); pf=QFormLayout(); pf.addRow("Receipt policy", self.policy); pf.addRow("Pay prompt", self.prompt); pf.addRow("USB / A4 printer", self.printer); l.addLayout(pf)
+            l.addWidget(self.receipt); pf=QFormLayout(); pf.addRow("Receipt policy", self.policy); pf.addRow("Pay prompt", self.prompt); pf.addRow("Thermal receipt printer", self.printer); l.addLayout(pf)
             l.addWidget(self.pay); l.addWidget(printer_note)
             row=QHBoxLayout()
             save=QPushButton("Save parking rules"); save.clicked.connect(self.save_parking)
-            test=QPushButton("Print test page"); test.clicked.connect(self.test_printer)
+            test=QPushButton("Print test ticket"); test.clicked.connect(self.test_printer)
             row.addWidget(save); row.addWidget(test); row.addStretch(); l.addLayout(row)
             self.park_status=QLabel(""); self.park_status.setWordWrap(True); l.addWidget(self.park_status)
         web=QPushButton("Open web UI"); web.clicked.connect(self.open_web); l.addWidget(web)
@@ -1651,7 +1651,7 @@ class SettingsPage(QWidget):
                 "printer_adapter": "system" if name else "simulated",
                 "printer_name": name or "",
             })
-            self.park_status.setText("Saved. Entry prints on that printer, then the gate opens." if name else "Saved. Receipts are stored as files until you pick a printer.")
+            self.park_status.setText("Saved. Entry prints a thermal ticket on that printer, then the gate opens." if name else "Saved. Receipts are stored as files until you pick a printer.")
             _ = saved
         except Exception as e:
             self.park_status.setText(str(e))

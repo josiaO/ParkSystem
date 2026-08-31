@@ -93,6 +93,13 @@ foreach ($name in $copyDirs) {
 }
 
 Copy-Item (Join-Path $Payload "requirements-windows.txt") (Join-Path $InstallDir "requirements-windows.txt") -Force
+$docSrc = Join-Path $KitRoot "documentation"
+if (Test-Path $docSrc) {
+    Write-Host "Copying documentation..."
+    $docDest = Join-Path $InstallDir "documentation"
+    if (Test-Path $docDest) { Remove-SmartParkTree -Path $docDest -InstallRoot $InstallDir }
+    Copy-Item $docSrc $docDest -Recurse -Force
+}
 $getPip = Join-Path $Payload "get-pip.py"
 if (Test-Path $getPip) {
     Copy-Item $getPip (Join-Path $InstallDir "get-pip.py") -Force
@@ -350,6 +357,7 @@ Write-Host "  Login: admin  /  SmartPark1!"
 Write-Host "  Then: Add site cameras  ->  Connect all"
 Write-Host "  Vehicles: register plates that should open the gate"
 Write-Host "  If it fails: %ProgramData%\SmartParkEdge\logs\launch.log"
+Write-Host "  Documentation: $InstallDir\documentation\index.html"
 Write-Host "  Uninstall: $Uninstall"
 Write-Host ""
 

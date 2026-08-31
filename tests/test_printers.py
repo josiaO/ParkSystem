@@ -12,7 +12,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import Settings
-from app.infrastructure.hardware.printers import ReceiptDocument, list_system_printers, printer_adapter, render_a4_png
+from app.infrastructure.hardware.printers import (
+    ReceiptDocument,
+    escpos_bytes,
+    list_system_printers,
+    printer_adapter,
+    render_a4_png,
+)
 
 
 def _doc() -> ReceiptDocument:
@@ -49,6 +55,12 @@ class PrinterTests(unittest.TestCase):
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertGreater(len(png), 1000)
 
+    def test_escpos_bytes_has_ticket_markers(self):
+        payload = escpos_bytes(_doc())
+        self.assertIn(b"PARKING ENTRY", payload)
+        self.assertIn(b"T000TST", payload)
+        self.assertTrue(payload.startswith(b"\x1b@"))
+
     def test_system_adapter_without_name_is_file_only(self):
         adapter = printer_adapter("system", printer_name="")
         self.assertEqual(adapter.id, "system")
@@ -57,3 +69,14 @@ class PrinterTests(unittest.TestCase):
         self.assertTrue(result.simulated)
         self.assertTrue(result.path)
         self.assertTrue(Path(result.path).is_file())
+
+    def test_system_adapter_sends_escpos_when_printer_set(self):
+        adapter = printer_adapter("system", printer_name="Thermal POS")
+        with patch("app.infrastructure.hardware.printers.send_escpos_to_system_printer") as send:
+            result = asyncio.run(adapter.print_receipt(_doc()))
+        self.assertTrue(result.ok)
+        self.assertFalse(result.simulated)
+        send.assert_called_once()
+        printer_name, payload = send.call_args[0]
+        self.assertEqual(printer_name, "Thermal POS")
+        self.assertIn(b"PARKING ENTRY", payload)

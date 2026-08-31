@@ -75,7 +75,7 @@ def save_parking_settings(db: Session, payload: dict) -> dict:
     if current.get("printer_name") and str(current.get("printer_adapter") or "simulated") == "simulated":
         current["printer_adapter"] = "system"
         row.value = current
-    if not current.get("printer_name") and str(current.get("printer_adapter") or "") in {"system", "usb", "a4"}:
+    if not current.get("printer_name") and str(current.get("printer_adapter") or "") in {"system", "usb", "a4", "thermal"}:
         current["printer_adapter"] = "simulated"
         row.value = current
     db.commit()

@@ -2594,7 +2594,7 @@ async def printer_test(
         entry_gate="Simulation",
         public_reference=token,
         public_url=public_url,
-        payment_instructions="This is a SmartPark test page for the USB A4 printer.",
+        payment_instructions="SmartPark thermal printer test ticket.",
         body_text="SmartPark test receipt\nPlate: T000TST\n",
         qr_payload=public_url,
         qr_png=_qr_png(public_url),

@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmartPark Edge — User Guide</title>
+  <meta name="description" content="Complete user guide: install SmartPark, connect cameras, manage parking and barriers.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="layout">
+  <nav class="sidebar" aria-label="Guide navigation">
+    <div class="brand" data-i18n="brand">SmartPark Edge</div>
+    <div class="toolbar">
+      <button type="button" data-lang-btn="en" class="active" data-i18n="lang_en">English</button>
+      <button type="button" data-lang-btn="sw" data-i18n="lang_sw">Kiswahili</button>
+      <button type="button" id="theme-toggle" class="theme-btn" title="Toggle theme" aria-label="Toggle theme">☾</button>
+    </div>
+    <div class="group" data-i18n="nav_start">Start</div>
+    <a href="#overview" data-i18n="nav_overview">Overview</a>
+    <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
+    <a href="#install" data-i18n="nav_install">Installation</a>
+    <a href="#login" data-i18n="login_h2">Sign in</a>
+    <a href="#daily" data-i18n="nav_daily">Daily use</a>
+    <div class="group" data-i18n="nav_cameras">Cameras</div>
+    <a href="#connect" data-i18n="nav_connect">Connect cameras</a>
+    <a href="#camera-types" data-i18n="nav_types">Camera types</a>
+    <a href="#live-video" data-i18n="nav_live">Live video</a>
+    <a href="#recognition" data-i18n="nav_plates">Plate reading</a>
+    <div class="group" data-i18n="nav_ops">Parking</div>
+    <a href="#vehicles" data-i18n="nav_vehicles">Registered vehicles</a>
+    <a href="#gates" data-i18n="nav_gates">Gates &amp; barriers</a>
+    <a href="#receipts" data-i18n="nav_receipts">Receipts &amp; fees</a>
+    <div class="group" data-i18n="nav_advanced">Advanced</div>
+    <a href="#streaming" data-i18n="nav_streaming">Smooth streaming</a>
+    <a href="#help" data-i18n="nav_help">Help &amp; fixes</a>
+  </nav>
+
+  <main>
+    <header class="hero" id="top">
+      <h1 data-i18n="hero_title">SmartPark Edge</h1>
+      <p data-i18n="hero_lead">Plate-first parking for your site.</p>
+      <div class="quick-links">
+        <a href="#quickstart" data-i18n="hero_q1">First time setup</a>
+        <a href="#connect" data-i18n="hero_q2">Connect cameras</a>
+        <a href="#help" data-i18n="hero_q3">Fix a problem</a>
+      </div>
+    </header>
+
+    <section id="overview">
+      <h2 data-i18n="overview_h2">What SmartPark does</h2>
+      <p data-i18n="overview_p">SmartPark Edge runs on the parking site computer.</p>
+      <div class="grid3">
+        <div class="card icon-card"><div class="icon">📷</div><h4 data-i18n="feat1_t">Cameras</h4><p data-i18n="feat1_d">Works with NetSDK cameras and IP cameras.</p></div>
+        <div class="card icon-card"><div class="icon">📺</div><h4 data-i18n="feat2_t">Live view</h4><p data-i18n="feat2_d">Watch lanes from Live Gates.</p></div>
+        <div class="card icon-card"><div class="icon">🔤</div><h4 data-i18n="feat3_t">Plates</h4><p data-i18n="feat3_d">Reads plates from camera or OCR.</p></div>
+        <div class="card icon-card"><div class="icon">🚧</div><h4 data-i18n="feat4_t">Barriers</h4><p data-i18n="feat4_d">Opens gate for allowed plates.</p></div>
+        <div class="card icon-card"><div class="icon">🧾</div><h4 data-i18n="feat5_t">Receipts</h4><p data-i18n="feat5_d">Prints entry tickets on a thermal roll printer.</p></div>
+        <div class="card icon-card"><div class="icon">⚡</div><h4 data-i18n="feat6_t">Always on</h4><p data-i18n="feat6_d">Parking continues when UI is closed.</p></div>
+      </div>
+
+      <figure class="figure">
+        <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+          <defs>
+            <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#3b82f6"/>
+              <stop offset="100%" stop-color="#22c55e"/>
+            </linearGradient>
+          </defs>
+          <rect x="10" y="70" width="130" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="75" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_entry">Entry camera</text>
+          <rect x="170" y="70" width="130" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="235" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_exit">Exit camera</text>
+          <rect x="330" y="55" width="150" height="90" rx="8" fill="var(--diagram-accent)" stroke="#3b82f6"/>
+          <text x="405" y="95" fill="var(--accent2)" text-anchor="middle" font-size="12" font-weight="bold" data-i18n-svg="lbl_sitepc">Site PC</text>
+          <text x="405" y="115" fill="var(--diagram-muted)" text-anchor="middle" font-size="11">SmartPark</text>
+          <rect x="510" y="70" width="100" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="560" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_barrier">Barrier</text>
+          <rect x="630" y="70" width="80" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="670" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_led">Display</text>
+          <path d="M140 100 H170 M300 100 H330 M480 100 H510 M610 100 H630" stroke="url(#g1)" stroke-width="2" fill="none"/>
+        </svg>
+        <figcaption data-i18n="topology_cap">Typical site layout.</figcaption>
+      </figure>
+
+      <h3 data-i18n="how_h2">How it works</h3>
+      <p data-i18n="how_p">When a vehicle arrives, the camera triggers a plate read.</p>
+      <figure class="figure">
+        <svg viewBox="0 0 640 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+          <rect x="10" y="30" width="100" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="60" y="55" fill="var(--diagram-text)" text-anchor="middle" font-size="11" data-i18n-svg="flow1">Vehicle</text>
+          <text x="125" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
+          <rect x="140" y="30" width="100" height="40" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
+          <text x="190" y="55" fill="var(--accent2)" text-anchor="middle" font-size="11" data-i18n-svg="flow2">Plate read</text>
+          <text x="255" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
+          <rect x="270" y="30" width="100" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="320" y="55" fill="var(--diagram-text)" text-anchor="middle" font-size="11" data-i18n-svg="flow3">Decision</text>
+          <text x="385" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
+          <rect x="400" y="30" width="120" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
+          <text x="460" y="55" fill="var(--accent)" text-anchor="middle" font-size="11" data-i18n-svg="flow4">Gate / receipt</text>
+        </svg>
+        <figcaption data-i18n="flow_cap">Detection runs in the background.</figcaption>
+      </figure>
+    </section>
+
+    <section id="quickstart">
+      <h2 data-i18n="quick_h2">Quick start</h2>
+      <p data-i18n="quick_p">Follow these steps the first time you set up a new site.</p>
+      <ol class="steps">
+        <li data-i18n="qs1">Install from USB.</li>
+        <li data-i18n="qs2">Open Desktop shortcut.</li>
+        <li data-i18n="qs3">Sign in.</li>
+        <li data-i18n="qs4">Add cameras.</li>
+        <li data-i18n="qs5">Connect all.</li>
+        <li data-i18n="qs6">Register plates.</li>
+        <li data-i18n="qs7">Choose printer.</li>
+        <li data-i18n="qs8">Test entry.</li>
+      </ol>
+    </section>
+
+    <section id="install">
+      <h2 data-i18n="install_h2">Installation</h2>
+      <p data-i18n="install_p">You receive SmartPark on a USB stick.</p>
+      <ol class="steps">
+        <li data-i18n="inst1">Open USB folder.</li>
+        <li data-i18n="inst2">Run Install-SmartPark.bat.</li>
+        <li data-i18n="inst3">Open Desktop shortcut.</li>
+        <li data-i18n="inst4">Use Start-SmartPark.bat if needed.</li>
+      </ol>
+      <div class="card warn"><strong>⚠</strong> <span data-i18n="inst_warn">Close other camera software first.</span></div>
+      <table>
+        <tbody>
+          <tr><th data-i18n="inst_loc">Install folder</th><td><code>%LOCALAPPDATA%\Programs\SmartPark Edge</code></td></tr>
+          <tr><th data-i18n="inst_logs">Log files</th><td><code>%ProgramData%\SmartParkEdge\logs\</code></td></tr>
+          <tr><th data-i18n="inst_docs">This guide</th><td><code>documentation\index.html</code> in install folder</td></tr>
+        </tbody>
+      </table>
+      <h3 data-i18n="inst_tasks_h">Services that start automatically</h3>
+      <ul>
+        <li data-i18n="inst_task1">Site Service</li>
+        <li data-i18n="inst_task2">Camera host</li>
+        <li data-i18n="inst_task3">Media service</li>
+      </ul>
+    </section>
+
+    <section id="login">
+      <h2 data-i18n="login_h2">Sign in</h2>
+      <p data-i18n="login_p">Use the administrator account from your installer.</p>
+      <table>
+        <tbody>
+          <tr><th data-i18n="login_user">Username</th><td><code>admin</code></td></tr>
+          <tr><th data-i18n="login_pass">Password</th><td><code>SmartPark1!</code> <span class="badge">default</span></td></tr>
+        </tbody>
+      </table>
+      <p data-i18n="login_note">Change password under Users if required.</p>
+    </section>
+
+    <section id="daily">
+      <h2 data-i18n="daily_h2">Daily use</h2>
+      <p data-i18n="daily_p">Screens operators use most often:</p>
+      <div class="grid2">
+        <div class="card"><h4 data-i18n="daily1_t">Live Gates</h4><p data-i18n="daily1_d">Watch cameras and plates.</p></div>
+        <div class="card"><h4 data-i18n="daily2_t">Sessions</h4><p data-i18n="daily2_d">Who is inside.</p></div>
+        <div class="card"><h4 data-i18n="daily3_t">Vehicles</h4><p data-i18n="daily3_d">Registered plates.</p></div>
+        <div class="card"><h4 data-i18n="daily4_t">Dashboard</h4><p data-i18n="daily4_d">Summary view.</p></div>
+      </div>
+      <div class="card tip"><h4 data-i18n="daily5_t">System Health</h4><p data-i18n="daily5_d">For supervisors.</p></div>
+    </section>
+
+    <section id="connect">
+      <h2 data-i18n="connect_h2">Connect your cameras</h2>
+      <p data-i18n="connect_p">Each camera needs IP, credentials, and entry/exit side.</p>
+      <ol class="steps">
+        <li data-i18n="conn1">Open <span class="ui-path">Live Gates → IPs</span>.</li>
+        <li data-i18n="conn2">Add cameras.</li>
+        <li data-i18n="conn3">Enter details.</li>
+        <li data-i18n="conn4">Choose adapter.</li>
+        <li data-i18n="conn5">Close other camera apps.</li>
+        <li data-i18n="conn6">Connect all.</li>
+        <li data-i18n="conn7">Check live video.</li>
+        <li data-i18n="conn8">Test with a vehicle.</li>
+      </ol>
+      <figure class="figure">
+        <svg viewBox="0 0 560 80" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+          <rect x="5" y="20" width="80" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="45" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_add">Add</text>
+          <text x="95" y="42" fill="var(--diagram-muted)">→</text>
+          <rect x="105" y="20" width="80" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="145" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_connect">Connect</text>
+          <text x="195" y="42" fill="var(--diagram-muted)">→</text>
+          <rect x="205" y="20" width="90" height="36" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
+          <text x="250" y="42" fill="var(--accent2)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_detect">Detect</text>
+          <text x="305" y="42" fill="var(--diagram-muted)">→</text>
+          <rect x="315" y="20" width="90" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
+          <text x="360" y="42" fill="var(--accent)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_gate">Gate</text>
+        </svg>
+      </figure>
+      <h3 data-i18n="cred_h">Typical camera settings</h3>
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="cred_th1">Camera type</th>
+            <th data-i18n="cred_th2">Port</th>
+            <th data-i18n="cred_th3">Login</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td data-i18n="cred_r1c1">NetSDK / HVX</td>
+            <td>30000</td>
+            <td data-i18n="cred_r1c3">admin / admin</td>
+          </tr>
+          <tr>
+            <td data-i18n="cred_r2c1">Dahua / Hikvision</td>
+            <td>554</td>
+            <td data-i18n="cred_r2c3">From camera web page</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="camera-types">
+      <h2 data-i18n="types_h2">Camera types</h2>
+      <p data-i18n="types_p">Choose the adapter on the IPs tab.</p>
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="types_th1">Adapter</th>
+            <th data-i18n="types_th2">Use when</th>
+            <th data-i18n="types_th3">Status when OK</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>hvx</code> <span class="badge green">default</span></td>
+            <td data-i18n="types_r1c2">NetSDK port 30000</td>
+            <td>SDK Connected</td>
+          </tr>
+          <tr>
+            <td><code>dahua</code> / <code>hikvision</code></td>
+            <td data-i18n="types_r2c2">IP camera, no built-in reader</td>
+            <td>Video Connected</td>
+          </tr>
+          <tr>
+            <td><code>rtsp</code></td>
+            <td data-i18n="types_r3c2">Generic RTSP</td>
+            <td>Video Connected</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="live-video">
+      <h2 data-i18n="live_h2">Live video</h2>
+      <p data-i18n="live_p">Live Gates → Live tab.</p>
+      <figure class="figure">
+        <svg viewBox="0 0 520 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+          <rect x="10" y="50" width="90" height="50" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="55" y="80" fill="var(--diagram-text)" text-anchor="middle" font-size="10">Camera</text>
+          <rect x="120" y="40" width="100" height="70" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
+          <text x="170" y="72" fill="var(--accent2)" text-anchor="middle" font-size="10" font-weight="bold">SmartPark</text>
+          <text x="170" y="88" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">Live view</text>
+          <rect x="240" y="35" width="80" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
+          <text x="280" y="60" fill="var(--accent)" text-anchor="middle" font-size="9">Screen L</text>
+          <rect x="240" y="85" width="80" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
+          <text x="280" y="110" fill="var(--accent)" text-anchor="middle" font-size="9">Screen R</text>
+          <rect x="340" y="50" width="80" height="50" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
+          <text x="380" y="80" fill="var(--diagram-text)" text-anchor="middle" font-size="9">Plates</text>
+          <path d="M100 75 H120 M220 75 H240" stroke="var(--diagram-stroke)" stroke-width="2"/>
+        </svg>
+      </figure>
+      <div class="card warn"><span data-i18n="live_tip">If video freezes, close other camera software.</span></div>
+      <p data-i18n="live_roles">Stream quality is managed automatically.</p>
+    </section>
+
+    <section id="recognition">
+      <h2 data-i18n="plates_h2">Plate recognition</h2>
+      <p data-i18n="plates_p">Two methods:</p>
+      <div class="grid2">
+        <div class="card ok">
+          <h4><span class="badge green">1</span> <span data-i18n="native_t">Camera built-in</span></h4>
+          <p data-i18n="native_d">NetSDK cameras send plate text directly.</p>
+        </div>
+        <div class="card">
+          <h4><span class="badge blue">2</span> <span data-i18n="fast_t">Local OCR</span></h4>
+          <p data-i18n="fast_d">Reads plate from video image.</p>
+        </div>
+      </div>
+      <p data-i18n="hybrid_note">Camera reader first, OCR as backup.</p>
+      <p data-i18n="coil_p">Ground loop support.</p>
+    </section>
+
+    <section id="vehicles">
+      <h2 data-i18n="vehicles_h2">Registered vehicles</h2>
+      <p data-i18n="vehicles_p">Registered plates open automatically.</p>
+      <ol>
+        <li data-i18n="veh1">Vehicles → Register plate</li>
+        <li data-i18n="veh2">Enter plate number</li>
+        <li data-i18n="veh3">Choose access type</li>
+        <li data-i18n="veh4">Casual visitors get receipts</li>
+      </ol>
+    </section>
+
+    <section id="gates">
+      <h2 data-i18n="gates_h2">Gates &amp; barriers</h2>
+      <p data-i18n="gates_p">Barrier control via camera, board, and LED.</p>
+      <p data-i18n="gate_mode">Commissioning mode for testing.</p>
+      <p data-i18n="gate_manual">Manual open on Live Gates when commissioning.</p>
+    </section>
+
+    <section id="receipts">
+      <h2 data-i18n="receipts_h2">Receipts &amp; fees</h2>
+      <p data-i18n="receipts_p">Casual visitors get a thermal entry receipt, then the barrier opens.</p>
+      <ol>
+        <li data-i18n="rec1">Settings → thermal printer</li>
+        <li data-i18n="rec2">Fees tab for tariffs</li>
+        <li data-i18n="rec3">Reprint from Sessions</li>
+      </ol>
+      <div class="card tip"><p data-i18n="rec_thermal">Use a 58 mm or 80 mm roll printer. USB or network (ESC/POS).</p></div>
+    </section>
+
+    <section id="streaming">
+      <h2 data-i18n="stream_h2">Smooth streaming (optional)</h2>
+      <p data-i18n="stream_p">Optional media service for smoother video.</p>
+      <div class="card">
+        <p data-i18n="stream_off">Off by default.</p>
+        <p data-i18n="stream_you">Built-in player when enabled.</p>
+        <p data-i18n="stream_roll">Contact technician to roll back if worse.</p>
+      </div>
+    </section>
+
+    <section id="help">
+      <h2 data-i18n="help_h2">Help &amp; common fixes</h2>
+      <p data-i18n="help_p">Try these first.</p>
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="help_th1">Problem</th>
+            <th data-i18n="help_th2">What to do</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td data-i18n="help_r1c1">Offline</td><td data-i18n="help_r1c2">Check network and Connect.</td></tr>
+          <tr><td data-i18n="help_r2c1">Frozen video</td><td data-i18n="help_r2c2">Close other apps.</td></tr>
+          <tr><td data-i18n="help_r3c1">No plate</td><td data-i18n="help_r3c2">Check Online status.</td></tr>
+          <tr><td data-i18n="help_r4c1">Gate stuck</td><td data-i18n="help_r4c2">Check plate and mode.</td></tr>
+          <tr><td data-i18n="help_r5c1">App won't open</td><td data-i18n="help_r5c2">Start-SmartPark.bat</td></tr>
+          <tr><td data-i18n="help_r6c1">No print</td><td data-i18n="help_r6c2">Re-select printer.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="site-footer">
+      <p data-i18n="footer_p">SmartPark Edge user guide.</p>
+      <p data-i18n="footer_v">Version 0.3</p>
+    </footer>
+  </main>
+</div>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
