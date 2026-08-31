@@ -60,14 +60,153 @@ def store_slip_files(document: ReceiptDocument) -> str:
     return str(path)
 
 
+def qr_png_bytes(payload: str) -> bytes:
+    """PNG bitmap for a QR code. Used for slip storage and thermal raster printing."""
+    payload = (payload or "").strip()
+    if not payload:
+        return b""
+    try:
+        import qrcode
+    except Exception:
+        return b""
+    try:
+        qr = qrcode.QRCode(
+            version=None,
+            box_size=6,
+            border=2,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        image = qr.make_image(fill_color="black", back_color="white")
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+def _prepare_qr_bitmap(png_bytes: bytes, *, max_width: int | None = None):
+    """1-bit QR bitmap prepared for ESC/POS raster/column commands."""
+    from PIL import Image, ImageOps
+
+    img_original = Image.open(BytesIO(png_bytes)).convert("RGBA")
+    base = Image.new("RGB", img_original.size, (255, 255, 255))
+    base.paste(img_original, mask=img_original.split()[3])
+    im = base.convert("L")
+    width_dots = max(128, min(576, int(max_width or settings.printer_width_dots or 384)))
+    w, h = im.size
+    if w > width_dots:
+        ratio = width_dots / float(w)
+        im = im.resize((width_dots, max(1, int(h * ratio))), Image.Resampling.LANCZOS)
+    im = ImageOps.invert(im)
+    return im.convert("1")
+
+
+def _document_qr_png(document: ReceiptDocument) -> bytes:
+    if document.qr_png.startswith(b"\x89PNG"):
+        return document.qr_png
+    payload = (document.qr_payload or document.public_url or "").strip()
+    return qr_png_bytes(payload)
+
+
+def escpos_qr_native(data: str, *, module_size: int = 5, error_level: int = 49) -> bytes:
+    """Epson-style ESC/POS QR (model 2). Works on most 58/80 mm thermal printers."""
+    payload = (data or "").encode("utf-8", "replace")
+    if not payload:
+        return b""
+    size = max(1, min(16, int(module_size)))
+    ec = error_level if error_level in {48, 49, 50, 51} else 49
+    parts = [
+        b"\x1d(\x6b\x04\x00\x31A2\x00",  # model 2
+        bytes([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, size]),
+        bytes([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, ec]),
+    ]
+    store_len = len(payload) + 3
+    parts.append(bytes([0x1D, 0x28, 0x6B, store_len % 256, store_len // 256, 0x31, 0x50, 0x30]) + payload)
+    parts.append(b"\x1d(\x6b\x03\x00\x31Q0")
+    return b"".join(parts)
+
+
+def escpos_qr_raster(png_bytes: bytes, *, max_width: int | None = None) -> bytes:
+    """GS v 0 raster QR bitmap."""
+    if not png_bytes.startswith(b"\x89PNG"):
+        return b""
+    im = _prepare_qr_bitmap(png_bytes, max_width=max_width)
+    width, height = im.size
+    bytes_per_row = (width + 7) // 8
+    header = bytes([
+        0x1D, 0x76, 0x30, 0x00,
+        bytes_per_row % 256, bytes_per_row // 256,
+        height % 256, height // 256,
+    ])
+    return header + im.tobytes()
+
+
+def escpos_qr_column(png_bytes: bytes, *, max_width: int | None = None) -> bytes:
+    """ESC * column-format QR bitmap — works on more 58/80 mm printers than GS v 0."""
+    if not png_bytes.startswith(b"\x89PNG"):
+        return b""
+    from PIL import Image
+
+    im = _prepare_qr_bitmap(png_bytes, max_width=max_width)
+    width_pixels = im.size[0]
+    im = im.transpose(Image.ROTATE_270).transpose(Image.FLIP_LEFT_RIGHT)
+    transposed_width, height_pixels = im.size
+    line_height = 8
+    header = bytes([0x1B, 0x2A, 0x00, width_pixels % 256, width_pixels // 256])
+    parts = [b"\x1b3\x10"]
+    left = 0
+    while left < transposed_width:
+        box = (left, 0, left + line_height, height_pixels)
+        im_slice = im.transform((line_height, height_pixels), Image.EXTENT, box)
+        parts.append(header + im_slice.tobytes() + b"\n")
+        left += line_height
+    parts.append(b"\x1b2")
+    return b"".join(parts)
+
+
+def escpos_qr_block(document: ReceiptDocument) -> bytes:
+    """Printable QR block for thermal ESC/POS printers."""
+    payload = (document.qr_payload or document.public_url or "").strip()
+    png = _document_qr_png(document)
+    if not payload and not png:
+        return b""
+    mode = (settings.printer_qr_mode or "auto").strip().lower()
+    block = b""
+    if mode == "native":
+        block = escpos_qr_native(payload) if payload else b""
+    elif mode == "raster":
+        block = escpos_qr_raster(png) if png else b""
+    elif mode == "column":
+        block = escpos_qr_column(png) if png else b""
+    elif mode == "both":
+        parts = []
+        if payload:
+            parts.append(escpos_qr_native(payload))
+        if png:
+            parts.append(escpos_qr_column(png) or escpos_qr_raster(png))
+        block = b"".join(parts)
+    else:
+        # auto: column raster first (widest printer support), then GS v 0, then native QR
+        if png:
+            block = escpos_qr_column(png) or escpos_qr_raster(png)
+        elif payload:
+            block = escpos_qr_native(payload)
+    if not block:
+        return b""
+    return b"\x1ba\x01\nScan QR\n\n" + block + b"\n\n\x1ba\x00"
+
+
 def escpos_bytes(document: ReceiptDocument) -> bytes:
-    """Plain ESC/POS text ticket. QR URL is printed as text so any 58/80mm printer can cut it."""
+    """Thermal receipt ticket with text fields and a scannable QR code."""
     init = b"\x1b@"
     center = b"\x1ba\x01"
     left = b"\x1ba\x00"
     wide = b"\x1d!\x11"
     normal = b"\x1d!\x00"
     cut = b"\x1dV\x00"
+    qr = escpos_qr_block(document)
     lines = [
         init,
         center,
@@ -80,10 +219,13 @@ def escpos_bytes(document: ReceiptDocument) -> bytes:
         f"Entry: {document.entry_time}\n".encode("utf-8", "replace"),
         f"Gate: {document.entry_gate}\n".encode("utf-8", "replace"),
         f"Ref: {document.public_reference}\n\n".encode("utf-8", "replace"),
-        (document.payment_instructions or "").encode("utf-8", "replace") + b"\n",
-        (document.public_url or "").encode("utf-8", "replace") + b"\n\n",
-        cut,
+        (document.payment_instructions or "").encode("utf-8", "replace") + b"\n\n",
     ]
+    if qr:
+        lines.append(qr)
+    elif document.public_url:
+        lines.append(b"URL: " + document.public_url.encode("utf-8", "replace") + b"\n\n")
+    lines.append(cut)
     return b"".join(lines)
 
 

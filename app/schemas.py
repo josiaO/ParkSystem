@@ -16,6 +16,8 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     username: str
     permissions: list[str]
+    navigation: list[dict] = []
+    modules: dict = {}
 
 
 class CameraCreate(BaseModel):
@@ -195,6 +197,7 @@ class SitePolicyUpdate(BaseModel):
     tax_behavior: str | None = None
     branding: str | None = None
     support_contacts: str | None = None
+    public_base_url: str | None = None
 
 
 class MigrationFlagsUpdate(BaseModel):
@@ -261,3 +264,40 @@ class VehicleUpdate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     notes: str | None = None
+
+
+class ModuleProfileApply(BaseModel):
+    profile: str
+
+
+class ModuleEnablement(BaseModel):
+    enabled: list[str]
+    profile: str | None = None
+
+
+class ZoneCreate(BaseModel):
+    site_id: int = 1
+    name: str
+
+
+class LaneCreate(BaseModel):
+    name: str
+    gate_id: int | None = None
+    zone_id: int | None = None
+    direction: str = "ENTRY"
+    bidirectional: bool = False
+
+
+class OnboardingStep(BaseModel):
+    step: int = 0
+    use_case: str | None = None
+    optional_modules: list[str] | None = None
+    activate: bool = False
+    topology: dict | None = None
+    site: dict | None = None
+    hardware: dict | None = None
+    recognition_mode: str | None = None
+    recognition_defaults: dict | None = None
+    user: dict | None = None
+    health_ok: bool | None = None
+    skip: bool = False

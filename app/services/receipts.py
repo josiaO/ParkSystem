@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from io import BytesIO
-
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.infrastructure.hardware.printers import ReceiptDocument, printer_adapter
+from app.infrastructure.hardware.printers import ReceiptDocument, printer_adapter, qr_png_bytes
 from app.models import Gate, ParkingSession, Receipt, utcnow
 
 
@@ -36,17 +34,38 @@ def policy_should_print(policy: str) -> bool:
     return policy != "OFF"
 
 
+def public_receipt_url(token: str, *, base_url: str | None = None) -> str:
+    """Absolute URL encoded in receipt QR codes (phones must reach this host)."""
+    token = (token or "").strip()
+    path = f"/p/{token}" if token else ""
+    base = (base_url or settings.public_base_url or "").strip().rstrip("/")
+    if base:
+        return f"{base}{path}"
+    host = (settings.api_host or "127.0.0.1").strip()
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = int(settings.api_port or 8760)
+    default_port = 443 if str(port) == "443" else (80 if str(port) == "80" else port)
+    if (default_port == 443 and str(port) == "443") or (default_port == 80 and str(port) == "80"):
+        return f"http://{host}{path}"
+    return f"http://{host}:{port}{path}"
+
+
+def resolve_public_base_url(db: Session | None = None) -> str:
+    base = (settings.public_base_url or "").strip().rstrip("/")
+    if base:
+        return base
+    if db is not None:
+        from app.services.site_policy import site_policy
+        policy = site_policy(db)
+        base = str(policy.get("public_base_url") or "").strip().rstrip("/")
+        if base:
+            return base
+    return ""
+
+
 def _qr_png(payload: str) -> bytes:
-    if not payload:
-        return b""
-    try:
-        import qrcode
-    except Exception:
-        return b""
-    image = qrcode.make(payload)
-    buf = BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
+    return qr_png_bytes(payload)
 
 
 def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -> ReceiptDocument:
@@ -63,15 +82,17 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         f"Gate: {gate_name}",
         f"Reference: {token}",
         "",
-        "Scan the QR to check parking time,",
+        "Scan the QR code to check parking time,",
         "amount and payment options.",
         "",
         "You can also pay at the kiosk.",
         "Lost paper is OK — the plate is the identity.",
-        public_url,
     ]
+    if public_url:
+        lines.append(public_url)
     body = "\n".join(lines) + "\n"
-    qr_png = _qr_png(public_url or token)
+    qr_target = public_url or token
+    qr_png = _qr_png(qr_target)
     return ReceiptDocument(
         site_name=settings.site_name or settings.app_name,
         plate=row.plate,
@@ -79,9 +100,9 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         entry_gate=gate_name,
         public_reference=token,
         public_url=public_url,
-        payment_instructions="Scan to check parking time, amount and payment options. You can also pay at the kiosk.",
+        payment_instructions="Scan the QR code for parking time, amount and payment options. You can also pay at the kiosk.",
         body_text=body,
-        qr_payload=public_url or token,
+        qr_payload=qr_target,
         qr_png=qr_png,
         lines=lines,
     )
@@ -113,7 +134,7 @@ async def issue_receipt(
     printer_name: str | None = None,
 ) -> dict:
     token = row.public_token or ""
-    public_url = f"/p/{token}" if token else ""
+    public_url = public_receipt_url(token, base_url=resolve_public_base_url(db))
     document = build_document(row, gate=gate, public_url=public_url)
     adapter = printer_adapter(adapter_id, printer_name=printer_name)
     try:

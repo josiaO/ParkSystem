@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     printer_name: str = ""
     printer_escpos_host: str = ""
     printer_escpos_port: int = 9100
+    public_base_url: str = ""
+    printer_width_dots: int = 384
+    printer_qr_mode: str = "auto"
     media_gateway_enabled: bool = False
     media_gateway_camera_ids: str = ""
     fastalpr_new_pipeline_enabled: bool = False

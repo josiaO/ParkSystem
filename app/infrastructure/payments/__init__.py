@@ -56,3 +56,17 @@ class ManualKioskPaymentProvider:
 
     async def query_status(self, provider_ref: str) -> dict[str, Any]:
         return {"status": "SUCCEEDED", "provider_id": self.id, "provider_ref": provider_ref}
+
+
+PROVIDERS: dict[str, PaymentProvider] = {
+    "simulated": SimulatedPaymentProvider(),
+    "kiosk_manual": ManualKioskPaymentProvider(),
+}
+
+
+def payment_provider_for(provider_id: str) -> PaymentProvider:
+    return PROVIDERS.get(provider_id) or PROVIDERS["kiosk_manual"]
+
+
+def list_payment_providers() -> list[str]:
+    return sorted(PROVIDERS.keys())
