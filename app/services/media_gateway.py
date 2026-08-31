@@ -411,6 +411,33 @@ class LocalMediaGateway:
             "last_error": row.last_error,
         }
 
+    def publish_detect(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "") -> FrameSample | None:
+        """Fill only the DETECT buffer (MediaMTX local RTSP consumer)."""
+        if jpeg[:2] != JPEG_SOI:
+            return None
+        row = self._sessions.get(camera_id)
+        if row is None:
+            row = StreamSession(spec=CameraLiveSpec(
+                id=camera_id, ip="", username="", password="", rtsp_url="", sdk_handle=None,
+                need_detect=True,
+            ))
+            self._sessions[camera_id] = row
+        now = time.monotonic()
+        detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
+        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
+        interval = 1.0 / max(ai_fps, 1.0)
+        latest_detect = row.detect.latest()
+        if latest_detect is not None and (now - latest_detect.received_at) < interval:
+            row.frames_dropped_ai += 1
+            return latest_detect
+        if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
+            row.frames_dropped_ai += 1
+        sample = row.detect.put(jpeg, source=source or "mediamtx", url=url)
+        row.frames_sampled_ai += 1
+        row.ai_last_at = now
+        row.ai_last_seq = sample.seq
+        return sample
+
     def publish(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "", detect: bool = True) -> FrameSample | None:
         if jpeg[:2] != JPEG_SOI:
             return None

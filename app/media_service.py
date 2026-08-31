@@ -6,6 +6,27 @@ import sys
 import time
 
 
+def _sync_cameras_from_db() -> list[dict]:
+    from app.db import SessionLocal
+    from app.models import Camera
+    from app.services.flags import flags, media_mtx_for_camera
+    from app.services.mediamtx_sources import sync_camera
+
+    synced: list[dict] = []
+    with SessionLocal() as db:
+        cfg = flags(db)
+        if not cfg.get("media_gateway_enabled"):
+            return synced
+        for camera in db.query(Camera).filter(Camera.enabled == True).all():
+            if not media_mtx_for_camera(int(camera.id), db):
+                continue
+            try:
+                synced.append(sync_camera(camera, db=db))
+            except Exception as exc:
+                synced.append({"camera_id": camera.id, "registered": False, "error": str(exc)[:200]})
+    return synced
+
+
 def main() -> int:
     from app.services.logging_setup import configure_logging
     from app.services.runtime import acquire_instance_lock, install_crash_hooks, set_process_name
@@ -29,6 +50,7 @@ def main() -> int:
                 break
     if mediamtx.available():
         print(mediamtx.start())
+        print("Synced cameras:", _sync_cameras_from_db())
     else:
         print("MediaMTX binary not found. Live view stays on LocalMediaGateway.")
     try:
@@ -36,6 +58,7 @@ def main() -> int:
             time.sleep(5)
             if flags().get("media_gateway_enabled") and mediamtx.available() and not mediamtx.running():
                 mediamtx.start()
+                _sync_cameras_from_db()
     except KeyboardInterrupt:
         mediamtx.stop()
     return 0

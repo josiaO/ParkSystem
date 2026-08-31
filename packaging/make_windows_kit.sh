@@ -30,9 +30,6 @@ shopt -s nullglob
 cp "$ROOT/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
 cp "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
 shopt -u nullglob
-if [[ ! -f "$OUT/payload/vendor/NetSDK.dll" ]]; then
-  echo "WARNING: OcxConfig/NetSDK.dll was not copied. SDK login will fail until it is in payload/vendor."
-fi
 
 download() {
   local url="$1" dest="$2"
@@ -44,6 +41,24 @@ download() {
   curl -L --fail --retry 5 --retry-delay 2 -o "$dest.partial" "$url"
   mv "$dest.partial" "$dest"
 }
+
+echo "Bundling MediaMTX (Windows amd64, optional sidecar)..."
+MEDIAMTX_VER="${MEDIAMTX_VERSION:-v1.11.3}"
+MEDIAMTX_ZIP="$CACHE/mediamtx_${MEDIAMTX_VER}_windows_amd64.zip"
+download "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VER}/mediamtx_${MEDIAMTX_VER}_windows_amd64.zip" \
+  "$MEDIAMTX_ZIP"
+rm -rf "$OUT/payload/vendor/mediamtx"
+mkdir -p "$OUT/payload/vendor/mediamtx"
+python3 -m zipfile -e "$MEDIAMTX_ZIP" "$OUT/payload/vendor/mediamtx"
+if [[ -f "$ROOT/vendor/mediamtx/LICENSE" ]]; then
+  cp "$ROOT/vendor/mediamtx/LICENSE" "$OUT/payload/vendor/mediamtx/LICENSE"
+fi
+if [[ ! -f "$OUT/payload/vendor/mediamtx/mediamtx.exe" ]]; then
+  echo "WARNING: mediamtx.exe missing from Windows kit. Media sidecar will not start."
+fi
+if [[ ! -f "$OUT/payload/vendor/NetSDK.dll" ]]; then
+  echo "WARNING: OcxConfig/NetSDK.dll was not copied. SDK login will fail until it is in payload/vendor."
+fi
 
 download "$PY64_URL" "$CACHE/python-${PY_VER}-embed-amd64.zip"
 download "$PY32_URL" "$CACHE/python-${PY_VER}-embed-win32.zip"
@@ -153,6 +168,8 @@ cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 cp "$ROOT/packaging/windows/Install-SmartPark.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartPark.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartParkServices.ps1" "$OUT/"
+cp "$ROOT/packaging/windows/Enable-MediaMTX.ps1" "$OUT/"
+cp "$ROOT/packaging/windows/MediaMTX-SoakTest.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/README-USB.txt" "$OUT/README.txt"
 cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/FIRST_TEST_WINDOWS.md"
 
