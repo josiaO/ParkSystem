@@ -178,7 +178,7 @@ class MjpegStream(QThread):
                     if latest is not None:
                         pending=latest
                     now=time.monotonic()
-                    if pending is not None and (now-last_emit) >= 0.04:
+                    if pending is not None and (now-last_emit) >= 0.025:
                         self.frame.emit(pending)
                         pending=None
                         last_emit=now
