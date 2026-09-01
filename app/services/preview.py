@@ -288,7 +288,7 @@ async def mjpeg_from_cache(camera_id: int):
                 event.clear()
                 continue
             try:
-                await asyncio.wait_for(event.wait(), timeout=0.4)
+                await asyncio.wait_for(event.wait(), timeout=0.05)
             except asyncio.TimeoutError:
                 pass
             finally:
