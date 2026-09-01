@@ -243,6 +243,9 @@ async def handle_plate_event(
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
+    entitlement = lookup_entitlement(db, plate)
+    if entitlement.registered and entitlement.plate:
+        plate = normalize_plate(entitlement.plate)
     if side == "EXIT":
         result = await handle_exit(db, plate=plate, gate=gate, side=side)
         result["action"] = "EXIT"
@@ -267,7 +270,6 @@ async def handle_plate_event(
         )
         return _attach_latency(result, started)
 
-    entitlement = lookup_entitlement(db, plate)
     cfg = parking_settings(db)
     policy = resolve_receipt_policy(cfg)
     existing = _active_for_plate(db, plate)
@@ -297,19 +299,27 @@ async def handle_plate_event(
 
     if auto:
         if duplicate:
+            camera = _side_camera(gate, side)
+            cameras = [camera] if camera else list(gate.cameras or [])
+            opened = await _pulse_gate(
+                db, gate, cameras,
+                reason=f"{entitlement.kind} re-entry {row.plate}",
+                side=side, led_text="WELCOME", session=row, automatic=True,
+            )
             result = {
                 "ok": True,
                 "action": "ENTRY",
                 "session": session_dict(row),
                 "receipt": slip if want_print else "",
-                "barrier_opened": False,
+                "barrier_opened": bool(opened and opened.ok),
+                "barrier": opened.__dict__ if opened else {"ok": False, "message": "No camera on that side to pulse"},
                 "entitlement": entitlement.__dict__,
                 "duplicate": True,
                 "alpr": alpr,
                 "source": source,
-                "message": f"Registered plate {row.plate} already has an open session.",
+                "message": f"Registered {entitlement.kind} plate {row.plate} — barrier opened.",
             }
-            return _finish_entry(db, result, row, gate, started, "DUPLICATE")
+            return _finish_entry(db, result, row, gate, started, "ENTRY_AUTHORIZED")
         await _print_now()
         taken = await take_receipt(db, row, reason=f"{entitlement.kind} auto-open {row.plate}")
         result = {
@@ -465,9 +475,13 @@ async def handle_exit(db: Session, *, plate: str, gate: Gate, side: str) -> dict
         amount=f"{due:.0f}", currency=row.currency or "TZS",
     )
     if must_pay:
-        if camera and (camera.display_ip or "").strip() and app_settings.gate_physical_control_enabled:
+        if camera and (camera.display_ip or "").strip():
             try:
-                await send_led_text(camera.display_ip, prompt[:16], dry_run=False)
+                await send_led_text(
+                    camera.display_ip,
+                    prompt[:16],
+                    dry_run=not app_settings.gate_physical_control_enabled,
+                )
             except Exception:
                 pass
         return {
@@ -477,7 +491,7 @@ async def handle_exit(db: Session, *, plate: str, gate: Gate, side: str) -> dict
             "say": prompt,
             "session": session_dict(row),
             "fee": fee,
-            "message": "Barrier stays closed until paid",
+            "message": prompt,
         }
     opened = await _pulse_gate(
         db, gate, cameras, reason=f"exit {plate}", side=side, led_text="THANKYOU",

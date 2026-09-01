@@ -565,21 +565,34 @@ class LocalMediaGateway:
     async def _rtsp_frames(self, row: StreamSession) -> bool:
         spec = row.spec
         role = spec.live_role or ROLE_LIVE
-        preferred = uri_for_role(spec.stream_profiles, role, spec.rtsp_url)
+        profiles = spec.stream_profiles or {}
+        if role in {ROLE_MAIN, ROLE_EVIDENCE}:
+            preferred = uri_for_role(profiles, ROLE_MAIN, spec.rtsp_url)
+        else:
+            # Live view should prefer the substream to keep decode latency low.
+            preferred = (
+                uri_for_role(profiles, ROLE_SUB, "")
+                or uri_for_role(profiles, ROLE_LIVE, spec.rtsp_url)
+                or spec.rtsp_url
+            )
         if role == ROLE_MAIN:
-            preferred = uri_for_role(spec.stream_profiles, ROLE_MAIN, preferred)
+            preferred = uri_for_role(profiles, ROLE_MAIN, preferred)
         urls = vendor_candidates(spec.ip, spec.username, spec.password, preferred or spec.rtsp_url)
         if preferred.startswith("rtsp://"):
             urls = [preferred] + [url for url in urls if url != preferred]
-        profiles = [normalize_profile(spec.ffmpeg_profile)]
+        # When live view fell back to a main-style URL, try known substream paths first.
+        if role not in {ROLE_MAIN, ROLE_EVIDENCE}:
+            subs = [url for url in vendor_candidates(spec.ip, spec.username, spec.password, "") if "sub" in url.lower() or "102" in url or "av0_1" in url or "subtype=1" in url]
+            urls = subs + [url for url in urls if url not in subs]
+        profiles_to_try = [normalize_profile(spec.ffmpeg_profile)]
         fallback = fallback_profile(spec.ffmpeg_profile)
-        if fallback not in profiles:
-            profiles.append(fallback)
+        if fallback not in profiles_to_try:
+            profiles_to_try.append(fallback)
         transports = [normalize_transport(spec.transport)]
         if transports[0] == "AUTO":
             transports = ["TCP", "UDP"]
         for url in urls:
-            for profile_name in profiles:
+            for profile_name in profiles_to_try:
                 for transport in transports:
                     stream = self.ffmpeg_jpeg_stream(
                         url,
@@ -614,19 +627,32 @@ class LocalMediaGateway:
         return False
 
     async def _http_stills(self, row: StreamSession) -> bool:
+        """Poll HTTP snapshot endpoints continuously — not a one-shot still."""
         spec = row.spec
-        http = await grab_http_snapshot(spec.ip, spec.username, spec.password)
-        if http.get("ok"):
-            row.source = "http"
-            row.url = str(http.get("url") or "")
-            row.state = "STREAMING"
-            self.publish(
-                spec.id, http["jpeg"],
-                source="http",
-                url=str(http.get("url") or ""),
-            )
-            return True
-        return False
+        interval = float(getattr(settings, "live_sdk_interval_seconds", 0.025) or 0.025)
+        got = False
+        row.state = "CONNECTING"
+        while row.wanted() or row.viewers > 0:
+            started = time.monotonic()
+            http = await grab_http_snapshot(spec.ip, spec.username, spec.password)
+            if http.get("ok") and http["jpeg"][:2] == JPEG_SOI:
+                row.source = "http"
+                row.url = str(http.get("url") or "")
+                row.state = "STREAMING"
+                self.publish(
+                    spec.id, http["jpeg"],
+                    source="http",
+                    url=str(http.get("url") or ""),
+                )
+                got = True
+            elif got and (time.monotonic() - row.last_frame_received_at) > float(
+                getattr(settings, "stale_stream_seconds", 2.5) or 2.5
+            ):
+                row.state = "DEGRADED"
+                return got
+            delay = interval - (time.monotonic() - started)
+            await asyncio.sleep(delay if delay > 0.002 else 0.002)
+        return got
 
     async def ffmpeg_jpeg_stream(
         self,

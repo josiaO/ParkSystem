@@ -1452,6 +1452,19 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
     return result
 
 
+def _resolve_stream_profiles(camera: Camera) -> dict:
+    profiles = dict(getattr(camera, "stream_profiles", None) or {})
+    if profiles:
+        return profiles
+    if camera.sdk_handle is not None:
+        from .services.stream_roles import hvx_profiles
+        return hvx_profiles(camera.sdk_handle)
+    if camera.rtsp_url:
+        from .services.stream_roles import recommend_roles
+        return recommend_roles([{"uri": camera.rtsp_url, "width": 1280, "height": 720, "fps": 15}])
+    return profiles
+
+
 def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "LIVE") -> CameraLiveSpec:
     detect = need_detect or (not adapter_has_native_plates(camera))
     return CameraLiveSpec(
@@ -1465,7 +1478,7 @@ def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "L
         transport=getattr(camera, "rtsp_transport", None) or settings.rtsp_transport,
         need_detect=detect,
         live_role=live_role,
-        stream_profiles=dict(getattr(camera, "stream_profiles", None) or {}),
+        stream_profiles=_resolve_stream_profiles(camera),
     )
 
 
@@ -1772,13 +1785,29 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     latest = row or previous
     if latest:
         remember_last_car(camera.id, capture_dict(latest))
-    filled = bool(row and row.plate and camera.gate_id and (row.id != previous_id or row.plate != previous_plate))
-    if filled:
+    side = (camera.lane_direction or "ENTRY").upper()
+    new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
+    entitlement = lookup_entitlement(db, row.plate) if row and row.plate else None
+    registered_auto = bool(
+        entitlement and entitlement.registered and entitlement.auto_open
+    )
+    should_handle = bool(
+        row and row.plate and camera.gate_id
+        and (new_capture or side == "EXIT" or registered_auto)
+    )
+    if should_handle:
         gate = db.get(Gate, camera.gate_id)
         if gate is not None:
+            from .services.dedup import camera_events
+            image_id = int(getattr(row, "image_id", 0) or 0)
+            dedupe_id = image_id or int(row.id or 0)
+            if camera_events.seen(camera_id=camera.id, plate=row.plate, image_id=dedupe_id):
+                return capture_dict(latest) if latest else None
             try:
+                ent = lookup_entitlement(db, row.plate)
+                event_plate = ent.plate if ent.registered else row.plate
                 await handle_plate_event(
-                    db, plate=row.plate, gate=gate, side=camera.lane_direction or "ENTRY",
+                    db, plate=event_plate, gate=gate, side=side,
                     simulated=False, source="camera",
                 )
             except Exception as exc:
@@ -1788,7 +1817,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 parking_outbox().enqueue("plate-event", {
                     "plate": row.plate,
                     "gate_id": gate.id,
-                    "side": camera.lane_direction or "ENTRY",
+                    "side": side,
                     "camera_id": camera.id,
                 })
     return capture_dict(latest) if latest else None

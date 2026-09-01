@@ -176,6 +176,26 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue((body.get("barrier") or {}).get("ok"))
         mock_ctrl.open.assert_awaited()
 
+    def test_grace_period_exit_opens_without_payment(self):
+        gate, _ = self._lane()
+        mock_ctrl = MagicMock()
+        mock_ctrl.open = AsyncMock(return_value=OPENED)
+        with patch("app.services.simulation.controller", return_value=mock_ctrl):
+            created = self.client.post("/sim/entry", headers=self.headers, json={
+                "plate": "T123ABC", "gate_id": gate["id"], "side": "ENTRY",
+            }).json()
+            self.assertTrue(created["barrier_opened"])
+            mock_ctrl.open.reset_mock()
+            exiting = self.client.post("/sim/exit", headers=self.headers, json={
+                "plate": "T123ABC", "gate_id": gate["id"], "side": "EXIT",
+            })
+        self.assertEqual(exiting.status_code, 200, exiting.text)
+        body = exiting.json()
+        self.assertTrue(body["opened"])
+        self.assertFalse(body["pay_required"])
+        self.assertEqual(body["fee"]["due"], 0)
+        mock_ctrl.open.assert_awaited()
+
     def test_unpaid_exit_stays_closed_with_pay_prompt(self):
         gate, _ = self._lane()
         mock_ctrl = MagicMock()
@@ -195,6 +215,7 @@ class SimulationTests(unittest.TestCase):
         self.assertFalse(body["opened"])
         self.assertTrue(body["pay_required"])
         self.assertIn("Pay", body["say"])
+        self.assertIn("Pay", body["message"])
         mock_ctrl.open.assert_not_called()
 
     def test_paid_exit_opens(self):

@@ -8,8 +8,10 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.plate import normalize_plate
+from app.core.plate import normalize_plate, plate_similarity
 from app.models import AccessPlan, RegisteredVehicle, utcnow
+
+REGISTERED_FUZZY_MIN = 0.85
 
 DEFAULT_PLANS = (
     {"name": "Monthly Tenant", "kind": "MONTHLY", "auto_open": True, "print_receipt": False},
@@ -54,11 +56,37 @@ def _in_window(vehicle: RegisteredVehicle, at: datetime) -> bool:
     return True
 
 
+def _fuzzy_match_vehicle(
+    db: Session,
+    plate: str,
+    *,
+    at: datetime | None = None,
+    min_similarity: float = REGISTERED_FUZZY_MIN,
+) -> RegisteredVehicle | None:
+    """Match OCR reads that are close to a saved plate (1–2 character edits)."""
+    now = at or utcnow()
+    best: RegisteredVehicle | None = None
+    best_score = 0.0
+    for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))):
+        if not _in_window(row, now):
+            continue
+        plan = row.plan
+        if plan is not None and not plan.enabled:
+            continue
+        score = plate_similarity(plate, row.plate)
+        if score >= min_similarity and score > best_score:
+            best_score = score
+            best = row
+    return best
+
+
 def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -> Entitlement:
     plate = normalize_plate(plate)
     if not plate:
         return Entitlement()
     vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == plate))
+    if vehicle is None:
+        vehicle = _fuzzy_match_vehicle(db, plate, at=at)
     if vehicle is None or not vehicle.enabled:
         return Entitlement(plate=plate)
     now = at or utcnow()
@@ -76,7 +104,7 @@ def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -
         plan_name=plan.name if plan else "",
         vehicle_id=vehicle.id,
         owner_name=vehicle.owner_name,
-        plate=plate,
+        plate=vehicle.plate,
     )
 
 

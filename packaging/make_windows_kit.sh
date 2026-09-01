@@ -38,7 +38,8 @@ download() {
     return
   fi
   echo "Downloading $(basename "$dest")..."
-  curl -L --fail --retry 5 --retry-delay 2 -o "$dest.partial" "$url"
+  rm -f "$dest.partial"
+  curl --http1.1 -L --fail --retry 5 --retry-delay 2 -o "$dest.partial" "$url"
   mv "$dest.partial" "$dest"
 }
 

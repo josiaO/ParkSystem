@@ -686,7 +686,7 @@ class HVXSDK:
     def _latest_jpg_buffer(self, handle: int) -> bytes:
         """Net_GetJpgBuffer is a queue. Drain it and keep only the newest frame."""
         latest = b""
-        for _ in range(8):
+        for _ in range(16):
             jpeg = self._get_jpg_buffer(handle)
             if not jpeg:
                 break
@@ -723,7 +723,7 @@ class HVXSDK:
                     with self._lock:
                         self._last_live_jpeg[handle] = jpeg
             self._pump_messages()
-            time.sleep(0.04 if handles else 0.2)
+            time.sleep(0.025 if handles else 0.2)
         self._video_thread = None
 
     def write_gpio(self, handle: int, index: int, value: int) -> int:

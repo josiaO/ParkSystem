@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     hvx_host_url: str = "http://127.0.0.1:8765"
     alpr_mode: str = "NATIVE_ONLY"
     live_idle_seconds: float = 20.0
-    live_sdk_interval_seconds: float = 0.04
-    snapshot_cache_seconds: float = 0.04
+    live_sdk_interval_seconds: float = 0.025
+    snapshot_cache_seconds: float = 0.025
     stale_stream_seconds: float = 2.5
     detect_fps: float = 5.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"

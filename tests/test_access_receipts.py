@@ -111,6 +111,42 @@ class AccessReceiptTests(unittest.TestCase):
         self.assertFalse(exiting.json().get("pay_required"))
         mock_ctrl.open.assert_awaited()
 
+    def test_registered_duplicate_entry_still_opens_gate(self):
+        gate = self._lane()
+        plans = self.client.get("/access-plans", headers=self.headers).json()
+        vip = next(row for row in plans if row["kind"] == "VIP")
+        self.client.post("/vehicles", headers=self.headers, json={"plate": "T453ETH", "plan_id": vip["id"]})
+        mock_ctrl = MagicMock()
+        mock_ctrl.open = AsyncMock(return_value=OPENED)
+        with patch("app.services.simulation.controller", return_value=mock_ctrl):
+            first = self.client.post("/sim/entry", headers=self.headers, json={
+                "plate": "T453ETH", "gate_id": gate["id"], "side": "ENTRY",
+            })
+            self.assertTrue(first.json()["barrier_opened"])
+            mock_ctrl.open.reset_mock()
+            again = self.client.post("/sim/entry", headers=self.headers, json={
+                "plate": "T453ETH", "gate_id": gate["id"], "side": "ENTRY",
+            })
+        self.assertEqual(again.status_code, 200, again.text)
+        body = again.json()
+        self.assertTrue(body["duplicate"])
+        self.assertTrue(body["barrier_opened"])
+        mock_ctrl.open.assert_awaited()
+
+    def test_fuzzy_ocr_matches_saved_vehicle(self):
+        from app.services.access import lookup_entitlement
+        with self.Session() as db:
+            from app.services.access import ensure_access_plans
+            ensure_access_plans(db)
+            from app.models import AccessPlan, RegisteredVehicle
+            plan = db.scalar(select(AccessPlan).where(AccessPlan.kind == "STAFF"))
+            db.add(RegisteredVehicle(plate="T453ETH", owner_name="Staff", plan_id=plan.id, enabled=True))
+            db.commit()
+            hit = lookup_entitlement(db, "T453ETI")  # common OCR confusion H/I
+            self.assertTrue(hit.registered)
+            self.assertEqual(hit.plate, "T453ETH")
+            self.assertTrue(hit.auto_open)
+
     def test_printer_adapter_is_ready(self):
         status = self.client.get("/printers/status", headers=self.headers)
         self.assertEqual(status.status_code, 200, status.text)
