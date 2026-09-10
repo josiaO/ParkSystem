@@ -15,7 +15,7 @@ from app.services.rtsp_probe import redact_url
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 MJPEG_BOUNDARY = "smartparkframe"
-MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots"}
+MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots", "receipts"}
 
 # Re-export for callers/tests that import from preview.
 __all__ = [

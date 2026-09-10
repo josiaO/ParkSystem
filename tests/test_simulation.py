@@ -252,6 +252,36 @@ class SimulationTests(unittest.TestCase):
         page = self.client.get(f"/p/{token}")
         self.assertEqual(page.status_code, 200)
         self.assertIn("T123ABC", page.text)
+        self.assertIn("Pay on phone", page.text)
+        status = self.client.get(f"/p/{token}/status")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["plate"], "T123ABC")
+        self.assertIn("qr_url", status.json())
+
+    def test_public_mobile_pay_and_kiosk_lookup(self):
+        gate, _ = self._lane()
+        with patch("app.services.simulation.controller") as ctrl:
+            ctrl.return_value.open = AsyncMock(return_value=OPENED)
+            created = self.client.post("/sim/entry", headers=self.headers, json={
+                "plate": "T999XYZ", "gate_id": gate["id"], "side": "ENTRY",
+            }).json()
+        sid = created["session"]["id"]
+        token = created["session"]["public_token"]
+        self._age_session(sid)
+        # Force a due amount so pay has work to do.
+        with self.Session() as db:
+            from app.models import ParkingSession
+            row = db.get(ParkingSession, sid)
+            row.amount_due = 1000
+            row.amount_paid = 0
+            db.commit()
+        paid = self.client.post(f"/p/{token}/pay", json={"method": "MOBILE_SIMULATED"})
+        self.assertEqual(paid.status_code, 200, paid.text)
+        self.assertTrue(paid.json()["paid"])
+        lookup = self.client.get(f"/sessions/by-token/{token}", headers=self.headers)
+        self.assertEqual(lookup.status_code, 200)
+        self.assertEqual(lookup.json()["plate"], "T999XYZ")
+        self.assertTrue(lookup.json()["paid"])
 
     def test_parking_settings_round_trip(self):
         res = self.client.patch("/settings/parking", headers=self.headers, json={

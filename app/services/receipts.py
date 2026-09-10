@@ -82,14 +82,16 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         f"Gate: {gate_name}",
         f"Reference: {token}",
         "",
-        "Scan the QR code to check parking time,",
-        "amount and payment options.",
+        "Scan the QR code to open the payment page on your phone,",
+        "or show this code at the kiosk.",
         "",
         "You can also pay at the kiosk.",
         "Lost paper is OK — the plate is the identity.",
     ]
     if public_url:
         lines.append(public_url)
+    if token:
+        lines.append(f"Code: {token}")
     body = "\n".join(lines) + "\n"
     qr_target = public_url or token
     qr_png = _qr_png(qr_target)
@@ -100,7 +102,7 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         entry_gate=gate_name,
         public_reference=token,
         public_url=public_url,
-        payment_instructions="Scan the QR code for parking time, amount and payment options. You can also pay at the kiosk.",
+        payment_instructions="Scan the QR to pay on your phone, or scan it at the kiosk for cash.",
         body_text=body,
         qr_payload=qr_target,
         qr_png=qr_png,
@@ -183,4 +185,7 @@ async def issue_receipt(
         "print": printed.__dict__,
         "qr_payload": document.qr_payload,
         "qr_url": f"/p/{token}/qr.png" if token else None,
+        "public_token": token,
+        "public_url": public_url,
+        "receipt_html_url": f"/media/receipts/{token}.html" if token else None,
     }

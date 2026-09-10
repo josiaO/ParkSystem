@@ -23,6 +23,13 @@ def _label(language: str, key: str, fallback: str) -> str:
     return t(key, language=language) or fallback
 
 
+def _lane_label(camera: Camera) -> str:
+    side = side_label(camera.lane_direction)
+    if camera.gate and camera.gate.name:
+        return f"{camera.gate.name} {side}".strip()
+    return (camera.name or "").strip() or f"Camera {camera.id}"
+
+
 def camera_operator_status(camera: Camera, *, language: str = "en") -> dict[str, Any]:
     media = gateway.session(camera.id)
     live = media.live.latest() if media else None
@@ -48,7 +55,7 @@ def camera_operator_status(camera: Camera, *, language: str = "en") -> dict[str,
         "name": camera.name,
         "lane": camera.gate.name if camera.gate else "",
         "side": side_label(camera.lane_direction),
-        "label": f"{camera.gate.name} {side_label(camera.lane_direction)}".strip() or camera.name,
+        "label": _lane_label(camera),
         "camera": _label(language, "status.online", "Online") if camera_ok else _label(language, "status.offline", "Offline"),
         "live_video": live_text,
         "plate_recognition": recog,

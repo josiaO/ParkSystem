@@ -79,13 +79,25 @@ def _stop_thread(thread, wait_ms=3000):
         thread.wait(400)
 
 
-def show_printable_receipt(parent, body, path=""):
+def show_printable_receipt(parent, body, path="", qr_url=""):
     dlg=QDialog(parent)
     dlg.setWindowTitle("Parking receipt")
-    dlg.setMinimumSize(420, 420)
+    dlg.setMinimumSize(420, 520)
     layout=QVBoxLayout(dlg)
     text=QPlainTextEdit(); text.setReadOnly(True); text.setPlainText(body or "")
     layout.addWidget(text, 1)
+    if qr_url:
+        try:
+            png = api.get_bytes(qr_url, timeout=8)
+            pix = QPixmap(); pix.loadFromData(png)
+            if not pix.isNull():
+                qr_label = QLabel(); qr_label.setAlignment(Qt.AlignCenter)
+                qr_label.setPixmap(pix.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                layout.addWidget(qr_label)
+                tip = QLabel("Scan to pay on your phone, or use the code at the kiosk.")
+                tip.setWordWrap(True); tip.setAlignment(Qt.AlignCenter); layout.addWidget(tip)
+        except Exception:
+            pass
     if path:
         hint=QLabel(f"Printer-ready file: {path}"); hint.setWordWrap(True); layout.addWidget(hint)
     row=QHBoxLayout()
@@ -1237,6 +1249,9 @@ class Sessions(QWidget):
         printed=(issued or {}).get("print") or {}
         record=(issued or {}).get("receipt_record") or {}
         path=printed.get("path") or (record.get("payload") or {}).get("path") or ""
+        qr_url=(issued or {}).get("qr_url") or ""
+        if not qr_url and (issued or {}).get("public_token"):
+            qr_url=f"/p/{issued['public_token']}/qr.png"
         if not body:
             try:
                 slip=api.get(f"/sessions/{s['id']}/receipt")
@@ -1244,7 +1259,7 @@ class Sessions(QWidget):
                 path=(slip.get("payload") or {}).get("path") or path
             except Exception:
                 pass
-        show_printable_receipt(self, body, path)
+        show_printable_receipt(self, body, path, qr_url=qr_url)
         self.refresh()
     def pay(self):
         s=self.selected()

@@ -14,6 +14,7 @@ Vendor-independent OCR on JPEG frames. It is a **consumer** of the DETECT buffer
 ## Rules
 
 - Load the ONNX models once, warm once, reuse.
+- Pipeline: **detect plate → padded crop → OCR on crop only** (`detect_crop_ocr`). Never OCR the full car JPEG.
 - Latest-frame queue size 1–3 (`LatestFrameBuffer`).
 - If inference is slower than the source, drop stale frames.
 - Default authority is the Site Service camera-event loop (`FASTALPR_LEGACY`).

@@ -10,10 +10,10 @@ app/services/                   Parking, plates, preview, HVX client, gates
 app/services/simulation.py      Shared live + Simulation entry/exit
 app/infrastructure/hardware/    Camera / gate / printer adapters
 app/domain/                     Protocols (CameraAdapter, …)
-app/desktop/                    PySide UI
-app/web/                        Browser UI
+app/desktop/                    PySide UI (Windows only)
+app/web/                        Browser UI (any OS) + `python -m app.web.launch`
 app/site_service.py             Production API process
-tools/hvx_sdk_host/             32-bit NetSDK process — do not rewrite
+tools/hvx_sdk_host/             32-bit NetSDK process — Windows only; do not rewrite
 packaging/windows/              USB installer
 tests/                          unittest
 docs/                           Architecture and ADRs
@@ -21,6 +21,7 @@ docs/                           Architecture and ADRs
 
 Parking decisions go through `handle_plate_event`. Hardware goes through adapters. Do not call `Net_*` from tariff or payment code.
 
+On Linux/macOS: `./scripts/run_dev_linux.sh` or `python -m app.web.launch`. Desktop launch exits with a pointer to the web UI.
 ## What not to touch (engine)
 
 Do not relocate or rewrite:

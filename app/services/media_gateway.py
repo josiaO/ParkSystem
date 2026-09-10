@@ -24,6 +24,7 @@ from app.services.latest_frame import FrameSample, LatestFrameBuffer
 from app.services.rtsp_probe import redact_url, vendor_candidates
 from app.services.stream_roles import (
     ROLE_DETECT,
+    ROLE_EVIDENCE,
     ROLE_LIVE,
     ROLE_MAIN,
     ROLE_SUB,
@@ -488,7 +489,14 @@ class LocalMediaGateway:
                     if spec.sdk_handle is not None:
                         ok = await self._sdk_frames(row)
                     else:
-                        ok = await self._rtsp_frames(row)
+                        try:
+                            ok = await self._rtsp_frames(row)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as rtsp_exc:
+                            # Keep live moving via HTTP stills if RTSP/ffmpeg fails.
+                            row.last_error = str(rtsp_exc)[:300]
+                            ok = False
                         if not ok:
                             ok = await self._http_stills(row)
                     if ok:
@@ -598,7 +606,7 @@ class LocalMediaGateway:
                         url,
                         profile=profile_name,
                         transport=transport,
-                        scale=960 if role != ROLE_MAIN else None,
+                        scale=720 if role != ROLE_MAIN else None,
                         session=row,
                     )
                     try:
@@ -673,14 +681,14 @@ class LocalMediaGateway:
             *profile_args(profile, transport=transport),
             "-i", url,
             "-an", "-vsync", "0", "-flush_packets", "1",
-            "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "7",
+            "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "8",
         ]
         if scale:
             cmd.extend(["-vf", f"scale={int(scale)}:-2"])
         cmd.append("pipe:1")
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            limit=256 * 1024,
+            limit=512 * 1024,
         )
         if session is not None and proc.pid:
             session.child_pids.add(proc.pid)

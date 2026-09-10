@@ -153,6 +153,16 @@ class GatewayIsolationTests(unittest.TestCase):
         self.assertGreaterEqual(row["frames_sampled_ai"], 1)
         stop_live_pumps()
 
+    def test_rtsp_producer_role_constants_resolve(self):
+        """Regression: missing ROLE_EVIDENCE crashed every RTSP live pump."""
+        from app.services import media_gateway as mg
+        from app.services.stream_roles import ROLE_EVIDENCE, ROLE_MAIN
+
+        self.assertEqual(mg.ROLE_EVIDENCE, ROLE_EVIDENCE)
+        roles = {mg.ROLE_MAIN, mg.ROLE_EVIDENCE}
+        self.assertIn(ROLE_MAIN, roles)
+        self.assertIn(ROLE_EVIDENCE, roles)
+
     def test_ai_frames_queue_is_bounded(self):
         q = BoundedQueue("ai", maxsize=1, overflow="drop_oldest")
         q.put("old")

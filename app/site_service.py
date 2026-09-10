@@ -8,6 +8,7 @@ import sys
 def main() -> int:
     from app.services.logging_setup import configure_logging
     from app.services.runtime import acquire_instance_lock, install_crash_hooks
+    from app.services.platform_capabilities import platform_snapshot
 
     install_crash_hooks("SmartParkSiteService")
     configure_logging("site-service")
@@ -17,6 +18,9 @@ def main() -> int:
     from app.config import settings
     from app.desktop.launch import install_root, start_hvx_host
 
+    snap = platform_snapshot()
+    if not snap["hvx_host_supported"]:
+        print(f"Site Service on {snap['os']}: HVX host skipped. Prefer browser UI + rtsp adapters.")
     root = install_root()
     start_hvx_host(root)
     import uvicorn

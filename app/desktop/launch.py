@@ -77,13 +77,15 @@ def _port_open(port: int) -> bool:
 
 
 def start_hvx_host(root: Path) -> None:
+    """Start the 32-bit NetSDK sidecar. No-op outside Windows (DLL is PE32 only)."""
+    if os.name != "nt":
+        return
     if _port_open(8765):
         return
     py32 = root / "python32" / "python.exe"
     host = root / "tools" / "hvx_sdk_host" / "hvx_host.py"
     if not py32.is_file() or not host.is_file():
         return
-    flags = 0x08000000 if os.name == "nt" else 0
     env = os.environ.copy()
     vendor = root / "vendor"
     if vendor.is_dir():
@@ -93,7 +95,7 @@ def start_hvx_host(root: Path) -> None:
         [str(py32), str(host)],
         cwd=str(host.parent),
         env=env,
-        creationflags=flags,
+        creationflags=0x08000000,  # CREATE_NO_WINDOW
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -188,6 +190,16 @@ def main() -> int:
     from app.services.logging_setup import configure_logging
     from app.services.runtime import acquire_instance_lock, install_crash_hooks, set_process_name
 
+    if os.name != "nt":
+        message = (
+            "SmartPark desktop is Windows-only (HVX NetSDK needs a 32-bit Windows host).\n"
+            "On this OS use the browser UI:\n"
+            "  python -m app.web.launch\n"
+            "or: ./scripts/run_dev_linux.sh"
+        )
+        print(message, file=sys.stderr)
+        return 2
+
     root = install_root()
     _prepare_env(root)
     set_process_name("SmartParkDesktop")
@@ -195,13 +207,10 @@ def main() -> int:
     configure_logging("desktop")
     if not acquire_instance_lock("desktop"):
         message = "SmartPark Edge is already open."
-        if os.name == "nt":
-            try:
-                import ctypes
-                ctypes.windll.user32.MessageBoxW(0, message, "SmartPark Edge", 0x40)
-            except Exception:
-                print(message, file=sys.stderr)
-        else:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, "SmartPark Edge", 0x40)
+        except Exception:
             print(message, file=sys.stderr)
         return 0
     try:

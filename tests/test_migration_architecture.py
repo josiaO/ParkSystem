@@ -146,6 +146,12 @@ class OperatorStatusTests(unittest.TestCase):
         self.assertNotIn("NetSDK", status["camera"])
         self.assertNotIn("RTSP", status["barrier"])
 
+    def test_ungated_camera_does_not_crash(self):
+        status = camera_operator_status(_cam(gate=None, gate_id=None, name="Lobby Cam"))
+        self.assertEqual(status["label"], "Lobby Cam")
+        self.assertEqual(status["lane"], "")
+        self.assertEqual(status["barrier"], "Unknown")
+
 
     def test_required_docs_exist(self):
         root = __import__("pathlib").Path(__file__).resolve().parents[1] / "docs"
