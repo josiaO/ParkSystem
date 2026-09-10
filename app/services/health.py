@@ -82,6 +82,7 @@ def live() -> dict:
 def ready() -> dict:
     from app.db import SessionLocal, is_sqlite
     from app.config import settings
+    from app.services.platform_capabilities import hvx_host_supported, platform_snapshot
 
     db_ok = False
     hvx_ok = False
@@ -100,12 +101,33 @@ def ready() -> dict:
         hvx_ok = False
     state = startup_state()
     core = db_ok
+    hvx_required = hvx_host_supported()
+    if core and (hvx_ok or not hvx_required):
+        status = "ready"
+    elif core:
+        status = "degraded"
+    else:
+        status = "not_ready"
     payload = {
         "ok": core,
-        "status": "ready" if core and hvx_ok else ("degraded" if core else "not_ready"),
+        "status": status,
         "state": state,
         "db": {"ok": db_ok, "sqlite": is_sqlite(), "error": error},
-        "hvx_host": {"ok": hvx_ok},
+        "hvx_host": {
+            "ok": hvx_ok,
+            "required": hvx_required,
+            "supported": hvx_required,
+            "note": (
+                None if hvx_ok
+                else (
+                    "HVX NetSDK host is Windows-only; Site Service and web UI run without it. "
+                    "Use rtsp/dahua/hikvision adapters for generic IP cameras."
+                    if not hvx_required
+                    else "HVX host not answering; SDK login and camera GPIO need the 32-bit host."
+                )
+            ),
+        },
+        "platform": platform_snapshot(),
         "time": datetime.now(timezone.utc).isoformat(),
     }
     return payload
@@ -140,9 +162,18 @@ def details() -> dict:
     from app.db import short_session
     with short_session() as _db:
         modules_snapshot = module_health(_db)
-    hvx = ready()["hvx_host"]
+    ready_snap = ready()
+    hvx = ready_snap["hvx_host"]
+    platform = ready_snap.get("platform") or {}
+    hvx_ok = bool(hvx.get("ok"))
+    if hvx_ok:
+        camera_detail = "HVX host"
+    elif hvx.get("supported"):
+        camera_detail = "HVX host down"
+    else:
+        camera_detail = "HVX Windows-only; use rtsp adapters on this OS"
     domains = {
-        "camera_connection": {"ok": bool(hvx.get("ok")), "detail": "HVX host" if hvx.get("ok") else "HVX host down"},
+        "camera_connection": {"ok": hvx_ok or not hvx.get("required", True), "detail": camera_detail},
         "media_gateway": {"ok": True, "local_sessions": len(gateway.live_metrics()), "mediamtx": mediamtx.health()},
         "recognition": {"ok": True, "alpr_mode": alpr_mode(), "native_alpr_enabled": migration_flags().get("native_alpr_enabled")},
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
@@ -152,9 +183,11 @@ def details() -> dict:
     body = {
         "ok": True,
         "state": startup_state(),
+        "status": ready_snap.get("status"),
         "alpr_mode": alpr_mode(),
         "process": process,
         "hvx_host": hvx,
+        "platform": platform,
         "cameras": cameras,
         "domains": domains,
         "modules": modules_snapshot,

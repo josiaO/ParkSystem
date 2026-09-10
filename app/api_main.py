@@ -27,7 +27,7 @@ from .core.fusion import resolve_readings
 from .services.alpr import recognize_bytes, status as alpr_status
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
-from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event
+from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event, should_persist_vehicle_capture
 from .services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from .services.gates import controller
 from .services.led_udp import send_led_text
@@ -791,6 +791,48 @@ def _connect_audit(result: dict) -> dict:
     return {k: v for k, v in result.items() if k not in {"password", "jpeg"}}
 
 
+def _commit_camera(db: Session, camera: Camera) -> None:
+    """Commit camera row changes; recover from stale/rolled-back sessions."""
+    from sqlalchemy.exc import PendingRollbackError, InvalidRequestError
+    from sqlalchemy.orm.attributes import flag_modified
+    from sqlalchemy.orm.exc import StaleDataError
+
+    for json_field in ("stream_profiles", "media_capabilities"):
+        if json_field in camera.__dict__:
+            try:
+                flag_modified(camera, json_field)
+            except Exception:
+                pass
+    try:
+        db.commit()
+        return
+    except (StaleDataError, PendingRollbackError, InvalidRequestError):
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    camera_id = getattr(camera, "id", None)
+    if camera_id is None:
+        raise RuntimeError("Camera row is missing an id after rollback")
+    fresh = db.get(Camera, camera_id)
+    if fresh is None:
+        raise RuntimeError(f"Camera {camera_id} was deleted during connect")
+    for field in (
+        "status", "sdk_handle", "last_error", "last_seen_at", "rtsp_url",
+        "adapter_id", "stream_profiles", "media_capabilities",
+    ):
+        if field in camera.__dict__:
+            setattr(fresh, field, getattr(camera, field))
+            if field in {"stream_profiles", "media_capabilities"}:
+                flag_modified(fresh, field)
+    db.commit()
+    for field in (
+        "status", "sdk_handle", "last_error", "last_seen_at", "rtsp_url",
+        "adapter_id", "stream_profiles", "media_capabilities",
+    ):
+        setattr(camera, field, getattr(fresh, field))
+
+
 async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise_on_host_error: bool = True) -> dict:
     adapter = camera_adapter_for(camera)
     caps = await adapter.capabilities(camera)
@@ -807,12 +849,12 @@ async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise
     if web:
         previous = camera.adapter_id
         camera.adapter_id = "rtsp"
-        db.commit()
+        _commit_camera(db, camera)
         video = await apply_video_connect(camera, db, user, raise_on_host_error=False)
         if video.get("status") == CameraStatus.VIDEO_CONNECTED.value:
             return video
         camera.adapter_id = previous
-        db.commit()
+        _commit_camera(db, camera)
     return await apply_sdk_connect(camera, db, user, raise_on_host_error=raise_on_host_error)
 
 
@@ -859,16 +901,32 @@ async def apply_video_connect(camera: Camera, db: Session, user: User, *, raise_
             camera.status = CameraStatus.OFFLINE.value
             camera.sdk_handle = None
             camera.last_error = result.get("error") or f"{adapter.id} did not return a live JPEG"
-        db.commit()
+        _commit_camera(db, camera)
         write_audit(db, user, "camera.video_connect", "camera", str(camera.id), str(_connect_audit(result)))
         return {**camera_dict(camera), "sdk_result": _connect_audit(result)}
     except HTTPException:
         raise
     except Exception as exc:
-        camera.status = CameraStatus.OFFLINE.value
-        camera.sdk_handle = None
-        camera.last_error = str(exc)
-        db.commit()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            fresh = db.get(Camera, camera.id) if getattr(camera, "id", None) else None
+            target = fresh or camera
+            target.status = CameraStatus.OFFLINE.value
+            target.sdk_handle = None
+            target.last_error = str(exc)
+            _commit_camera(db, target)
+            if fresh is not None:
+                camera.status = target.status
+                camera.sdk_handle = target.sdk_handle
+                camera.last_error = target.last_error
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         if raise_on_host_error:
             raise HTTPException(502, f"IP camera connection failed: {exc}")
         return {**camera_dict(camera), "sdk_result": {"connected": False, "error": str(exc)}}
@@ -889,7 +947,7 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
         camera.last_error = (
             f"No TCP on {camera.ip_address}:{port} — skipped SDK login so other cameras can still connect."
         )
-        db.commit()
+        _commit_camera(db, camera)
         write_audit(db, user, "camera.sdk_connect", "camera", str(camera.id), camera.last_error)
         return {
             **camera_dict(camera),
@@ -897,7 +955,7 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
         }
     camera.status = CameraStatus.SDK_CONNECTING.value
     camera.last_error = ""
-    db.commit()
+    _commit_camera(db, camera)
     try:
         result = await adapter.connect(camera)
         if result.get("connected"):
@@ -908,7 +966,7 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
             from .services.stream_roles import default_capabilities, hvx_profiles
             camera.stream_profiles = hvx_profiles(camera.sdk_handle)
             camera.media_capabilities = default_capabilities(native_alpr=True, sdk=True)
-            db.commit()
+            _commit_camera(db, camera)
             try:
                 from .services.mediamtx_sources import sync_camera
                 sync_camera(camera, db=db)
@@ -918,7 +976,7 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
             camera.status = CameraStatus.SDK_FAILED.value
             name = result.get("connect_rc_name") or result.get("connect_rc")
             camera.last_error = result.get("error") or f"SDK return code: {name}"
-        db.commit()
+        _commit_camera(db, camera)
         write_audit(
             db, user, "camera.sdk_connect", "camera", str(camera.id),
             str(_connect_audit(result)),
@@ -927,9 +985,24 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
     except HTTPException:
         raise
     except Exception as exc:
-        camera.status = CameraStatus.SDK_FAILED.value
-        camera.last_error = str(exc)
-        db.commit()
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            fresh = db.get(Camera, camera.id) if getattr(camera, "id", None) else None
+            target = fresh or camera
+            target.status = CameraStatus.SDK_FAILED.value
+            target.last_error = str(exc)
+            _commit_camera(db, target)
+            if fresh is not None:
+                camera.status = target.status
+                camera.last_error = target.last_error
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         if raise_on_host_error:
             raise HTTPException(502, f"HVX SDK connection failed: {exc}")
         return {**camera_dict(camera), "sdk_result": {"connected": False, "error": str(exc)}}
@@ -1091,7 +1164,18 @@ async def _run_local_alpr(
     )
     if not fused.resolved_plate:
         return alpr
+    # Unique image id so FastALPR hits create a VehicleCapture only when the frame looks like a car/plate.
+    if not image_id:
+        image_id = int(time.time() * 1000) % 2_000_000_000
     capture = _capture_from_readings(native, local, fused, image_id=image_id)
+    from .services.presence import coil_watch
+    allowed, reason = should_persist_vehicle_capture(
+        capture, coil_occupied=coil_watch.occupied(camera.id),
+    )
+    if not allowed:
+        alpr = dict(alpr or {})
+        alpr["persist_skipped"] = reason
+        return alpr
     await _persist_capture_event(db, camera, capture, jpeg, _crop_from_alpr(alpr))
     return alpr
 
@@ -1495,6 +1579,9 @@ async def camera_live_endpoint(camera_id: int, db: Session = Depends(get_db), _:
     return await media_registry.get_live_endpoint(camera_id, db)
 
 
+_snapshot_status_checked: set[int] = set()
+
+
 @app.get("/cameras/{camera_id}/snapshot.jpg")
 async def camera_snapshot(camera_id: int, _: User = Depends(require_media("cameras.view"))):
     spec = pumping_spec(camera_id) or _camera_live_spec(camera_id)
@@ -1509,15 +1596,18 @@ async def camera_snapshot(camera_id: int, _: User = Depends(require_media("camer
             headers["X-Frame-Seq"] = str(seq)
         return Response(content=jpeg, media_type="image/jpeg", headers=headers)
 
-    def _mark_video(url: str | None = None) -> None:
-        with short_session() as db:
-            camera = db.get(Camera, spec.id)
-            if camera is not None:
-                persist_video(db, camera, url)
-
     if row.jpeg[:2] == b"\xff\xd8":
         touch_live(spec)
-        _mark_video(row.url or None)
+        # Promote DISCOVERED→VIDEO_CONNECTED once; never open SQLite on every 40ms poll.
+        if camera_id not in _snapshot_status_checked:
+            with short_session() as db:
+                camera = db.get(Camera, spec.id)
+                if camera is not None:
+                    if camera.status in {
+                        CameraStatus.UNKNOWN.value, CameraStatus.DISCOVERED.value,
+                    }:
+                        persist_video(db, camera, row.url or None)
+                    _snapshot_status_checked.add(camera_id)
         return _jpeg_response(row.jpeg, row.seq)
     touch_live(spec)
     if pumping_spec(camera_id) is not None:
@@ -1568,7 +1658,7 @@ def unwatch_camera_live(camera_id: int, _: User = Depends(require_media("cameras
 
 @app.post("/cameras/{camera_id}/snapshot/capture")
 async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.view"))):
-    """Grab one live JPEG and save it as a car snapshot (plate may be empty)."""
+    """Grab one live JPEG and save a car snapshot only when a vehicle/plate is present."""
     c = get_camera_or_404(db, camera_id)
     spec = _live_spec(c)
     touch_live(spec)
@@ -1578,18 +1668,42 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
     if not grabbed.get("ok"):
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")
     jpeg = grabbed["jpeg"]
-    persist_event(
-        db, c, jpeg=jpeg, crop=b"",
-        capture={"plate": "", "image_id": int(time.time() * 1000) % 2_000_000_000},
+    native = await _native_capture_for_camera(c)
+    alpr = await asyncio.to_thread(recognize_bytes, jpeg, camera_label=f"cam-{c.id}-snap")
+    local = local_from_fastalpr(alpr)
+    fused = resolve_readings(
+        native_plate=native.get("plate") or "",
+        native_confidence=float(native.get("confidence") or 0),
+        local_plate=local.get("plate") or "",
+        local_confidence=float(local.get("confidence") or 0),
+        mode=fusion_mode(c),
     )
+    image_id = int(time.time() * 1000) % 2_000_000_000
+    if fused.resolved_plate or native.get("have_vehicle"):
+        capture = _capture_from_readings(native, local, fused, image_id=image_id)
+        if native.get("have_vehicle"):
+            capture["have_vehicle"] = True
+        allowed, reason = should_persist_vehicle_capture(capture, coil_occupied=coil_watch.occupied(c.id))
+        if not allowed and native.get("have_vehicle"):
+            capture = {
+                "plate": "", "image_id": image_id, "have_vehicle": True,
+                "score": 0, "source": native.get("source") or "camera",
+            }
+            allowed, reason = should_persist_vehicle_capture(capture)
+        if not allowed:
+            raise HTTPException(409, f"No vehicle in frame ({reason}). Snapshot not saved.")
+        row = persist_event(db, c, jpeg=jpeg, crop=_crop_from_alpr(alpr), capture=capture)
+    else:
+        raise HTTPException(409, "No vehicle or plate in frame. Snapshot not saved.")
     write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
-    latest = latest_for_camera(db, c.id)
+    latest = row or latest_for_camera(db, c.id)
     return {
         "ok": True,
         "camera_id": c.id,
         "bytes": len(jpeg),
         "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
         "capture": capture_dict(latest) if latest else None,
+        "plate": (latest.plate if latest else "") or fused.resolved_plate or "",
     }
 
 
@@ -1781,7 +1895,12 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None
     previous_plate = str(previous.plate or "") if previous else ""
-    row = persist_event(db, camera, jpeg=jpeg, crop=crop, capture=capture)
+    row = persist_event(
+        db, camera, jpeg=jpeg, crop=crop, capture=capture,
+        coil_occupied=coil_watch.occupied(camera.id),
+    )
+    if row is None:
+        return capture_dict(previous) if previous else None
     latest = row or previous
     if latest:
         remember_last_car(camera.id, capture_dict(latest))
@@ -1791,35 +1910,67 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     registered_auto = bool(
         entitlement and entitlement.registered and entitlement.auto_open
     )
+    gate = None
+    if camera.gate_id:
+        gate = db.get(Gate, camera.gate_id)
+    elif row and row.plate:
+        # Auto-link only when the site has a single enabled lane (unambiguous).
+        gates = list(db.scalars(select(Gate).where(Gate.enabled == True).order_by(Gate.id)).all())
+        if len(gates) == 1:
+            gate = gates[0]
+            if camera.gate_id is None:
+                camera.gate_id = gate.id
+                db.commit()
+    needs_session = False
+    if row and row.plate and side == "ENTRY":
+        from .services.simulation import _active_for_plate
+        needs_session = _active_for_plate(db, row.plate) is None
+    # Plate-first: create/update parking sessions even when the camera has no Gate.
+    # Barrier open still needs a gate; the session (plate + receipt token) does not.
     should_handle = bool(
-        row and row.plate and camera.gate_id
-        and (new_capture or side == "EXIT" or registered_auto)
+        row and row.plate
+        and (new_capture or side == "EXIT" or registered_auto or needs_session)
     )
     if should_handle:
-        gate = db.get(Gate, camera.gate_id)
-        if gate is not None:
-            from .services.dedup import camera_events
-            image_id = int(getattr(row, "image_id", 0) or 0)
-            dedupe_id = image_id or int(row.id or 0)
-            if camera_events.seen(camera_id=camera.id, plate=row.plate, image_id=dedupe_id):
-                return capture_dict(latest) if latest else None
-            try:
-                ent = lookup_entitlement(db, row.plate)
-                event_plate = ent.plate if ent.registered else row.plate
-                await handle_plate_event(
-                    db, plate=event_plate, gate=gate, side=side,
-                    simulated=False, source="camera",
-                )
-            except Exception as exc:
-                from .services.health import note_worker_failure
-                from .services.queues import parking_outbox
-                note_worker_failure("plate-event", str(exc))
-                parking_outbox().enqueue("plate-event", {
-                    "plate": row.plate,
-                    "gate_id": gate.id,
-                    "side": side,
-                    "camera_id": camera.id,
-                })
+        from .services.dedup import camera_events
+        image_id = int(getattr(row, "image_id", 0) or 0)
+        dedupe_id = image_id or int(row.id or 0)
+        if camera_events.seen(camera_id=camera.id, plate=row.plate, image_id=dedupe_id):
+            return capture_dict(latest) if latest else None
+        try:
+            ent = lookup_entitlement(db, row.plate)
+            event_plate = ent.plate if ent.registered else row.plate
+            result = await handle_plate_event(
+                db, plate=event_plate, gate=gate, side=side,
+                simulated=False, alpr=capture,
+                source=str((capture or {}).get("source") or "camera"),
+                camera=camera,
+            )
+            if result.get("session") and latest:
+                session_id = (result["session"] or {}).get("id")
+                if session_id:
+                    session_row = db.get(ParkingSession, session_id)
+                    if session_row is not None:
+                        if not session_row.camera_id:
+                            session_row.camera_id = camera.id
+                        if gate is None:
+                            camera.last_error = (
+                                f"Session saved for {row.plate} (no Gate on camera — "
+                                "assign a lane/gate to enable barrier control)."
+                            )
+                        elif camera.last_error and "no Gate" in (camera.last_error or ""):
+                            camera.last_error = ""
+                        db.commit()
+        except Exception as exc:
+            from .services.health import note_worker_failure
+            from .services.queues import parking_outbox
+            note_worker_failure("plate-event", str(exc))
+            parking_outbox().enqueue("plate-event", {
+                "plate": row.plate,
+                "gate_id": gate.id if gate else None,
+                "side": side,
+                "camera_id": camera.id,
+            })
     return capture_dict(latest) if latest else None
 
 
@@ -1849,17 +2000,19 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             crop = await hvx.event_crop(handle, image_id=image_id or None)
         except Exception:
             continue
-        if jpeg[:2] == b"\xff\xd8":
-            remember_frame(camera_id, jpeg, source="sdk-event")
+        # Do not inject event stills into live preview — that freezes the UI on the car snap.
+        # Live frames come only from the media gateway producer (Net_GetJpgBuffer / RTSP / HTTP).
         native = native_from_sdk_capture(capture)
-        presence = bool(native.get("have_vehicle") or jpeg[:2] == b"\xff\xd8" or crop[:2] == b"\xff\xd8")
+        # Only treat real vehicle signals as presence — not "any JPEG arrived".
+        presence = bool(native.get("have_vehicle") or native.get("plate"))
         if presence:
             coil_watch.observe(camera_id, True, source="image-callback")
         with short_session() as db:
             row = db.get(Camera, camera_id)
             if row is None:
                 return
-            await _persist_capture_event(db, row, capture, jpeg, crop)
+            if presence:
+                await _persist_capture_event(db, row, capture, jpeg, crop)
             if should_run_local(
                 native_plate=str(native.get("plate") or ""),
                 native_confidence=float(native.get("confidence") or 0),
@@ -1867,7 +2020,7 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             ):
                 frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
                 await _run_local_alpr(
-                    db, row, frame, native=native, presence=True,
+                    db, row, frame, native=native, presence=presence,
                     image_id=image_id, force=False,
                 )
         if image_id:
@@ -1976,8 +2129,9 @@ async def _outbox_loop():
                     continue
                 try:
                     with short_session() as db:
-                        gate = db.get(Gate, int(payload.get("gate_id") or 0))
-                        if gate is None:
+                        gate = db.get(Gate, int(payload.get("gate_id") or 0)) if payload.get("gate_id") else None
+                        camera = db.get(Camera, int(payload.get("camera_id") or 0)) if payload.get("camera_id") else None
+                        if gate is None and camera is None and not payload.get("plate"):
                             box.ack(item["id"])
                             continue
                         await handle_plate_event(
@@ -1987,6 +2141,7 @@ async def _outbox_loop():
                             side=str(payload.get("side") or "ENTRY"),
                             simulated=False,
                             source="outbox",
+                            camera=camera,
                         )
                     box.ack(item["id"])
                 except Exception as exc:
@@ -2617,21 +2772,20 @@ async def sim_exit_ep(payload: SimExitRequest, db: Session = Depends(get_db), us
 
 @app.get("/p/{token}", include_in_schema=False)
 def public_receipt(token: str, db: Session = Depends(get_db)):
-    row = db.scalar(select(ParkingSession).where(ParkingSession.public_token == token))
+    from app.services.public_pay import public_session_payload, session_by_public_token
+
+    row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
-    if row.status not in ("CLOSED",):
-        from app.services.simulation import quote_session
-        quote_session(db, row)
-    due = float(row.amount_due or 0)
-    paid = float(row.amount_paid or 0)
-    remaining = max(0.0, due - paid)
-    kind = getattr(row, "parker_kind", None) or "CASUAL"
+    data = public_session_payload(db, row)
+    remaining = float(data["amount_remaining"])
+    paid = float(data["amount_paid"])
+    due = float(data["amount_due"])
+    currency = data["currency"]
     entry = row.entry_time.strftime("%d %b %Y %H:%M") if row.entry_time else "—"
-    status_label = "PAID" if paid + 0.0001 >= due and row.status in ("PAID", "CLOSED") else row.status
-    if remaining <= 0 and row.status not in ("CLOSED",):
-        status_label = "PAID" if row.status == "PAID" else "NO CHARGE YET"
-    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Parking — {row.plate}</title>
+    status_label = "PAID" if data["paid"] else data["status"]
+    pay_disabled = "disabled" if data["paid"] else ""
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pay — {row.plate}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
       body{{font:16px/1.45 system-ui,sans-serif;margin:0;background:#f5f7fb;color:#172033}}
@@ -2640,25 +2794,144 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       .card{{background:#fff;border:1px solid #dfe5ef;border-radius:12px;padding:20px;margin:16px 0}}
       .due{{font-size:26px;font-weight:700}}
       .muted{{color:#5b6b82}}
-      img.qr{{width:160px;height:160px}}
-      .btn{{display:block;text-align:center;background:#1f5eff;color:#fff;text-decoration:none;
-           border-radius:8px;padding:12px;margin-top:12px;font-weight:600}}
-      .btn.secondary{{background:#eef2f8;color:#172033}}
+      .ok{{color:#0a7a3e;font-weight:700}}
+      img.qr{{width:168px;height:168px;background:#fff;padding:8px;border:1px solid #dfe5ef;border-radius:8px}}
+      .btn{{display:block;width:100%;box-sizing:border-box;text-align:center;background:#1f5eff;color:#fff;
+           border:0;border-radius:8px;padding:14px;margin-top:12px;font-weight:600;font-size:16px;cursor:pointer}}
+      .btn:disabled{{opacity:.5;cursor:not-allowed}}
+      .btn.secondary{{background:#eef2f8;color:#172033;text-decoration:none}}
+      code{{background:#eef2f8;padding:2px 6px;border-radius:4px}}
+      #msg{{min-height:1.4em;margin-top:10px}}
     </style></head>
     <body><main>
     <p class="muted">{settings.site_name}</p>
     <p class="plate">{row.plate}</p>
     <div class="card">
       <p>Entry {entry}</p>
-      <p>{kind} · {status_label}</p>
-      <p class="due">TZS {remaining:,.0f}</p>
-      <p class="muted">Amount due now. Paid TZS {paid:,.0f} of {due:,.0f}.</p>
+      <p>{data['parker_kind']} · <span id="status">{status_label}</span></p>
+      <p class="due" id="due">{currency} {remaining:,.0f}</p>
+      <p class="muted">Paid {currency} {paid:,.0f} of {due:,.0f}.</p>
+      <p class="muted">Receipt code <code id="code">{token}</code></p>
+      <button class="btn" id="pay-mobile" {pay_disabled}>Pay on phone (mobile)</button>
       <a class="btn secondary" href="#kiosk">Pay at kiosk</a>
+      <p id="msg" class="muted"></p>
     </div>
-    <p><img class="qr" src="/p/{token}/qr.png" alt="QR"></p>
-    <p class="muted" id="kiosk">Pay at the kiosk, or keep this page. Lost paper is OK — the plate is the identity. Mobile money will appear here when the site provider is connected.</p>
+    <p><img class="qr" src="/p/{token}/qr.png" alt="Payment QR"></p>
+    <div class="card" id="kiosk">
+      <p><b>Kiosk</b></p>
+      <p class="muted">Scan this same QR (or type code <code>{token}</code>) at the site kiosk. An operator confirms cash and the ledger updates immediately.</p>
+    </div>
+    <p class="muted">Lost paper is OK — the plate is the identity. This page is the payment link encoded in the receipt QR.</p>
+    <script>
+      const token = {token!r};
+      const payBtn = document.getElementById("pay-mobile");
+      const msg = document.getElementById("msg");
+      async function refresh() {{
+        const res = await fetch("/p/" + encodeURIComponent(token) + "/status");
+        if (!res.ok) return;
+        const data = await res.json();
+        document.getElementById("status").textContent = data.paid ? "PAID" : data.status;
+        document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
+        if (data.paid) {{
+          payBtn.disabled = true;
+          msg.textContent = "Paid. You can leave when the exit camera reads your plate.";
+          msg.className = "ok";
+        }}
+      }}
+      payBtn.addEventListener("click", async () => {{
+        payBtn.disabled = true;
+        msg.textContent = "Confirming payment…";
+        msg.className = "muted";
+        try {{
+          const res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
+          }});
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || "Payment failed");
+          msg.textContent = data.already_paid ? "Already paid." : "Payment recorded.";
+          msg.className = "ok";
+          await refresh();
+        }} catch (err) {{
+          msg.textContent = err.message || String(err);
+          msg.className = "muted";
+          payBtn.disabled = false;
+        }}
+      }});
+      setInterval(refresh, 5000);
+    </script>
     </main></body></html>"""
     return HTMLResponse(html)
+
+
+@app.get("/p/{token}/status")
+def public_receipt_status(token: str, db: Session = Depends(get_db)):
+    from app.services.public_pay import public_session_payload, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    return public_session_payload(db, row)
+
+
+@app.post("/p/{token}/pay")
+async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfirm(method="MOBILE_SIMULATED"), db: Session = Depends(get_db)):
+    """Phone payment from the receipt QR page.
+
+    Uses the simulated provider until a live mobile-money aggregator is wired.
+    Kiosk cash must use the authenticated kiosk endpoint instead.
+    """
+    from app.services.public_pay import pay_public_session, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    method = (payload.method or "MOBILE_SIMULATED").strip().upper()
+    if method in {"KIOSK_CASH", "CASH", "KIOSK"}:
+        raise HTTPException(401, "Kiosk cash requires a signed-in operator. Open Sessions and pay there, or POST /p/{token}/kiosk-pay.")
+    try:
+        result = await pay_public_session(db, row, method=method, amount=payload.amount)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+    return result
+
+
+@app.post("/p/{token}/kiosk-pay")
+async def kiosk_receipt_pay(
+    token: str,
+    payload: PaymentConfirm = PaymentConfirm(method="KIOSK_CASH"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_any("payments.create", "kiosk.use", "simulation.run")),
+):
+    """Operator confirms cash after scanning the receipt QR at the kiosk."""
+    from app.services.public_pay import pay_public_session, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    try:
+        result = await pay_public_session(
+            db, row, method=payload.method or "KIOSK_CASH", amount=payload.amount, operator_id=user.id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    write_audit(db, user, "payments.create", "parking_session", str(row.id), f"kiosk QR {row.plate}")
+    return result
+
+
+@app.get("/sessions/by-token/{token}")
+def session_by_token(token: str, db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use", "payments.create"))):
+    from app.services.public_pay import public_session_payload, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "No session for that receipt code")
+    return public_session_payload(db, row)
 
 
 @app.get("/p/{token}/qr.png", include_in_schema=False)

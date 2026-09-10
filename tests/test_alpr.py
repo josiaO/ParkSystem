@@ -56,6 +56,37 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(box["label"], "T285DQP")
         self.assertEqual(box["image_width"], 640)
 
+    def test_crop_then_ocr_uses_padded_plate_not_full_frame(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from app.services.alpr import _predict_crop_then_ocr
+
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        bbox = SimpleNamespace(x1=100, y1=200, x2=220, y2=240)
+        detection = SimpleNamespace(bounding_box=bbox)
+        ocr = SimpleNamespace(text="T285DQP____", confidence=0.91)
+        seen = {}
+
+        class FakeOcr:
+            def predict(self, crop):
+                seen["crop_shape"] = tuple(crop.shape[:2])
+                seen["crop_w"] = crop.shape[1]
+                return ocr
+
+        class FakeDet:
+            def predict(self, img):
+                seen["full_shape"] = tuple(img.shape[:2])
+                return [detection]
+
+        engine = SimpleNamespace(detector=FakeDet(), ocr=FakeOcr())
+        hits = _predict_crop_then_ocr(engine, frame)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].plate_normalized, "T285DQP")
+        self.assertEqual(seen["full_shape"], (480, 640))
+        # OCR must see a plate crop (padded+upscaled), not the full 640-wide frame.
+        self.assertLess(seen["crop_w"], 640)
+        self.assertGreaterEqual(seen["crop_w"], 300)
+
     def test_clean_ocr_strips_fast_plate_padding(self):
         self.assertEqual(clean_ocr_text("T285DQP____"), "T285DQP")
         self.assertEqual(normalize_plate(clean_ocr_text("T_285_DQP")), "T285DQP")
