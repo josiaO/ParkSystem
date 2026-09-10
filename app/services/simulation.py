@@ -84,7 +84,7 @@ def save_parking_settings(db: Session, payload: dict) -> dict:
 
 def session_dict(row: ParkingSession) -> dict:
     token = row.public_token or ""
-    return {
+    body = {
         "id": row.id,
         "plate": row.plate,
         "gate_id": row.gate_id,
@@ -106,7 +106,37 @@ def session_dict(row: ParkingSession) -> dict:
         "amount_due": float(row.amount_due or 0),
         "amount_paid": float(row.amount_paid or 0),
         "breakdown": row.breakdown or [],
+        "snapshot_url": None,
+        "crop_url": None,
+        "plate_confidence": None,
     }
+    try:
+        from sqlalchemy.orm import object_session
+        from app.services.captures import capture_dict, latest_for_camera
+        db = object_session(row)
+        if db is not None and row.camera_id:
+            cap = latest_for_camera(db, int(row.camera_id))
+            if cap and normalize_plate(cap.plate) == normalize_plate(row.plate):
+                info = capture_dict(cap)
+                body["snapshot_url"] = info.get("snapshot_url")
+                body["crop_url"] = info.get("crop_url")
+                body["plate_confidence"] = info.get("confidence")
+        elif db is not None and row.plate:
+            from sqlalchemy import select
+            from app.models import VehicleCapture
+            cap = db.scalar(
+                select(VehicleCapture)
+                .where(VehicleCapture.plate == normalize_plate(row.plate))
+                .order_by(VehicleCapture.id.desc())
+            )
+            if cap:
+                info = capture_dict(cap)
+                body["snapshot_url"] = info.get("snapshot_url")
+                body["crop_url"] = info.get("crop_url")
+                body["plate_confidence"] = info.get("confidence")
+    except Exception:
+        pass
+    return body
 
 
 def _side_camera(gate: Gate, side: str) -> Camera | None:
@@ -118,6 +148,9 @@ def _side_camera(gate: Gate, side: str) -> Camera | None:
 
 
 def _active_for_plate(db: Session, plate: str) -> ParkingSession | None:
+    plate = normalize_plate(plate)
+    if not plate:
+        return None
     return db.scalar(
         select(ParkingSession)
         .where(ParkingSession.plate == plate, ParkingSession.status.in_(tuple(OPEN_STATUSES)))
@@ -144,26 +177,32 @@ def create_entry(
     db: Session,
     *,
     plate: str,
-    gate: Gate,
+    gate: Gate | None,
     side: str,
     simulated: bool = False,
     entitlement: Entitlement | None = None,
     status: str = "WAITING_RECEIPT",
     receipt_status: str = "PRINTED",
+    camera: Camera | None = None,
 ) -> ParkingSession:
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("Enter a number plate")
     existing = _active_for_plate(db, plate)
     if existing:
+        if camera is not None and not existing.camera_id:
+            existing.camera_id = camera.id
+            db.commit()
+            db.refresh(existing)
         return existing
-    camera = _side_camera(gate, side)
+    if camera is None and gate is not None:
+        camera = _side_camera(gate, side)
     token = secrets.token_urlsafe(10)
     tariff = ensure_car1_tariff(db)
     entitlement = entitlement or Entitlement(plate=plate)
     row = ParkingSession(
         plate=plate,
-        gate_id=gate.id,
+        gate_id=gate.id if gate else None,
         camera_id=camera.id if camera else None,
         lane_direction=(side or "ENTRY").upper(),
         status=status,
@@ -231,13 +270,18 @@ async def handle_plate_event(
     db: Session,
     *,
     plate: str,
-    gate: Gate,
+    gate: Gate | None,
     side: str,
     simulated: bool = False,
     alpr: dict | None = None,
     source: str = "camera",
+    camera: Camera | None = None,
 ) -> dict:
-    """Shared entry/exit path for live cameras and simulation."""
+    """Shared entry/exit path for live cameras and simulation.
+
+    Gate is optional: plate-first parking still creates a ParkingSession when the
+    camera has not been assigned to a lane yet (barrier open is skipped).
+    """
     started = time.perf_counter()
     side = (side or "ENTRY").upper()
     plate = normalize_plate(plate)
@@ -247,7 +291,7 @@ async def handle_plate_event(
     if entitlement.registered and entitlement.plate:
         plate = normalize_plate(entitlement.plate)
     if side == "EXIT":
-        result = await handle_exit(db, plate=plate, gate=gate, side=side)
+        result = await handle_exit(db, plate=plate, gate=gate, side=side, camera=camera)
         result["action"] = "EXIT"
         result["alpr"] = alpr
         result["source"] = source
@@ -282,6 +326,7 @@ async def handle_plate_event(
     row = create_entry(
         db, plate=plate, gate=gate, side=side, simulated=simulated,
         entitlement=entitlement, status=status, receipt_status=receipt_status,
+        camera=camera,
     )
     duplicate = existing is not None
     issued = None
@@ -299,25 +344,25 @@ async def handle_plate_event(
 
     if auto:
         if duplicate:
-            camera = _side_camera(gate, side)
-            cameras = [camera] if camera else list(gate.cameras or [])
+            pulse_camera = camera or (_side_camera(gate, side) if gate else None)
+            cameras = [pulse_camera] if pulse_camera else list((gate.cameras if gate else None) or [])
             opened = await _pulse_gate(
                 db, gate, cameras,
                 reason=f"{entitlement.kind} re-entry {row.plate}",
                 side=side, led_text="WELCOME", session=row, automatic=True,
-            )
+            ) if gate else None
             result = {
                 "ok": True,
                 "action": "ENTRY",
                 "session": session_dict(row),
                 "receipt": slip if want_print else "",
                 "barrier_opened": bool(opened and opened.ok),
-                "barrier": opened.__dict__ if opened else {"ok": False, "message": "No camera on that side to pulse"},
+                "barrier": opened.__dict__ if opened else {"ok": False, "message": "No gate assigned — session saved, barrier skipped"},
                 "entitlement": entitlement.__dict__,
                 "duplicate": True,
                 "alpr": alpr,
                 "source": source,
-                "message": f"Registered {entitlement.kind} plate {row.plate} — barrier opened.",
+                "message": f"Registered {entitlement.kind} plate {row.plate} — barrier opened." if opened else f"Registered {entitlement.kind} plate {row.plate} — session active (assign a Gate to open barriers).",
             }
             return _finish_entry(db, result, row, gate, started, "ENTRY_AUTHORIZED")
         await _print_now()
@@ -352,7 +397,11 @@ async def handle_plate_event(
         taken["alpr"] = alpr
         taken["source"] = source
         taken["duplicate"] = duplicate
-        taken["message"] = "Receipt sent to the printer. Barrier opening."
+        taken["message"] = (
+            "Receipt sent to the printer. Barrier opening."
+            if gate
+            else "Session saved. Assign this camera to a Gate to open barriers."
+        )
         return _finish_entry(db, taken, row, gate, started, "ENTRY_AUTHORIZED")
 
     await _print_now()
@@ -381,7 +430,7 @@ def _finish_entry(
     db: Session,
     result: dict,
     row: ParkingSession,
-    gate: Gate,
+    gate: Gate | None,
     started: float,
     outcome: str,
 ) -> dict:
@@ -431,12 +480,12 @@ def quote_session(db: Session, row: ParkingSession, *, at: datetime | None = Non
     return fee.__dict__
 
 
-async def handle_exit(db: Session, *, plate: str, gate: Gate, side: str) -> dict:
+async def handle_exit(db: Session, *, plate: str, gate: Gate | None, side: str, camera: Camera | None = None) -> dict:
     plate = normalize_plate(plate)
     entitlement = lookup_entitlement(db, plate)
     row = _active_for_plate(db, plate)
-    camera = _side_camera(gate, side)
-    cameras = [camera] if camera else list(gate.cameras or [])
+    pulse_camera = camera or (_side_camera(gate, side) if gate else None)
+    cameras = [pulse_camera] if pulse_camera else list((gate.cameras if gate else None) or [])
     registered_exit = bool(entitlement.registered and entitlement.auto_open)
     subscriber_session = bool(row and (getattr(row, "parker_kind", None) or "CASUAL") != "CASUAL")
 
@@ -475,10 +524,11 @@ async def handle_exit(db: Session, *, plate: str, gate: Gate, side: str) -> dict
         amount=f"{due:.0f}", currency=row.currency or "TZS",
     )
     if must_pay:
-        if camera and (camera.display_ip or "").strip():
+        led_cam = pulse_camera or camera
+        if led_cam and (led_cam.display_ip or "").strip():
             try:
                 await send_led_text(
-                    camera.display_ip,
+                    led_cam.display_ip,
                     prompt[:16],
                     dry_run=not app_settings.gate_physical_control_enabled,
                 )

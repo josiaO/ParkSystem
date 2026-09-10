@@ -54,10 +54,13 @@ def reset_bootstrap_admin(db: Session) -> str:
 
 
 def setup_status(db: Session) -> dict:
+    from app.services.platform_capabilities import platform_snapshot, recommended_camera_adapter
+
     created = ensure_bootstrap_admin(db)
     bootstrap = db.scalar(select(User).where(User.username == settings.bootstrap_username))
     password_ok = bootstrap_password_works(db)
     usernames = [user.username for user in db.scalars(select(User)).all()]
+    platform = platform_snapshot()
     if created or password_ok:
         hint = f"Sign in as {settings.bootstrap_username} / {settings.bootstrap_password}"
         password = settings.bootstrap_password
@@ -67,6 +70,12 @@ def setup_status(db: Session) -> dict:
             "Use the existing password, or run: python -m app.cli reset-admin"
         )
         password = ""
+    if not platform["hvx_host_supported"]:
+        hint = (
+            f"{hint}. This host is {platform['os']}: use the browser UI. "
+            "For normal IP cameras pick adapter rtsp (or dahua/hikvision). "
+            "HVX LAPR cameras need a Windows PC running the 32-bit SDK host."
+        )
     return {
         "ready": user_count(db) > 0,
         "username": settings.bootstrap_username,
@@ -76,4 +85,6 @@ def setup_status(db: Session) -> dict:
         "bootstrap_password_ok": password_ok,
         "usernames": usernames,
         "hint": hint,
+        "platform": platform,
+        "recommended_camera_adapter": recommended_camera_adapter(),
     }

@@ -225,7 +225,7 @@
     .inline-fields label { margin: 0; min-width: 140px; flex: 0 1 180px; font-size: 11px; font-weight: 600; color: var(--text-secondary); }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .row-actions button { padding: 0 10px; height: 26px; font-size: 11.5px; }
-    pre, pre.receipt {
+    pre, pre.receipt, .receipt {
       white-space: pre-wrap; font-family: var(--mono); font-size: 12px;
       background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
       padding: 12px; color: var(--text-secondary); max-height: 420px; overflow: auto;
@@ -399,6 +399,7 @@
       </div>
       <h1>SmartPark Edge</h1>
       <p class="muted" id="login-hint">Parking camera operations</p>
+      <p class="muted" id="login-platform" style="margin-top:8px;font-size:12px"></p>
       <label for="username">Username</label>
       <input id="username" name="username" autocomplete="username" required>
       <label for="password">Password</label>
@@ -601,8 +602,12 @@
       </div>
 
       <div id="page-sessions" class="hidden">
-        <p class="muted">Plate-first parking sessions. A vehicle may exit at a different gate from entry.</p>
+        <p class="muted">Plate-first parking sessions. Scan a receipt QR (or type its code) to pay at the kiosk.</p>
         <div class="toolbar">
+          <label style="display:flex;gap:8px;align-items:center;margin:0">Receipt code
+            <input id="receipt-token" placeholder="paste code from QR / ticket" style="min-width:180px">
+          </label>
+          <button type="button" id="lookup-receipt">Find by code</button>
           <button type="button" id="pay-session">Record kiosk payment</button>
           <button class="secondary" type="button" id="print-session-receipt">Show / print receipt</button>
           <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
@@ -610,13 +615,13 @@
         <div class="tblwrap" style="overflow:auto">
         <table>
           <thead>
-            <tr><th>Plate</th><th>Kind</th><th>Status</th><th>Receipt</th><th>Entry</th><th>Due</th><th>Paid</th></tr>
+            <tr><th>Plate</th><th>Kind</th><th>Status</th><th>Receipt</th><th>Code</th><th>Entry</th><th>Due</th><th>Paid</th></tr>
           </thead>
           <tbody id="session-rows"></tbody>
         </table>
         </div>
         <p class="error" id="session-error"></p>
-        <pre id="session-receipt" class="receipt hidden">No receipt yet.</pre>
+        <div id="session-receipt" class="receipt hidden">No receipt yet.</div>
       </div>
 
       <div id="page-payments" class="hidden">
@@ -846,7 +851,7 @@
           <option value="HYBRID">HYBRID</option>
         </select>
       </label>
-      <p class="muted">Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.</p>
+      <p class="muted" id="camera-adapter-hint">Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.</p>
       <p class="error" id="camera-dialog-error"></p>
       <div class="toolbar">
         <button type="submit">Save Camera</button>
@@ -948,7 +953,12 @@
   </dialog>
 
   <script>
-    const state = { token: sessionStorage.getItem("smartpark_token") || "", user: "", userId: null, permissions: [], roles: [], navigation: [], modules: {} };
+    const state = {
+      token: sessionStorage.getItem("smartpark_token") || "",
+      user: "", userId: null, permissions: [], roles: [], navigation: [], modules: {},
+      recommendedAdapter: "hvx",
+      platform: null,
+    };
     let selectedCameraId = null;
 
     const loginView = document.getElementById("login-view");
@@ -1189,6 +1199,25 @@
       }
     }
 
+    function startMjpegLive(slot, id) {
+      if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
+      const els = paneEls(slot);
+      const prev = liveObjectUrls[slot];
+      if (prev) { try { URL.revokeObjectURL(prev); } catch (_) {} liveObjectUrls[slot] = ""; }
+      // Continuous MJPEG stream — smoother than 40ms snapshot polling.
+      els.img.onload = () => {
+        if (els.status) els.status.textContent = "Live";
+        drawLiveOverlay(slot);
+      };
+      els.img.onerror = () => {
+        if (els.img.dataset.cameraId === String(id)) {
+          if (els.status) els.status.textContent = "Reconnecting…";
+          startSnapshotLoop(slot, id);
+        }
+      };
+      els.img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
+    }
+
     function startSnapshotLoop(slot, id) {
       if (snapshotTimers[slot]) clearInterval(snapshotTimers[slot]);
       const els = paneEls(slot);
@@ -1221,7 +1250,7 @@
           .finally(() => { liveFetchBusy[slot] = false; });
       };
       tick();
-      snapshotTimers[slot] = setInterval(tick, 40);
+      snapshotTimers[slot] = setInterval(tick, 120);
     }
 
     async function startLiveSlot(slot, camera, force = false) {
@@ -1275,7 +1304,7 @@
         els.webrtc.removeAttribute("src");
       }
       els.img.style.display = "block";
-      startSnapshotLoop(slot, id);
+      startMjpegLive(slot, id);
       refreshPlates(slot);
     }
 
@@ -2229,7 +2258,7 @@
 
     function healthTone(value) {
       const s = String(value == null ? "" : value).toLowerCase();
-      if (s === "disabled" || s === "off" || s === "n/a" || s === "—") return "c-mut";
+      if (s === "disabled" || s === "off" || s === "n/a" || s.startsWith("n/a ") || s === "—") return "c-mut";
       if (s === "ok" || s === "healthy" || s === "ready" || s === "online" || s === "up") return "c-ok";
       if (s === "warn" || s === "degraded" || s === "warning") return "c-wrn";
       if (s === "down" || s === "critical" || s === "error" || s === "fail") return "c-dgr";
@@ -2271,12 +2300,18 @@
         }
         const proc = details.process || live.process || {};
         const modules = details.modules || live.modules || {};
+        const hvx = details.hvx_host || {};
+        let hvxLabel = "disabled";
+        if (hvx.ok) hvxLabel = "ok";
+        else if (hvx.required === false || hvx.supported === false) hvxLabel = "n/a (web OS)";
+        else if (details.hvx_host) hvxLabel = "down";
         const items = [
-          ["State", details.state || live.state || "—"],
+          ["State", details.status || details.state || live.state || "—"],
+          ["OS", (details.platform && details.platform.os) || "—"],
           ["Version", proc.version || "—"],
           ["Uptime s", proc.uptime_seconds ?? "—"],
           ["Threads", proc.thread_count ?? "—"],
-          ["HVX host", details.hvx_host && details.hvx_host.ok ? "ok" : (details.hvx_host ? "down" : "disabled")],
+          ["HVX host", hvxLabel],
           ["ALPR mode", details.alpr_mode || "NATIVE_ONLY"],
         ];
         const components = (modules && modules.components) || modules || {};
@@ -2290,8 +2325,8 @@
         cards.innerHTML = items.map(([label, value]) =>
           `<div class="stat"><div class="k">${label}</div><div class="v"><span class="chip ${healthTone(value)}">${value}</span></div></div>`
         ).join("");
-        const st = String(details.state || live.state || "ok").toLowerCase();
-        if (st.includes("critical") || st.includes("down")) setHdrHealth("Critical", "c-dgr");
+        const st = String(details.status || details.state || live.state || "ok").toLowerCase();
+        if (st.includes("critical") || st.includes("down") || st.includes("not_ready")) setHdrHealth("Critical", "c-dgr");
         else if (st.includes("degrad") || st.includes("warn")) setHdrHealth("Degraded", "c-wrn");
         else setHdrHealth("Operational", "c-ok");
         pre.textContent = JSON.stringify(details, null, 2);
@@ -2314,8 +2349,8 @@
       try {
         const rows = await api("/sessions");
         document.getElementById("session-rows").innerHTML = rows.map((s) =>
-          `<tr data-id="${s.id}"><td>${s.plate || ""}</td><td>${s.parker_kind || "CASUAL"}</td><td>${s.status || ""}</td><td>${s.receipt_status || "—"}</td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${Number(s.amount_due || 0).toLocaleString()}</td><td>${Number(s.amount_paid || 0).toLocaleString()}</td></tr>`
-        ).join("") || `<tr><td colspan="7" class="muted">No sessions yet.</td></tr>`;
+          `<tr data-id="${s.id}"><td>${s.plate || ""}</td><td>${s.parker_kind || "CASUAL"}</td><td>${s.status || ""}</td><td>${s.receipt_status || "—"}</td><td><code>${s.public_token || "—"}</code></td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${Number(s.amount_due || 0).toLocaleString()}</td><td>${Number(s.amount_paid || 0).toLocaleString()}</td></tr>`
+        ).join("") || `<tr><td colspan="8" class="muted">No sessions yet. Live plates create sessions automatically (even without a Gate). Assign each camera to a Gate to enable barriers.</td></tr>`;
         document.querySelectorAll("#session-rows tr[data-id]").forEach((tr) => {
           tr.addEventListener("click", () => {
             document.querySelectorAll("#session-rows tr").forEach((row) => row.classList.remove("selected"));
@@ -2375,9 +2410,15 @@
         form.elements.id.value = "";
         form.elements.sdk_port.value = "30000";
         form.elements.username.value = "admin";
-        form.elements.adapter_id.value = "hvx";
+        form.elements.adapter_id.value = state.recommendedAdapter || "hvx";
         form.elements.controller_ip.value = "";
         form.elements.display_ip.value = "";
+      }
+      const adapterHint = document.getElementById("camera-adapter-hint");
+      if (adapterHint && state.platform && !state.platform.hvx_host_supported) {
+        adapterHint.textContent = "This OS has no HVX SDK host. Prefer rtsp/dahua/hikvision for IP cameras (FastALPR). HVX LAPR cameras need a Windows PC with the 32-bit host.";
+      } else if (adapterHint) {
+        adapterHint.textContent = "Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.";
       }
       document.getElementById("camera-dialog").showModal();
     }
@@ -2616,31 +2657,71 @@
       try {
         const issued = await api(`/sessions/${selectedSessionId}/receipt`, { method: "POST", body: "{}" });
         const body = (issued && issued.receipt) || "";
+        const qrUrl = issued && (issued.qr_url || (issued.public_token ? `/p/${issued.public_token}/qr.png` : ""));
+        const safe = (body || "").replace(/[&<>]/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[ch]));
+        const qrBlock = qrUrl
+          ? `<p style="margin:16px 0"><img src="${mediaUrl(qrUrl)}" alt="Payment QR" style="width:200px;height:200px;border:1px solid #ccc;padding:8px;background:#fff"></p><p class="muted">Scan to pay on your phone, or use this code at the kiosk.</p>`
+          : "";
         out.classList.remove("hidden");
-        out.textContent = body || "Receipt stored.";
-        const printer = window.open("", "smartpark-receipt", "width=480,height=640");
+        out.innerHTML = `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${safe || "Receipt stored."}</pre>${qrBlock}`;
+        const printer = window.open("", "smartpark-receipt", "width=480,height=720");
         if (printer) {
-          printer.document.write(`<!DOCTYPE html><html><head><title>Parking receipt</title><style>body{font:14px/1.4 ui-monospace,monospace;padding:16px}</style></head><body><pre>${body.replace(/[&<>]/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[ch]))}</pre></body></html>`);
+          printer.document.write(`<!DOCTYPE html><html><head><title>Parking receipt</title><style>body{font:14px/1.4 ui-monospace,monospace;padding:16px;max-width:420px}pre{white-space:pre-wrap;word-break:break-word}</style></head><body><pre>${safe}</pre>${qrBlock}</body></html>`);
           printer.document.close();
           printer.focus();
-          printer.print();
+          setTimeout(() => printer.print(), 400);
         }
       } catch (e) {
         err.textContent = e.message;
       }
     });
-    document.getElementById("pay-session").addEventListener("click", async () => {
-      if (!selectedSessionId) {
-        document.getElementById("session-error").textContent = "Select a session first.";
+    document.getElementById("lookup-receipt").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      err.textContent = "";
+      const token = (document.getElementById("receipt-token").value || "").trim();
+      if (!token) {
+        err.textContent = "Enter the receipt code from the QR / ticket.";
         return;
       }
       try {
-        await api(`/sessions/${selectedSessionId}/pay`, { method: "POST", body: JSON.stringify({ method: "KIOSK_CASH" }) });
+        const data = await api(`/sessions/by-token/${encodeURIComponent(token)}`);
+        selectedSessionId = Number(data.session_id);
+        await loadSessions();
+        const row = document.querySelector(`#session-rows tr[data-id="${selectedSessionId}"]`);
+        if (row) {
+          document.querySelectorAll("#session-rows tr").forEach((r) => r.classList.remove("selected"));
+          row.classList.add("selected");
+          row.scrollIntoView({ block: "nearest" });
+        }
+        err.textContent = data.paid
+          ? `${data.plate} is already paid.`
+          : `Found ${data.plate} — due ${data.currency} ${Math.round(data.amount_remaining)}. Select Pay to record kiosk cash.`;
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    });
+    document.getElementById("pay-session").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      const token = (document.getElementById("receipt-token").value || "").trim();
+      if (!selectedSessionId && !token) {
+        err.textContent = "Select a session or enter a receipt code first.";
+        return;
+      }
+      try {
+        if (token) {
+          await api(`/p/${encodeURIComponent(token)}/kiosk-pay`, {
+            method: "POST",
+            body: JSON.stringify({ method: "KIOSK_CASH" }),
+          });
+        } else {
+          await api(`/sessions/${selectedSessionId}/pay`, { method: "POST", body: JSON.stringify({ method: "KIOSK_CASH" }) });
+        }
         selectedSessionId = null;
+        document.getElementById("receipt-token").value = "";
         await loadSessions();
         await loadPayments();
       } catch (e) {
-        document.getElementById("session-error").textContent = e.message;
+        err.textContent = e.message;
       }
     });
     document.getElementById("vehicle-cancel").addEventListener("click", () => document.getElementById("vehicle-dialog").close());
@@ -3179,6 +3260,16 @@
         if (setup.password) document.getElementById("password").value = setup.password;
         else document.getElementById("password").value = "";
         if (setup.hint) document.getElementById("login-hint").textContent = setup.hint;
+        if (setup.platform) {
+          state.platform = setup.platform;
+          state.recommendedAdapter = setup.recommended_camera_adapter || setup.platform.recommended_camera_adapter || "hvx";
+          const plat = document.getElementById("login-platform");
+          if (plat) {
+            plat.textContent = setup.platform.hvx_host_supported
+              ? `${setup.platform.os} · desktop or browser`
+              : `${setup.platform.os} · browser UI (desktop/HVX host are Windows-only)`;
+          }
+        }
       } catch (_) {}
       if (!state.token) return;
       try {

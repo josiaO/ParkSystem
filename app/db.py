@@ -84,9 +84,20 @@ def _sqlite_on_connect(dbapi_conn, _connection_record):
         return
     cur = dbapi_conn.cursor()
     try:
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
-        cur.execute("PRAGMA synchronous=NORMAL")
+        # WAL needs free disk for -wal/-shm. On a full disk, fall back so the
+        # API can still answer instead of crashing every request on connect.
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            try:
+                cur.execute("PRAGMA journal_mode=DELETE")
+            except Exception:
+                pass
+        try:
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
     finally:
         cur.close()
 

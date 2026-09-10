@@ -53,10 +53,37 @@ def store_slip_files(document: ReceiptDocument) -> str:
     folder = settings.media_dir / "receipts"
     folder.mkdir(parents=True, exist_ok=True)
     stem = document.public_reference or document.plate or "receipt"
+    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:80] or "receipt"
     path = folder / f"{stem}.txt"
     path.write_text(document.body_text, encoding="utf-8")
+    qr_name = ""
     if document.qr_png.startswith(b"\x89PNG"):
-        (folder / f"{stem}.png").write_bytes(document.qr_png)
+        qr_path = folder / f"{stem}.png"
+        qr_path.write_bytes(document.qr_png)
+        qr_name = qr_path.name
+    # HTML slip so "Show / print" always includes a scannable QR, not text-only.
+    html_path = folder / f"{stem}.html"
+    token = document.public_reference or ""
+    qr_img = ""
+    if token:
+        # Prefer API route so HTML works when opened from /media/receipts/…
+        qr_img = f'<img class="qr" src="/p/{token}/qr.png" alt="QR">'
+    elif qr_name:
+        qr_img = f'<img class="qr" src="{qr_name}" alt="QR">'
+    safe_body = (
+        (document.body_text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    html_path.write_text(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Parking receipt</title>"
+        "<style>body{font:14px/1.45 ui-monospace,monospace;padding:16px;max-width:420px}"
+        "pre{white-space:pre-wrap;word-break:break-word}img.qr{width:200px;height:200px;margin:12px 0;"
+        "border:1px solid #ccc;padding:8px;background:#fff}</style></head><body>"
+        f"<pre>{safe_body}</pre>{qr_img}</body></html>",
+        encoding="utf-8",
+    )
     return str(path)
 
 
