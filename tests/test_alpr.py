@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from app.api_main import app, ensure_roles
 from app.config import Settings
 from app.core.fusion import resolve_readings
-from app.core.plate import normalize_plate, plate_similarity
+from app.core.plate import assess_plate, correct_ocr_confusions, normalize_plate, plate_similarity
 from app.db import Base, get_db
 from app.models import Role, User, UserRole
 from app.security import hash_password
@@ -127,6 +127,38 @@ class PlateFusionTests(unittest.TestCase):
     def test_fuse_local_only_mode(self):
         decision = resolve_readings(native_plate="NATIVE1", native_confidence=0.99, local_plate="LOCAL1", local_confidence=0.4, mode="LOCAL")
         self.assertEqual(decision.resolved_plate, "LOCAL1")
+        self.assertTrue(decision.needs_review)
+
+    def test_low_confidence_single_frame_is_held(self):
+        decision = resolve_readings(native_plate="", native_confidence=0, local_plate="T285DQP", local_confidence=0.41)
+        self.assertEqual(decision.resolved_plate, "T285DQP")
+        self.assertTrue(decision.needs_review)
+        self.assertIn("single-frame", decision.reason)
+
+    def test_disagreement_keeps_both_plates(self):
+        decision = resolve_readings(native_plate="T285DQP", native_confidence=0.91, local_plate="T285D0P", local_confidence=0.91)
+        self.assertTrue(decision.disagreed)
+        self.assertEqual(decision.native_plate, "T285DQP")
+        self.assertEqual(decision.local_plate, "T285D0P")
+        self.assertTrue(decision.needs_review)
+
+    def test_hard_plates_and_garbage(self):
+        self.assertEqual(normalize_plate(""), "")
+        self.assertEqual(normalize_plate("!!!"), "")
+        self.assertFalse(assess_plate("STOP")["likely"])
+        self.assertFalse(assess_plate("AB")["likely"])
+        self.assertFalse(assess_plate("")["likely"])
+        self.assertTrue(assess_plate("T285DQP")["likely"])
+        fixed = correct_ocr_confusions("T28SDQP")
+        self.assertEqual(fixed["plate"], "T285DQP")
+        self.assertTrue(fixed["corrected"])
+
+    def test_local_consensus_skips_single_frame_hold(self):
+        decision = resolve_readings(
+            native_plate="", native_confidence=0, local_plate="T285DQP", local_confidence=0.8, local_consensus=True,
+        )
+        self.assertEqual(decision.resolved_plate, "T285DQP")
+        self.assertFalse(decision.needs_review)
 
     def test_recognize_bytes_never_invents_plates(self):
         with patch("app.services.alpr.fastalpr_installed", return_value=False):
@@ -267,7 +299,7 @@ class AlprApiTests(unittest.TestCase):
             "count": 1, "best": {"plate": "T123ABC", "confidence": 0.91}, "detail": "1 plate(s)",
         }
         with patch("app.api_main.live_snapshot", new=AsyncMock(return_value=grabbed)):
-            with patch("app.api_main.recognize_bytes", return_value=recognized):
+            with patch("app.api_main.recognize_frame", return_value=recognized):
                 with patch("app.api_main._native_capture_for_camera", new=AsyncMock(return_value={
                     "plate": "T123ABC", "confidence": 0.80, "source": "qy_Net_RegImageRecvEx",
                 })):
@@ -275,7 +307,7 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()["best"]["plate"], "T123ABC")
         self.assertEqual(res.json()["camera_id"], cam_id)
-        self.assertEqual(res.json()["fusion"]["method"], "AGREED")
+        self.assertEqual(res.json()["fusion"]["method"], "LOCAL_SELECTED")
         self.assertEqual(res.json()["fusion"]["resolved_plate"], "T123ABC")
         self.assertEqual(res.json()["last_car"]["plate"], "T123ABC")
         self.assertTrue(res.json()["last_car"]["snapshot_url"])
@@ -290,7 +322,7 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 409)
 
     def test_upload_refuses_simulation(self):
-        with patch("app.api_main.recognize_bytes", return_value={
+        with patch("app.api_main.recognize_frame", return_value={
             "ok": False, "backend": "none", "plates": [],
             "detail": "FastALPR is not installed — not substituting simulated plates",
         }):

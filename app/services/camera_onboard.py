@@ -104,7 +104,7 @@ async def probe_connection(
     camera_type = "VENDOR_SDK_CAMERA" if recommended == "hvx" else (
         "GENERIC_ONVIF" if recommended == "onvif" else "GENERIC_RTSP"
     )
-    recognition = "NATIVE_ONLY" if recommended == "hvx" else "FASTALPR_ONLY"
+    recognition = "FASTALPR_ONLY"
     return {
         "ok": hvx_open or rtsp_ok or bool(http.get("ok")) or bool(onvif.get("ok")),
         "ip": ip,

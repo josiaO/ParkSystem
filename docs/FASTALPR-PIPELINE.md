@@ -22,4 +22,11 @@ Vendor-independent OCR on JPEG frames. It is a **consumer** of the DETECT buffer
 
 ## Modes
 
-`NATIVE_ONLY`, `FASTALPR_ONLY` / `LOCAL_ONLY`, `HYBRID`. Per-camera `recognition_mode` overrides the process default.
+Default mode is `FASTALPR_ONLY`: every presence JPEG is read by the FastALPR plate engine (ParkWatch software OCR). `NATIVE_ONLY` keeps the camera text. `HYBRID` uses both. Per-camera `recognition_mode` overrides the process default.
+
+The engine is isolated and replaceable. See [PLATE-ENGINE.md](PLATE-ENGINE.md).
+
+## DETECT FPS vs time-in-view
+
+Default `SMARTPARK_DETECT_FPS=5` is 200 ms between frames. A plate that is readable for about 1 s at typical entry speed yields ~5 frames, which is enough for two agreeing FastALPR reads (or one read ≥ 0.92). Do not drop below ~3 FPS if consensus is required. `/alpr/status` reports this coverage math under `detect`.
+

@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.i18n import t
-from app.infrastructure.hardware.cameras import adapter_has_native_plates
 from app.infrastructure.hardware.registry import camera_adapter_id
 from app.models import Camera, CameraStatus, Gate
+from app.services.captures import latest_for_camera
+from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
 from app.services.media_gateway import gateway
 from app.services.site_cameras import side_label
 from app.services.site_policy import site_policy
@@ -30,14 +31,19 @@ def _lane_label(camera: Camera) -> str:
     return (camera.name or "").strip() or f"Camera {camera.id}"
 
 
-def camera_operator_status(camera: Camera, *, language: str = "en") -> dict[str, Any]:
+def camera_operator_status(camera: Camera, *, language: str = "en", db: Session | None = None) -> dict[str, Any]:
     media = gateway.session(camera.id)
     live = media.live.latest() if media else None
     pumping = bool(media and media.producer is not None and not media.producer.done())
     camera_ok = camera.status in ONLINE_CAMERA or pumping or bool(live)
     live_ok = pumping or bool(live)
-    native = adapter_has_native_plates(camera)
-    recog_mode = str(getattr(camera, "recognition_mode", None) or ("NATIVE_ONLY" if native else "FASTALPR_ONLY"))
+    canonical = camera_recognition_mode(camera)
+    if canonical == LOCAL_ONLY:
+        recog_mode = "FASTALPR_ONLY"
+    elif canonical == NATIVE_ONLY:
+        recog_mode = "NATIVE_ONLY"
+    else:
+        recog_mode = "HYBRID"
     if camera_ok:
         recog = _label(language, "status.ready", "Ready")
     else:
@@ -50,6 +56,15 @@ def camera_operator_status(camera: Camera, *, language: str = "en") -> dict[str,
         live_text = _label(language, "status.online", "Online")
     else:
         live_text = _label(language, "status.offline", "Offline")
+    last_plate = ""
+    pending = False
+    if db is not None:
+        last = latest_for_camera(db, camera.id)
+        if last:
+            last_plate = last.plate or ""
+            pending = bool(isinstance(last.bbox, dict) and last.bbox.get("pending_confirmation"))
+    gate_mode = str(camera.gate.mode if camera.gate else "")
+    waiting = _label(language, "status.waiting", "Waiting for confirmation") if pending else ""
     return {
         "camera_id": camera.id,
         "name": camera.name,
@@ -63,6 +78,11 @@ def camera_operator_status(camera: Camera, *, language: str = "en") -> dict[str,
         "adapter_id": camera_adapter_id(camera),
         "recognition_mode": recog_mode,
         "status": camera.status,
+        "last_plate": last_plate,
+        "gate_mode": gate_mode or "COMMISSIONING",
+        "pending_confirmation": pending,
+        "manual_action": waiting,
+        "camera_ok": camera_ok,
     }
 
 
@@ -71,7 +91,7 @@ def lane_operator_status(db: Session) -> dict[str, Any]:
     language = str(policy.get("language") or "en")
     cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
     gates = list(db.scalars(select(Gate).order_by(Gate.id)).all())
-    lanes = [camera_operator_status(camera, language=language) for camera in cameras]
+    lanes = [camera_operator_status(camera, language=language, db=db) for camera in cameras]
     return {
         "site": {
             "name": policy.get("name"),

@@ -65,6 +65,13 @@ class LatestFrameBuffer:
         with self._lock:
             return self._items[-1] if self._items else None
 
+    def recent(self, n: int = 3) -> list[FrameSample]:
+        """Newest-last snapshot of the DETECT/LIVE buffer. Does not consume frames."""
+        count = max(1, min(int(n or 1), self.maxsize))
+        with self._lock:
+            items = list(self._items)
+        return items[-count:]
+
     def take(self) -> FrameSample | None:
         with self._lock:
             if not self._items:

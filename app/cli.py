@@ -9,7 +9,7 @@ from .config import settings
 from .db import SessionLocal, ensure_schema
 from .models import Role, User, UserRole
 from .security import hash_password
-from .services.bootstrap import reset_bootstrap_admin
+from .services.bootstrap import effective_bootstrap_password, reset_bootstrap_admin
 
 
 def create_admin():
@@ -37,7 +37,9 @@ def reset_admin():
     with SessionLocal() as db:
         ensure_roles(db)
         action = reset_bootstrap_admin(db)
-    print(f"Admin {action}: {settings.bootstrap_username} / {settings.bootstrap_password}")
+    print(f"Admin {action}: {settings.bootstrap_username} / {effective_bootstrap_password()}")
+    if not str(settings.bootstrap_password or "").strip():
+        print("Password file:", settings.data_dir / "bootstrap_password.txt")
 
 
 def main():

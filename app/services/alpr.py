@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import settings
+from app.core.consensus import detect_coverage
 from app.core.plate import normalize_plate
 from app.services.camera_lpr import camera_contract
 
@@ -116,7 +117,7 @@ def _copy_if_needed(src: Path, dest: Path) -> bool:
     if not src.is_file():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.is_file() and dest.stat().st_size == src.stat().st_size:
+    if dest.is_file() and dest.stat().st_size == src.stat().st_size and dest.stat().st_mtime >= src.stat().st_mtime:
         return True
     dest.write_bytes(src.read_bytes())
     return dest.is_file()
@@ -173,12 +174,19 @@ def status() -> dict:
         "native_engine": "qy_Net_RegImageRecvEx",
         "local_engine": "fastalpr" if installed else "none",
         "camera": contract,
+        "detect": detect_coverage(
+            fps=float(getattr(settings, "detect_fps", 5.0) or 5.0),
+            dwell_seconds=1.0,
+            min_frames=2,
+        ),
+        "engine_id": "fastalpr",
         "detail": (
-            "FastALPR detects the plate, crops it with padding, then OCRs only that crop. "
-            "HVX cameras may also send a native plate; when they do not (or you change camera brand), "
-            "FastALPR runs on a coil/presence trigger."
+            "The camera snaps the JPEG. FastALPR detects the plate, crops it with padding, "
+            "then reads only that crop. Country "
+            f"{settings.alpr_country or 'Tanzania'} shapes the reading. "
+            "Replace the ONNX pack to retrain, or register another PlateEngine to change libraries."
             if installed
-            else "Local FastALPR is not installed in this copy. Native camera plates still work if the adapter provides them."
+            else "FastALPR is not installed in this copy. Install the fast-alpr package and the ONNX model pack."
         ),
     }
 
@@ -205,6 +213,13 @@ def _load_engine():
                 kwargs["ocr_model"] = OCR_MODEL
             _engine = ALPR(**kwargs)
         return _engine
+
+
+def unload_engine() -> None:
+    """Drop the loaded reader so the next frame picks up a new model pack."""
+    global _engine
+    with _lock:
+        _engine = None
 
 
 def _crop_path(image_path: str, bbox) -> str | None:
@@ -273,6 +288,14 @@ def _boost_contrast(bgr):
         return None
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     light, a, b = cv2.split(lab)
+    # Compress specular glare (headlights) before CLAHE so the plate crop is not washed out.
+    try:
+        import numpy as np
+        hi = float(np.percentile(light, 98))
+        if hi > 220:
+            light = cv2.convertScaleAbs(light, alpha=0.85, beta=0)
+    except Exception:
+        pass
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     light = clahe.apply(light)
     return cv2.cvtColor(cv2.merge((light, a, b)), cv2.COLOR_LAB2BGR)
@@ -342,6 +365,19 @@ def _ocr_result_text(ocr) -> tuple[str, float]:
     return text, float(conf or 0)
 
 
+def _country_name() -> str:
+    return str(getattr(settings, "alpr_country", "") or "").strip().lower()
+
+
+def _apply_country_profile(text: str, confidence: float) -> tuple[str, float]:
+    """ParkWatch SetCountry: one country profile shapes the reading."""
+    if _country_name() in {"tanzania", "tz"}:
+        plate = _fix_tz_ocr_plate(text)
+        return plate, _tz_plate_score(plate, confidence)
+    plate = normalize_plate(clean_ocr_text(text))
+    return plate, float(confidence or 0)
+
+
 def _tz_plate_score(plate: str, confidence: float) -> float:
     """Boost plates that look like Tanzania T###XXX / T###XX format."""
     p = normalize_plate(plate)
@@ -408,14 +444,14 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         except Exception:
             continue
         text, conf = _ocr_result_text(ocr)
-        plate = _fix_tz_ocr_plate(text)
+        plate, score = _apply_country_profile(text, conf)
         if len(plate) < MIN_PLATE_CHARS:
             continue
         hits.append(
             PlateHit(
                 plate_raw=text,
                 plate_normalized=plate,
-                plate_confidence=_tz_plate_score(plate, conf),
+                plate_confidence=score,
                 plate_crop_path=_save_crop_bgr(crop),
                 bbox=bbox_dict(bbox),
             )

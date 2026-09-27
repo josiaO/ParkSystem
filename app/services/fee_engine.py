@@ -118,7 +118,7 @@ def calculate_car1_fee(
     exit_time: datetime,
     rules: dict[str, Any] | None = None,
 ) -> FeeResult:
-    rules = dict(CAR1_RULES if rules is None else {**CAR1_RULES, **rules})
+    rules = dict(CAR1_RULES if rules is None else {**CAR1_RULES, **_class_overlay(rules)})
     start = _aware(entry_time)
     end = _aware(exit_time)
     if end < start:
@@ -143,7 +143,21 @@ def calculate_car1_fee(
     if subtract and due > subtract:
         due -= subtract
         notes.append(f"minus:{subtract}")
-    return FeeResult(duration, int(due), currency, "Car1", notes)
+    car_type = str(rules.get("car_type") or "Car1")
+    return FeeResult(duration, int(due), currency, car_type, notes)
+
+
+def _class_overlay(rules: dict[str, Any]) -> dict[str, Any]:
+    """Apply optional vehicle_classes[car_type] onto the Car1 JSON without a new API."""
+    merged = dict(rules or {})
+    classes = merged.get("vehicle_classes")
+    car_type = str(merged.get("car_type") or settings.fee_car_type or "Car1")
+    if isinstance(classes, dict) and car_type in classes and isinstance(classes[car_type], dict):
+        overlay = dict(classes[car_type])
+        overlay.pop("vehicle_classes", None)
+        merged.update(overlay)
+    merged["car_type"] = car_type
+    return merged
 
 
 def default_tariff_payload() -> dict[str, Any]:
@@ -168,20 +182,111 @@ def ensure_car1_tariff(db: Session) -> Tariff:
         db.commit()
         db.refresh(row)
         return row
-    row.currency = payload["currency"]
-    row.source = payload["source"]
-    row.rules = payload["rules"]
-    row.active = True
+    existing = row.rules if isinstance(row.rules, dict) else {}
+    merged = dict(payload["rules"])
+    # Keep rates an operator already saved. Defaults fill only missing keys.
+    for key, value in existing.items():
+        if value is not None:
+            merged[key] = value
+    if not row.currency:
+        row.currency = payload["currency"]
+    if not row.source:
+        row.source = payload["source"]
+    row.rules = merged
+    if row.active is None:
+        row.active = True
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _minutes(seconds: Any) -> float:
+    return round(int(seconds or 0) / 60, 2)
+
+
+def tariff_editor(row: Tariff) -> dict[str, Any]:
+    """Plain fields for the tariff screen. Times stay as clock values; fees stay as money."""
+    rules = row.rules if isinstance(row.rules, dict) else {}
+    return {
+        "id": row.id,
+        "name": row.name,
+        "car_type": row.car_type,
+        "currency": row.currency or str(rules.get("currency") or "TZS"),
+        "active": bool(row.active),
+        "day_start": str(rules.get("day_start") or CAR1_RULES["day_start"])[:5],
+        "day_end": str(rules.get("day_end") or CAR1_RULES["day_end"])[:5],
+        "free_day_minutes": _minutes(rules.get("free_day_seconds")),
+        "free_night_minutes": _minutes(rules.get("free_night_seconds")),
+        "day_block_minutes": _minutes(rules.get("day_block_seconds")),
+        "night_block_minutes": _minutes(rules.get("night_block_seconds")),
+        "day_block_fee": int(rules.get("day_block_fee") or 0),
+        "night_block_fee": int(rules.get("night_block_fee") or 0),
+        "day_max": int(rules.get("day_max") or 0),
+        "night_max": int(rules.get("night_max") or 0),
+        "daily_wrap_fee": int(rules.get("daily_wrap_fee") or 0),
+    }
+
+
+def _clock(value: str, fallback: str) -> str:
+    text = (value or "").strip() or fallback
+    parts = text.split(":")
+    if len(parts) < 2:
+        raise ValueError("Enter a time like 05:05")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("Enter a time like 05:05")
+    second = int(parts[2]) if len(parts) > 2 else 0
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def apply_tariff_editor(db: Session, updates: dict[str, Any]) -> Tariff:
+    """Save the tariff form. Minutes on screen become the seconds the fee engine uses."""
+    row = ensure_car1_tariff(db)
+    rules = dict(row.rules or {})
+    if updates.get("currency"):
+        row.currency = str(updates["currency"]).strip().upper()[:8]
+        rules["currency"] = row.currency
+    if updates.get("day_start"):
+        rules["day_start"] = _clock(str(updates["day_start"]), str(rules.get("day_start")))
+    if updates.get("day_end"):
+        rules["day_end"] = _clock(str(updates["day_end"]), str(rules.get("day_end")))
+    minute_keys = {
+        "free_day_minutes": "free_day_seconds",
+        "free_night_minutes": "free_night_seconds",
+        "day_block_minutes": "day_block_seconds",
+        "night_block_minutes": "night_block_seconds",
+    }
+    for form_key, rule_key in minute_keys.items():
+        if updates.get(form_key) is None:
+            continue
+        minutes = float(updates[form_key])
+        if minutes < 0:
+            raise ValueError("Minutes cannot be negative")
+        rules[rule_key] = int(round(minutes * 60))
+    for key in ("day_block_fee", "night_block_fee", "day_max", "night_max", "daily_wrap_fee"):
+        if updates.get(key) is None:
+            continue
+        amount = int(updates[key])
+        if amount < 0:
+            raise ValueError("Fees cannot be negative")
+        rules[key] = amount
+    if updates.get("active") is not None:
+        row.active = bool(updates["active"])
+    row.rules = rules
     db.commit()
     db.refresh(row)
     return row
 
 
 def load_active_rules(db: Session, car_type: str = "Car1") -> dict[str, Any]:
-    row = db.scalar(select(Tariff).where(Tariff.car_type == car_type, Tariff.active.is_(True)).order_by(Tariff.id.desc()))
+    wanted = car_type or "Car1"
+    row = db.scalar(select(Tariff).where(Tariff.car_type == wanted, Tariff.active.is_(True)).order_by(Tariff.id.desc()))
+    if row is None and wanted != "Car1":
+        row = db.scalar(select(Tariff).where(Tariff.car_type == "Car1", Tariff.active.is_(True)).order_by(Tariff.id.desc()))
     if row and isinstance(row.rules, dict):
         rules = dict(CAR1_RULES)
         rules.update(row.rules)
         rules["currency"] = row.currency or rules.get("currency")
-        return rules
-    return dict(CAR1_RULES)
+        rules["car_type"] = wanted
+        return _class_overlay(rules)
+    return _class_overlay({**CAR1_RULES, "car_type": wanted})
