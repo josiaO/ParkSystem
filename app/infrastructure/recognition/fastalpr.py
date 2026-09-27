@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.alpr import recognize_bytes
+from app.infrastructure.recognition.engines import recognize_frame
 from app.services.camera_lpr import local_from_fastalpr
 
 
@@ -14,7 +14,7 @@ class FastALPRProvider:
     async def process(self, event_or_frame: dict[str, Any]) -> dict[str, Any]:
         jpeg = event_or_frame.get("jpeg") or b""
         label = str(event_or_frame.get("camera_label") or event_or_frame.get("camera_id") or "frame")
-        result = recognize_bytes(jpeg, camera_label=str(label))
+        result = recognize_frame(jpeg, camera_label=str(label))
         local = local_from_fastalpr(result)
         from app.infrastructure.recognition import normalize_event
 

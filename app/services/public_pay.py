@@ -11,7 +11,9 @@ from app.services.simulation import quote_session, session_dict as sim_session_d
 
 
 def session_by_public_token(db: Session, token: str) -> ParkingSession | None:
-    token = (token or "").strip()
+    from app.services.kiosk_lookup import extract_receipt_token
+
+    token = extract_receipt_token(token)
     if not token:
         return None
     return db.scalar(select(ParkingSession).where(ParkingSession.public_token == token))
@@ -25,7 +27,12 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
     due = float(row.amount_due or 0)
     paid = float(row.amount_paid or 0)
     remaining = max(0.0, due - paid)
-    paid_up = remaining <= 0.0001 and due >= 0
+    paid_up = remaining <= 0.0001
+    from app.services.kiosk_lookup import image_fields, stay_for
+
+    stay = stay_for(row)
+    images = image_fields(db, row)
+    payable = remaining > 0.0001
     return {
         "ok": True,
         "token": row.public_token,
@@ -34,15 +41,20 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
         "status": row.status,
         "parker_kind": getattr(row, "parker_kind", None) or "CASUAL",
         "entry_time": row.entry_time.isoformat() if row.entry_time else None,
+        "exit_time": row.exit_time.isoformat() if row.exit_time else None,
         "currency": row.currency or "TZS",
         "amount_due": due,
         "amount_paid": paid,
         "amount_remaining": remaining,
-        "paid": paid_up,
+        "paid": paid_up or row.status == "PAID",
+        "payable": payable,
+        "pay_blocked_reason": "" if payable else "This vehicle does not have a fee to pay.",
         "receipt_url": f"/p/{row.public_token}",
         "qr_url": f"/p/{row.public_token}/qr.png",
-        "pay_methods": ["MOBILE_SIMULATED", "KIOSK_CASH"],
+        "pay_methods": ["MOBILE_SIMULATED", "MOBILE_MONEY", "KIOSK_CASH"] if payable else [],
         "session": sim_session_dict(row),
+        **stay,
+        **images,
     }
 
 

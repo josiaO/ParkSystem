@@ -47,7 +47,7 @@ See [04-DOMAIN-MODEL.md](04-DOMAIN-MODEL.md). Hardware identity is projected fro
 
 1. Connect: `HVXCameraAdapter.connect` → `HVXHostClient` → port 30000 NetSDK sequence
 2. Media: `LocalMediaGateway` owns one upstream producer per camera (HVX JPEG or FFmpeg RTSP). Live view and FastALPR are consumers of latest-frame buffers; FastALPR is not in the decode loop.
-3. Plate callback **or coil GPIO rising edge** ingested by the API camera-event loop (FastALPR fills in when native characters are missing). This loop runs for every connected lane even if live view is closed.
+3. Plate callback **or coil GPIO rising edge** ingested by the API camera-event loop. The active plate engine (FastALPR) reads that JPEG. This is the ParkWatch path: the camera supplies the picture, software supplies the plate. `NATIVE_ONLY` can still keep the camera text on a single lane. The loop runs for every connected lane even if live view is closed.
 4. `handle_plate_event` creates/updates a session, records `AccessDecision`, pulses via the gate adapter
 5. Payment writes `PaymentTransaction` then updates session paid state in the same service call
 

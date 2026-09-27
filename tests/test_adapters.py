@@ -134,6 +134,17 @@ class AdapterWrapTests(unittest.TestCase):
         self.assertTrue(should_pulse_physical(gate=commissioning, automatic=True))
         self.assertTrue(should_pulse_physical(gate=production, automatic=True))
 
+    def test_one_failed_adapter_does_not_stop_the_other(self):
+        hvx = camera_adapter_for(_cam(adapter_id="hvx"))
+        rtsp = camera_adapter_for(_cam(adapter_id="rtsp"))
+        with patch.object(hvx, "connect", AsyncMock(side_effect=RuntimeError("sdk down"))):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(hvx.connect(_cam()))
+        with patch.object(rtsp, "connect", AsyncMock(return_value={"connected": True, "adapter_id": "rtsp"})):
+            result = asyncio.run(rtsp.connect(_cam(adapter_id="rtsp")))
+        self.assertTrue(result["connected"])
+        self.assertEqual(result["adapter_id"], "rtsp")
+
     def test_gate_adapter_wraps_working_controller(self):
         health = asyncio.run(live_gate_adapter().health())
         self.assertEqual(health["adapter_id"], "hvx")

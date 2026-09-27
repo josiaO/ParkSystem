@@ -24,6 +24,18 @@ class FeeEngineTests(unittest.TestCase):
         self.assertEqual(result.due, 1000)
         self.assertIn("minus:1000", result.breakdown)
 
+    def test_vehicle_class_overlay_changes_fee_without_new_api(self):
+        start = datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc)
+        end = start + timedelta(seconds=2701)
+        car1 = calculate_car1_fee(start, end)
+        van = calculate_car1_fee(start, end, {
+            "car_type": "Van1",
+            "vehicle_classes": {"Van1": {"day_block_fee": 2000}},
+        })
+        self.assertEqual(car1.due, 1000)
+        self.assertEqual(van.car_type, "Van1")
+        self.assertEqual(van.due, 3000)
+
     def test_car1_constants_match_sql(self):
         self.assertEqual(CAR1_RULES["free_day_seconds"], 2700)
         self.assertEqual(CAR1_RULES["free_night_seconds"], 2100)

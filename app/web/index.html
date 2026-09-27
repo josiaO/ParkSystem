@@ -282,6 +282,14 @@
     .gate-card p { font-size: 12px; color: var(--text-secondary); margin: 4px 0; }
     .live-title { font-weight: 700; margin-bottom: 8px; font-size: 12.5px; color: var(--text-primary); }
     .dual-live { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
+    .dual-live.layout-1 { grid-template-columns: minmax(0, 1fr); }
+    .dual-live.layout-1 .live-pane[data-slot="1"] { display: none; }
+    .dual-live.layout-all { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .kiosk-grid, .fee-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .kiosk-grid img { width: 100%; max-height: 200px; object-fit: contain; background: #070B10; border-radius: 8px; }
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .seg button { padding: 6px 12px; }
+    .seg button.on { background: var(--accent); color: var(--accent-fg); }
     .live-pane .live-card { height: 100%; display: flex; flex-direction: column; min-width: 0; }
     .live-pane .live-frame { height: min(34vh, 360px); max-height: 360px; min-height: 200px; flex: 1; }
     .live-pane img[data-role="video"] {
@@ -440,6 +448,7 @@
       <button data-page="payments" data-nav-id="payments" id="nav-payments" class="sitem">Payments</button>
       <div class="group">Management</div>
       <button data-page="fees" data-nav-id="fees" class="sitem">Tariffs</button>
+      <button data-page="reports" data-nav-id="reports" id="nav-reports" class="sitem">Reports</button>
       <button data-page="onboarding" data-nav-id="onboarding" id="nav-onboarding" class="sitem hidden">Setup Wizard</button>
       <div class="group">System</div>
       <button data-page="gates" data-nav-id="gates" class="sitem">Gates</button>
@@ -457,6 +466,7 @@
       </div>
 
       <div id="page-dashboard">
+        <div id="backup-banner" class="notice hidden"></div>
         <div class="stat-grid" id="dashboard-cards"></div>
         <div class="gates-overview" id="dashboard-lanes"></div>
         <p class="muted" id="dashboard-summary">Loading…</p>
@@ -465,17 +475,23 @@
       <div id="page-health" class="hidden">
         <p class="muted">Technician view. One failed camera or HVX host must not stop parking. Disabled modules show as neutral — not an error.</p>
         <div class="stat-grid" id="health-cards"></div>
-        <div class="card" style="margin-top:14px"><div class="card-h"><h3>Health details</h3></div><div class="card-b"><pre id="health-details">Loading…</pre></div></div>
+        <div class="card" style="margin-top:14px"><div class="card-h"><h3>What this means</h3></div><div class="card-b" id="health-plain">Loading…</div></div>
+        <details style="margin-top:12px"><summary>Technical details</summary><pre id="health-details">Loading…</pre></details>
       </div>
 
       <div id="page-cameras" class="hidden">
-        <div class="notice">Pick any camera for the left and right views — click a view or use its camera list. A lane preset can fill both. Live shows the newest JPEG (not a buffered video). Detection keeps running if you leave this page.</div>
+        <div class="notice">Show 1 camera, 2 cameras, or every camera. A camera that is not on this screen still reads plates and fills its lane. Leaving this page only stops the picture, not recognition.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">IPs</button>
         </div>
         <div id="cameras-sub-live">
           <div class="toolbar">
+            <div class="seg" id="live-layout" role="group" aria-label="How many cameras to show">
+              <button type="button" data-layout="1">1</button>
+              <button type="button" data-layout="2" class="on">2</button>
+              <button type="button" data-layout="all">All</button>
+            </div>
             <label>Lane preset <select id="live-lane"></select></label>
             <button class="secondary" type="button" id="apply-lane">Fill both from lane</button>
             <button class="secondary" type="button" id="refresh-live">Refresh live</button>
@@ -508,6 +524,8 @@
                 </div>
                 <div class="pane-actions">
                   <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                  <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
+                  <p class="muted" data-role="hold"></p>
                 </div>
               </div>
             </div>
@@ -538,6 +556,8 @@
                 </div>
                 <div class="pane-actions">
                   <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                  <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
+                  <p class="muted" data-role="hold"></p>
                 </div>
               </div>
             </div>
@@ -602,16 +622,41 @@
       </div>
 
       <div id="page-sessions" class="hidden">
-        <p class="muted">Plate-first parking sessions. Scan a receipt QR (or type its code) to pay at the kiosk.</p>
+        <p class="muted">Scan the receipt QR (a USB scanner types the code and presses Enter). The visit shows the time inside, the entry photo, and the amount. Payment stays closed when nothing is owed.</p>
         <div class="toolbar">
-          <label style="display:flex;gap:8px;align-items:center;margin:0">Receipt code
-            <input id="receipt-token" placeholder="paste code from QR / ticket" style="min-width:180px">
+          <label style="display:flex;gap:8px;align-items:center;margin:0">Receipt QR or plate
+            <input id="receipt-token" placeholder="Scan QR or type a plate" style="min-width:220px" autocomplete="off">
           </label>
-          <button type="button" id="lookup-receipt">Find by code</button>
+          <button type="button" id="lookup-receipt">Find visit</button>
+          <button class="secondary" type="button" id="scan-receipt-camera">Scan with camera</button>
           <button type="button" id="pay-session">Record kiosk payment</button>
           <button class="secondary" type="button" id="print-session-receipt">Show / print receipt</button>
           <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
         </div>
+        <div id="kiosk-card" class="card hidden" style="margin:12px 0;padding:14px">
+          <div class="kiosk-grid">
+            <div>
+              <img id="kiosk-photo" alt="Car at entry" hidden>
+              <img id="kiosk-crop" alt="Plate close-up" hidden style="margin-top:8px;background:#fff">
+              <p class="muted" id="kiosk-photo-missing">No entry photo stored.</p>
+            </div>
+            <div>
+              <p id="kiosk-plate" style="font-size:28px;letter-spacing:.08em;font-weight:700"></p>
+              <p id="kiosk-stay"></p>
+              <p id="kiosk-due" style="font-size:22px;font-weight:700"></p>
+              <p class="muted" id="kiosk-note"></p>
+              <label>Correct the plate if the photo shows a different one
+                <input id="kiosk-correct" autocomplete="off">
+              </label>
+              <div class="toolbar">
+                <button class="secondary" type="button" id="kiosk-save-plate">Save corrected plate</button>
+                <button type="button" id="kiosk-pay" disabled>Record payment</button>
+                <button class="secondary" type="button" id="kiosk-mobile" disabled>Pay with mobile on this computer</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <video id="qr-camera" hidden playsinline style="max-width:280px;border-radius:8px"></video>
         <div class="tblwrap" style="overflow:auto">
         <table>
           <thead>
@@ -643,10 +688,15 @@
         <div class="toolbar">
           <button type="button" id="add-vehicle">Register plate</button>
           <button class="secondary" type="button" id="refresh-vehicles">Refresh</button>
+          <button class="secondary" type="button" id="delete-vehicles">Delete selected</button>
         </div>
+        <label>Register many (one plate per line: plate, owner, start date, end date)
+          <textarea id="vehicle-bulk" rows="4" placeholder="T111AAA, Jane, 2026-09-01, 2026-10-01"></textarea>
+        </label>
+        <div class="toolbar"><button type="button" id="save-vehicle-bulk">Register these plates</button></div>
         <table>
           <thead>
-            <tr><th>Plate</th><th>Owner</th><th>Plan</th><th>Auto-open</th><th>Enabled</th><th>Valid until</th><th></th></tr>
+            <tr><th></th><th>Plate</th><th>Owner</th><th>Plan</th><th>Auto-open</th><th>Enabled</th><th>From</th><th>Until</th><th></th></tr>
           </thead>
           <tbody id="vehicle-rows"></tbody>
         </table>
@@ -654,15 +704,79 @@
       </div>
 
       <div id="page-fees" class="hidden">
-        <p class="muted">Current site tariff. Change rates in configuration, not in program constants.</p>
+        <p class="muted">Day and night rates for this site. Times and amounts are normal fields — save them here.</p>
+        <form id="tariff-form" class="fee-grid">
+          <label>Currency <input name="currency" id="fee-currency" maxlength="8"></label>
+          <label>Day starts <input name="day_start" id="fee-day-start" type="time"></label>
+          <label>Day ends <input name="day_end" id="fee-day-end" type="time"></label>
+          <label>Free daytime (minutes) <input name="free_day_minutes" id="fee-free-day" type="number" min="0" step="1"></label>
+          <label>Free night (minutes) <input name="free_night_minutes" id="fee-free-night" type="number" min="0" step="1"></label>
+          <label>Day block (minutes) <input name="day_block_minutes" id="fee-day-block" type="number" min="1" step="1"></label>
+          <label>Night block (minutes) <input name="night_block_minutes" id="fee-night-block" type="number" min="1" step="1"></label>
+          <label>Fee per day block <input name="day_block_fee" id="fee-day-fee" type="number" min="0" step="1"></label>
+          <label>Fee per night block <input name="night_block_fee" id="fee-night-fee" type="number" min="0" step="1"></label>
+          <label>Day maximum <input name="day_max" id="fee-day-max" type="number" min="0" step="1"></label>
+          <label>Night maximum <input name="night_max" id="fee-night-max" type="number" min="0" step="1"></label>
+          <label>Fee per full day <input name="daily_wrap_fee" id="fee-daily" type="number" min="0" step="1"></label>
+        </form>
         <div class="toolbar">
-          <button type="button" id="quote-fee">Quote fee</button>
-          <button class="secondary" type="button" id="refresh-tariff">Show tariff</button>
+          <button type="button" id="save-tariff">Save tariff</button>
+          <button class="secondary" type="button" id="refresh-tariff">Reload</button>
         </div>
-        <label>Entry UTC <input id="fee-entry" placeholder="2026-08-25T08:00:00"></label>
-        <label>Exit UTC <input id="fee-exit" placeholder="2026-08-25T10:00:00"></label>
-        <pre id="fee-result">Loading tariff…</pre>
+        <p class="muted">Try a stay to see the fee before you save a change.</p>
+        <div class="fee-grid">
+          <label>Entry <input id="fee-entry" type="datetime-local"></label>
+          <label>Exit <input id="fee-exit" type="datetime-local"></label>
+        </div>
+        <div class="toolbar"><button type="button" id="quote-fee">Quote fee</button></div>
+        <p id="fee-result">Loading tariff…</p>
         <p class="error" id="fee-error"></p>
+      </div>
+
+      <div id="page-reports" class="hidden">
+        <p class="muted">Print or download the report an auditor, a cashier, or a supervisor needs. Plate accuracy shows when the two readers disagreed and when a person corrected a plate.</p>
+        <div class="toolbar">
+          <label>Report
+            <select id="report-kind">
+              <option value="overview">Overview</option>
+              <option value="payments">Payments</option>
+              <option value="outstanding">Cars still inside or owing</option>
+              <option value="daily">Takings by day</option>
+              <option value="operators">Cash by operator</option>
+              <option value="accuracy">Plate reading accuracy</option>
+              <option value="exceptions">Manual actions and corrections</option>
+              <option value="seasons">Season tickets</option>
+            </select>
+          </label>
+          <label>From <input id="report-start" type="date"></label>
+          <label>To <input id="report-end" type="date"></label>
+          <button type="button" id="run-report">Show report</button>
+          <button class="secondary" type="button" id="print-report">Print this report</button>
+          <button class="secondary" type="button" id="print-all-reports">Print all</button>
+          <button class="secondary" type="button" id="download-report">Download this report</button>
+        </div>
+        <div id="report-body"><p class="muted">Choose dates and show the report.</p></div>
+        <h3 style="margin:18px 0 8px">Backup</h3>
+        <p class="muted" id="backup-status">Checking backup…</p>
+        <div class="fee-grid">
+          <label>Remind me to save a file every (days) <input id="backup-days" type="number" min="1" value="7"></label>
+          <label>Cloud address <input id="backup-url" placeholder="https://backup.example/smartpark" autocomplete="off"></label>
+          <label>Cloud token <input id="backup-token" type="password" placeholder="Leave blank to keep the saved token" autocomplete="off"></label>
+          <label>Cloud every (hours) <input id="backup-hours" type="number" min="1" value="24"></label>
+          <label>Cloud backup
+            <select id="backup-enabled">
+              <option value="false">Off</option>
+              <option value="true">On</option>
+            </select>
+          </label>
+        </div>
+        <div class="toolbar">
+          <button type="button" id="backup-save">Save backup schedule</button>
+          <button class="secondary" type="button" id="backup-download">Download offline backup</button>
+          <button class="secondary" type="button" id="backup-cloud">Run cloud backup now</button>
+          <button class="secondary" type="button" id="backup-snooze">Remind me tomorrow</button>
+        </div>
+        <p class="error" id="report-error"></p>
       </div>
 
       <div id="page-users" class="hidden">
@@ -851,7 +965,7 @@
           <option value="HYBRID">HYBRID</option>
         </select>
       </label>
-      <p class="muted" id="camera-adapter-hint">Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.</p>
+      <p class="muted" id="camera-adapter-hint">Leave Adapter on hvx for this site’s QY cameras. The camera snaps the photo. FastALPR reads the plate. Pick rtsp/dahua/hikvision when the camera has no onboard reader — Connect still pulls video and FastALPR still reads the JPEG.</p>
       <p class="error" id="camera-dialog-error"></p>
       <div class="toolbar">
         <button type="submit">Save Camera</button>
@@ -919,6 +1033,16 @@
           <option value="false">No</option>
         </select>
       </label>
+      <label>Season starts
+        <input name="valid_from" type="date">
+      </label>
+      <label>Season ends
+        <input name="valid_until" type="date">
+      </label>
+      <div class="toolbar">
+        <button class="secondary" type="button" id="vehicle-from-today">Start today</button>
+        <button class="secondary" type="button" id="vehicle-until-today">End today</button>
+      </div>
       <label>Notes <input name="notes"></label>
       <p class="error" id="vehicle-dialog-error"></p>
       <div class="toolbar">
@@ -1033,6 +1157,7 @@
 
     function paneEls(slot) {
       const pane = document.querySelector(`.live-pane[data-slot="${slot}"]`);
+      if (!pane) return {};
       return {
         pane,
         camera: pane.querySelector('[data-role="camera"]'),
@@ -1045,6 +1170,7 @@
         crop: pane.querySelector('[data-role="crop"]'),
         plate: pane.querySelector('[data-role="plate"]'),
         details: pane.querySelector('[data-role="details"]'),
+        hold: pane.querySelector('[data-role="hold"]'),
       };
     }
 
@@ -1097,14 +1223,70 @@
       return cameraRowsCache.find((c) => String(c.id) === String(id)) || null;
     }
 
+    let liveLayout = lsGet("smartpark_live_layout") || "2";
+
+    function ensureSlot(slot) {
+      const bags = [liveCameras, liveWatchIds, liveFrameSeq, liveObjectUrls, liveFetchBusy, liveOverlays, liveLastCars, snapshotTimers];
+      bags.forEach((bag) => {
+        while (bag.length <= slot) bag.push(bag === liveFrameSeq || bag === liveFetchBusy ? 0 : null);
+      });
+      if (liveFetchBusy[slot] == null) liveFetchBusy[slot] = false;
+      if (liveFrameSeq[slot] == null) liveFrameSeq[slot] = 0;
+    }
+
     function fillPaneSelects(rows) {
-      [0, 1].forEach((slot) => {
+      document.querySelectorAll(".live-pane").forEach((pane) => {
+        const slot = Number(pane.dataset.slot);
         const sel = paneEls(slot).camera;
         if (!sel) return;
         const current = sel.value || String(savedSlotId(slot) || "");
         sel.innerHTML = `<option value="">Choose camera…</option>` +
           (rows || []).map((c) => `<option value="${c.id}">${cameraOptionLabel(c)}</option>`).join("");
         if (current && [...sel.options].some((o) => o.value === current)) sel.value = current;
+      });
+    }
+
+    function bindExtraPane(pane) {
+      const slot = Number(pane.dataset.slot);
+      const sel = pane.querySelector('[data-role="camera"]');
+      const pick = pane.querySelector('[data-role="pick"]');
+      if (sel) sel.addEventListener("change", () => startLiveSlot(slot, cameraFromSelect(slot), true));
+      if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
+      const openBtn = pane.querySelector('[data-role="open-side"]');
+      if (openBtn) openBtn.addEventListener("click", () => openPaneSide(slot));
+      const correctBtn = pane.querySelector('[data-role="correct-plate"]');
+      if (correctBtn) correctBtn.addEventListener("click", () => correctPanePlate(slot));
+    }
+
+    function syncLivePanes() {
+      const grid = document.querySelector(".dual-live");
+      if (!grid) return;
+      grid.classList.toggle("layout-1", liveLayout === "1");
+      grid.classList.toggle("layout-all", liveLayout === "all");
+      const pane1 = grid.querySelector('.live-pane[data-slot="1"]');
+      if (pane1) pane1.hidden = liveLayout === "1";
+      if (liveLayout === "1") stopLiveSlot(1);
+      const want = liveLayout === "all" ? Math.max(cameraRowsCache.length, 2) : 2;
+      [...grid.querySelectorAll(".live-pane")].forEach((pane) => {
+        const slot = Number(pane.dataset.slot);
+        if (slot >= 2 && slot >= want) {
+          stopLiveSlot(slot);
+          pane.remove();
+        }
+      });
+      const template = grid.querySelector('.live-pane[data-slot="0"]');
+      for (let slot = 2; slot < want; slot += 1) {
+        if (grid.querySelector(`.live-pane[data-slot="${slot}"]`)) continue;
+        const clone = template.cloneNode(true);
+        clone.dataset.slot = String(slot);
+        const label = clone.querySelector("label.live-title");
+        if (label && label.firstChild) label.firstChild.textContent = `Camera ${slot + 1} `;
+        grid.appendChild(clone);
+        ensureSlot(slot);
+        bindExtraPane(clone);
+      }
+      document.querySelectorAll("#live-layout button").forEach((btn) => {
+        btn.classList.toggle("on", btn.dataset.layout === liveLayout);
       });
     }
 
@@ -1157,10 +1339,8 @@
 
     function stopLive() {
       if (liveAlprTimer) { clearInterval(liveAlprTimer); liveAlprTimer = null; }
-      stopLiveSlot(0);
-      stopLiveSlot(1);
-      liveCameras[0] = null;
-      liveCameras[1] = null;
+      document.querySelectorAll(".live-pane").forEach((pane) => stopLiveSlot(Number(pane.dataset.slot)));
+      liveCameras.forEach((_, slot) => { liveCameras[slot] = null; });
     }
 
     function drawLiveOverlay(slot) {
@@ -1322,19 +1502,68 @@
 
     function startDualLive(force = false) {
       if (!liveTabVisible()) { stopLive(); return; }
+      syncLivePanes();
       fillPaneSelects(cameraRowsCache);
-      const anyChosen = [0, 1].some((slot) => cameraFromSelect(slot));
-      if (!anyChosen && cameraRowsCache.length) {
-        const left = cameraRowsCache[0];
-        const right = cameraRowsCache[1] || null;
-        if (paneEls(0).camera) paneEls(0).camera.value = left ? String(left.id) : "";
-        if (paneEls(1).camera) paneEls(1).camera.value = right ? String(right.id) : "";
+      const slots = [...document.querySelectorAll(".dual-live .live-pane")]
+        .map((pane) => Number(pane.dataset.slot))
+        .filter((slot) => liveLayout !== "1" || slot === 0);
+      if (liveLayout === "all") {
+        slots.forEach((slot, index) => {
+          const cam = cameraRowsCache[index] || null;
+          const sel = paneEls(slot).camera;
+          if (sel) sel.value = cam ? String(cam.id) : "";
+          startLiveSlot(slot, cam, force);
+        });
+      } else {
+        const anyChosen = slots.some((slot) => cameraFromSelect(slot));
+        if (!anyChosen && cameraRowsCache.length) {
+          const left = cameraRowsCache[0];
+          const right = cameraRowsCache[1] || null;
+          if (paneEls(0).camera) paneEls(0).camera.value = left ? String(left.id) : "";
+          if (paneEls(1).camera && liveLayout !== "1") paneEls(1).camera.value = right ? String(right.id) : "";
+        }
+        slots.forEach((slot) => startLiveSlot(slot, cameraFromSelect(slot), force));
       }
-      [0, 1].forEach((slot) => startLiveSlot(slot, cameraFromSelect(slot), force));
       if (!liveAlprTimer) {
         liveAlprTimer = setInterval(() => {
           liveCameras.forEach((cam, slot) => { if (cam) refreshPlates(slot); });
         }, 2000);
+      }
+    }
+
+    async function openPaneSide(slot) {
+      const cam = liveCameras[slot];
+      const error = document.getElementById("camera-error");
+      if (!cam) { error.textContent = "No camera on this view."; return; }
+      const reason = prompt("Reason");
+      if (!reason) return;
+      if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
+      try {
+        alert(JSON.stringify(await api(`/cameras/${cam.id}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    async function correctPanePlate(slot) {
+      const cam = liveCameras[slot];
+      const shown = liveLastCars[slot] || {};
+      const error = document.getElementById("camera-error");
+      if (!cam) { error.textContent = "No camera on this view."; return; }
+      const current = shown.plate || "";
+      const next = prompt("Correct plate (leave as-is to confirm)", current);
+      if (next == null) return;
+      error.textContent = "";
+      try {
+        const data = await api(`/cameras/${cam.id}/plate-corrections`, {
+          method: "POST",
+          body: JSON.stringify({ plate: String(next).trim() || current, capture_id: shown.id || null, confirm: true }),
+        });
+        liveLastCars[slot] = data.capture || shown;
+        renderSlotCar(slot, { last_car: liveLastCars[slot], fusion: (data.capture || {}).fusion });
+        alert(data.message || "Plate confirmed");
+      } catch (err) {
+        error.textContent = err.message;
       }
     }
 
@@ -1429,10 +1658,15 @@
       const source = shown.source || (data && data.fusion && data.fusion.method) || "—";
       const side = shown.lane_direction || cam.side || cam.lane_direction || "—";
       const when = formatWhen(shown.created_at);
+      const fusion = (data && data.fusion) || shown.fusion || {};
+      const held = Boolean(shown.pending_confirmation || shown.needs_review || fusion.needs_review);
+      const decision = held ? "held for confirmation" : "auto-accepted";
       if (plate) {
-        els.details.textContent = `Time ${when} · ${side} · ${conf} · ${source}`;
+        els.details.textContent = `Time ${when} · ${side} · ${conf} · ${source} · ${decision}`;
+        if (els.hold) els.hold.textContent = held ? "Waiting: confirm or correct this plate before the gate auto-decides." : "";
       } else {
         els.details.textContent = "No car yet. Connect all on the IPs tab, then wait for a vehicle.";
+        if (els.hold) els.hold.textContent = "";
       }
       liveOverlays[slot] = (data && data.overlay) || null;
       drawLiveOverlay(slot);
@@ -1588,17 +1822,19 @@
         const rows = await api("/vehicles");
         document.getElementById("vehicle-rows").innerHTML = rows.map((v) => `
           <tr>
+            <td><input type="checkbox" data-vehicle-check="${v.id}" aria-label="Select ${v.plate}"></td>
             <td><strong>${v.plate}</strong></td>
             <td>${v.owner_name || "—"}</td>
             <td>${v.plan_name || v.plan_kind || "—"}</td>
             <td>${v.auto_open ? "Yes" : "No"}</td>
             <td>${v.enabled ? "Yes" : "No"}</td>
+            <td>${(v.valid_from || "—").toString().slice(0, 10)}</td>
             <td>${(v.valid_until || "—").toString().slice(0, 10)}</td>
             <td class="row-actions">
               ${can("subscribers.manage") ? `<button type="button" data-edit-vehicle="${v.id}">Edit</button>
               <button class="danger" type="button" data-del-vehicle="${v.id}">Delete</button>` : ""}
             </td>
-          </tr>`).join("") || `<tr><td colspan="7">No registered plates yet.</td></tr>`;
+          </tr>`).join("") || `<tr><td colspan="9">No registered plates yet.</td></tr>`;
       } catch (err) {
         error.textContent = err.message;
       }
@@ -1619,6 +1855,11 @@
         form.elements.owner_name.value = vehicle.owner_name || "";
         form.elements.enabled.value = vehicle.enabled ? "true" : "false";
         form.elements.notes.value = vehicle.notes || "";
+        form.elements.valid_from.value = (vehicle.valid_from || "").slice(0, 10);
+        form.elements.valid_until.value = (vehicle.valid_until || "").slice(0, 10);
+      } else {
+        form.elements.valid_from.value = "";
+        form.elements.valid_until.value = "";
       }
       document.getElementById("vehicle-dialog").showModal();
     }
@@ -1653,7 +1894,7 @@
       document.getElementById("page-title").textContent = (navItem && navItem.label) || {
         dashboard: "Dashboard", health: "System Health", cameras: "Live Gates", gates: "Gates",
         sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
-        fees: "Tariffs", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
+        fees: "Tariffs", reports: "Reports", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
         onboarding: "Setup Wizard", watchlists: "Watchlists",
       }[name] || name;
       const sub = document.getElementById("page-subtitle");
@@ -1666,7 +1907,8 @@
           sessions: "Plate-first parking sessions",
           vehicles: "Registered plates and access plans",
           payments: "Kiosk and mobile payment ledger",
-          fees: "Site tariff and fee quotes",
+          fees: "Day and night parking rates",
+          reports: "Visits, money, and backups",
           users: "Operator accounts and roles",
           hardware: "Technician diagnostics",
           sim: "Simulate entry/exit without cameras",
@@ -1684,6 +1926,7 @@
       if (name === "vehicles") loadVehicles();
       if (name === "payments") loadPayments();
       if (name === "fees") loadFees();
+      if (name === "reports") loadReports();
       if (name === "users") loadUsers();
       if (name === "hardware") loadHardware();
       if (name === "sim") loadSim();
@@ -1743,6 +1986,7 @@
             watchlists: null,
             payments: "payments.view",
             fees: "fees.view",
+            reports: "dashboard.view",
             onboarding: "settings.manage",
             gates: "gates.view",
             users: "users.view",
@@ -1907,7 +2151,7 @@
       }
 
       if (step === 4) {
-        const mode = draft.recognition_mode || st.recognition_default || "HYBRID";
+        const mode = draft.recognition_mode || st.recognition_default || "FASTALPR_ONLY";
         const modes = st.recognition_modes || [];
         body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Recognition per camera</h1>
           <p class="muted" style="margin:6px 0 18px">Default mode for this site. Applied to existing cameras; new cameras inherit it.</p>
@@ -2084,6 +2328,18 @@
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
       const paySession = document.getElementById("pay-session");
       if (paySession) paySession.style.display = (can("payments.create") || can("kiosk.use")) ? "" : "none";
+      const saveTariff = document.getElementById("save-tariff");
+      if (saveTariff) saveTariff.style.display = (can("fees.manage") || can("settings.manage")) ? "" : "none";
+      const manageVehicles = can("subscribers.manage");
+      ["add-vehicle", "save-vehicle-bulk", "delete-vehicles"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = manageVehicles ? "" : "none";
+      });
+      const manageBackup = can("settings.manage");
+      ["backup-save", "backup-download", "backup-cloud"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = manageBackup ? "" : "none";
+      });
     }
 
     async function refreshSessionContext() {
@@ -2247,6 +2503,7 @@
         const alerts = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
         el.className = (stats.alerts && stats.alerts.length) ? "notice" : "muted";
         el.textContent = alerts;
+        refreshBackupBanner();
       } catch (err) {
         el.textContent = `Unable to load dashboard: ${err.message}`;
       }
@@ -2288,6 +2545,58 @@
       hdrHealthTimer = setInterval(refreshHdrHealth, 8000);
     }
 
+    function healthSentences(details, live) {
+      const status = String(details.status || details.state || (live && live.state) || "ok");
+      const lines = [`The site is ${status.replaceAll("_", " ")}.`];
+      const hvx = details.hvx_host || {};
+      if (hvx.ok) lines.push("The camera host that talks to HVX cameras is running.");
+      else if (hvx.required === false || hvx.supported === false) lines.push("This computer does not run the Windows HVX camera host. IP cameras can still be used.");
+      else if (details.hvx_host) lines.push("The HVX camera host is not responding. Parking can continue on cameras that do not need it.");
+      const modules = (details.modules && details.modules.components) || details.modules || {};
+      Object.keys(modules).forEach((key) => {
+        if (["components", "profile", "enabled_modules"].includes(key)) return;
+        const item = modules[key];
+        const state = (item && (item.state || item.status)) || (typeof item === "string" ? item : "");
+        if (!state) return;
+        const label = key.replaceAll("_", " ");
+        const lower = String(state).toLowerCase();
+        if (lower.includes("disabled") || lower === "n/a" || lower.includes("neutral")) {
+          lines.push(`${label} is turned off. That is normal when you are not using it.`);
+        } else if (lower.includes("ok") || lower.includes("ready") || lower.includes("healthy")) {
+          lines.push(`${label} is working.`);
+        } else {
+          lines.push(`${label} needs attention (${state}).`);
+        }
+      });
+      if (lines.length === 1) lines.push("No extra warnings.");
+      return lines;
+    }
+
+    async function refreshBackupBanner() {
+      const banner = document.getElementById("backup-banner");
+      if (!banner) return;
+      try {
+        const status = await api("/backup");
+        if (status.offline_due || status.cloud_due) {
+          const bits = [];
+          if (status.offline_due) bits.push(status.offline_message);
+          if (status.cloud_due) bits.push(status.cloud_message);
+          banner.classList.remove("hidden");
+          banner.innerHTML = `${bits.join(" ")} <button type="button" id="backup-banner-open">Open reports</button> <button type="button" class="secondary" id="backup-banner-snooze">Remind me tomorrow</button>`;
+          document.getElementById("backup-banner-open").addEventListener("click", () => showPage("reports"));
+          document.getElementById("backup-banner-snooze").addEventListener("click", async () => {
+            await api("/backup/snooze", { method: "POST", body: "{}" });
+            banner.classList.add("hidden");
+          });
+        } else {
+          banner.classList.add("hidden");
+          banner.textContent = "";
+        }
+      } catch (_) {
+        banner.classList.add("hidden");
+      }
+    }
+
     async function loadHealth() {
       const cards = document.getElementById("health-cards");
       const pre = document.getElementById("health-details");
@@ -2312,7 +2621,7 @@
           ["Uptime s", proc.uptime_seconds ?? "—"],
           ["Threads", proc.thread_count ?? "—"],
           ["HVX host", hvxLabel],
-          ["ALPR mode", details.alpr_mode || "NATIVE_ONLY"],
+          ["ALPR mode", details.alpr_mode || "FASTALPR_ONLY"],
         ];
         const components = (modules && modules.components) || modules || {};
         Object.keys(components).forEach((key) => {
@@ -2329,6 +2638,8 @@
         if (st.includes("critical") || st.includes("down") || st.includes("not_ready")) setHdrHealth("Critical", "c-dgr");
         else if (st.includes("degrad") || st.includes("warn")) setHdrHealth("Degraded", "c-wrn");
         else setHdrHealth("Operational", "c-ok");
+        const plain = document.getElementById("health-plain");
+        if (plain) plain.innerHTML = healthSentences(details, live).map((line) => `<p>${line}</p>`).join("");
         pre.textContent = JSON.stringify(details, null, 2);
       } catch (err) {
         pre.textContent = err.message;
@@ -2473,6 +2784,13 @@
     document.getElementById("refresh-live").addEventListener("click", () => startDualLive(true));
     document.getElementById("apply-lane").addEventListener("click", applyLanePreset);
     document.getElementById("live-lane").addEventListener("change", applyLanePreset);
+    document.getElementById("live-layout").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-layout]");
+      if (!btn) return;
+      liveLayout = btn.dataset.layout;
+      lsSet("smartpark_live_layout", liveLayout);
+      startDualLive(true);
+    });
     document.querySelectorAll(".live-pane").forEach((pane) => {
       const slot = Number(pane.dataset.slot);
       const sel = pane.querySelector('[data-role="camera"]');
@@ -2497,6 +2815,31 @@
         if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
         try {
           alert(JSON.stringify(await api(`/cameras/${cam.id}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
+        } catch (err) {
+          error.textContent = err.message;
+        }
+      });
+    });
+    document.querySelectorAll(".live-pane [data-role='correct-plate']").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const pane = btn.closest(".live-pane");
+        const slot = Number(pane.dataset.slot);
+        const cam = liveCameras[slot];
+        const shown = liveLastCars[slot] || {};
+        const error = document.getElementById("camera-error");
+        if (!cam) { error.textContent = "No camera on this side."; return; }
+        const current = shown.plate || "";
+        const next = prompt("Correct plate (leave as-is to confirm)", current);
+        if (next == null) return;
+        error.textContent = "";
+        try {
+          const data = await api(`/cameras/${cam.id}/plate-corrections`, {
+            method: "POST",
+            body: JSON.stringify({ plate: String(next).trim() || current, capture_id: shown.id || null, confirm: true }),
+          });
+          liveLastCars[slot] = data.capture || shown;
+          renderSlotCar(slot, { last_car: liveLastCars[slot], fusion: (data.capture || {}).fusion });
+          alert(data.message || "Plate confirmed");
         } catch (err) {
           error.textContent = err.message;
         }
@@ -2675,56 +3018,223 @@
         err.textContent = e.message;
       }
     });
-    document.getElementById("lookup-receipt").addEventListener("click", async () => {
+    let kioskVisit = null;
+    function showKioskVisit(data) {
+      kioskVisit = data;
+      selectedSessionId = Number(data.session_id);
+      const card = document.getElementById("kiosk-card");
+      card.classList.remove("hidden");
+      document.getElementById("kiosk-plate").textContent = data.plate || "—";
+      const inside = data.still_inside ? "still inside" : "visit ended";
+      document.getElementById("kiosk-stay").textContent = `Time on site: ${data.duration_label || "—"} (${inside}). Entered ${(data.entry_time || "").replace("T", " ").slice(0, 16)}.`;
+      const remain = Math.round(Number(data.amount_remaining || 0));
+      document.getElementById("kiosk-due").textContent = data.payable
+        ? `${data.currency || "TZS"} ${remain.toLocaleString()} to pay`
+        : "Nothing to pay";
+      document.getElementById("kiosk-note").textContent = data.image_note || "";
+      const photo = document.getElementById("kiosk-photo");
+      const crop = document.getElementById("kiosk-crop");
+      const missing = document.getElementById("kiosk-photo-missing");
+      if (data.snapshot_url) {
+        photo.hidden = false;
+        photo.src = data.snapshot_url;
+        missing.hidden = true;
+      } else {
+        photo.hidden = true;
+        photo.removeAttribute("src");
+        missing.hidden = false;
+      }
+      if (data.crop_url) {
+        crop.hidden = false;
+        crop.src = data.crop_url;
+      } else {
+        crop.hidden = true;
+        crop.removeAttribute("src");
+      }
+      document.getElementById("kiosk-correct").value = data.image_matches_plate === false ? "" : (data.plate || "");
+      const allow = Boolean(data.payable) && (can("payments.create") || can("kiosk.use"));
+      document.getElementById("kiosk-pay").disabled = !allow;
+      document.getElementById("kiosk-mobile").disabled = !data.payable;
+      document.getElementById("pay-session").disabled = !allow;
+    }
+
+    async function lookupReceipt() {
       const err = document.getElementById("session-error");
       err.textContent = "";
       const token = (document.getElementById("receipt-token").value || "").trim();
       if (!token) {
-        err.textContent = "Enter the receipt code from the QR / ticket.";
+        err.textContent = "Scan the receipt QR or type a plate.";
         return;
       }
       try {
-        const data = await api(`/sessions/by-token/${encodeURIComponent(token)}`);
-        selectedSessionId = Number(data.session_id);
+        const data = await api(`/sessions/lookup?q=${encodeURIComponent(token)}`);
         await loadSessions();
-        const row = document.querySelector(`#session-rows tr[data-id="${selectedSessionId}"]`);
+        const row = document.querySelector(`#session-rows tr[data-id="${data.session_id}"]`);
         if (row) {
           document.querySelectorAll("#session-rows tr").forEach((r) => r.classList.remove("selected"));
           row.classList.add("selected");
           row.scrollIntoView({ block: "nearest" });
         }
-        err.textContent = data.paid
-          ? `${data.plate} is already paid.`
-          : `Found ${data.plate} — due ${data.currency} ${Math.round(data.amount_remaining)}. Select Pay to record kiosk cash.`;
+        showKioskVisit(data);
+        err.textContent = "";
       } catch (e) {
         err.textContent = e.message;
       }
+    }
+
+    document.getElementById("lookup-receipt").addEventListener("click", lookupReceipt);
+    document.getElementById("receipt-token").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); lookupReceipt(); }
     });
-    document.getElementById("pay-session").addEventListener("click", async () => {
+    async function recordKioskPayment() {
       const err = document.getElementById("session-error");
-      const token = (document.getElementById("receipt-token").value || "").trim();
+      err.textContent = "";
+      if (kioskVisit && !kioskVisit.payable) {
+        err.textContent = kioskVisit.pay_blocked_reason || "This vehicle does not have a fee to pay.";
+        return;
+      }
+      const token = (kioskVisit && kioskVisit.token) || "";
       if (!selectedSessionId && !token) {
-        err.textContent = "Select a session or enter a receipt code first.";
+        err.textContent = "Scan a receipt QR or select a visit first.";
         return;
       }
       try {
         if (token) {
-          await api(`/p/${encodeURIComponent(token)}/kiosk-pay`, {
+          const data = await api(`/p/${encodeURIComponent(token)}/kiosk-pay`, {
             method: "POST",
             body: JSON.stringify({ method: "KIOSK_CASH" }),
           });
+          if (data.already_paid) err.textContent = "Already settled. Nothing new to collect.";
+          showKioskVisit(data.session_id ? data : (data.session || data));
         } else {
           await api(`/sessions/${selectedSessionId}/pay`, { method: "POST", body: JSON.stringify({ method: "KIOSK_CASH" }) });
         }
-        selectedSessionId = null;
-        document.getElementById("receipt-token").value = "";
+        await loadSessions();
+        await loadPayments();
+        if (token) {
+          const fresh = await api(`/sessions/lookup?q=${encodeURIComponent(token)}`);
+          showKioskVisit(fresh);
+        }
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    }
+    document.getElementById("pay-session").addEventListener("click", recordKioskPayment);
+    document.getElementById("kiosk-pay").addEventListener("click", recordKioskPayment);
+    document.getElementById("kiosk-mobile").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      err.textContent = "";
+      if (!kioskVisit || !kioskVisit.payable || !kioskVisit.token) {
+        err.textContent = (kioskVisit && kioskVisit.pay_blocked_reason) || "Scan a receipt before paying by mobile.";
+        return;
+      }
+      try {
+        const data = await api(`/p/${encodeURIComponent(kioskVisit.token)}/pay`, {
+          method: "POST",
+          body: JSON.stringify({ method: "MOBILE_SIMULATED" }),
+        });
+        showKioskVisit(data);
         await loadSessions();
         await loadPayments();
       } catch (e) {
         err.textContent = e.message;
       }
     });
+    document.getElementById("kiosk-save-plate").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      err.textContent = "";
+      if (!selectedSessionId) { err.textContent = "Find a visit first."; return; }
+      const plate = document.getElementById("kiosk-correct").value.trim();
+      if (!plate) { err.textContent = "Type the plate you can see on the car."; return; }
+      try {
+        await api(`/sessions/${selectedSessionId}/correct-plate`, {
+          method: "POST",
+          body: JSON.stringify({ plate, confirm: true }),
+        });
+        const token = (kioskVisit && kioskVisit.token) || plate;
+        const fresh = await api(`/sessions/lookup?q=${encodeURIComponent(token)}`);
+        showKioskVisit(fresh);
+        await loadSessions();
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    });
+    document.getElementById("scan-receipt-camera").addEventListener("click", async () => {
+      const err = document.getElementById("session-error");
+      err.textContent = "";
+      if (!("BarcodeDetector" in window) || !navigator.mediaDevices) {
+        err.textContent = "This browser cannot scan with a webcam. Use a USB scanner in the box above.";
+        return;
+      }
+      const video = document.getElementById("qr-camera");
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.hidden = false;
+        video.srcObject = stream;
+        await video.play();
+        const detector = new BarcodeDetector({ formats: ["qr_code"] });
+        const timer = setInterval(async () => {
+          try {
+            const codes = await detector.detect(video);
+            if (!codes || !codes[0]) return;
+            clearInterval(timer);
+            stream.getTracks().forEach((track) => track.stop());
+            video.hidden = true;
+            document.getElementById("receipt-token").value = codes[0].rawValue || "";
+            lookupReceipt();
+          } catch (_) {}
+        }, 500);
+      } catch (e) {
+        err.textContent = "Camera permission was blocked. Use a USB scanner instead.";
+      }
+    });
     document.getElementById("vehicle-cancel").addEventListener("click", () => document.getElementById("vehicle-dialog").close());
+    document.getElementById("vehicle-from-today").addEventListener("click", () => {
+      const now = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      document.querySelector("#vehicle-form [name=valid_from]").value = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+    });
+    document.getElementById("vehicle-until-today").addEventListener("click", () => {
+      const now = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      document.querySelector("#vehicle-form [name=valid_until]").value = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+    });
+    document.getElementById("save-vehicle-bulk").addEventListener("click", async () => {
+      const error = document.getElementById("vehicle-error");
+      error.textContent = "";
+      const lines = document.getElementById("vehicle-bulk").value.split(/\n/).map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) { error.textContent = "Add one plate per line."; return; }
+      const vehicles = lines.map((line) => {
+        const [plate, owner, from, until] = line.split(",").map((part) => (part || "").trim());
+        return {
+          plate,
+          owner_name: owner || "",
+          valid_from: from ? `${from}T00:00:00Z` : null,
+          valid_until: until ? `${until}T23:59:59Z` : null,
+        };
+      });
+      try {
+        const result = await api("/vehicles/bulk", { method: "POST", body: JSON.stringify({ vehicles }) });
+        const failed = (result.errors || []).map((item) => item.error).join("; ");
+        error.textContent = failed ? `Saved ${result.created.length}. ${failed}` : `Registered ${result.created.length} plates.`;
+        document.getElementById("vehicle-bulk").value = "";
+        loadVehicles();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("delete-vehicles").addEventListener("click", async () => {
+      const ids = [...document.querySelectorAll("[data-vehicle-check]:checked")].map((el) => Number(el.dataset.vehicleCheck));
+      const error = document.getElementById("vehicle-error");
+      if (!ids.length) { error.textContent = "Select at least one plate."; return; }
+      if (!confirm(`Remove ${ids.length} registered plate(s)?`)) return;
+      try {
+        await api("/vehicles/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) });
+        loadVehicles();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
     document.getElementById("vehicle-rows").addEventListener("click", async (e) => {
       const editId = e.target.getAttribute && e.target.getAttribute("data-edit-vehicle");
       const delId = e.target.getAttribute && e.target.getAttribute("data-del-vehicle");
@@ -2748,6 +3258,8 @@
         plan_id: Number(form.elements.plan_id.value) || null,
         enabled: form.elements.enabled.value === "true",
         notes: form.elements.notes.value,
+        valid_from: form.elements.valid_from.value ? `${form.elements.valid_from.value}T00:00:00Z` : null,
+        valid_until: form.elements.valid_until.value ? `${form.elements.valid_until.value}T23:59:59Z` : null,
       };
       try {
         if (form.elements.id.value) await api(`/vehicles/${form.elements.id.value}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -3190,6 +3702,19 @@
       }
     });
 
+    function localDateTimeValue(date) {
+      const p = (n) => String(n).padStart(2, "0");
+      return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+    }
+
+    function fillTariffForm(editor) {
+      if (!editor) return;
+      const form = document.getElementById("tariff-form");
+      Object.entries(editor).forEach(([key, value]) => {
+        if (form.elements[key]) form.elements[key].value = value ?? "";
+      });
+    }
+
     async function loadFees() {
       const error = document.getElementById("fee-error");
       error.textContent = "";
@@ -3198,17 +3723,35 @@
       if (!entry.value || !exit.value) {
         const now = new Date();
         const earlier = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-        const iso = (d) => d.toISOString().slice(0, 19);
-        if (!entry.value) entry.value = iso(earlier);
-        if (!exit.value) exit.value = iso(now);
+        if (!entry.value) entry.value = localDateTimeValue(earlier);
+        if (!exit.value) exit.value = localDateTimeValue(now);
       }
       try {
-        document.getElementById("fee-result").textContent = JSON.stringify(await api("/fees/tariff"), null, 2);
+        const tariff = await api("/fees/tariff");
+        fillTariffForm(tariff.editor);
+        document.getElementById("fee-result").textContent = `${tariff.name} · ${tariff.currency}. Day rate ${tariff.editor.day_block_fee} per ${tariff.editor.day_block_minutes} min.`;
       } catch (err) {
         error.textContent = err.message;
       }
     }
     document.getElementById("refresh-tariff").addEventListener("click", loadFees);
+    document.getElementById("save-tariff").addEventListener("click", async () => {
+      const error = document.getElementById("fee-error");
+      error.textContent = "";
+      const form = document.getElementById("tariff-form");
+      const payload = {};
+      [...form.elements].forEach((el) => {
+        if (!el.name) return;
+        payload[el.name] = el.type === "number" ? Number(el.value) : el.value;
+      });
+      try {
+        const saved = await api("/fees/tariff", { method: "PATCH", body: JSON.stringify(payload) });
+        fillTariffForm(saved.editor);
+        document.getElementById("fee-result").textContent = "Tariff saved.";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
     document.getElementById("quote-fee").addEventListener("click", async () => {
       const error = document.getElementById("fee-error");
       error.textContent = "";
@@ -3218,10 +3761,160 @@
           exit_time: document.getElementById("fee-exit").value.trim(),
           car_type: "Car1",
         }) });
-        document.getElementById("fee-result").textContent = JSON.stringify(data, null, 2);
+        const minutes = Math.round(Number(data.duration_seconds || 0) / 60);
+        document.getElementById("fee-result").textContent = `${data.currency || ""} ${Number(data.due || 0).toLocaleString()} for ${minutes} min.`;
       } catch (err) {
         error.textContent = err.message;
       }
+    });
+
+    function reportQuery() {
+      const start = document.getElementById("report-start").value;
+      const end = document.getElementById("report-end").value;
+      const bits = [];
+      if (start) bits.push(`start=${encodeURIComponent(start)}`);
+      if (end) bits.push(`end=${encodeURIComponent(end)}`);
+      return bits.length ? `?${bits.join("&")}` : "";
+    }
+
+    async function loadReports() {
+      const error = document.getElementById("report-error");
+      const start = document.getElementById("report-start");
+      const end = document.getElementById("report-end");
+      if (start && !start.value) {
+        const today = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        const stamp = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
+        start.value = stamp;
+        end.value = stamp;
+      }
+      try {
+        const status = await api("/backup");
+        document.getElementById("backup-status").textContent = `${status.offline_message} ${status.cloud_message}`;
+        document.getElementById("backup-days").value = status.reminder_days;
+        document.getElementById("backup-url").value = status.cloud_url || "";
+        document.getElementById("backup-hours").value = status.cloud_interval_hours;
+        document.getElementById("backup-enabled").value = status.cloud_enabled ? "true" : "false";
+      } catch (err) {
+        if (error) error.textContent = err.message;
+      }
+    }
+
+    let lastReportPack = null;
+
+    function reportText(value) {
+      return String(value ?? "").replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+    }
+
+    function reportSheetHtml(sheet) {
+      if (!sheet) return "<p>That report is not in this pack.</p>";
+      const sections = (sheet.sections || []).map((section) => `
+        <h3 style="margin:14px 0 6px">${reportText(section.title)}</h3>
+        <table><tbody>${(section.rows || []).map((row) => `<tr><th>${reportText(row.label)}</th><td>${reportText(row.value)}</td></tr>`).join("")}</tbody></table>
+      `).join("");
+      const columns = sheet.columns || [];
+      if (!columns.length) return `<h2>${reportText(sheet.title)}</h2>${sections}`;
+      const head = columns.map((column) => `<th>${reportText(column.label)}</th>`).join("");
+      const body = (sheet.rows || []).map((row) =>
+        `<tr>${columns.map((column) => `<td>${reportText(row[column.key])}</td>`).join("")}</tr>`
+      ).join("") || `<tr><td colspan="${columns.length}">Nothing in this period.</td></tr>`;
+      return `<h2>${reportText(sheet.title)}</h2>${sections}<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function openReportPrint(html, title) {
+      const printer = window.open("", "smartpark-report", "width=800,height=900");
+      if (!printer) return;
+      printer.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>body{font:14px/1.4 system-ui,sans-serif;padding:24px}table{border-collapse:collapse;width:100%;margin-bottom:18px}td,th{border-bottom:1px solid #ddd;text-align:left;padding:6px}h2{margin-top:28px}</style></head><body><h1>${title}</h1>${html}</body></html>`);
+      printer.document.close();
+      printer.focus();
+      setTimeout(() => printer.print(), 300);
+    }
+
+    document.getElementById("run-report").addEventListener("click", async () => {
+      const error = document.getElementById("report-error");
+      error.textContent = "";
+      try {
+        lastReportPack = await api(`/reports/summary${reportQuery()}`);
+        const kind = document.getElementById("report-kind").value;
+        const sheet = (lastReportPack.reports || []).find((item) => item.id === kind) || (lastReportPack.reports || [])[0];
+        document.getElementById("report-body").innerHTML = reportSheetHtml(sheet);
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("print-report").addEventListener("click", () => {
+      openReportPrint(document.getElementById("report-body").innerHTML, "SmartPark report");
+    });
+    document.getElementById("print-all-reports").addEventListener("click", () => {
+      const sheets = (lastReportPack && lastReportPack.reports) || [];
+      if (!sheets.length) {
+        document.getElementById("report-error").textContent = "Show a report first, then print all.";
+        return;
+      }
+      openReportPrint(sheets.map(reportSheetHtml).join(""), "SmartPark audit pack");
+    });
+    document.getElementById("download-report").addEventListener("click", async () => {
+      const kind = document.getElementById("report-kind").value || "payments";
+      const q = reportQuery();
+      const joiner = q ? "&" : "?";
+      const res = await fetch(`/reports/export.csv${q}${joiner}kind=${encodeURIComponent(kind)}`, { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
+      if (!res.ok) { document.getElementById("report-error").textContent = "Could not download that report."; return; }
+      const blob = await res.blob();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `smartpark-${kind}.csv`;
+      link.click();
+    });
+    document.getElementById("backup-save").addEventListener("click", async () => {
+      const error = document.getElementById("report-error");
+      error.textContent = "";
+      const payload = {
+        reminder_days: Number(document.getElementById("backup-days").value),
+        cloud_url: document.getElementById("backup-url").value.trim(),
+        cloud_interval_hours: Number(document.getElementById("backup-hours").value),
+        cloud_enabled: document.getElementById("backup-enabled").value === "true",
+      };
+      const token = document.getElementById("backup-token").value;
+      if (token) payload.cloud_token = token;
+      try {
+        const status = await api("/backup", { method: "PATCH", body: JSON.stringify(payload) });
+        document.getElementById("backup-status").textContent = `${status.offline_message} ${status.cloud_message}`;
+        document.getElementById("backup-token").value = "";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("backup-download").addEventListener("click", async () => {
+      const error = document.getElementById("report-error");
+      error.textContent = "";
+      try {
+        const res = await fetch("/backup/download", { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
+        if (!res.ok) throw new Error("Could not download the backup.");
+        const blob = await res.blob();
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "smartpark-backup.sql";
+        link.click();
+        await loadReports();
+        refreshBackupBanner();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("backup-cloud").addEventListener("click", async () => {
+      const error = document.getElementById("report-error");
+      error.textContent = "";
+      try {
+        const status = await api("/backup/cloud", { method: "POST", body: "{}" });
+        document.getElementById("backup-status").textContent = status.cloud_message || "Cloud backup finished.";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    });
+    document.getElementById("backup-snooze").addEventListener("click", async () => {
+      await api("/backup/snooze", { method: "POST", body: "{}" });
+      await loadReports();
+      refreshBackupBanner();
     });
 
     async function loadHardware() {

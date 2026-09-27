@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import platform
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,7 +28,8 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     db_pool_timeout_seconds: float = 8.0
     hvx_host_url: str = "http://127.0.0.1:8765"
-    alpr_mode: str = "NATIVE_ONLY"
+    alpr_mode: str = "FASTALPR_ONLY"
+    alpr_engine: str = "fastalpr"
     live_idle_seconds: float = 20.0
     live_sdk_interval_seconds: float = 0.025
     snapshot_cache_seconds: float = 0.025
@@ -55,7 +57,8 @@ class Settings(BaseSettings):
     alpr_csf: float = 0.918
     default_hvx_sdk_port: int = 30000
     bootstrap_username: str = "admin"
-    bootstrap_password: str = "SmartPark1!"
+    bootstrap_password: str = ""
+    mobile_money_webhook_secret: str = ""
     default_camera_password: str = "admin"
     gate_physical_control_enabled: bool = True
     board_tcp_port: int = 5000
@@ -86,6 +89,58 @@ class Settings(BaseSettings):
     site_language: str = "en"
     plate_normalization: str = "ALNUM_UPPER"
     plate_validation: str = "NONE"
+
+    @field_validator("api_port", "default_hvx_sdk_port", "board_tcp_port", "led_udp_port", "printer_escpos_port")
+    @classmethod
+    def _port_range(cls, value: int) -> int:
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"Invalid SMARTPARK port {port}; expected 1-65535")
+        return port
+
+    @field_validator("detect_fps")
+    @classmethod
+    def _detect_fps_range(cls, value: float) -> float:
+        fps = float(value)
+        if not 1.0 <= fps <= 30.0:
+            raise ValueError("SMARTPARK_DETECT_FPS must be between 1 and 30")
+        return fps
+
+    @field_validator("alpr_mode")
+    @classmethod
+    def _alpr_mode(cls, value: str) -> str:
+        chosen = str(value or "FASTALPR_ONLY").upper()
+        allowed = {
+            "NATIVE_ONLY", "NATIVE_WITH_LOCAL_VERIFY", "HYBRID",
+            "LOCAL_ONLY", "FASTALPR_ONLY", "LOCAL", "FASTALPR",
+        }
+        if chosen not in allowed:
+            raise ValueError(f"Invalid SMARTPARK_ALPR_MODE {value!r}")
+        return chosen
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level(cls, value: str) -> str:
+        chosen = str(value or "INFO").upper()
+        if chosen not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"Invalid SMARTPARK_LOG_LEVEL {value!r}")
+        return chosen
+
+    @field_validator("rtsp_transport")
+    @classmethod
+    def _rtsp_transport(cls, value: str) -> str:
+        chosen = str(value or "TCP").upper()
+        if chosen not in {"TCP", "UDP", "AUTO"}:
+            raise ValueError(f"Invalid SMARTPARK_RTSP_TRANSPORT {value!r}")
+        return chosen
+
+    @field_validator("gate_command_timeout_seconds", "request_timeout_seconds", "live_idle_seconds")
+    @classmethod
+    def _positive_seconds(cls, value: float) -> float:
+        seconds = float(value)
+        if seconds <= 0:
+            raise ValueError("SMARTPARK timeout/idle values must be greater than 0")
+        return seconds
 
     @property
     def data_dir(self) -> Path:

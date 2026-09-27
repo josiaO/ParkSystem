@@ -338,6 +338,7 @@ def acquire_live(spec: CameraLiveSpec) -> None:
 
 
 def release_live(camera_id: int) -> None:
+    """Stop showing this camera. Recognition on a connected camera keeps running."""
     _viewers[camera_id] = max(0, viewers_for(camera_id) - 1)
     _last_view[camera_id] = time.monotonic()
     row = gateway.session(camera_id)

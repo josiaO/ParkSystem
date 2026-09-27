@@ -2,7 +2,9 @@
 <#
 .SYNOPSIS
     Register SmartPark background processes so parking does not need the Desktop UI.
-    The main installer runs this automatically.
+    The main installer runs this automatically. This scheduled-task path stays
+    the supported default until Install-SmartParkWinService.ps1 is verified on
+    site hardware — do not remove this file in the same change as SCM.
 #>
 [CmdletBinding()]
 param(

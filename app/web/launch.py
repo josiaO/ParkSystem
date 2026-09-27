@@ -1,6 +1,7 @@
-"""Multiplatform web entry: Site Service + browser UI (any OS).
+"""Browser entry: Site Service + browser UI on any OS.
 
-Desktop stays Windows-only. On Linux/macOS this is the supported operator path.
+The PySide desktop (`python -m app.desktop.launch`) also runs on Linux.
+The HVX NetSDK host stays Windows-only.
 """
 
 from __future__ import annotations

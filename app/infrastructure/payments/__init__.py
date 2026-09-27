@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from app.infrastructure.payments.mobile_money import MobileMoneyPaymentProvider
+
 from app.infrastructure.payments.ledger import (  # noqa: F401
     apply_session_payment_state,
     list_transactions,
@@ -61,6 +63,7 @@ class ManualKioskPaymentProvider:
 PROVIDERS: dict[str, PaymentProvider] = {
     "simulated": SimulatedPaymentProvider(),
     "kiosk_manual": ManualKioskPaymentProvider(),
+    "mobile_money": MobileMoneyPaymentProvider(),
 }
 
 

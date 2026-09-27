@@ -2,9 +2,9 @@
 
 SmartPark Edge is a **plate-first parking system**. Cameras read number plates, the Site Server opens or holds the barrier, casual drivers get a receipt, and registered plates (season, VIP, staff) can open automatically.
 
-**Desktop is Windows-only.** The **browser UI + Site Service** run on any OS (Linux, macOS, Windows). A small **32-bit Windows process** talks to the HVX camera vendor SDK so the main app can stay 64-bit — that host cannot run on Linux.
+The **desktop app and Site Service** run on Windows and Linux. A small **32-bit Windows process** talks to the HVX camera vendor SDK so the main app can stay 64-bit — that host cannot run on Linux. On Linux the desktop still opens; IP cameras use RTSP/HTTP and FastALPR.
 
-Install on the parking PC from `dist/SmartParkEdge-Install` (or the USB zip). Sign in `admin` / `SmartPark1!`. How to help, and what is still open, is in [CONTRIBUTING.md](CONTRIBUTING.md). How the pieces fit is in [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/00-START-HERE.md](docs/00-START-HERE.md).
+Install on the parking PC from `dist/SmartParkEdge-Install` (or the USB zip). First-run sign-in is `admin` plus the password printed by setup (also written once to `bootstrap_password.txt` in the data directory). How to help, and what is still open, is in [CONTRIBUTING.md](CONTRIBUTING.md). How the pieces fit is in [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/00-START-HERE.md](docs/00-START-HERE.md).
 
 ## Perspective
 
@@ -19,8 +19,8 @@ The site must keep running if one camera dies, the UI is closed, or FastALPR is 
 | Piece | Windows | Linux / macOS |
 |---|---|---|
 | Site Service (API + parking) | Yes | Yes |
-| Browser UI (`http://127.0.0.1:8760`) | Yes | Yes (preferred client) |
-| Desktop (PySide6) | Yes | No — use the browser |
+| Browser UI (`http://127.0.0.1:8760`) | Yes | Yes |
+| Desktop (PySide6) | Yes | Yes (`python -m app.desktop.launch`) |
 | HVX NetSDK host (port 30000 cameras) | Yes (32-bit) | No |
 | Generic IP cams (`rtsp` / `dahua` / `hikvision`) | Yes | Yes + FastALPR |
 
@@ -29,7 +29,7 @@ The site must keep running if one camera dies, the UI is closed, or FastALPR is 
 | Layer | What |
 |---|---|
 | Site Service | Python 3.11+, FastAPI, SQLite (Postgres only if `SMARTPARK_DATABASE_URL` is set) |
-| Desktop | PySide6 (**Windows only**) |
+| Desktop | PySide6 (Windows and Linux) |
 | Web | Static UI served by the same API (`http://127.0.0.1:8760`) — **any OS** |
 | Camera SDK | 32-bit `hvx_sdk_host` loading `NetSDK.dll` (port **30000**) — **Windows only** |
 | Optional OCR | FastALPR + ONNX; OpenCV only to improve a JPEG for that OCR |

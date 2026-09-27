@@ -190,16 +190,6 @@ def main() -> int:
     from app.services.logging_setup import configure_logging
     from app.services.runtime import acquire_instance_lock, install_crash_hooks, set_process_name
 
-    if os.name != "nt":
-        message = (
-            "SmartPark desktop is Windows-only (HVX NetSDK needs a 32-bit Windows host).\n"
-            "On this OS use the browser UI:\n"
-            "  python -m app.web.launch\n"
-            "or: ./scripts/run_dev_linux.sh"
-        )
-        print(message, file=sys.stderr)
-        return 2
-
     root = install_root()
     _prepare_env(root)
     set_process_name("SmartParkDesktop")

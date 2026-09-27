@@ -30,10 +30,10 @@ class PlatformCapabilitiesTests(unittest.TestCase):
     def test_non_windows_recommends_web_and_rtsp(self):
         with patch.object(plat, "system_name", return_value="Linux"):
             self.assertFalse(plat.hvx_host_supported())
-            self.assertEqual(plat.recommended_client(), "web")
+            self.assertEqual(plat.recommended_client(), "desktop")
             self.assertEqual(plat.recommended_camera_adapter(), "rtsp")
             snap = plat.platform_snapshot()
-            self.assertFalse(snap["desktop_supported"])
+            self.assertTrue(snap["desktop_supported"])
             self.assertIn("Windows-only", snap["note"])
 
     def test_windows_recommends_desktop_and_hvx(self):
@@ -85,7 +85,8 @@ class PlatformReadyApiTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ready")
         self.assertFalse(payload["hvx_host"]["required"])
         self.assertIn("platform", payload)
-        self.assertEqual(payload["platform"]["recommended_client"], "web")
+        self.assertEqual(payload["platform"]["recommended_client"], "desktop")
+        self.assertTrue(payload["platform"]["desktop_supported"])
 
 
 if __name__ == "__main__":

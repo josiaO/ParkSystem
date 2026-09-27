@@ -62,7 +62,8 @@ class AuthTests(unittest.TestCase):
     def test_root_serves_web_login(self):
         r = self.client.get("/")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Sign In", r.text)
+        self.assertIn('id="login-btn"', r.text)
+        self.assertIn("Sign in", r.text)
 
     def test_login_rejects_bad_password(self):
         r = self.client.post("/auth/login", json={"username": "admin", "password": "nope"})

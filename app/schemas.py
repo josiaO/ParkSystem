@@ -132,6 +132,17 @@ class StreamProfilesUpdate(BaseModel):
     stream_profiles: dict | None = None
 
 
+class PlateEngineCorrection(BaseModel):
+    image_ref: str = ""
+    predicted: str = ""
+    corrected: str = ""
+    country: str = ""
+
+
+class ModelPackRequest(BaseModel):
+    directory: str = ""
+
+
 class FusionRequest(BaseModel):
     native_plate: str = ""
     native_confidence: float = 0.0
@@ -171,6 +182,12 @@ class SimExitRequest(BaseModel):
 class PaymentConfirm(BaseModel):
     method: str = "KIOSK_CASH"
     amount: float | None = None
+
+
+class PlateCorrection(BaseModel):
+    plate: str = ""
+    capture_id: int | None = None
+    confirm: bool = False
 
 
 class ParkingSettingsUpdate(BaseModel):
@@ -254,6 +271,38 @@ class VehicleCreate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     notes: str = ""
+
+
+class TariffEditorUpdate(BaseModel):
+    currency: str | None = None
+    day_start: str | None = None
+    day_end: str | None = None
+    free_day_minutes: float | None = None
+    free_night_minutes: float | None = None
+    day_block_minutes: float | None = None
+    night_block_minutes: float | None = None
+    day_block_fee: int | None = None
+    night_block_fee: int | None = None
+    day_max: int | None = None
+    night_max: int | None = None
+    daily_wrap_fee: int | None = None
+    active: bool | None = None
+
+
+class VehicleBulkCreate(BaseModel):
+    vehicles: list[VehicleCreate]
+
+
+class VehicleBulkDelete(BaseModel):
+    ids: list[int]
+
+
+class BackupSettingsUpdate(BaseModel):
+    reminder_days: int | None = None
+    cloud_enabled: bool | None = None
+    cloud_url: str | None = None
+    cloud_token: str | None = None
+    cloud_interval_hours: int | None = None
 
 
 class VehicleUpdate(BaseModel):

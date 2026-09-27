@@ -72,7 +72,7 @@ class StreamSession:
     spec: CameraLiveSpec
     state: str = "DISCONNECTED"
     live: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("live", maxsize=1))
-    detect: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("detect", maxsize=1))
+    detect: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("detect", maxsize=3))
     producer: asyncio.Task | None = None
     viewers: int = 0
     detect_consumers: int = 0
@@ -230,6 +230,10 @@ class LocalMediaGateway:
     def peek_detect(self, camera_id: int) -> FrameSample | None:
         row = self._sessions.get(camera_id)
         return row.detect.latest() if row else None
+
+    def peek_detect_recent(self, camera_id: int, n: int = 3) -> list[FrameSample]:
+        row = self._sessions.get(camera_id)
+        return row.detect.recent(n) if row else []
 
     def note_displayed(self, camera_id: int) -> None:
         row = self._sessions.get(camera_id)

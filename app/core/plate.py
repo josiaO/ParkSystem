@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Iterable
 
 _ALNUM_RE = re.compile(r"[^A-Z0-9]+")
 _TZ_RE = re.compile(r"^T[A-Z0-9]{5,8}$")
+_TZ_STANDARD_RE = re.compile(r"^T\d{3}[A-Z]{2,4}$")
 _KE_RE = re.compile(r"^K[A-Z]{2}\d{3}[A-Z]$")
 _ZA_RE = re.compile(r"^[A-Z]{2,3}\d{2,3}[A-Z]{2}$")
 _AE_RE = re.compile(r"^[A-Z]?\d{1,6}$")
+_DENYLIST = frozenset({
+    "STATION", "POLICE", "TAXI", "STOP", "ENTRY", "EXIT", "OPEN", "CLOSE",
+    "DANGER", "PARKING", "WELCOME", "THANKYOU", "THANK", "PLEASE", "SLOW",
+    "SPEED", "CAMERA", "SMARTPARK", "DAHUA", "HIKVISION",
+})
+# OCR pairs seen on Tanzanian plates (digit/letter lookalikes).
+_CONFUSION_PAIRS = (("O", "0"), ("I", "1"), ("B", "8"), ("S", "5"))
 
 
 def normalize_plate(value: str | None, policy: str = "ALNUM_UPPER") -> str:
@@ -63,14 +71,128 @@ def validate_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
     }
 
 
+def _letter_digit_mix(plate: str) -> bool:
+    letters = sum(ch.isalpha() for ch in plate)
+    digits = sum(ch.isdigit() for ch in plate)
+    return letters >= 1 and digits >= 2 and 5 <= len(plate) <= 10
+
+
+def plate_shape_score(plate: str) -> int:
+    """Higher is a more typical East-African private plate."""
+    if _TZ_STANDARD_RE.match(plate):
+        return 3
+    if _TZ_RE.match(plate) or _KE_RE.match(plate) or _ZA_RE.match(plate):
+        return 2
+    if _letter_digit_mix(plate):
+        return 1
+    return 0
+
+
+def confusion_variants(plate: str, *, max_subs: int = 2) -> list[str]:
+    """Generate OCR lookalike spellings (0/O, 1/I, 8/B, 5/S) without exploding."""
+    seed = normalize_plate(plate)
+    if not seed:
+        return []
+    found = {seed}
+    layer = {seed}
+    for _ in range(max(1, int(max_subs or 1))):
+        nxt: set[str] = set()
+        for text in layer:
+            for i, ch in enumerate(text):
+                for a, b in _CONFUSION_PAIRS:
+                    swap = b if ch == a else a if ch == b else None
+                    if swap:
+                        nxt.add(text[:i] + swap + text[i + 1 :])
+        found.update(nxt)
+        layer = nxt
+        if len(found) > 64:
+            break
+    return list(found)
+
+
+def correct_ocr_confusions(raw: str | None, *, known_plates: Iterable[str] | None = None) -> dict[str, Any]:
+    """Prefer a TZ-shaped or registered variant before database lookup."""
+    normalised = normalize_plate(raw)
+    known = {normalize_plate(p) for p in (known_plates or []) if normalize_plate(p)}
+    variants = confusion_variants(normalised)
+    if normalised in known:
+        return {"plate": normalised, "corrected": False, "reason": "exact-known"}
+    for plate in variants:
+        if plate in known:
+            return {"plate": plate, "corrected": plate != normalised, "reason": "known-confusion"}
+    best = normalised
+    best_score = plate_shape_score(normalised)
+    for plate in variants:
+        score = plate_shape_score(plate)
+        if score > best_score:
+            best, best_score = plate, score
+    tz_forced = _force_tz_positions(normalised)
+    if plate_shape_score(tz_forced) > best_score:
+        best, best_score = tz_forced, plate_shape_score(tz_forced)
+    return {
+        "plate": best,
+        "corrected": best != normalised,
+        "reason": "tz-shape" if best != normalised else "unchanged",
+    }
+
+
+def _force_tz_positions(plate: str) -> str:
+    """Tanzanian private plates are typically T + 3 digits + 3 letters (T285DQP)."""
+    if not plate.startswith("T") or len(plate) < 6:
+        return plate
+    body = list(plate[1:])
+    digit_map = {"O": "0", "I": "1", "B": "8", "S": "5"}
+    letter_map = {"0": "O", "1": "I", "8": "B", "5": "S"}
+    for i, ch in enumerate(body):
+        if i < 3:
+            body[i] = digit_map.get(ch, ch)
+        else:
+            body[i] = letter_map.get(ch, ch)
+    return "T" + "".join(body)
+
+
+def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
+    """Flag garbage OCR as unlikely without changing the site validation default (NONE)."""
+    chosen = (policy or "NONE").upper()
+    normalised = normalize_plate(value)
+    checked = validate_plate(normalised, chosen)
+    likely = True
+    flag = "LIKELY"
+    if not normalised:
+        likely, flag = False, "EMPTY"
+    elif normalised in _DENYLIST:
+        likely, flag = False, "DENYLIST"
+    elif not _letter_digit_mix(normalised):
+        likely, flag = False, "UNLIKELY_PATTERN"
+    elif len(normalised) < 5 or len(normalised) > 10:
+        likely, flag = False, "UNLIKELY_LENGTH"
+    elif chosen == "TZ" and not _TZ_RE.match(normalised):
+        likely, flag = False, "UNLIKELY_TZ"
+    elif plate_shape_score(normalised) == 0:
+        likely, flag = False, "UNLIKELY_PATTERN"
+    return {
+        **checked,
+        "likely": likely,
+        "likelihood": flag,
+        "hold_for_operator": not likely,
+    }
+
+
 def apply_site_plate(raw: str | None, *, normalization: str = "ALNUM_UPPER", validation: str = "NONE") -> dict[str, Any]:
     normalised = normalize_plate(raw, normalization)
-    checked = validate_plate(normalised, validation)
+    corrected = correct_ocr_confusions(normalised)
+    chosen = corrected.get("plate") or normalised
+    checked = assess_plate(chosen, validation)
     return {
         "raw_plate": str(raw or "").strip(),
-        "normalized_plate": normalised,
+        "normalized_plate": chosen,
+        "ocr_corrected": bool(corrected.get("corrected")),
+        "ocr_correction_reason": corrected.get("reason") or "",
         "validation_result": checked.get("result") or "NONE",
         "validation_ok": bool(checked.get("ok")),
+        "likely": bool(checked.get("likely")),
+        "likelihood": checked.get("likelihood") or "LIKELY",
+        "hold_for_operator": bool(checked.get("hold_for_operator")),
         "normalization_policy": normalization,
         "validation_policy": validation,
     }

@@ -314,7 +314,7 @@ class SimulationTests(unittest.TestCase):
                 files={"file": ("car.jpg", jpeg, "image/jpeg")},
             )
 
-        with patch("app.api_main.recognize_bytes", return_value=alpr):
+        with patch("app.api_main.recognize_frame", return_value=alpr):
             with patch("app.services.simulation.controller", return_value=mock_ctrl):
                 entry = upload("ENTRY")
                 self.assertEqual(entry.status_code, 200, entry.text)
@@ -340,7 +340,7 @@ class SimulationTests(unittest.TestCase):
 
     def test_capture_without_plate_does_not_open(self):
         gate, _ = self._lane()
-        with patch("app.api_main.recognize_bytes", return_value={
+        with patch("app.api_main.recognize_frame", return_value={
             "ok": True, "backend": "fastalpr", "plates": [], "best": None, "detail": "no plate in frame",
         }):
             res = self.client.post(

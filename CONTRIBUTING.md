@@ -10,7 +10,7 @@ app/services/                   Parking, plates, preview, HVX client, gates
 app/services/simulation.py      Shared live + Simulation entry/exit
 app/infrastructure/hardware/    Camera / gate / printer adapters
 app/domain/                     Protocols (CameraAdapter, …)
-app/desktop/                    PySide UI (Windows only)
+app/desktop/                    PySide UI (Windows and Linux)
 app/web/                        Browser UI (any OS) + `python -m app.web.launch`
 app/site_service.py             Production API process
 tools/hvx_sdk_host/             32-bit NetSDK process — Windows only; do not rewrite

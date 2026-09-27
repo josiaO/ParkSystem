@@ -57,6 +57,7 @@ class WindowsPackagingTests(unittest.TestCase):
         services = (ROOT / "packaging" / "windows" / "Install-SmartParkServices.ps1").read_text(encoding="utf-8")
         self.assertIn("SmartPark Site Service", services)
         self.assertIn("Start-ScheduledTask", services)
+        self.assertTrue((ROOT / "packaging" / "windows" / "Install-SmartParkWinService.ps1").is_file())
 
     def test_usb_payload_matches_this_rebuild(self):
         payload = ROOT / "dist" / "SmartParkEdge-Install" / "payload"

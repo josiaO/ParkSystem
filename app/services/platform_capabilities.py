@@ -1,7 +1,7 @@
 """OS capabilities: which clients and SDK pieces can run here.
 
-Desktop + HVX NetSDK host stay Windows-only (PE32 DLLs). The Site Service and
-browser UI are the multiplatform operator path on Linux/macOS.
+The PySide desktop and the Site Service run on Windows and Linux. The HVX
+NetSDK host stays Windows-only because NetSDK.dll is a 32-bit Windows library.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ def hvx_host_supported() -> bool:
 
 
 def recommended_client() -> str:
-    """Primary UI for this OS: desktop on Windows, web everywhere else."""
-    return "desktop" if is_windows() else "web"
+    """PySide desktop is the operator UI on Windows and Linux."""
+    return "desktop"
 
 
 def recommended_camera_adapter() -> str:
@@ -40,14 +40,13 @@ def platform_snapshot() -> dict:
         "python": sys.version.split()[0],
         "python_bits": struct.calcsize("P") * 8,
         "hvx_host_supported": hvx_host_supported(),
-        "desktop_supported": is_windows(),
+        "desktop_supported": True,
         "web_supported": True,
         "recommended_client": recommended_client(),
         "recommended_camera_adapter": recommended_camera_adapter(),
         "note": (
-            "HVX NetSDK host and desktop installer are Windows-only. "
-            "Use the browser UI at this Site Service for Linux/macOS; "
-            "set camera adapter to rtsp/dahua/hikvision for non-LAPR IP cameras."
+            "Desktop runs on this OS. The HVX NetSDK host is Windows-only; "
+            "use rtsp/dahua/hikvision adapters for IP cameras here."
             if not is_windows()
             else "Windows site PC: desktop or browser. HVX cameras need the 32-bit SDK host."
         ),

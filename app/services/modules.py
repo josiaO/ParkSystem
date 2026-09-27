@@ -49,7 +49,7 @@ def _default_config() -> dict[str, Any]:
         "onboarding_completed": True,
         "onboarding_step": 8,
         "use_case": "PARKING",
-        "recognition_default": "HYBRID",
+        "recognition_default": "FASTALPR_ONLY",
     }
 
 
@@ -357,7 +357,7 @@ def onboarding_status(db: Session) -> dict[str, Any]:
         "step": int(cfg.get("onboarding_step") or 1),
         "use_case": cfg.get("use_case"),
         "profile": cfg.get("profile"),
-        "recognition_default": cfg.get("recognition_default") or "HYBRID",
+        "recognition_default": cfg.get("recognition_default") or "FASTALPR_ONLY",
         "profiles": list_profiles(),
         "use_cases": [
             {"id": "LPR", "label": "License Plate Recognition", "profile": USE_CASE_TO_PROFILE["LPR"],
@@ -390,9 +390,9 @@ def onboarding_status(db: Session) -> dict[str, Any]:
         },
         "health": health,
         "recognition_modes": [
-            {"id": "NATIVE_ONLY", "label": "Native ALPR", "description": "Use the camera vendor plate engine when available."},
-            {"id": "FASTALPR_ONLY", "label": "SmartPark FastALPR", "description": "Edge FastALPR on live video frames."},
-            {"id": "HYBRID", "label": "Hybrid", "description": "Prefer native, fall back to FastALPR."},
+            {"id": "FASTALPR_ONLY", "label": "FastALPR", "description": "Read every lane JPEG in the FastALPR engine. This is the ParkWatch software-OCR path."},
+            {"id": "NATIVE_ONLY", "label": "Camera OCR", "description": "Keep the camera's own plate text when it sends one."},
+            {"id": "HYBRID", "label": "Hybrid", "description": "Read in FastALPR and keep the camera text when they agree."},
             {"id": "VIDEO_ONLY", "label": "Video only", "description": "Live video without plate recognition."},
         ],
         "steps": [

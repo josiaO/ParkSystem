@@ -574,10 +574,15 @@ def mark_paid(
     method: str = "KIOSK_CASH",
 ) -> ParkingSession:
     quote_session(db, row)
+    due = float(row.amount_due or 0)
+    paid = float(row.amount_paid or 0)
+    remaining = max(0.0, due - paid)
+    if remaining <= 0.0001:
+        raise ValueError("This vehicle does not have a fee to pay")
     recorded = record_succeeded_payment(
         db,
         row,
-        amount=float(row.amount_due or 0),
+        amount=remaining,
         method=method,
         provider_id="kiosk_manual",
         operator_id=operator_id,
