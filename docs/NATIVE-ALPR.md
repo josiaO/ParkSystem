@@ -25,6 +25,8 @@ Coil: `Net_ReadGPIOState` on GPIO IN (learned 1–7). Rising edge → `Net_Image
 
 `HVXNativeALPRProvider` maps that callback through `native_from_sdk_capture`. It does not open gates and does not run FastALPR.
 
+The site default is software reading: FastALPR reads the JPEG (`FASTALPR_ONLY`). The camera text stays available. Set a lane to `NATIVE_ONLY` to keep the camera string. See [PLATE-ENGINE.md](PLATE-ENGINE.md).
+
 Live JPEG is `Net_GetJpgBuffer` on the host. The Site Service MediaGateway polls it. FastALPR is a separate DETECT consumer.
 
 Disable native fusion only with `native_alpr_enabled=false` (rollback/debug). Default is on.

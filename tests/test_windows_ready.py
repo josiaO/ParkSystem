@@ -19,7 +19,7 @@ from app.config import settings
 from app.db import Base, get_db
 from app.models import Camera, CameraStatus, Role, User, UserRole
 from app.security import hash_password
-from app.services.bootstrap import ensure_bootstrap_admin, setup_status
+from app.services.bootstrap import effective_bootstrap_password, ensure_bootstrap_admin, setup_status
 from app.services.hvx_client import HVXHostUnavailable
 from app.services.site_cameras import KNOWN_SITE_CAMERAS
 
@@ -68,12 +68,14 @@ class WindowsReadyTests(unittest.TestCase):
             self.assertTrue(ensure_bootstrap_admin(db))
             self.assertFalse(ensure_bootstrap_admin(db))
             status = setup_status(db)
+        password = effective_bootstrap_password()
         self.assertTrue(status["ready"])
         self.assertEqual(status["username"], settings.bootstrap_username)
-        self.assertEqual(status["password"], settings.bootstrap_password)
+        self.assertEqual(status["password"], password)
+        self.assertGreaterEqual(len(password), 12)
         login = self.client.post("/auth/login", json={
             "username": settings.bootstrap_username,
-            "password": settings.bootstrap_password,
+            "password": password,
         })
         self.assertEqual(login.status_code, 200, login.text)
 
@@ -82,7 +84,9 @@ class WindowsReadyTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
         self.assertEqual(body["username"], "admin")
-        self.assertIn("SmartPark1!", body["hint"])
+        self.assertTrue(body["password"])
+        self.assertNotEqual(body["password"], "SmartPark1!")
+        self.assertIn(body["username"], body["hint"])
         self.assertTrue(body["ready"])
 
     def test_setup_hides_default_password_when_admin_already_exists(self):

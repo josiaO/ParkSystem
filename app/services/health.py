@@ -120,7 +120,7 @@ def ready() -> dict:
             "note": (
                 None if hvx_ok
                 else (
-                    "HVX NetSDK host is Windows-only; Site Service and web UI run without it. "
+                    "HVX NetSDK host is Windows-only; desktop and Site Service run without it. "
                     "Use rtsp/dahua/hikvision adapters for generic IP cameras."
                     if not hvx_required
                     else "HVX host not answering; SDK login and camera GPIO need the 32-bit host."

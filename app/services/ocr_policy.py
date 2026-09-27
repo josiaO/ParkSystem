@@ -1,9 +1,9 @@
-"""Native camera ALPR first. FastALPR is the vendor-independent fallback.
+"""Software plate reading is the default, matching ParkWatch InALPR/OutALPR.
 
-NATIVE_ONLY still prefers the camera. It does not require OcxConfig: if the
-camera never sends a plate (wrong vendor, own ALPR not ready, or coil JPEG
-with empty characters), FastALPR runs on that presence-triggered frame.
-It is not run on every live frame; connected lanes still get periodic FastALPR when native plates are missing, even with live view closed.
+The camera snaps the JPEG. The active PlateEngine (FastALPR) reads that JPEG.
+NATIVE_ONLY is still available when a lane should keep the camera's own text.
+FASTALPR_ONLY reads every presence frame in software and does not require the
+camera's onboard OCR.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _canonical_mode(value: str) -> str:
 
 def alpr_mode() -> str:
     from app.config import settings
-    return _canonical_mode(str(getattr(settings, "alpr_mode", NATIVE_ONLY) or NATIVE_ONLY))
+    return _canonical_mode(str(getattr(settings, "alpr_mode", "FASTALPR_ONLY") or "FASTALPR_ONLY"))
 
 
 def camera_recognition_mode(camera=None) -> str:

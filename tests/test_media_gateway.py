@@ -69,6 +69,16 @@ class LatestFrameTests(unittest.TestCase):
         newest = detect.latest()
         self.assertEqual(newest.seq, 10)
 
+    def test_detect_recent_reuses_buffer(self):
+        buf = LatestFrameBuffer("detect", maxsize=3)
+        buf.put(JPEG + b"1", source="sdk")
+        buf.put(JPEG + b"2", source="sdk")
+        buf.put(JPEG + b"3", source="sdk")
+        recent = buf.recent(3)
+        self.assertEqual(len(recent), 3)
+        self.assertEqual(recent[-1].seq, 3)
+        self.assertEqual(buf.depth(), 3)
+
     def test_take_latest_jpeg_still_drops_stacked_frames(self):
         first = b"\xff\xd8" + b"AAAA" + b"\xff\xd9"
         second = b"\xff\xd8" + b"BBBB" + b"\xff\xd9"

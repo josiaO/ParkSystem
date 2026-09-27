@@ -39,7 +39,7 @@ Statuses: CREATED, PENDING, SUCCEEDED, FAILED, EXPIRED (refunds later). Methods 
 
 Quote fee → insert intent + transaction → recompute `amount_paid` / `PAID` → audit. Duplicate key returns the existing transaction.
 
-Receipt QR encodes `/p/{public_token}` (absolute URL when `public_base_url` is set). Phone opens that page and can pay via the simulated mobile path (`POST /p/{token}/pay`). Kiosk scans the same QR / code and confirms cash (`POST /p/{token}/kiosk-pay` or Sessions → Find by code). Live MNO aggregators replace `SimulatedPaymentProvider` and must only call `record_succeeded_payment` after a verified webhook.
+Receipt QR encodes `/p/{public_token}` (absolute URL when `public_base_url` is set). Phone opens that page and can pay via the simulated mobile path (`POST /p/{token}/pay`). The page shows time inside and the entry photo. Kiosk scans the same QR and confirms cash only when an amount is still due (`POST /p/{token}/kiosk-pay` or Sessions → Find visit). Live MNO aggregators replace `SimulatedPaymentProvider` and must only call `record_succeeded_payment` after a verified webhook.
 
 ## Failure behavior
 

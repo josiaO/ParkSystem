@@ -164,8 +164,8 @@ SmartPark Edge is a **plate-first parking operating system** that runs on-site a
 | Component | Windows | Linux / macOS |
 |-----------|---------|---------------|
 | Site Service (API + parking logic) | Yes | Yes |
-| Browser UI (`http://127.0.0.1:8760`) | Yes | Yes (preferred client) |
-| Desktop (PySide6) | Yes | No — use browser |
+| Browser UI (`http://127.0.0.1:8760`) | Yes | Yes |
+| Desktop (PySide6) | Yes | Yes |
 | HVX NetSDK host (port 30000 cameras) | Yes (32-bit) | No |
 | Generic IP cams (`rtsp` / `dahua` / `hikvision`) | Yes | Yes + FastALPR |
 | USB thermal receipt printer | Yes | Limited (LAN ESC/POS works) |
@@ -174,7 +174,7 @@ SmartPark Edge is a **plate-first parking operating system** that runs on-site a
 Platform detection lives in `app/services/platform_capabilities.py`:
 
 - `hvx_host_supported()` — true only on Windows
-- `recommended_client()` — `"desktop"` on Windows, `"web"` elsewhere
+- `recommended_client()` — `"desktop"` on Windows and Linux
 - `recommended_camera_adapter()` — `"hvx"` on Windows, `"rtsp"` elsewhere
 
 ---
@@ -350,7 +350,8 @@ The live parking, media, and hardware orchestration layer (~50 modules). Critica
 | Module | Purpose |
 |--------|---------|
 | `launch.py` | Windows entry: spawn HVX host + Site Service + desktop |
-| `main.py` | Full operator UI (~2000 lines) |
+| `main.py` | Operator UI: live gates, sessions, vehicles, tariffs, health |
+| `desk.py` | Reports, backup, and plain-language health text |
 | `api.py` | Sync httpx wrapper for local API |
 | `theme.py` | Dark/light Qt styles |
 

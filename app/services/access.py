@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.plate import normalize_plate, plate_similarity
+from app.core.plate import correct_ocr_confusions, normalize_plate, plate_similarity
 from app.models import AccessPlan, RegisteredVehicle, utcnow
 
 REGISTERED_FUZZY_MIN = 0.85
@@ -85,6 +85,14 @@ def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -
     if not plate:
         return Entitlement()
     vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == plate))
+    if vehicle is None:
+        known = [
+            row.plate
+            for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))).all()
+        ]
+        fixed = correct_ocr_confusions(plate, known_plates=known)
+        if fixed.get("plate") and fixed["plate"] != plate:
+            vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == fixed["plate"]))
     if vehicle is None:
         vehicle = _fuzzy_match_vehicle(db, plate, at=at)
     if vehicle is None or not vehicle.enabled:

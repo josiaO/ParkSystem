@@ -152,6 +152,25 @@ def _crop_from_bbox(jpeg: bytes, box: dict | None) -> bytes:
         return b""
 
 
+def attach_fusion_audit(box: dict | None, capture: dict | None) -> dict:
+    """Keep native vs FastALPR disagreement on the capture row (bbox JSON)."""
+    box = dict(box or {})
+    capture = capture or {}
+    fusion = capture.get("fusion") if isinstance(capture.get("fusion"), dict) else {}
+    native_plate = str(fusion.get("native_plate") or capture.get("native_plate") or "")
+    local_plate = str(fusion.get("local_plate") or capture.get("local_plate") or "")
+    if fusion:
+        box["fusion"] = fusion
+    if native_plate:
+        box["native_plate"] = native_plate
+    if local_plate:
+        box["local_plate"] = local_plate
+    box["needs_review"] = bool(fusion.get("needs_review") or capture.get("needs_review"))
+    box["pending_confirmation"] = bool(capture.get("pending_confirmation") or box["needs_review"])
+    box["disagreed"] = bool(fusion.get("disagreed") or (native_plate and local_plate and native_plate != local_plate))
+    return box
+
+
 def capture_dict(row: VehicleCapture) -> dict:
     chars = " ".join(list(row.plate)) if row.plate else ""
     return {
@@ -172,6 +191,11 @@ def capture_dict(row: VehicleCapture) -> dict:
         "plate_region": getattr(row, "plate_region", None) or "",
         "event_id": getattr(row, "event_id", None) or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        "fusion": (row.bbox or {}).get("fusion") if isinstance(row.bbox, dict) else None,
+        "native_plate": (row.bbox or {}).get("native_plate") if isinstance(row.bbox, dict) else "",
+        "local_plate": (row.bbox or {}).get("local_plate") if isinstance(row.bbox, dict) else "",
+        "needs_review": bool((row.bbox or {}).get("needs_review")) if isinstance(row.bbox, dict) else False,
+        "pending_confirmation": bool((row.bbox or {}).get("pending_confirmation")) if isinstance(row.bbox, dict) else False,
     }
 
 
@@ -202,8 +226,14 @@ def persist_event(
     box = native.get("bbox")
     if not isinstance(box, dict):
         box = bbox_from_lp_box((capture or {}).get("plate_box"))
-    if isinstance(box, dict) and native.get("source"):
-        box = {**box, "source": native.get("source")}
+    if not isinstance(box, dict):
+        raw_box = (capture or {}).get("bbox")
+        box = raw_box if isinstance(raw_box, dict) else {}
+    else:
+        box = dict(box)
+    if native.get("source"):
+        box["source"] = native.get("source")
+    box = attach_fusion_audit(box, capture)
     plate_jpeg = crop if crop[:2] == b"\xff\xd8" else _crop_from_bbox(jpeg, box)
     if image_id:
         existing = db.scalar(
@@ -219,8 +249,7 @@ def persist_event(
                     existing.plate = native.get("plate") or existing.plate
                     existing.plate_raw = native.get("plate_raw") or existing.plate_raw
                     existing.confidence = float(native.get("confidence") or existing.confidence or 0)
-                    if box:
-                        existing.bbox = box
+                    existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
                     if plate_jpeg[:2] == b"\xff\xd8":
                         existing.crop_path = _write_jpeg("crops", f"cam{camera.id}-img{image_id}-plate.jpg", plate_jpeg)
                     if jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
@@ -276,3 +305,27 @@ def list_captures(db: Session, *, gate_id: int | None = None, limit: int = 20) -
     if gate_id is not None:
         stmt = stmt.where(VehicleCapture.gate_id == gate_id)
     return list(db.scalars(stmt).all())
+
+
+def apply_operator_plate_correction(row: VehicleCapture, plate: str) -> VehicleCapture:
+    """Set the operator plate without erasing the original OCR string."""
+    chosen = normalize_plate(plate)
+    if not chosen:
+        raise ValueError("Corrected plate is empty")
+    original = row.plate_raw or row.plate
+    if not row.plate_raw:
+        row.plate_raw = original
+    box = dict(row.bbox or {})
+    box["operator_plate"] = chosen
+    box["ocr_plate"] = original
+    box["needs_review"] = False
+    box["pending_confirmation"] = False
+    box["fusion"] = {
+        **(box.get("fusion") or {}),
+        "method": "OPERATOR_CORRECTED",
+        "resolved_plate": chosen,
+        "needs_review": False,
+    }
+    row.bbox = box
+    row.plate = chosen
+    return row

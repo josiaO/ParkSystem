@@ -6,17 +6,18 @@ import sys
 import time
 import traceback
 import httpx
-from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, Qt, QSize, QThread, QTime, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog
+    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog
 )
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
 from .api import api, BASE
+from .desk import ReportsPage, health_sentences
 from .theme import DARK, LIGHT
 
 
@@ -266,10 +267,10 @@ class Login(QDialog):
         tag=QLabel("Vehicle intelligence · edge platform")
         tag.setStyleSheet("font-size:10px;font-weight:600;color:#8A94A2;letter-spacing:0.08em;text-transform:uppercase")
         title=QLabel("Sign in"); title.setStyleSheet("font-size:22px;font-weight:700;margin-top:10px")
-        self.sub=QLabel("Sign in as admin / SmartPark1!")
+        self.sub=QLabel("Sign in with the first-run admin password shown at setup")
         self.sub.setObjectName("muted"); self.sub.setWordWrap(True)
         self.user=QLineEdit("admin"); self.user.setPlaceholderText("Username")
-        self.pwd=QLineEdit("SmartPark1!"); self.pwd.setPlaceholderText("Password"); self.pwd.setEchoMode(QLineEdit.Password)
+        self.pwd=QLineEdit(); self.pwd.setPlaceholderText("Password"); self.pwd.setEchoMode(QLineEdit.Password)
         btn=QPushButton("Sign in"); btn.clicked.connect(self.login)
         l.addWidget(brand); l.addWidget(tag); l.addWidget(title); l.addWidget(self.sub)
         l.addSpacing(8); l.addWidget(self.user); l.addWidget(self.pwd); l.addSpacing(6); l.addWidget(btn)
@@ -296,7 +297,7 @@ class Login(QDialog):
             if "401" in text or "Invalid username" in text:
                 text = (
                     "Invalid username or password.\n\n"
-                    "admin / SmartPark1! only works on a fresh database. "
+                    "admin / first-run password only works on a fresh database. "
                     "This PC already has an admin account. "
                     "Reset it with: python -m app.cli reset-admin"
                 )
@@ -361,6 +362,12 @@ class CameraLivePane(QFrame):
         l.addWidget(self.details)
         self.open_btn=QPushButton("Open this side"); self.open_btn.clicked.connect(self.open_this_side)
         l.addWidget(self.open_btn)
+        self.correct_btn=QPushButton("Correct plate")
+        self.correct_btn.clicked.connect(self.correct_plate)
+        l.addWidget(self.correct_btn)
+        self.hold_label=QLabel("")
+        self.hold_label.setWordWrap(True)
+        l.addWidget(self.hold_label)
         self._workers=[]
         self._snap_busy=False
         self._alpr_busy=False
@@ -564,9 +571,12 @@ class CameraLivePane(QFrame):
         side=shown.get("lane_direction") or (self.camera or {}).get("side") or (self.camera or {}).get("lane_direction") or "—"
         when=str(shown.get("created_at") or "")[:19].replace("T"," ") or "—"
         if plate:
-            self.details.setText(f"Time {when}  ·  {side}  ·  {conf_txt}  ·  {source}")
+            decision = "held for confirmation" if (shown.get("pending_confirmation") or shown.get("needs_review") or fusion.get("needs_review")) else "auto-accepted"
+            self.details.setText(f"Time {when}  ·  {side}  ·  {conf_txt}  ·  {source}  ·  {decision}")
+            self.hold_label.setText("Waiting: confirm or correct this plate before the gate auto-decides." if decision.startswith("held") else "")
         else:
             self.details.setText("No car yet. Connect all on the IPs tab, then wait for a vehicle.")
+            self.hold_label.setText("")
         snap=shown.get("snapshot_url")
         if snap:
             w=Worker(lambda: api.get_bytes(snap, timeout=8))
@@ -586,6 +596,23 @@ class CameraLivePane(QFrame):
             try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
 
+    def correct_plate(self):
+        cam=self.camera
+        if not cam:
+            QMessageBox.information(self,"Correct plate","No camera on this side."); return
+        shown=self._held_car or {}
+        current=str(shown.get("plate") or "")
+        text,ok=QInputDialog.getText(self,"Correct plate","Plate (leave as-is to confirm)", text=current)
+        if not ok:
+            return
+        try:
+            body={"plate": text.strip() or current, "capture_id": shown.get("id"), "confirm": True}
+            data=api.post(f"/cameras/{cam['id']}/plate-corrections", body, timeout=20)
+            QMessageBox.information(self,"Plate",str((data or {}).get("message") or data))
+            self._tick_alpr()
+        except Exception as e:
+            QMessageBox.critical(self,"Correct plate",str(e))
+
 
 class Dashboard(QWidget):
     def __init__(self):
@@ -594,6 +621,12 @@ class Dashboard(QWidget):
         self.layout.addWidget(title)
         self.grid=QGridLayout(); self.layout.addLayout(self.grid)
         self.alert=QLabel(""); self.alert.setWordWrap(True); self.layout.addWidget(self.alert)
+        self.backup=QLabel(""); self.backup.setWordWrap(True); self.layout.addWidget(self.backup)
+        backup_row=QHBoxLayout()
+        self.open_reports=QPushButton("Open reports"); self.open_reports.clicked.connect(self._open_reports); self.open_reports.setVisible(False)
+        self.snooze_backup=QPushButton("Remind me tomorrow"); self.snooze_backup.clicked.connect(self._snooze_backup); self.snooze_backup.setVisible(False)
+        backup_row.addWidget(self.open_reports); backup_row.addWidget(self.snooze_backup); backup_row.addStretch()
+        self.layout.addLayout(backup_row)
         self.layout.addStretch()
         self._cards=[]
         self._workers=[]
@@ -646,6 +679,40 @@ class Dashboard(QWidget):
             self.grid.addWidget(frame, 2 + i//2, i%2)
         alerts=data.get("alerts") or []
         self.alert.setText("  ·  ".join(alerts) if alerts else "No hardware alerts.")
+        self._load_backup()
+    def _load_backup(self):
+        try:
+            status=api.get("/backup")
+        except Exception:
+            self.backup.setText("")
+            self.open_reports.setVisible(False)
+            self.snooze_backup.setVisible(False)
+            return
+        due=bool(status.get("offline_due") or status.get("cloud_due"))
+        bits=[]
+        if status.get("offline_due"):
+            bits.append(status.get("offline_message") or "")
+        if status.get("cloud_due"):
+            bits.append(status.get("cloud_message") or "Cloud backup is due.")
+        self.backup.setText(" ".join(bit for bit in bits if bit))
+        self.open_reports.setVisible(due)
+        self.snooze_backup.setVisible(due)
+    def _open_reports(self):
+        window=self.window()
+        nav=getattr(window, "nav", None)
+        if nav is None:
+            return
+        for i in range(nav.count()):
+            if "report" in nav.item(i).text().lower():
+                nav.setCurrentRow(i)
+                return
+    def _snooze_backup(self):
+        try:
+            api.post("/backup/snooze", {})
+        except Exception as exc:
+            QMessageBox.warning(self, "Backup", str(exc))
+            return
+        self._load_backup()
 
 
 class CameraDialog(QDialog):
@@ -715,11 +782,17 @@ class Cameras(QWidget):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Live Gates"); title.setStyleSheet("font-size:24px;font-weight:700")
         l.addWidget(title)
-        hint=QLabel("Pick any camera for the left and right views — click a view or its list. Lane preset can fill both. Live shows the newest JPEG, not a buffered video.")
+        hint=QLabel("Show 1 camera, 2 cameras, or every camera. A camera that is not on this screen still reads plates and fills its lane. Leaving this page only stops the picture, not recognition.")
         hint.setWordWrap(True); l.addWidget(hint)
         self.tabs=QTabWidget()
         live=QWidget(); live_l=QVBoxLayout(live)
         lane_row=QHBoxLayout()
+        lane_row.addWidget(QLabel("Show"))
+        self.layout_mode=QComboBox()
+        self.layout_mode.addItems(["1 camera", "2 cameras", "All cameras"])
+        self.layout_mode.setCurrentIndex(1)
+        self.layout_mode.currentIndexChanged.connect(self._on_layout)
+        lane_row.addWidget(self.layout_mode)
         lane_row.addWidget(QLabel("Lane preset"))
         self.lane=QComboBox(); self.lane.currentIndexChanged.connect(self._lane_changed)
         lane_row.addWidget(self.lane, 1)
@@ -728,11 +801,15 @@ class Cameras(QWidget):
         refresh_live=QPushButton("Refresh live"); refresh_live.clicked.connect(lambda: self._start_pair(False))
         lane_row.addWidget(refresh_live)
         live_l.addLayout(lane_row)
-        panes=QHBoxLayout()
+        self.live_grid=QGridLayout()
         self.pane_a=CameraLivePane("Left")
         self.pane_b=CameraLivePane("Right")
-        panes.addWidget(self.pane_a, 1); panes.addWidget(self.pane_b, 1)
-        live_l.addLayout(panes, 1)
+        self.extra_panes=[]
+        self.live_grid.addWidget(self.pane_a, 0, 0)
+        self.live_grid.addWidget(self.pane_b, 0, 1)
+        live_host=QWidget(); live_host.setLayout(self.live_grid)
+        live_scroll=QScrollArea(); live_scroll.setWidgetResizable(True); live_scroll.setWidget(live_host)
+        live_l.addWidget(live_scroll, 1)
 
         ips=QWidget(); ips_l=QVBoxLayout(ips)
         tools=QHBoxLayout()
@@ -772,6 +849,8 @@ class Cameras(QWidget):
         self.table.itemSelectionChanged.connect(self._on_select)
         self._workers=[]
         self._ready=False
+        if not hasattr(self, "extra_panes"):
+            self.extra_panes=[]
     def selected_id(self):
         row=self.table.currentRow()
         if row<0: return None
@@ -938,38 +1017,76 @@ class Cameras(QWidget):
         self.lane.blockSignals(False)
     def _lane_changed(self):
         self._start_pair(True)
+    def _all_panes(self):
+        return [self.pane_a, self.pane_b, *getattr(self, "extra_panes", [])]
+    def _stop_panes(self):
+        for pane in self._all_panes():
+            pane.stop_live()
+    def _on_layout(self):
+        self._sync_layout()
+        self._start_pair(False)
+    def _sync_layout(self):
+        mode=self.layout_mode.currentIndex() if hasattr(self, "layout_mode") else 1
+        self.pane_b.setVisible(mode != 0)
+        if mode == 0:
+            self.pane_b.stop_live()
+        needed=max(0, len(self.rows) - 2) if mode == 2 else 0
+        while len(self.extra_panes) < needed:
+            pane=CameraLivePane(f"Camera {len(self.extra_panes)+3}")
+            self.extra_panes.append(pane)
+            index=len(self.extra_panes) + 1
+            self.live_grid.addWidget(pane, index // 2, index % 2)
+        for i, pane in enumerate(self.extra_panes):
+            show=i < needed
+            pane.setVisible(show)
+            if not show:
+                pane.stop_live()
     def _on_tab(self, index):
         if index==0:
             self._start_pair(False)
         else:
-            self.pane_a.stop_live(); self.pane_b.stop_live()
+            self._stop_panes()
     def _maybe_start_pair(self):
         if self._live_visible():
             self._start_pair(False)
         else:
-            self.pane_a.stop_live(); self.pane_b.stop_live()
+            self._stop_panes()
     def _start_pair(self, from_lane=False):
         if not self._live_visible():
-            self.pane_a.stop_live(); self.pane_b.stop_live(); return
+            self._stop_panes(); return
+        self._sync_layout()
+        mode=self.layout_mode.currentIndex() if hasattr(self, "layout_mode") else 1
+        if mode == 2:
+            visible=[self.pane_a, self.pane_b] + [pane for pane in self.extra_panes if pane.isVisible()]
+            for pane in visible:
+                pane.fill_cameras(self.rows)
+            for pane, cam in zip(visible, self.rows):
+                pane.set_camera(cam)
+            for pane in visible[len(self.rows):]:
+                pane.set_camera(None)
+            return
         self.pane_a.fill_cameras(self.rows)
         self.pane_b.fill_cameras(self.rows)
         if from_lane:
             left, right=pair_lane_cameras(self.rows, self.lane.currentData())
             self.pane_a.set_camera(left)
-            self.pane_b.set_camera(right)
+            if mode != 0:
+                self.pane_b.set_camera(right)
             return
         if self.pane_a.camera_id() is None and self.pane_b.camera_id() is None and self.rows:
             self.pane_a.set_camera(self.rows[0])
-            self.pane_b.set_camera(self.rows[1] if len(self.rows)>1 else None)
+            if mode != 0:
+                self.pane_b.set_camera(self.rows[1] if len(self.rows)>1 else None)
             return
         self.pane_a.start_live()
-        self.pane_b.start_live()
+        if mode != 0:
+            self.pane_b.start_live()
     def _on_select(self):
         cid=self.selected_id()
         if cid is not None:
             self._load_streams(cid)
     def hideEvent(self, event):
-        self.pane_a.stop_live(); self.pane_b.stop_live()
+        self._stop_panes()
         super().hideEvent(event)
     def showEvent(self, event):
         super().showEvent(event)
@@ -979,7 +1096,8 @@ class Cameras(QWidget):
         else:
             self._maybe_start_pair()
     def shutdown(self):
-        self.pane_a.shutdown(); self.pane_b.shutdown()
+        for pane in self._all_panes():
+            pane.shutdown()
     def _load_streams(self, cid):
         s=Worker(lambda: api.get(f"/cameras/{cid}/streams", timeout=8))
         s.done.connect(self._show_streams); self._keep(s); s.start()
@@ -1181,11 +1299,22 @@ class Users(QWidget):
         except Exception as e: QMessageBox.critical(self,"Delete user",str(e))
 
 
+def _iso_date(text: str, end: bool = False) -> str | None:
+    raw=(text or "")[:10]
+    if len(raw) < 10 or raw[4] != "-":
+        return None
+    return f"{raw}T{'23:59:59' if end else '00:00:00'}Z"
+
+
 class VehicleDialog(QDialog):
     def __init__(self, vehicle=None, plans=None):
         super().__init__(); self.setWindowTitle("Edit vehicle" if vehicle else "Register plate")
         form=QFormLayout(self)
         self.plate=QLineEdit(); self.owner=QLineEdit(); self.plan=QComboBox(); self.enabled=QComboBox(); self.enabled.addItems(["Yes","No"]); self.notes=QLineEdit()
+        self.use_from=QCheckBox("Starts on")
+        self.valid_from=QDateEdit(QDate.currentDate()); self.valid_from.setCalendarPopup(True); self.valid_from.setDisplayFormat("yyyy-MM-dd")
+        self.use_until=QCheckBox("Ends on")
+        self.valid_until=QDateEdit(QDate.currentDate()); self.valid_until.setCalendarPopup(True); self.valid_until.setDisplayFormat("yyyy-MM-dd")
         for p in plans or []: self.plan.addItem(p["name"], p["id"])
         if vehicle:
             self.plate.setText(vehicle.get("plate") or ""); self.owner.setText(vehicle.get("owner_name") or "")
@@ -1193,14 +1322,31 @@ class VehicleDialog(QDialog):
             if idx>=0: self.plan.setCurrentIndex(idx)
             self.enabled.setCurrentText("Yes" if vehicle.get("enabled") else "No")
             self.notes.setText(vehicle.get("notes") or "")
+            start=_iso_date(str(vehicle.get("valid_from") or ""))
+            finish=_iso_date(str(vehicle.get("valid_until") or ""), end=True)
+            if start:
+                self.use_from.setChecked(True)
+                self.valid_from.setDate(QDate.fromString(start[:10], "yyyy-MM-dd"))
+            if finish:
+                self.use_until.setChecked(True)
+                self.valid_until.setDate(QDate.fromString(finish[:10], "yyyy-MM-dd"))
         form.addRow("Plate", self.plate); form.addRow("Owner", self.owner); form.addRow("Plan", self.plan)
         form.addRow("Enabled", self.enabled); form.addRow("Notes", self.notes)
+        from_row=QHBoxLayout(); from_row.addWidget(self.use_from); from_row.addWidget(self.valid_from)
+        start_today=QPushButton("Start today"); start_today.clicked.connect(lambda: (self.use_from.setChecked(True), self.valid_from.setDate(QDate.currentDate())))
+        from_row.addWidget(start_today)
+        until_row=QHBoxLayout(); until_row.addWidget(self.use_until); until_row.addWidget(self.valid_until)
+        end_today=QPushButton("End today"); end_today.clicked.connect(lambda: (self.use_until.setChecked(True), self.valid_until.setDate(QDate.currentDate())))
+        until_row.addWidget(end_today)
+        form.addRow("Season start", from_row); form.addRow("Season end", until_row)
         save=QPushButton("Save"); save.clicked.connect(self.accept); form.addRow(save)
     def payload(self):
         return {
             "plate": self.plate.text().strip(), "owner_name": self.owner.text().strip(),
             "plan_id": self.plan.currentData(), "enabled": self.enabled.currentText()=="Yes",
             "notes": self.notes.text().strip(),
+            "valid_from": _iso_date(self.valid_from.date().toString("yyyy-MM-dd")) if self.use_from.isChecked() else None,
+            "valid_until": _iso_date(self.valid_until.date().toString("yyyy-MM-dd"), end=True) if self.use_until.isChecked() else None,
         }
 
 
@@ -1208,19 +1354,114 @@ class Sessions(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Parking sessions"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Plate-first sessions. A vehicle can exit at a different gate from the one it entered.")
+        note=QLabel("Find a visit by scanning the receipt QR or typing the plate. Compare the photo and the time inside before taking money. Payment stays off when nothing is owed.")
         note.setWordWrap(True); l.addWidget(note)
+        find=QHBoxLayout()
+        self.query=QLineEdit(); self.query.setPlaceholderText("Scan QR, paste the receipt link, or type the plate")
+        self.query.returnPressed.connect(self.lookup)
+        find_btn=QPushButton("Find visit"); find_btn.clicked.connect(self.lookup)
+        find.addWidget(self.query, 1); find.addWidget(find_btn); l.addLayout(find)
+        card=QFrame(); card.setObjectName("card"); card_l=QHBoxLayout(card)
+        photos=QVBoxLayout()
+        self.photo=QLabel("No entry photo stored."); self.photo.setMinimumSize(240, 140); self.photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.crop=QLabel(""); self.crop.setMinimumHeight(80); self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        photos.addWidget(self.photo); photos.addWidget(self.crop)
+        detail=QVBoxLayout()
+        self.kiosk_plate=QLabel("—"); self.kiosk_plate.setStyleSheet("font-size:28px;font-weight:700;letter-spacing:2px")
+        self.kiosk_stay=QLabel("Scan a receipt or pick a session.")
+        self.kiosk_stay.setWordWrap(True)
+        self.kiosk_due=QLabel(""); self.kiosk_due.setStyleSheet("font-size:18px;font-weight:700")
+        self.kiosk_note=QLabel(""); self.kiosk_note.setWordWrap(True)
+        self.correct=QLineEdit(); self.correct.setPlaceholderText("Correct plate")
+        actions=QHBoxLayout()
+        save_plate=QPushButton("Save corrected plate"); save_plate.clicked.connect(self.correct_plate)
+        self.pay_btn=QPushButton("Record payment"); self.pay_btn.clicked.connect(self.pay_visit); self.pay_btn.setEnabled(False)
+        self.mobile_btn=QPushButton("Pay with mobile on this computer"); self.mobile_btn.clicked.connect(self.pay_mobile); self.mobile_btn.setEnabled(False)
+        can_pay=api.can("payments.create") or api.can("kiosk.use")
+        self.pay_btn.setVisible(can_pay)
+        self.mobile_btn.setVisible(can_pay)
+        actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn); actions.addStretch()
+        detail.addWidget(self.kiosk_plate); detail.addWidget(self.kiosk_stay); detail.addWidget(self.kiosk_due); detail.addWidget(self.kiosk_note)
+        detail.addWidget(self.correct); detail.addLayout(actions)
+        card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
+        l.addWidget(card)
         self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Kind","Status","Receipt","Entry","Due","Paid","Gate"])
         configure_table(self.table); l.addWidget(self.table, 1)
+        self.table.itemSelectionChanged.connect(self._on_row)
         row=QHBoxLayout()
-        pay=QPushButton("Record kiosk payment"); pay.clicked.connect(self.pay); pay.setVisible(api.can("payments.create"))
+        pay=QPushButton("Record kiosk payment"); pay.clicked.connect(self.pay); pay.setVisible(can_pay)
         receipt=QPushButton("Show / print receipt"); receipt.clicked.connect(self.print_receipt)
         refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
         row.addWidget(pay); row.addWidget(receipt); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
-        self.rows=[]; self.refresh()
+        self.rows=[]; self.visit=None; self.refresh()
+    def _pixmap(self, label, path, empty):
+        if not path:
+            label.setPixmap(QPixmap()); label.setText(empty); return
+        try:
+            data=api.get_bytes(path, timeout=12)
+            pix=QPixmap(); pix.loadFromData(data)
+            if pix.isNull():
+                label.setText(empty); return
+            label.setText("")
+            label.setPixmap(pix.scaled(320, 180, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except Exception:
+            label.setPixmap(QPixmap()); label.setText(empty)
+    def _show_visit(self, data):
+        self.visit=data or None
+        if not data:
+            self.kiosk_plate.setText("—")
+            self.kiosk_stay.setText("No visit matches that QR code or plate.")
+            self.kiosk_due.setText("")
+            self.kiosk_note.setText("")
+            self.pay_btn.setEnabled(False)
+            self.mobile_btn.setEnabled(False)
+            self._pixmap(self.photo, None, "No entry photo stored.")
+            self._pixmap(self.crop, None, "")
+            return
+        self.kiosk_plate.setText(data.get("plate") or "—")
+        inside="Still inside." if data.get("still_inside") else "Has left."
+        entered=(data.get("entry_time") or "").replace("T", " ")[:16]
+        self.kiosk_stay.setText(f"Time on site: {data.get('duration_label') or '—'} ({inside}) Entered {entered}.")
+        remaining=int(float(data.get("amount_remaining") or 0))
+        currency=data.get("currency") or "TZS"
+        if data.get("payable"):
+            self.kiosk_due.setText(f"To pay: {currency} {remaining:,}")
+        else:
+            self.kiosk_due.setText(data.get("pay_blocked_reason") or "Nothing to pay.")
+        self.kiosk_note.setText(data.get("image_note") or "")
+        self.correct.setText("" if data.get("image_matches_plate") is False else (data.get("plate") or ""))
+        payable=bool(data.get("payable"))
+        self.pay_btn.setEnabled(payable)
+        self.mobile_btn.setEnabled(payable and bool(data.get("token")))
+        self._pixmap(self.photo, data.get("snapshot_url"), "No entry photo stored.")
+        self._pixmap(self.crop, data.get("crop_url"), "")
+    def lookup(self):
+        from urllib.parse import quote
+        q=self.query.text().strip()
+        if not q:
+            QMessageBox.information(self, "Find visit", "Scan a QR code or type a plate."); return
+        try:
+            data=api.get(f"/sessions/lookup?q={quote(q, safe='')}", timeout=15)
+        except Exception as exc:
+            self._show_visit(None)
+            self.kiosk_stay.setText(str(exc))
+            return
+        self._show_visit(data)
+    def _on_row(self):
+        if getattr(self, "_filling", False):
+            return
+        row=self.selected()
+        if not row:
+            return
+        text=row.get("public_token") or row.get("plate") or ""
+        if not text:
+            return
+        self.query.setText(text)
+        self.lookup()
     def refresh(self):
         try: self.rows=api.get("/sessions")
         except Exception as e: QMessageBox.warning(self,"Sessions",str(e)); return
+        self._filling=True
         self.table.setRowCount(len(self.rows))
         for r,s in enumerate(self.rows):
             vals=[
@@ -1234,6 +1475,7 @@ class Sessions(QWidget):
                 s.get("gate_id") or "—",
             ]
             for c,val in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(val)))
+        self._filling=False
     def selected(self):
         row=self.table.currentRow()
         if row<0 or row>=len(self.rows): return None
@@ -1261,15 +1503,59 @@ class Sessions(QWidget):
                 pass
         show_printable_receipt(self, body, path, qr_url=qr_url)
         self.refresh()
+    def correct_plate(self):
+        visit=self.visit or {}
+        session_id=visit.get("session_id")
+        plate=self.correct.text().strip()
+        if not session_id or not plate:
+            QMessageBox.information(self, "Correct plate", "Find the visit and type the plate you can see."); return
+        try:
+            api.post(f"/sessions/{session_id}/correct-plate", {"plate": plate})
+        except Exception as exc:
+            QMessageBox.critical(self, "Correct plate", str(exc)); return
+        self.query.setText(plate)
+        self.lookup()
+        self.refresh()
+    def _settle(self, method):
+        visit=self.visit or {}
+        if not visit.get("payable"):
+            QMessageBox.information(self, "Payment", visit.get("pay_blocked_reason") or "This vehicle does not have a fee to pay.")
+            return
+        token=visit.get("token")
+        session_id=visit.get("session_id")
+        plate=visit.get("plate") or ""
+        if QMessageBox.question(self, "Record payment", f"Take payment for {plate}?") != QMessageBox.Yes:
+            return
+        try:
+            if method == "KIOSK_CASH" and token:
+                result=api.post(f"/p/{token}/kiosk-pay", {"method": "KIOSK_CASH"})
+            elif method == "KIOSK_CASH" and session_id:
+                result=api.post(f"/sessions/{session_id}/pay", {"method": "KIOSK_CASH"})
+            elif token:
+                result=api.post(f"/p/{token}/pay", {"method": "MOBILE_SIMULATED"})
+            else:
+                raise RuntimeError("This visit has no receipt code for phone payment.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Payment", str(exc)); return
+        if result.get("already_paid"):
+            QMessageBox.information(self, "Payment", "Already settled.")
+        else:
+            QMessageBox.information(self, "Payment", "Payment recorded.")
+        if "payable" in (result or {}):
+            self._show_visit(result)
+        self.refresh()
+    def pay_visit(self):
+        self._settle("KIOSK_CASH")
+    def pay_mobile(self):
+        self._settle("MOBILE_SIMULATED")
     def pay(self):
         s=self.selected()
-        if not s: QMessageBox.information(self,"Payment","Select a session first."); return
-        if QMessageBox.question(self,"Record payment",f"Record kiosk payment for {s.get('plate')}?")!=QMessageBox.Yes: return
-        try:
-            api.post(f"/sessions/{s['id']}/pay", {"method": "KIOSK_CASH"})
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self,"Payment",str(e))
+        if s:
+            self.query.setText(s.get("public_token") or s.get("plate") or "")
+            self.lookup()
+        if not (self.visit or {}).get("session_id") and s:
+            self.visit={"session_id": s.get("id"), "plate": s.get("plate"), "token": s.get("public_token"), "payable": float(s.get("amount_due") or 0) > float(s.get("amount_paid") or 0)}
+        self.pay_visit()
 
 
 class Payments(QWidget):
@@ -1303,33 +1589,78 @@ class Vehicles(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Registered plates"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Season, VIP, staff, and tenant plates open the gate automatically when the camera reads them.")
+        note=QLabel("Season, VIP, staff, and tenant plates open the gate automatically when the camera reads them. Set a start and end date, or use today.")
         note.setWordWrap(True); l.addWidget(note)
-        self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["Plate","Owner","Plan","Auto-open","Enabled","Until"])
+        self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(["Plate","Owner","Plan","Auto-open","Enabled","From","Until"])
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         configure_table(self.table); l.addWidget(self.table, 1)
+        bulk_note=QLabel("Register many, one plate per line: plate, owner, start date, end date")
+        l.addWidget(bulk_note)
+        self.bulk=QPlainTextEdit(); self.bulk.setPlaceholderText("T111AAA, Jane, 2026-09-01, 2026-10-01"); self.bulk.setMaximumHeight(90)
+        l.addWidget(self.bulk)
         row=QHBoxLayout()
-        add=QPushButton("Register plate"); add.clicked.connect(self.add); add.setVisible(api.can("subscribers.manage"))
-        edit=QPushButton("Edit"); edit.clicked.connect(self.edit); edit.setVisible(api.can("subscribers.manage"))
-        delete=QPushButton("Delete"); delete.clicked.connect(self.delete); delete.setVisible(api.can("subscribers.manage"))
+        manage=api.can("subscribers.manage")
+        add=QPushButton("Register plate"); add.clicked.connect(self.add); add.setVisible(manage)
+        bulk=QPushButton("Register these plates"); bulk.clicked.connect(self.add_bulk); bulk.setVisible(manage)
+        edit=QPushButton("Edit"); edit.clicked.connect(self.edit); edit.setVisible(manage)
+        delete=QPushButton("Delete"); delete.clicked.connect(self.delete); delete.setVisible(manage)
+        delete_many=QPushButton("Delete selected"); delete_many.clicked.connect(self.delete_selected); delete_many.setVisible(manage)
         refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
-        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
         self.rows=[]; self.refresh()
     def refresh(self):
         try: self.rows=api.get("/vehicles")
         except Exception as e: QMessageBox.warning(self,"Vehicles",str(e)); return
         self.table.setRowCount(len(self.rows))
         for r,v in enumerate(self.rows):
-            vals=[v["plate"], v.get("owner_name") or "—", v.get("plan_name") or "—", "Yes" if v.get("auto_open") else "No", "Yes" if v.get("enabled") else "No", (v.get("valid_until") or "—")[:10]]
+            vals=[
+                v["plate"], v.get("owner_name") or "—", v.get("plan_name") or "—",
+                "Yes" if v.get("auto_open") else "No", "Yes" if v.get("enabled") else "No",
+                (v.get("valid_from") or "—")[:10], (v.get("valid_until") or "—")[:10],
+            ]
             for c,val in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(val)))
     def selected(self):
         row=self.table.currentRow()
         if row<0 or row>=len(self.rows): return None
         return self.rows[row]
+    def selected_ids(self):
+        ids=[]
+        for index in self.table.selectionModel().selectedRows():
+            row=index.row()
+            if 0<=row<len(self.rows):
+                ids.append(self.rows[row]["id"])
+        return ids
     def add(self):
         d=VehicleDialog(plans=api.get("/access-plans"))
         if d.exec():
             try: api.post("/vehicles", d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Register plate",str(e))
+    def add_bulk(self):
+        lines=[line.strip() for line in self.bulk.toPlainText().splitlines() if line.strip()]
+        if not lines:
+            QMessageBox.information(self, "Register plates", "Add one plate per line."); return
+        vehicles=[]
+        for line in lines:
+            parts=[part.strip() for part in line.split(",")]
+            plate=parts[0] if parts else ""
+            owner=parts[1] if len(parts)>1 else ""
+            start=parts[2] if len(parts)>2 else ""
+            finish=parts[3] if len(parts)>3 else ""
+            vehicles.append({
+                "plate": plate,
+                "owner_name": owner,
+                "valid_from": _iso_date(start) if start else None,
+                "valid_until": _iso_date(finish, end=True) if finish else None,
+            })
+        try:
+            result=api.post("/vehicles/bulk", {"vehicles": vehicles})
+        except Exception as exc:
+            QMessageBox.critical(self, "Register plates", str(exc)); return
+        failed="; ".join(item.get("error") or "" for item in (result.get("errors") or []) if item.get("error"))
+        created=len(result.get("created") or [])
+        self.bulk.clear()
+        self.refresh()
+        QMessageBox.information(self, "Register plates", f"Registered {created} plates. {failed}".strip())
     def edit(self):
         v=self.selected()
         if not v: QMessageBox.information(self,"Edit","Select a plate first."); return
@@ -1343,35 +1674,110 @@ class Vehicles(QWidget):
         if QMessageBox.question(self,"Delete",f"Remove {v['plate']}?")!=QMessageBox.Yes: return
         try: api.delete(f"/vehicles/{v['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete",str(e))
+    def delete_selected(self):
+        ids=self.selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Delete", "Select at least one plate."); return
+        if QMessageBox.question(self, "Delete", f"Remove {len(ids)} registered plate(s)?")!=QMessageBox.Yes: return
+        try: api.post("/vehicles/bulk-delete", {"ids": ids}); self.refresh()
+        except Exception as e: QMessageBox.critical(self,"Delete",str(e))
 
 
 class Fees(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Tariffs"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Current site tariff. Change rates in configuration — do not edit program constants.")
+        note=QLabel("Day and night rates for this site. Times and amounts are normal fields — save them here.")
         note.setWordWrap(True); l.addWidget(note)
         form=QFormLayout()
+        self.currency=QLineEdit("TZS")
+        self.day_start=QTimeEdit(); self.day_start.setDisplayFormat("HH:mm")
+        self.day_end=QTimeEdit(); self.day_end.setDisplayFormat("HH:mm")
+        self.free_day=QSpinBox(); self.free_night=QSpinBox()
+        self.day_block=QSpinBox(); self.night_block=QSpinBox()
+        self.day_fee=QSpinBox(); self.night_fee=QSpinBox()
+        self.day_max=QSpinBox(); self.night_max=QSpinBox(); self.daily=QSpinBox()
+        for box in (self.free_day, self.free_night, self.day_fee, self.night_fee, self.day_max, self.night_max, self.daily):
+            box.setRange(0, 10000000)
+        for box in (self.day_block, self.night_block):
+            box.setRange(1, 10080)
+        form.addRow("Currency", self.currency)
+        form.addRow("Day starts", self.day_start); form.addRow("Day ends", self.day_end)
+        form.addRow("Free daytime (minutes)", self.free_day); form.addRow("Free night (minutes)", self.free_night)
+        form.addRow("Day block (minutes)", self.day_block); form.addRow("Night block (minutes)", self.night_block)
+        form.addRow("Fee per day block", self.day_fee); form.addRow("Fee per night block", self.night_fee)
+        form.addRow("Day maximum", self.day_max); form.addRow("Night maximum", self.night_max)
+        form.addRow("Fee per full day", self.daily)
+        l.addLayout(form)
+        actions=QHBoxLayout()
+        save=QPushButton("Save tariff"); save.clicked.connect(self.save)
+        save.setVisible(api.can("fees.manage") or api.can("settings.manage"))
+        reload_btn=QPushButton("Reload"); reload_btn.clicked.connect(self.load_tariff)
+        actions.addWidget(save); actions.addWidget(reload_btn); actions.addStretch(); l.addLayout(actions)
+        quote_form=QFormLayout()
         self.entry=QLineEdit(); self.exit=QLineEdit()
         from datetime import datetime, timezone, timedelta
         now=datetime.now(timezone.utc)
         self.entry.setText((now-timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S"))
         self.exit.setText(now.strftime("%Y-%m-%dT%H:%M:%S"))
-        form.addRow("Entry (UTC)", self.entry); form.addRow("Exit (UTC)", self.exit)
-        l.addLayout(form)
+        quote_form.addRow("Entry (UTC)", self.entry); quote_form.addRow("Exit (UTC)", self.exit)
+        l.addLayout(quote_form)
         quote=QPushButton("Quote Car1 fee"); quote.clicked.connect(self.quote); l.addWidget(quote)
-        self.out=QPlainTextEdit(); self.out.setReadOnly(True); l.addWidget(self.out, 1)
+        self.out=QLabel(""); self.out.setWordWrap(True); l.addWidget(self.out)
+        l.addStretch()
         self.load_tariff()
+    def _set_time(self, edit, value):
+        parsed=QTime.fromString(str(value or "")[:5], "HH:mm")
+        if parsed.isValid():
+            edit.setTime(parsed)
     def load_tariff(self):
         try: data=api.get("/fees/tariff")
-        except Exception as e: self.out.setPlainText(str(e)); return
-        self.out.setPlainText(json.dumps(data, indent=2, default=str))
+        except Exception as e: self.out.setText(str(e)); return
+        editor=(data or {}).get("editor") or {}
+        self.currency.setText(editor.get("currency") or data.get("currency") or "TZS")
+        self._set_time(self.day_start, editor.get("day_start"))
+        self._set_time(self.day_end, editor.get("day_end"))
+        self.free_day.setValue(int(float(editor.get("free_day_minutes") or 0)))
+        self.free_night.setValue(int(float(editor.get("free_night_minutes") or 0)))
+        self.day_block.setValue(max(1, int(float(editor.get("day_block_minutes") or 1))))
+        self.night_block.setValue(max(1, int(float(editor.get("night_block_minutes") or 1))))
+        self.day_fee.setValue(int(editor.get("day_block_fee") or 0))
+        self.night_fee.setValue(int(editor.get("night_block_fee") or 0))
+        self.day_max.setValue(int(editor.get("day_max") or 0))
+        self.night_max.setValue(int(editor.get("night_max") or 0))
+        self.daily.setValue(int(editor.get("daily_wrap_fee") or 0))
+        name=data.get("name") or "Tariff"
+        self.out.setText(f"{name} · {self.currency.text()}. Day rate {self.day_fee.value()} per {self.day_block.value()} min.")
+    def save(self):
+        payload={
+            "currency": self.currency.text().strip(),
+            "day_start": self.day_start.time().toString("HH:mm"),
+            "day_end": self.day_end.time().toString("HH:mm"),
+            "free_day_minutes": self.free_day.value(),
+            "free_night_minutes": self.free_night.value(),
+            "day_block_minutes": self.day_block.value(),
+            "night_block_minutes": self.night_block.value(),
+            "day_block_fee": self.day_fee.value(),
+            "night_block_fee": self.night_fee.value(),
+            "day_max": self.day_max.value(),
+            "night_max": self.night_max.value(),
+            "daily_wrap_fee": self.daily.value(),
+        }
+        try:
+            api.patch("/fees/tariff", payload)
+        except Exception as exc:
+            QMessageBox.critical(self, "Tariff", str(exc)); return
+        self.load_tariff()
+        QMessageBox.information(self, "Tariff", "Tariff saved.")
     def quote(self):
         try:
             data=api.post("/fees/quote",{"entry_time":self.entry.text().strip(),"exit_time":self.exit.text().strip(),"car_type":"Car1"})
-            self.out.setPlainText(json.dumps(data, indent=2, default=str))
         except Exception as e:
-            QMessageBox.critical(self,"Fee",str(e))
+            QMessageBox.critical(self,"Fee",str(e)); return
+        minutes=max(0, int(int(data.get("duration_seconds") or 0) / 60))
+        due=int(data.get("due") or 0)
+        currency=data.get("currency") or self.currency.text() or "TZS"
+        self.out.setText(f"{currency} {due:,} for {minutes} min.")
 
 
 class SystemHealth(QWidget):
@@ -1379,12 +1785,14 @@ class SystemHealth(QWidget):
         super().__init__()
         l=QVBoxLayout(self)
         title=QLabel("System Health"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Technician view. Parking stays up when one camera or the HVX host is degraded.")
+        note=QLabel("Parking stays up when one camera or the HVX host is degraded. The summary is in plain language.")
         note.setWordWrap(True); l.addWidget(note)
         self.state=QLabel("…"); self.state.setStyleSheet("font-size:18px;font-weight:700"); l.addWidget(self.state)
-        self.info=QPlainTextEdit(); self.info.setReadOnly(True); l.addWidget(self.info, 1)
+        self.summary=QLabel("…"); self.summary.setWordWrap(True); l.addWidget(self.summary)
+        self.info=QPlainTextEdit(); self.info.setReadOnly(True); self.info.setVisible(False); l.addWidget(self.info, 1)
         row=QHBoxLayout(); refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
-        row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        self.details_btn=QPushButton("Show technical details"); self.details_btn.clicked.connect(self._toggle_details)
+        row.addWidget(refresh); row.addWidget(self.details_btn); row.addStretch(); l.addLayout(row)
         self._timer=QTimer(self); self._timer.setInterval(4000); self._timer.timeout.connect(self.refresh)
     def showEvent(self, event):
         super().showEvent(event)
@@ -1412,7 +1820,12 @@ class SystemHealth(QWidget):
             except Exception as e:
                 data={"error": str(e), "live": live}
         self.state.setText(str(data.get("state") or state))
+        self.summary.setText(health_sentences(data, live))
         self.info.setPlainText(json.dumps(data, indent=2, default=str))
+    def _toggle_details(self):
+        show=not self.info.isVisible()
+        self.info.setVisible(show)
+        self.details_btn.setText("Hide technical details" if show else "Show technical details")
 
 
 class Hardware(QWidget):
@@ -1815,6 +2228,83 @@ class OnboardingWizard(QWidget):
             self.err.setText(str(e))
 
 
+class PlateEnginePage(QWidget):
+    """ParkWatch-style reader: the camera snaps, FastALPR reads, the pack can be replaced."""
+
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self)
+        title = QLabel("Plate Engine")
+        title.setStyleSheet("font-size:24px;font-weight:700")
+        root.addWidget(title)
+        intro = QLabel(
+            "Same split as ParkWatch. The lane camera saves the photo. "
+            "FastALPR finds the plate and reads it. Tanzania is the country profile. "
+            "Drop a new ONNX pack to retrain, or register another engine to change the library. "
+            "This desktop runs on Windows and Linux."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        root.addWidget(intro)
+        self.card = QLabel("")
+        self.card.setWordWrap(True)
+        self.card.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        root.addWidget(self.card)
+        row = QHBoxLayout()
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.load)
+        pack = QPushButton("Apply model pack…")
+        pack.setObjectName("secondary")
+        pack.clicked.connect(self.apply_pack)
+        row.addWidget(refresh)
+        row.addWidget(pack)
+        row.addStretch()
+        root.addLayout(row)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        root.addWidget(self.status)
+        root.addStretch()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.load()
+
+    def load(self):
+        try:
+            data = api.get("/recognition/engine")
+        except Exception as exc:
+            self.status.setText(str(exc))
+            return
+        models = data.get("models") or {}
+        training = data.get("training") or {}
+        engines = ", ".join(row.get("id", "") for row in (data.get("engines") or []))
+        lines = [
+            f"Engine: {data.get('display_name')} ({data.get('id')}) {data.get('version')}",
+            f"Installed: {'yes' if data.get('installed') else 'no'}    Loaded: {'yes' if data.get('loaded') else 'no'}",
+            f"Country: {data.get('country')}    Contrast: {data.get('contrast_sensitivity')}",
+            f"Detector: {models.get('detector_file')} ({'ready' if models.get('detector_ready') else 'missing'})",
+            f"OCR: {models.get('ocr_file')} ({'ready' if models.get('ocr_ready') else 'missing'})",
+            f"Model folder: {models.get('bundled_dir') or 'not installed'}",
+            f"Registered engines: {engines or data.get('id')}",
+            f"Corrections saved for retraining: {training.get('corrections', 0)}",
+            str(training.get("retrain") or ""),
+        ]
+        self.card.setText("\n".join(lines))
+        self.status.setText("Reading every lane photo in software.")
+
+    def apply_pack(self):
+        folder = QFileDialog.getExistingDirectory(self, "Model pack folder")
+        if not folder:
+            return
+        try:
+            result = api.post("/recognition/model-pack", {"directory": folder}, timeout=60)
+        except Exception as exc:
+            self.status.setText(str(exc))
+            return
+        self.status.setText(f"Installed to {result.get('installed_to')}. The next car uses the new weights.")
+        self.load()
+
+
 class SettingsPage(QWidget):
     def __init__(self, window):
         super().__init__(); self.window=window; l=QVBoxLayout(self)
@@ -1946,7 +2436,10 @@ class SettingsPage(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("SmartPark Edge")
+        super().__init__()
+        import platform
+        system = platform.system() or "desktop"
+        self.setWindowTitle(f"SmartPark  ·  {system}")
         central=QWidget(); self.setCentralWidget(central)
         root=QHBoxLayout(central); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
         self.nav=QListWidget()
@@ -1964,6 +2457,8 @@ class MainWindow(QMainWindow):
             self.add_page(api.nav_label("health", "System Health"), SystemHealth)
         if api.nav_page("cameras"):
             self.add_page(api.nav_label("cameras", "Live Gates"), Cameras)
+        if api.nav_page("plates"):
+            self.add_page(api.nav_label("plates", "Plate Engine"), PlateEnginePage)
         if api.nav_page("onboarding") or (
             api.can("settings.manage") and not (api.modules or {}).get("onboarding_completed", True)
         ):
@@ -1976,6 +2471,8 @@ class MainWindow(QMainWindow):
             self.add_page(api.nav_label("payments", "Payments"), Payments)
         if api.nav_page("fees"):
             self.add_page(api.nav_label("fees", "Tariffs"), Fees)
+        if api.nav_page("reports"):
+            self.add_page(api.nav_label("reports", "Reports"), ReportsPage)
         if api.nav_page("gates"):
             self.add_page(api.nav_label("gates", "Gates"), Gates)
         if api.nav_page("users"):
@@ -1988,6 +2485,7 @@ class MainWindow(QMainWindow):
             self.add_page(api.nav_label("sim", "Simulation"), SimPage)
         self.nav.currentRowChanged.connect(self._show_page)
         self.apply_theme("Light")
+        self.statusBar().showMessage("Camera snaps the photo. FastALPR reads the plate. Windows and Linux.")
         geom=available_screen()
         if geom is not None:
             self.setGeometry(geom)

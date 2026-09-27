@@ -6,7 +6,7 @@ from pathlib import Path
 import asyncio
 import time
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
@@ -15,16 +15,19 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
-from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User
+from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
-    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ParkingSettingsUpdate, PaymentConfirm, SessionCreate, SimEntryRequest, SimExitRequest,
+    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
+    VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep,
 )
 from .security import authenticate_user, create_session, current_user, oauth2_scheme, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
-from .services.alpr import recognize_bytes, status as alpr_status
+from .infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
+from .infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
+from .services.alpr import status as alpr_status
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
 from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event, should_persist_vehicle_capture
@@ -509,7 +512,17 @@ def camera_dict(c: Camera):
     from .services.stream_roles import public_profiles
     from .domain.cameras import camera_type_for
     native = adapter_has_native_plates(c)
-    recog = str(getattr(c, "recognition_mode", None) or "").strip() or ("NATIVE_ONLY" if native else "FASTALPR_ONLY")
+    from .services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
+    canonical = camera_recognition_mode(c)
+    if canonical == LOCAL_ONLY:
+        recog = "FASTALPR_ONLY"
+        plate_engine = "fastalpr"
+    elif canonical == NATIVE_ONLY:
+        recog = "NATIVE_ONLY"
+        plate_engine = "native"
+    else:
+        recog = "HYBRID"
+        plate_engine = "fastalpr"
     return {
         "id": c.id, "name": c.name, "ip_address": c.ip_address, "sdk_port": c.sdk_port,
         "username": c.username, "gate_id": c.gate_id, "gate_name": lane_name,
@@ -521,7 +534,7 @@ def camera_dict(c: Camera):
         "adapter_id": camera_adapter_id(c),
         "connection_mode": camera_connection_mode(c),
         "native_plates": native,
-        "plate_engine": "native" if native else "fastalpr",
+        "plate_engine": plate_engine,
         "recognition_mode": recog,
         "camera_type": getattr(c, "camera_type", None) or camera_type_for(camera_adapter_id(c), native_plates=native),
         "vendor": getattr(c, "vendor", None) or "",
@@ -1101,12 +1114,13 @@ def _crop_from_alpr(alpr: dict | None) -> bytes:
     return data if data[:2] == b"\xff\xd8" else b""
 
 
-def _capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0) -> dict:
+def _capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0, pending: bool = False) -> dict:
     method = str(getattr(fused, "method", "") or "")
     box = local.get("bbox") if method.startswith("LOCAL") else native.get("bbox")
     if not isinstance(box, dict):
         box = native.get("bbox") or local.get("bbox")
     source = "fastalpr" if "LOCAL" in method else (native.get("source") or "camera")
+    fusion = fused.as_dict() if hasattr(fused, "as_dict") else {}
     return {
         "plate": fused.resolved_plate,
         "plate_raw": local.get("plate_raw") or native.get("plate_raw") or fused.resolved_plate,
@@ -1118,6 +1132,11 @@ def _capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 
         "image_height": native.get("image_height") or 0,
         "have_vehicle": native.get("have_vehicle"),
         "snap_type": native.get("snap_type"),
+        "fusion": fusion,
+        "native_plate": fusion.get("native_plate") or native.get("plate") or "",
+        "local_plate": fusion.get("local_plate") or local.get("plate") or "",
+        "needs_review": bool(getattr(fused, "needs_review", False)),
+        "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
     }
 
 
@@ -1155,12 +1174,32 @@ async def _run_local_alpr(
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     remember_alpr(camera.id, alpr)
     local = local_from_fastalpr(alpr)
+    from .core.consensus import DEFAULT_HIGH_CONF, resolve_local_reads
+    reads = [(str(local.get("plate") or ""), float(local.get("confidence") or 0))]
+    consensus_ok = False
+    if float(local.get("confidence") or 0) < DEFAULT_HIGH_CONF:
+        extras = gateway.peek_detect_recent(camera.id, 3)
+        for sample in extras:
+            if not sample or sample.jpeg[:2] != b"\xff\xd8" or sample.jpeg == jpeg:
+                continue
+            extra = await asyncio.to_thread(
+                recognize_bytes, sample.jpeg, camera_label=f"cam-{camera.id}-detect",
+            )
+            hit = local_from_fastalpr(extra)
+            if hit.get("plate"):
+                reads.append((str(hit.get("plate") or ""), float(hit.get("confidence") or 0)))
+                break
+        decided = resolve_local_reads(reads)
+        if decided.plate:
+            local = {**local, "plate": decided.plate, "confidence": decided.confidence, "consensus": decided.as_dict()}
+            consensus_ok = bool(decided.accepted)
     fused = resolve_readings(
         native_plate=native.get("plate") or "",
         native_confidence=float(native.get("confidence") or 0),
         local_plate=local.get("plate") or "",
         local_confidence=float(local.get("confidence") or 0),
         mode=fusion_mode(camera),
+        local_consensus=consensus_ok,
     )
     if not fused.resolved_plate:
         return alpr
@@ -1473,7 +1512,57 @@ async def _sdk_probe_status(c: Camera) -> dict:
 
 @app.get("/alpr/status")
 def get_alpr_status(_: User = Depends(require("hardware.view"))):
-    return alpr_status()
+    body = alpr_status()
+    body["engines"] = list_engines()
+    return body
+
+
+@app.get("/recognition/engine")
+def get_plate_engine(_: User = Depends(require("cameras.view"))):
+    engine = active_engine()
+    described = engine.describe()
+    described["engines"] = list_engines()
+    described["training"] = training_status(engine_id=engine.id)
+    described["platform"] = {
+        "desktop": "PySide6",
+        "windows": True,
+        "linux": True,
+    }
+    return described
+
+
+@app.post("/recognition/corrections")
+def post_plate_correction(
+    payload: PlateEngineCorrection,
+    _: User = Depends(require("cameras.connect")),
+):
+    engine = active_engine()
+    row = record_correction(
+        image_ref=payload.image_ref,
+        predicted=payload.predicted,
+        corrected=payload.corrected,
+        engine_id=engine.id,
+        country=payload.country,
+    )
+    return {"ok": True, "correction": row, "training": training_status(engine_id=engine.id)}
+
+
+@app.post("/recognition/model-pack")
+def post_model_pack(
+    payload: ModelPackRequest,
+    _: User = Depends(require("settings.manage")),
+):
+    directory = payload.directory.strip()
+    if not directory:
+        raise HTTPException(400, "directory is required")
+    engine = active_engine()
+    try:
+        applied = apply_model_pack(directory, engine_id=engine.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return applied
 
 
 @app.post("/alpr/fuse")
@@ -1496,7 +1585,7 @@ async def alpr_recognize_upload(
     jpeg = await file.read()
     if not jpeg:
         raise HTTPException(400, "Empty image")
-    result = recognize_bytes(jpeg, camera_label=file.filename or "upload")
+    result = recognize_frame(jpeg, camera_label=file.filename or "upload")
     return result
 
 
@@ -1509,7 +1598,7 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
         raise HTTPException(409, grabbed.get("error") or "Could not grab a live frame")
     remember_frame(c.id, grabbed["jpeg"], url=grabbed.get("url") or "", url_redacted=grabbed.get("url_redacted") or "")
     persist_video(db, c, grabbed.get("url"))
-    result = recognize_bytes(grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}")
+    result = recognize_frame(grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}")
     native = await _native_capture_for_camera(c)
     local = local_from_fastalpr(result)
     fused = resolve_readings(
@@ -1517,7 +1606,7 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
         native_confidence=float(native.get("confidence") or 0),
         local_plate=local.get("plate") or "",
         local_confidence=float(local.get("confidence") or 0),
-        mode="HYBRID",
+        mode=fusion_mode(c),
     )
     result["camera_id"] = c.id
     result["frame"] = {k: v for k, v in grabbed.items() if k not in {"jpeg", "url"}}
@@ -1801,6 +1890,51 @@ async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User =
     return _plate_payload(c, native, get_state(c.id).alpr or None, db)
 
 
+@app.post("/cameras/{camera_id}/plate-corrections")
+async def correct_camera_plate(
+    camera_id: int,
+    payload: PlateCorrection,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_any("gates.open", "sessions.view", "cameras.connect")),
+):
+    """Operator confirms or corrects a held misread. Raw OCR stays on plate_raw."""
+    from .core.plate import apply_site_plate, normalize_plate
+    from .services.captures import apply_operator_plate_correction
+
+    camera = get_camera_or_404(db, camera_id)
+    row = db.get(VehicleCapture, int(payload.capture_id)) if payload.capture_id else latest_for_camera(db, camera.id)
+    if row is None or row.camera_id != camera.id:
+        raise HTTPException(404, "No vehicle capture to correct")
+    original = row.plate_raw or row.plate
+    chosen = normalize_plate(payload.plate) if payload.plate else normalize_plate(row.plate)
+    if not chosen:
+        raise HTTPException(400, "Corrected plate is empty")
+    assessed = apply_site_plate(chosen, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+    apply_operator_plate_correction(row, chosen)
+    write_audit(
+        db, user, "plate.correct", "vehicle_capture", str(row.id),
+        f"ocr={original} corrected={chosen} confirm={bool(payload.confirm)}",
+    )
+    db.commit()
+    db.refresh(row)
+    gate = db.get(Gate, camera.gate_id) if camera.gate_id else None
+    side = (camera.lane_direction or "ENTRY").upper()
+    result = await handle_plate_event(
+        db, plate=chosen, gate=gate, side=side, simulated=False,
+        alpr=capture_dict(row), source="operator-correction", camera=camera,
+    )
+    last = capture_dict(row)
+    remember_last_car(camera.id, last)
+    return {
+        "ok": True,
+        "capture": last,
+        "session": result.get("session"),
+        "barrier_opened": result.get("barrier_opened"),
+        "likely": assessed.get("likely"),
+        "message": result.get("message") or "Plate confirmed",
+    }
+
+
 @app.get("/cameras/{camera_id}/presence")
 async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     c = get_camera_or_404(db, camera_id)
@@ -1925,10 +2059,24 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     if row and row.plate and side == "ENTRY":
         from .services.simulation import _active_for_plate
         needs_session = _active_for_plate(db, row.plate) is None
+    from .core.plate import apply_site_plate
+    hold = bool((capture or {}).get("needs_review") or (capture or {}).get("pending_confirmation"))
+    if row and row.plate:
+        assessed = apply_site_plate(row.plate, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+        if assessed.get("hold_for_operator"):
+            hold = True
+    if latest and hold:
+        payload = capture_dict(latest)
+        payload["pending_confirmation"] = True
+        payload["needs_review"] = True
+        remember_last_car(camera.id, payload)
+        if isinstance(row.bbox, dict):
+            row.bbox = {**row.bbox, "pending_confirmation": True, "needs_review": True}
+            db.commit()
     # Plate-first: create/update parking sessions even when the camera has no Gate.
     # Barrier open still needs a gate; the session (plate + receipt token) does not.
     should_handle = bool(
-        row and row.plate
+        row and row.plate and not hold
         and (new_capture or side == "EXIT" or registered_auto or needs_session)
     )
     if should_handle:
@@ -2441,9 +2589,11 @@ async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Se
 
 
 def tariff_dict(row: Tariff) -> dict:
+    from .services.fee_engine import tariff_editor
     return {
         "id": row.id, "name": row.name, "car_type": row.car_type, "currency": row.currency,
         "source": row.source, "rules": row.rules, "active": row.active,
+        "editor": tariff_editor(row),
     }
 
 
@@ -2454,6 +2604,22 @@ def session_dict(row: ParkingSession) -> dict:
 @app.get("/fees/tariff")
 def get_fee_tariff(db: Session = Depends(get_db), _: User = Depends(require("fees.view"))):
     row = ensure_car1_tariff(db)
+    return tariff_dict(row)
+
+
+@app.patch("/fees/tariff")
+def patch_fee_tariff(
+    payload: TariffEditorUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_any("fees.manage", "settings.manage")),
+):
+    from .services.fee_engine import apply_tariff_editor
+    try:
+        row = apply_tariff_editor(db, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    write_audit(db, user, "tariff.update", "tariff", str(row.id), row.name)
+    db.commit()
     return tariff_dict(row)
 
 
@@ -2670,7 +2836,7 @@ async def sim_capture(
             jpeg = b""
     if jpeg[:2] != b"\xff\xd8":
         raise HTTPException(400, "Upload a JPEG or PNG photo of the car")
-    alpr = recognize_bytes(jpeg, camera_label=file.filename or "sim-upload")
+    alpr = recognize_frame(jpeg, camera_label=file.filename or "sim-upload")
     best = (alpr or {}).get("best") or {}
     plate = str(best.get("plate") or "").strip()
     if not plate:
@@ -2726,12 +2892,43 @@ async def session_receipt_taken(session_id: int, db: Session = Depends(get_db), 
     return await sim_receipt_taken(session_id, db, user)
 
 
+@app.post("/sessions/{session_id}/correct-plate")
+async def correct_session_plate(
+    session_id: int,
+    payload: PlateCorrection,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_any("gates.open", "sessions.view", "simulation.run")),
+):
+    from .core.plate import normalize_plate
+    from .services.captures import apply_operator_plate_correction
+
+    row = db.get(ParkingSession, session_id)
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    chosen = normalize_plate(payload.plate)
+    if not chosen:
+        raise HTTPException(400, "Corrected plate is empty")
+    original = row.plate
+    row.plate = chosen
+    capture = None
+    if row.camera_id:
+        capture = latest_for_camera(db, row.camera_id)
+        if capture and (not capture.plate or capture.plate == original):
+            apply_operator_plate_correction(capture, chosen)
+    write_audit(db, user, "plate.correct", "parking_session", str(row.id), f"ocr={original} corrected={chosen}")
+    db.commit()
+    return {"ok": True, "session": sim_session_dict(row), "capture": capture_dict(capture) if capture else None}
+
+
 @app.post("/sim/sessions/{session_id}/pay")
 def sim_pay(session_id: int, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
-    row = mark_paid(db, row, operator_id=user.id, method="KIOSK_CASH")
+    try:
+        row = mark_paid(db, row, operator_id=user.id, method="KIOSK_CASH")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     write_audit(db, user, "sim.pay", "parking_session", str(row.id), f"{row.plate} {row.amount_paid}")
     db.commit()
     return sim_session_dict(row)
@@ -2748,7 +2945,10 @@ def confirm_session_payment(
     if not row:
         raise HTTPException(404, "Session not found")
     method = payload.method or "KIOSK_CASH"
-    row = mark_paid(db, row, operator_id=user.id, method=method)
+    try:
+        row = mark_paid(db, row, operator_id=user.id, method=method)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     write_audit(db, user, "payments.create", "parking_session", str(row.id), f"{row.plate} {row.amount_paid} {method}")
     db.commit()
     return sim_session_dict(row)
@@ -2757,6 +2957,52 @@ def confirm_session_payment(
 @app.get("/payments")
 def list_payments(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view", "kiosk.use"))):
     return [transaction_dict(row) for row in list_transactions(db)]
+
+
+@app.post("/payments/mobile-money/webhook")
+async def mobile_money_webhook(request: Request, db: Session = Depends(get_db)):
+    """Verified aggregator callback only. A redirect/success URL must not mark paid."""
+    from .infrastructure.payments import payment_provider_for
+    from .infrastructure.payments.ledger import record_succeeded_payment, transaction_dict as txn_dict
+
+    raw = await request.body()
+    signature = request.headers.get("x-signature") or request.headers.get("x-smartpark-signature") or ""
+    try:
+        import json
+        payload = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    provider = payment_provider_for("mobile_money")
+    verified = await provider.verify_callback({
+        **payload,
+        "signature": signature or payload.get("signature") or "",
+        "raw_body": raw,
+        "x_signature": signature,
+    })
+    if not verified.get("verified"):
+        raise HTTPException(400, verified.get("error") or "Unverified webhook")
+    session_id = int(verified.get("session_id") or payload.get("session_id") or 0)
+    row = db.get(ParkingSession, session_id) if session_id else None
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    amount = float(verified.get("amount") or payload.get("amount") or row.amount_due or 0)
+    recorded = record_succeeded_payment(
+        db, row,
+        amount=amount,
+        method="MOBILE_MONEY",
+        provider_id="mobile_money",
+        idempotency_key=str(verified.get("provider_ref") or payload.get("provider_ref") or f"mm:{row.id}:{amount}"),
+    )
+    write_audit(db, None, "payments.webhook", "parking_session", str(row.id), f"mobile_money {amount}")
+    return {
+        "ok": True,
+        "verified": True,
+        "session": sim_session_dict(recorded["session"]),
+        "transaction": txn_dict(recorded["transaction"]),
+        "duplicate": bool(recorded.get("duplicate")),
+    }
 
 
 @app.post("/sim/exit")
@@ -2784,7 +3030,16 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     currency = data["currency"]
     entry = row.entry_time.strftime("%d %b %Y %H:%M") if row.entry_time else "—"
     status_label = "PAID" if data["paid"] else data["status"]
-    pay_disabled = "disabled" if data["paid"] else ""
+    pay_disabled = "disabled" if not data.get("payable") else ""
+    stay = data.get("duration_label") or "—"
+    image_note = data.get("image_note") or ""
+    snapshot = data.get("snapshot_url") or ""
+    crop = data.get("crop_url") or ""
+    photo_block = ""
+    if snapshot:
+        photo_block = f'<p><img class="car" src="{snapshot}" alt="Car at entry"></p>'
+        if crop:
+            photo_block += f'<p><img class="crop" src="{crop}" alt="Plate crop"></p>'
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pay — {row.plate}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -2796,6 +3051,8 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       .muted{{color:#5b6b82}}
       .ok{{color:#0a7a3e;font-weight:700}}
       img.qr{{width:168px;height:168px;background:#fff;padding:8px;border:1px solid #dfe5ef;border-radius:8px}}
+      img.car{{width:100%;max-height:220px;object-fit:contain;background:#0b1220;border-radius:8px}}
+      img.crop{{max-width:100%;max-height:72px;object-fit:contain;background:#fff;border:1px solid #dfe5ef;border-radius:6px}}
       .btn{{display:block;width:100%;box-sizing:border-box;text-align:center;background:#1f5eff;color:#fff;
            border:0;border-radius:8px;padding:14px;margin-top:12px;font-weight:600;font-size:16px;cursor:pointer}}
       .btn:disabled{{opacity:.5;cursor:not-allowed}}
@@ -2806,11 +3063,14 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     <body><main>
     <p class="muted">{settings.site_name}</p>
     <p class="plate">{row.plate}</p>
+    {photo_block}
     <div class="card">
       <p>Entry {entry}</p>
+      <p>Time inside <b id="stay">{stay}</b></p>
       <p>{data['parker_kind']} · <span id="status">{status_label}</span></p>
       <p class="due" id="due">{currency} {remaining:,.0f}</p>
       <p class="muted">Paid {currency} {paid:,.0f} of {due:,.0f}.</p>
+      <p class="muted">{image_note}</p>
       <p class="muted">Receipt code <code id="code">{token}</code></p>
       <button class="btn" id="pay-mobile" {pay_disabled}>Pay on phone (mobile)</button>
       <a class="btn secondary" href="#kiosk">Pay at kiosk</a>
@@ -2832,10 +3092,11 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         const data = await res.json();
         document.getElementById("status").textContent = data.paid ? "PAID" : data.status;
         document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
-        if (data.paid) {{
-          payBtn.disabled = true;
-          msg.textContent = "Paid. You can leave when the exit camera reads your plate.";
-          msg.className = "ok";
+        if (data.duration_label) document.getElementById("stay").textContent = data.duration_label;
+        payBtn.disabled = !data.payable;
+        if (!data.payable) {{
+          msg.textContent = data.pay_blocked_reason || (data.paid ? "Paid. You can leave when the exit camera reads your plate." : "Nothing to pay.");
+          msg.className = data.paid ? "ok" : "muted";
         }}
       }}
       payBtn.addEventListener("click", async () => {{
@@ -2934,6 +3195,60 @@ def session_by_token(token: str, db: Session = Depends(get_db), _: User = Depend
     return public_session_payload(db, row)
 
 
+@app.get("/sessions/lookup")
+def lookup_session(q: str = "", db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use", "payments.create"))):
+    """Find a visit from a scanned QR, a receipt link, or a number plate."""
+    from app.services.kiosk_lookup import find_session
+    from app.services.public_pay import public_session_payload
+
+    row = find_session(db, q)
+    if not row:
+        raise HTTPException(404, "No visit matches that QR code or plate")
+    return public_session_payload(db, row)
+
+
+def _session_image(db: Session, token: str, kind: str):
+    from app.services.kiosk_lookup import image_fields
+    from app.services.preview import media_path
+    from app.services.public_pay import session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    fields = image_fields(db, row)
+    url = fields.get("snapshot_url") if kind == "snapshot" else fields.get("crop_url")
+    if not url:
+        raise HTTPException(404, "No photo for this visit")
+    # url is /p/{token}/... — the file path lives on the capture row.
+    from sqlalchemy import select
+    from app.models import VehicleCapture
+    from app.core.plate import normalize_plate
+    plate = normalize_plate(row.plate)
+    capture = None
+    if plate:
+        capture = db.scalar(select(VehicleCapture).where(VehicleCapture.plate == plate).order_by(VehicleCapture.id.desc()))
+    if capture is None and row.camera_id:
+        capture = db.scalar(select(VehicleCapture).where(VehicleCapture.camera_id == row.camera_id).order_by(VehicleCapture.id.desc()))
+    stored = (capture.snapshot_path if kind == "snapshot" else capture.crop_path) if capture else ""
+    if not stored or "/" not in stored.replace("\\", "/"):
+        raise HTTPException(404, "No photo for this visit")
+    folder, name = str(stored).replace("\\", "/").split("/", 1)
+    path = media_path(folder, name)
+    if path is None:
+        raise HTTPException(404, "No photo for this visit")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/p/{token}/snapshot.jpg", include_in_schema=False)
+def public_snapshot(token: str, db: Session = Depends(get_db)):
+    return _session_image(db, token, "snapshot")
+
+
+@app.get("/p/{token}/crop.jpg", include_in_schema=False)
+def public_crop(token: str, db: Session = Depends(get_db)):
+    return _session_image(db, token, "crop")
+
+
 @app.get("/p/{token}/qr.png", include_in_schema=False)
 def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     row = db.scalar(select(Receipt).where(Receipt.public_token == token).order_by(Receipt.id.desc()))
@@ -2945,6 +3260,123 @@ def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     if not png:
         raise HTTPException(404, "QR not available")
     return Response(content=png, media_type="image/png")
+
+
+@app.get("/reports/summary")
+def reports_summary(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_any("dashboard.view", "fees.view", "payments.view")),
+):
+    from .services.reports_desk import report_summary
+    return report_summary(db, start, end)
+
+
+@app.get("/reports/export.csv")
+def reports_export(
+    kind: str = "payments",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_any("dashboard.view", "fees.view", "payments.view")),
+):
+    from .services.reports_desk import report_by_id, report_summary, table_csv
+    summary = report_summary(db, start, end)
+    try:
+        sheet = report_by_id(summary, kind)
+    except KeyError:
+        raise HTTPException(404, "Unknown report")
+    filename = f"smartpark-{sheet['id']}.csv"
+    return Response(
+        content=table_csv(sheet),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/reports/payments.csv")
+def reports_csv(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_any("dashboard.view", "fees.view", "payments.view")),
+):
+    from .services.reports_desk import report_csv, report_summary
+    summary = report_summary(db, start, end)
+    return Response(
+        content=report_csv(summary),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="smartpark-payments.csv"'},
+    )
+
+
+@app.get("/backup")
+def backup_status(db: Session = Depends(get_db), _: User = Depends(require_any("dashboard.view", "settings.manage"))):
+    from .services.backup import public_backup_status
+    return public_backup_status(db)
+
+
+@app.patch("/backup")
+def backup_update(
+    payload: BackupSettingsUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    from .services.backup import public_backup_status, save_backup_settings
+    try:
+        save_backup_settings(db, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    write_audit(db, user, "backup.update", "site", "backup", "")
+    db.commit()
+    return public_backup_status(db)
+
+
+@app.post("/backup/offline")
+def backup_mark_offline(db: Session = Depends(get_db), user: User = Depends(require("settings.manage"))):
+    from .services.backup import mark_offline_saved
+    status = mark_offline_saved(db)
+    write_audit(db, user, "backup.offline", "site", "backup", status.get("last_offline_at") or "")
+    db.commit()
+    return status
+
+
+@app.post("/backup/snooze")
+def backup_snooze(db: Session = Depends(get_db), _: User = Depends(require_any("dashboard.view", "settings.manage"))):
+    from .services.backup import snooze_offline_reminder
+    return snooze_offline_reminder(db)
+
+
+@app.get("/backup/download")
+def backup_download(db: Session = Depends(get_db), user: User = Depends(require("settings.manage"))):
+    from .services.backup import backup_filename, dump_sql, mark_offline_saved
+    try:
+        body = dump_sql(db)
+    except Exception as exc:
+        raise HTTPException(409, str(exc)) from exc
+    mark_offline_saved(db)
+    write_audit(db, user, "backup.download", "site", "backup", backup_filename())
+    db.commit()
+    return Response(
+        content=body,
+        media_type="application/sql",
+        headers={"Content-Disposition": f'attachment; filename="{backup_filename()}"'},
+    )
+
+
+@app.post("/backup/cloud")
+def backup_cloud(db: Session = Depends(get_db), user: User = Depends(require("settings.manage"))):
+    from .services.backup import push_cloud_backup
+    try:
+        status = push_cloud_backup(db)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
+    write_audit(db, user, "backup.cloud", "site", "backup", "ok")
+    db.commit()
+    return status
 
 
 @app.get("/dashboard")
@@ -3155,6 +3587,59 @@ def update_vehicle(vehicle_id: int, payload: VehicleUpdate, db: Session = Depend
     db.refresh(row)
     write_audit(db, user, "vehicle.update", "registered_vehicle", str(row.id), row.plate)
     return vehicle_dict(row)
+
+
+@app.post("/vehicles/bulk")
+def create_vehicles_bulk(payload: VehicleBulkCreate, db: Session = Depends(get_db), user: User = Depends(require("subscribers.manage"))):
+    """Register many plates at once. One bad row does not skip the others that succeed."""
+    from .core.plate import normalize_plate as norm
+    ensure_access_plans(db)
+    created = []
+    errors = []
+    for index, item in enumerate(payload.vehicles):
+        plate = norm(item.plate)
+        if not plate:
+            errors.append({"index": index, "error": "Enter a number plate"})
+            continue
+        plan_id = item.plan_id
+        if plan_id is None:
+            first = db.scalar(select(AccessPlan).order_by(AccessPlan.id))
+            plan_id = first.id if first else None
+        if plan_id and db.get(AccessPlan, plan_id) is None:
+            errors.append({"index": index, "plate": plate, "error": "Access plan not found"})
+            continue
+        row = RegisteredVehicle(
+            plate=plate, owner_name=item.owner_name or "", plan_id=plan_id,
+            enabled=item.enabled, valid_from=item.valid_from, valid_until=item.valid_until,
+            notes=item.notes or "",
+        )
+        db.add(row)
+        try:
+            db.commit()
+            db.refresh(row)
+        except IntegrityError:
+            db.rollback()
+            errors.append({"index": index, "plate": plate, "error": "That number plate is already registered"})
+            continue
+        write_audit(db, user, "vehicle.register", "registered_vehicle", str(row.id), plate)
+        db.commit()
+        created.append(vehicle_dict(row))
+    return {"ok": True, "created": created, "errors": errors}
+
+
+@app.post("/vehicles/bulk-delete")
+def delete_vehicles_bulk(payload: VehicleBulkDelete, db: Session = Depends(get_db), user: User = Depends(require("subscribers.manage"))):
+    deleted = []
+    for vehicle_id in payload.ids:
+        row = db.get(RegisteredVehicle, int(vehicle_id))
+        if row is None:
+            continue
+        plate = row.plate
+        db.delete(row)
+        deleted.append(vehicle_id)
+        write_audit(db, user, "vehicle.delete", "registered_vehicle", str(vehicle_id), plate)
+    db.commit()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.delete("/vehicles/{vehicle_id}")
