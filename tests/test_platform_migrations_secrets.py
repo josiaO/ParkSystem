@@ -54,6 +54,9 @@ LEGACY_SQL = [
     "CREATE UNIQUE INDEX ix_registered_vehicles_plate ON registered_vehicles (plate)",
     "CREATE TABLE users (id INTEGER NOT NULL, username VARCHAR(80) NOT NULL, full_name VARCHAR(160) NOT NULL, "
     "password_hash VARCHAR(255) NOT NULL, status VARCHAR(20) NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY (id))",
+    "CREATE TABLE vehicle_captures (id INTEGER NOT NULL, camera_id INTEGER, gate_id INTEGER, lane_direction VARCHAR(20) NOT NULL, "
+    "plate VARCHAR(32) NOT NULL, plate_raw VARCHAR(32) NOT NULL, confidence NUMERIC(6, 3) NOT NULL, image_id INTEGER NOT NULL, "
+    "snapshot_path VARCHAR(260) NOT NULL, crop_path VARCHAR(260) NOT NULL, bbox JSON, created_at DATETIME NOT NULL, PRIMARY KEY (id))",
     "INSERT INTO gates (id, name, mode, enabled, physical_control_verified) VALUES (7, '1#', 'COMMISSIONING', 1, 0)",
     "INSERT INTO cameras (id, name, ip_address, sdk_port, username, password_secret, lane_direction, rtsp_url, status, "
     "last_error, enabled) VALUES (3, 'Entry', '192.168.1.10', 30000, 'admin', 'legacy-pass', 'ENTRY', '', 'UNKNOWN', '', 1)",
@@ -88,6 +91,7 @@ class AlembicRunnerTests(unittest.TestCase):
         summary = upgrade_to_head(engine)
         self.assertEqual(summary["mode"], "adopt")
         self.assertIn("cameras.adapter_id", summary["legacy_fixups"])
+        self.assertIn("vehicle_captures.source", summary["legacy_fixups"])
         self.assertEqual(current_revision(engine), head_revision())
 
         insp = inspect(engine)
@@ -99,6 +103,7 @@ class AlembicRunnerTests(unittest.TestCase):
             self.assertEqual([u["column_names"] for u in uniques], [["site_id", column]], table)
         self.assertIn("credentials_ref", {c["name"] for c in insp.get_columns("cameras")})
         self.assertFalse(any(i["unique"] for i in insp.get_indexes("registered_vehicles")))
+        self.assertIn("ai_review", {c["name"] for c in insp.get_columns("vehicle_captures")})  # 0003
 
         with engine.connect() as conn:
             self.assertEqual(conn.execute(text("SELECT site_id FROM gates WHERE id=7")).scalar(), 1)

@@ -278,6 +278,8 @@ class VehicleCapture(Base):
     plate_type: Mapped[str] = mapped_column(String(40), default="")
     source: Mapped[str] = mapped_column(String(40), default="")
     event_id: Mapped[str] = mapped_column(String(64), default="")
+    # Optional cloud AI second opinion (supporting/conflicting/unreadable). Never the plate authority.
+    ai_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

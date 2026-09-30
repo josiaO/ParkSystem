@@ -1041,6 +1041,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for how to contribute to these areas.
 | [05-DATABASE-SCHEMA.md](05-DATABASE-SCHEMA.md) | SQLite / Postgres |
 | [DATABASE-MIGRATIONS.md](DATABASE-MIGRATIONS.md) | Alembic runner, site-scoped constraints |
 | [SECRETS-AND-REDACTION.md](SECRETS-AND-REDACTION.md) | SecretStore (`credentials_ref`), redaction surfaces |
+| [AI-REVIEW.md](AI-REVIEW.md) | Optional Gemini second opinion, off by default |
 | [06-SESSION-STATE-MACHINE.md](06-SESSION-STATE-MACHINE.md) | Session statuses |
 | [07-HARDWARE-ADAPTER-ARCHITECTURE.md](07-HARDWARE-ADAPTER-ARCHITECTURE.md) | Adapters |
 | [08-HVX-CAMERA-INTEGRATION.md](08-HVX-CAMERA-INTEGRATION.md) | NetSDK path |
