@@ -59,6 +59,33 @@ class Settings(BaseSettings):
     bootstrap_username: str = "admin"
     bootstrap_password: str = ""
     mobile_money_webhook_secret: str = ""
+    # --- External payment providers (Phase 2 §8) -------------------------
+    # Which provider backs the public "pay by phone" flow. simulated keeps the
+    # legacy instant path; flutterwave / clickpesa create PENDING intents that
+    # only become SUCCEEDED after server-side verification.
+    payments_mobile_provider: str = "simulated"
+    # ClickPesa has no sandbox. A live collection is refused unless BOTH flags
+    # below are set explicitly by the operator (LIVE_PROVIDER_CONFIRMATION_REQUIRED).
+    payments_live_provider_confirmation_required: bool = True
+    payments_live_provider_confirmed: bool = False
+    payments_reconcile_seconds: float = 60.0
+    payments_intent_expiry_minutes: int = 30
+    payments_http_timeout_seconds: float = 8.0
+    flutterwave_secret_key: str = ""          # FLWSECK_TEST-... by default
+    flutterwave_secret_hash: str = ""         # webhook verif-hash / signature secret
+    flutterwave_base_url: str = "https://api.flutterwave.com/v3"
+    flutterwave_allow_live_keys: bool = False
+    flutterwave_customer_email: str = "payments@smartpark.local"
+    flutterwave_default_network: str = ""     # Airtel | Tigo | Halopesa | Vodafone | ""
+    clickpesa_client_id: str = ""
+    clickpesa_api_key: str = ""
+    clickpesa_checksum_key: str = ""
+    clickpesa_base_url: str = "https://api.clickpesa.com/third-parties"
+    clickpesa_live_enabled: bool = False
+    # Comma-separated hostnames that a public tunnel/reverse proxy forwards to
+    # this Site Service. Requests arriving on those hosts may only reach the
+    # narrow public payment surface (see app/services/public_ingress.py).
+    public_ingress_hosts: str = ""
     default_camera_password: str = "admin"
     gate_physical_control_enabled: bool = True
     board_tcp_port: int = 5000

@@ -51,11 +51,13 @@ Internet down: kiosk cash still works; do not invent mobile SUCCEEDED. Provider 
 
 ## Configuration
 
-No live Tanzania aggregator in V1. Plug in a provider that implements `create_intent`, `initiate_collection`, `verify_callback`, `query_status`.
+`SMARTPARK_PAYMENTS_MOBILE_PROVIDER` selects the phone-pay provider: `simulated` (default), `flutterwave` (TEST keys by default) or `clickpesa` (live-disabled until confirmed). External providers create `PENDING` intents that are credited only after server-side verification; see `MOBILE-MONEY-PROVIDERS.md`. A provider implements `create_intent`, `initiate_collection`, `verify_callback`, `query_status` (and optionally `refund`, `health`).
+
+`record_succeeded_payment(..., intent=, provider_transaction_id=)` links the ledger row to an existing intent and makes a replayed provider transaction a duplicate under the unique `provider_transaction_id` even if the idempotency key differs.
 
 ## Tests
 
-`test_kiosk_payment_writes_ledger`, `test_paid_exit_opens`.
+`test_kiosk_payment_writes_ledger`, `test_paid_exit_opens`, `tests/test_payments_flutterwave.py`, `tests/test_payments_clickpesa.py`, `tests/test_public_ingress.py`.
 
 ## How to extend safely
 
