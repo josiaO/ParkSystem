@@ -20,6 +20,7 @@ from app.domain.parking_engine import (
     CLOSED,
     DENIED_PAYMENT_REQUIRED,
     ENTRY_AUTHORIZED,
+    ENTRY_CANCELLED,
     EXIT_GATE_OPEN_REQUESTED,
     EXIT_VEHICLE_DETECTED,
     EXIT_VEHICLE_PASSED,
@@ -79,6 +80,9 @@ def _commit_transition(db: Session, row: ParkingSession, target: str, policy: La
     if nxt == CLOSED:
         row.status = "CLOSED"
         row.exit_time = row.exit_time or utcnow()
+        row.closed_at = row.closed_at or utcnow()
+    if nxt == ENTRY_CANCELLED:
+        row.status = "CLOSED"
         row.closed_at = row.closed_at or utcnow()
     db.commit()
     db.refresh(row)
@@ -252,6 +256,15 @@ def mark_receipt_taken(db: Session, row: ParkingSession, *, policy: LanePolicy |
     return advance(db, row, RECEIPT_TAKEN, policy=policy)
 
 
+def cancel_entry_attempt(db: Session, row: ParkingSession, *, policy: LanePolicy | None = None) -> ParkingSession:
+    """Vehicle left before the receipt was taken. Releases the open-plate lock."""
+    policy = policy or LanePolicy(receipt_required_before_open=True)
+    current = _current(row)
+    if current == ENTRY_CANCELLED or row.status == "CLOSED":
+        return row
+    return advance(db, row, ENTRY_CANCELLED, policy=policy)
+
+
 def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, policy: LanePolicy | None = None) -> ParkingSession:
     policy = policy or LanePolicy()
     if command_uuid and row.open_command_uuid == command_uuid:
@@ -264,7 +277,9 @@ def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, p
     if current == RECEIPT_TAKEN:
         row = advance(db, row, ENTRY_AUTHORIZED, policy=policy)
         current = _current(row)
-    if current == SESSION_CREATED and not policy.receipt_required_before_open:
+    subscriber = (row.parker_kind or "CASUAL").upper() not in {"CASUAL", ""}
+    skip_receipt = (not policy.receipt_required_before_open) or (subscriber and policy.subscriber_skip_receipt)
+    if current == SESSION_CREATED and skip_receipt:
         row = advance(db, row, ENTRY_AUTHORIZED, policy=policy)
         current = _current(row)
     if current != ENTRY_AUTHORIZED:
@@ -390,6 +405,9 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "lifecycle": _current(row),
         "entry_lane_id": row.entry_lane_id,
         "exit_lane_id": row.exit_lane_id,
+        "gate_id": row.gate_id,
+        "camera_id": row.camera_id,
+        "simulated": bool(row.simulated),
         "entry_event_id": row.entry_event_id,
         "exit_event_id": row.exit_event_id,
         "public_token": row.public_token,

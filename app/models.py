@@ -15,6 +15,15 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def as_utc(dt: datetime | None) -> datetime | None:
+    """SQLite often returns naive datetimes; compare only in UTC."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class UserStatus(str, Enum):
     ACTIVE = "ACTIVE"
     LOCKED = "LOCKED"

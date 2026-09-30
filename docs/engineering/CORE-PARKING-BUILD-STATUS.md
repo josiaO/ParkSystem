@@ -11,7 +11,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 1 Parking domain engine | PASS | `f1c5e85` |
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
 | 3 Receipt and QR | PASS | `b1ce995` |
-| 4 Entry orchestration | not started | |
+| 4 Entry orchestration | PASS | |
 | 5 Tariff and local payment | not started | |
 | 6 Exit orchestration | not started | |
 | 7 Physical lane hardware | not started | |
@@ -247,3 +247,43 @@ Same as Phase 0–2. Physical presenter / taken sensor not attached. Windows USB
 Connect recognition + parking + printer + gate in one entry orchestrator. Presence → consensus → session → print → presented → taken → authorize → idempotent OPEN → vehicle passed → ACTIVE. Do not put the sequence in a FastAPI route or camera callback. Printer/taken failure must not silently open. Subscribers may skip receipt per lane policy.
 
 Commit: `b1ce995`.
+
+---
+
+## Phase 4 — Entry orchestration
+
+### Implemented behavior
+
+- `EntryLaneController` (`app/application/entry_lane.py`) is the entry sequence: presence → recognition candidate → admission → session → print → taken → idempotent OPEN → vehicle passed → ACTIVE. FastAPI routes and camera callbacks only submit events; they do not own the sequence.
+- Casual lanes with `receipt_required_before_open` wait for taken. Printer failure and gate-unavailable leave the session consistent and do not pulse. Duplicate ALPR reuses one session. Subscribers skip receipt when `subscriber_skip_receipt` is set. Vehicle-left before taken cancels (`ENTRY_CANCELLED`) and releases the open-plate lock.
+- Live `handle_plate_event` still honors site `receipt_policy` (default PRINT_AND_OPEN) so existing kiosk/sim flows stay intact. The new controller is the RECEIPT_REQUIRED path and the Phase 4 test surface.
+- SQLite datetime mix-up fixed: `lookup_entitlement` compares `valid_from` / `valid_until` via `as_utc()`. That was the `TypeError` on `POST /sim/capture`.
+
+### Tests run
+
+```text
+.venv/bin/python -m compileall -q app tools
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_parking_entry.py
+.venv/bin/python -m pytest -q -p no:cacheprovider
+git diff --check
+```
+
+### Test results
+
+**480 passed** (467 Phase 3 + 13 entry/datetime tests), 1 pre-existing Starlette/httpx warning. `compileall` exit 0.
+
+### Unresolved hardware verification
+
+Same as Phase 0–3. Full entry path is simulated. Not validated on a physical lane. HVX GPIO still only through `gates.controller`.
+
+### Known limitations
+
+- Default live policy remains PRINT_AND_OPEN until a lane is configured `REQUIRE_TAKEN_BEFORE_OPEN`.
+- Operator/manual plate fallback UI is Phase 8.
+- Physical taken-sensor still simulated.
+
+### Phase 5 implementation plan (do this next; do not start Phase 6)
+
+Pure tariff engine from configuration (not Rock City constants). Cash settlement on local SQLite with PaymentIntent/PaymentTransaction, Decimal/minor units, duplicate cash idempotency, `payment_exit_grace_until`. No public payment web app.
+
+Commit: filled after commit.

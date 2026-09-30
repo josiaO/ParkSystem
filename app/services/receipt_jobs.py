@@ -216,10 +216,12 @@ async def mark_receipt_taken(
         return row
     if printer is not None and hasattr(printer, "simulate_taken"):
         printer.simulate_taken()
-        try:
-            await printer.wait_until_taken(timeout_seconds=0.1)
-        except TimeoutError as exc:
-            raise InvalidPrintJob(str(exc)) from exc
+        requires_sensor = bool((policy or LanePolicy(receipt_required_before_open=True)).receipt_required_before_open)
+        if requires_sensor:
+            try:
+                await printer.wait_until_taken(timeout_seconds=0.1)
+            except TimeoutError as exc:
+                raise InvalidPrintJob(str(exc)) from exc
     _set_job(row, JOB_TAKEN)
     row.receipt_status = "TAKEN"
     row.receipt_taken_at = row.receipt_taken_at or utcnow()
