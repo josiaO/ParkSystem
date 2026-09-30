@@ -1474,7 +1474,8 @@
             els.webrtc.src = ep.webrtc;
           }
           els.status.textContent = "Live (MediaMTX)";
-          startSnapshotLoop(slot, id);
+          // WebRTC is the live transport. Do not also poll snapshot.jpg:
+          // that creates a second decode path and can spawn repeated FFmpeg work.
           refreshPlates(slot);
           return;
         }

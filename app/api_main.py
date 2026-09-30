@@ -122,24 +122,9 @@ async def lifespan(app: FastAPI):
         sync_gate_lanes_from_cameras(db)
     mark_core_ready()
     start_idle_watch()
-    try:
-        from .services.flags import flags as migration_flags
-        from .services import mediamtx
-        if migration_flags().get("media_gateway_enabled") and mediamtx.available():
-            mediamtx.start()
-            from .services.mediamtx_sources import sync_camera
-            from .models import Camera
-            with SessionLocal() as db:
-                cfg = migration_flags(db)
-                from .services.flags import media_mtx_for_camera
-                for camera in db.scalars(select(Camera).where(Camera.enabled == True)).all():
-                    if media_mtx_for_camera(int(camera.id), db):
-                        try:
-                            sync_camera(camera, db=db)
-                        except Exception:
-                            pass
-    except Exception:
-        pass
+    # MediaMTX has one owner: SmartParkMediaService. The Site Service only
+    # consumes its local control/stream endpoints and must not spawn a competing
+    # sidecar process.
     ingest = asyncio.create_task(_camera_event_loop(), name="camera-events")
     outbox = asyncio.create_task(_outbox_loop(), name="parking-outbox")
     hvx_watch = asyncio.create_task(_hvx_watch_loop(), name="hvx-watch")
@@ -150,11 +135,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
         await asyncio.gather(ingest, outbox, hvx_watch, return_exceptions=True)
         stop_live_pumps()
-        try:
-            from .services import mediamtx
-            mediamtx.stop()
-        except Exception:
-            pass
+        # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
 
 
