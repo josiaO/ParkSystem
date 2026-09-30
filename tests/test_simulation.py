@@ -52,6 +52,8 @@ class SimulationTests(unittest.TestCase):
         set_session_factory(self.Session)
         with self.Session() as db:
             ensure_roles(db)
+            from app.services.modules import apply_profile
+            apply_profile(db, "PARKING_PRO")
             admin_role = db.scalar(select(Role).where(Role.name == "Admin"))
             operator_role = db.scalar(select(Role).where(Role.name == "Operator"))
             admin = User(username="admin", full_name="Test Admin", password_hash=hash_password("correct-horse"))

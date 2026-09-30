@@ -65,6 +65,8 @@ def normalize_event(
         normalized_plate=applied["normalized_plate"],
         recognition_confidence=float(confidence or 0),
         validation_result=applied["validation_result"],
+        validation_ok=applied["validation_ok"],
+        needs_review=applied["hold_for_operator"],
     )
     if extra:
         body.update(extra)

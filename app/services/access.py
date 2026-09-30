@@ -90,7 +90,10 @@ def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -
             row.plate
             for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))).all()
         ]
-        fixed = correct_ocr_confusions(plate, known_plates=known)
+        from app.services.site_policy import site_policy
+
+        validation = str(site_policy(db).get("plate_validation") or "NONE")
+        fixed = correct_ocr_confusions(plate, known_plates=known, policy=validation)
         if fixed.get("plate") and fixed["plate"] != plate:
             vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == fixed["plate"]))
     if vehicle is None:

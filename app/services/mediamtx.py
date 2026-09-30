@@ -19,6 +19,17 @@ _last_error: str = ""
 _external_checked_at: float = 0.0
 _external_running_cache: bool = False
 
+CONTROL_API = "http://127.0.0.1:9997"
+METRICS_ADDRESS = "127.0.0.1:9998"
+
+
+def live_path_name(camera_id: int) -> str:
+    return f"cam{int(camera_id)}"
+
+
+def detect_path_name(camera_id: int) -> str:
+    return f"cam{int(camera_id)}_detect"
+
 
 def mediamtx_bin() -> Path | None:
     env = os.environ.get("SMARTPARK_MEDIAMTX_BIN")
@@ -59,6 +70,8 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
         "hlsAddress: 127.0.0.1:8888",
         "api: yes",
         "apiAddress: 127.0.0.1:9997",
+        "metrics: yes",
+        "metricsAddress: 127.0.0.1:9998",
         "paths:",
     ]
     rows = paths if paths is not None else _sources
@@ -67,8 +80,8 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
     for camera_id, source in sorted(rows.items()):
         live_uri = str(source.get("uri") or source.get("rtsp_url") or "")
         detect_uri = str(source.get("detect_uri") or live_uri)
-        live_name = f"cam{int(camera_id)}"
-        detect_name = f"cam{int(camera_id)}_detect"
+        live_name = live_path_name(camera_id)
+        detect_name = detect_path_name(camera_id)
         for name, uri in ((live_name, live_uri), (detect_name, detect_uri)):
             lines.append(f"  {name}:")
             if uri.startswith("rtsp://"):
@@ -148,41 +161,90 @@ def stop() -> None:
         proc.kill()
 
 
+def _path_conf(uri: str) -> dict[str, Any]:
+    if str(uri).startswith("rtsp://"):
+        return {"source": uri, "sourceOnDemand": False, "rtspTransport": "tcp"}
+    return {"source": "publisher"}
+
+
+def _control_api(method: str, path: str, body: dict[str, Any] | None = None) -> int | None:
+    """Call the MediaMTX Control API. None means the API could not be reached."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    req = urllib.request.Request(
+        f"{CONTROL_API}{path}",
+        data=data,
+        method=method,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return int(resp.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+    except Exception:
+        return None
+
+
+def _upsert_path(name: str, uri: str) -> int | None:
+    conf = _path_conf(uri)
+    status = _control_api("POST", f"/v3/config/paths/add/{name}", conf)
+    if status == 400:
+        status = _control_api("POST", f"/v3/config/paths/replace/{name}", conf)
+    return status
+
+
+def sync_paths() -> bool:
+    """Push registered paths through the real Control API.
+
+    ``write_config`` has already updated ``mediamtx.yml``. MediaMTX hot-reloads
+    that file, so a missed API call must not restart the process. Only
+    SmartParkMediaService starts and stops MediaMTX.
+    """
+    if not running():
+        return False
+    ok = True
+    for camera_id, source in sorted(_sources.items()):
+        live_uri = str(source.get("uri") or source.get("rtsp_url") or "")
+        detect_uri = str(source.get("detect_uri") or live_uri)
+        for name, uri in (
+            (live_path_name(camera_id), live_uri),
+            (detect_path_name(camera_id), detect_uri),
+        ):
+            status = _upsert_path(name, uri)
+            if status is None or status >= 400:
+                ok = False
+    return ok
+
+
 def register_source(camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
     _sources[int(camera_id)] = dict(source)
     write_config()
     if running():
-        if not reload_paths():
-            stop()
-            start()
+        sync_paths()
     return live_endpoint(camera_id)
 
 
 def reload_paths() -> bool:
-    """Ask a running MediaMTX to reload path definitions."""
-    if not running():
-        return False
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:9997/v3/config/paths/reload",
-            method="POST",
-            data=b"",
-        )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            return 200 <= int(resp.status) < 300
-    except Exception:
-        return False
+    """Apply path changes through add/replace. MediaMTX has no paths reload endpoint."""
+    return sync_paths()
 
 
 def unregister_source(camera_id: int) -> None:
-    _sources.pop(int(camera_id), None)
+    camera_id = int(camera_id)
+    _sources.pop(camera_id, None)
     write_config()
+    if running():
+        for name in (live_path_name(camera_id), detect_path_name(camera_id)):
+            _control_api("DELETE", f"/v3/config/paths/delete/{name}")
 
 
 def live_endpoint(camera_id: int) -> dict[str, Any]:
-    name = f"cam{int(camera_id)}"
+    name = live_path_name(camera_id)
     source = _sources.get(int(camera_id)) or {}
     return {
         "camera_id": int(camera_id),
@@ -196,9 +258,19 @@ def live_endpoint(camera_id: int) -> dict[str, Any]:
 
 
 def detect_endpoint(camera_id: int) -> dict[str, Any]:
-    body = live_endpoint(camera_id)
-    body["kind"] = "mediamtx-detect"
-    return body
+    name = detect_path_name(camera_id)
+    source = _sources.get(int(camera_id)) or {}
+    return {
+        "camera_id": int(camera_id),
+        "kind": "mediamtx-detect",
+        "rtsp": f"rtsp://127.0.0.1:8554/{name}",
+        "webrtc": f"http://127.0.0.1:8889/{name}",
+        "hls": f"http://127.0.0.1:8888/{name}",
+        "upstream_redacted": redact_url(
+            str(source.get("detect_uri") or source.get("uri") or source.get("rtsp_url") or "")
+        ),
+        "running": running(),
+    }
 
 
 def health() -> dict[str, Any]:
@@ -210,6 +282,8 @@ def health() -> dict[str, Any]:
         "sources": sorted(_sources),
         "uptime_seconds": round(time.monotonic() - _started_at, 1) if (_process is not None and _process.poll() is None) else 0,
         "owned_by_this_process": bool(_process is not None and _process.poll() is None),
+        "metrics_enabled": True,
+        "metrics_address": METRICS_ADDRESS,
         "last_error": _last_error,
         "note": (
             "MediaMTX is optional. HVX native ALPR and LocalMediaGateway stay up if this sidecar is missing."

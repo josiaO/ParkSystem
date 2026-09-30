@@ -16,7 +16,9 @@ _consumers: dict[int, asyncio.Task] = {}
 
 
 def _detect_url(camera_id: int) -> str:
-    return f"rtsp://127.0.0.1:8554/cam{int(camera_id)}_detect"
+    from app.services.mediamtx import detect_endpoint
+
+    return str(detect_endpoint(camera_id).get("rtsp") or "")
 
 
 async def _consume(spec: "CameraLiveSpec") -> None:

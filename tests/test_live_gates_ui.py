@@ -46,7 +46,7 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertNotIn("class Lanes", desktop)
         self.assertIn("class CameraLivePane", desktop)
         self.assertIn('addTab(live, "Live")', desktop)
-        self.assertIn('addTab(ips, "IPs")', desktop)
+        self.assertIn('addTab(ips, "Devices")', desktop)
         self.assertIn("Choose camera", desktop)
         self.assertIn("Onboard wizard", desktop)
         self.assertIn("Fill both from lane", desktop)
