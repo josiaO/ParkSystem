@@ -444,19 +444,23 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         except Exception:
             continue
         text, conf = _ocr_result_text(ocr)
-        plate, score = _apply_country_profile(text, conf)
+        plate, _rank = _apply_country_profile(text, conf)
         if len(plate) < MIN_PLATE_CHARS:
             continue
+        raw_conf = max(0.0, min(float(conf or 0), 1.0))
         hits.append(
             PlateHit(
                 plate_raw=text,
                 plate_normalized=plate,
-                plate_confidence=score,
+                plate_confidence=raw_conf,
                 plate_crop_path=_save_crop_bgr(crop),
                 bbox=bbox_dict(bbox),
             )
         )
-    hits.sort(key=lambda h: h.plate_confidence, reverse=True)
+    hits.sort(
+        key=lambda h: _apply_country_profile(h.plate_raw or h.plate_normalized, h.plate_confidence)[1],
+        reverse=True,
+    )
     return hits
 
 

@@ -449,7 +449,7 @@ class CameraLivePane(QFrame):
         self.status.setText("Opening live view…")
         try: api.post(f"/cameras/{cid}/live/watch", {}, timeout=8)
         except Exception: pass
-        self._snap_timer.setInterval(40)
+        self._snap_timer.setInterval(100)
         if not self._snap_timer.isActive(): self._snap_timer.start()
         self._tick_snapshot()
         if not self._alpr_timer.isActive(): self._alpr_timer.start()
@@ -2486,10 +2486,9 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self._show_page)
         self.apply_theme("Light")
         self.statusBar().showMessage("Camera snaps the photo. FastALPR reads the plate. Windows and Linux.")
-        geom=available_screen()
-        if geom is not None:
-            self.setGeometry(geom)
-        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        self.setMinimumSize(960, 640)
+        # Do not setGeometry() to the full screen rect. On Windows the frame is
+        # taller than the client area, Qt retries, and the window grows forever.
     def closeEvent(self, event):
         for page in self.pages:
             if page is None: continue
@@ -2519,6 +2518,9 @@ class MainWindow(QMainWindow):
 
 def main():
     app=QApplication(sys.argv); app.setApplicationName("SmartPark Edge")
+    font = QFont()
+    font.setPointSize(10)
+    app.setFont(font)
     app.setStyleSheet(LIGHT)
     try:
         from app.desktop.launch import ensure_background_services
