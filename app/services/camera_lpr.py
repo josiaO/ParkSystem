@@ -127,6 +127,35 @@ def local_from_fastalpr(result: dict | None) -> dict:
     }
 
 
+def capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0, pending: bool = False) -> dict:
+    """Build one VehicleCapture payload from native/local readings and a fusion decision."""
+    native = native or {}
+    local = local or {}
+    method = str(getattr(fused, "method", "") or "")
+    box = local.get("bbox") if method.startswith("LOCAL") else native.get("bbox")
+    if not isinstance(box, dict):
+        box = native.get("bbox") or local.get("bbox")
+    source = "fastalpr" if "LOCAL" in method else (native.get("source") or "camera")
+    fusion = fused.as_dict() if hasattr(fused, "as_dict") else {}
+    return {
+        "plate": fused.resolved_plate,
+        "plate_raw": local.get("plate_raw") or native.get("plate_raw") or fused.resolved_plate,
+        "score": fused.resolved_confidence,
+        "bbox": box,
+        "source": source,
+        "image_id": int(image_id or native.get("image_id") or 0),
+        "image_width": native.get("image_width") or 0,
+        "image_height": native.get("image_height") or 0,
+        "have_vehicle": native.get("have_vehicle"),
+        "snap_type": native.get("snap_type"),
+        "fusion": fusion,
+        "native_plate": fusion.get("native_plate") or native.get("plate") or "",
+        "local_plate": fusion.get("local_plate") or local.get("plate") or "",
+        "needs_review": bool(getattr(fused, "needs_review", False)),
+        "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
+    }
+
+
 def camera_contract() -> dict:
     return {
         "camera_type": DVCAM_QY,

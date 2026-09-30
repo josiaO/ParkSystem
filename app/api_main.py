@@ -126,15 +126,18 @@ async def lifespan(app: FastAPI):
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
     # consumes its local control/stream endpoints and must not spawn a competing
     # sidecar process.
+    from .services import hybrid_fusion
+    hybrid_fusion.set_persist(_persist_capture_event)
     ingest = asyncio.create_task(_camera_event_loop(), name="camera-events")
     outbox = asyncio.create_task(_outbox_loop(), name="parking-outbox")
     hvx_watch = asyncio.create_task(_hvx_watch_loop(), name="hvx-watch")
+    fusion_flush = asyncio.create_task(_fusion_flush_loop(), name="hybrid-fusion-flush")
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch):
+        for task in (ingest, outbox, hvx_watch, fusion_flush):
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, return_exceptions=True)
+        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, return_exceptions=True)
         stop_live_pumps()
         # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
@@ -1099,29 +1102,9 @@ def _crop_from_alpr(alpr: dict | None) -> bytes:
 
 
 def _capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0, pending: bool = False) -> dict:
-    method = str(getattr(fused, "method", "") or "")
-    box = local.get("bbox") if method.startswith("LOCAL") else native.get("bbox")
-    if not isinstance(box, dict):
-        box = native.get("bbox") or local.get("bbox")
-    source = "fastalpr" if "LOCAL" in method else (native.get("source") or "camera")
-    fusion = fused.as_dict() if hasattr(fused, "as_dict") else {}
-    return {
-        "plate": fused.resolved_plate,
-        "plate_raw": local.get("plate_raw") or native.get("plate_raw") or fused.resolved_plate,
-        "score": fused.resolved_confidence,
-        "bbox": box,
-        "source": source,
-        "image_id": int(image_id or native.get("image_id") or 0),
-        "image_width": native.get("image_width") or 0,
-        "image_height": native.get("image_height") or 0,
-        "have_vehicle": native.get("have_vehicle"),
-        "snap_type": native.get("snap_type"),
-        "fusion": fusion,
-        "native_plate": fusion.get("native_plate") or native.get("plate") or "",
-        "local_plate": fusion.get("local_plate") or local.get("plate") or "",
-        "needs_review": bool(getattr(fused, "needs_review", False)),
-        "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
-    }
+    from .services.camera_lpr import capture_from_readings
+
+    return capture_from_readings(native, local, fused, image_id=image_id, pending=pending)
 
 
 async def _run_local_alpr(
@@ -2213,9 +2196,19 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             row = db.get(Camera, camera_id)
             if row is None:
                 return
+            from .services import hybrid_fusion
+            if presence and native.get("plate") and hybrid_fusion.routes_camera(row, db):
+                # HYBRID with a live Recognition Worker: the native reading is one
+                # candidate; the worker's FastALPR reading arrives via the outbox.
+                # The coordinator persists exactly one fused capture per vehicle.
+                await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
+                if image_id:
+                    _last_image_id[camera_id] = image_id
+                continue
             if presence:
                 await _persist_capture_event(db, row, capture, jpeg, crop)
-            if should_run_local(
+            from .recognition_worker import worker_owns_software_reads
+            if not worker_owns_software_reads(camera_id) and should_run_local(
                 native_plate=str(native.get("plate") or ""),
                 native_confidence=float(native.get("confidence") or 0),
                 presence=presence,
@@ -2334,6 +2327,14 @@ async def _outbox_loop():
                 if recognized is None and item.get("kind") != "plate-event":
                     box.ack(item["id"])
                     continue
+                # Durable idempotency: a crash after business processing but before
+                # ACK redelivers the row; the processed mark (same SQLite file,
+                # committed with the ACK) and the capture event_id (main DB) both
+                # stop it from creating a second capture/session.
+                event_key = str((recognized or {}).get("event_id") or payload.get("event_id") or "") or None
+                if event_key and box.was_processed(event_key):
+                    box.ack(item["id"])
+                    continue
                 try:
                     with short_session() as db:
                         if recognized is not None:
@@ -2341,16 +2342,12 @@ async def _outbox_loop():
                             if not is_enabled("recognition.alpr", db):
                                 continue
                             camera = db.get(Camera, int(recognized.get("camera_id") or 0)) if recognized.get("camera_id") else None
-                            if camera is not None and adapter_has_native_plates(camera):
-                                from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
-                                if camera_recognition_mode(camera) != LOCAL_ONLY:
-                                    box.ack(item["id"])
-                                    continue
                             if camera is None or not camera.enabled:
-                                box.ack(item["id"])
+                                box.ack(item["id"], processed_key=event_key)
                                 continue
-                            capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
-                                       "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
+                            if event_key and db.scalar(select(VehicleCapture.id).where(VehicleCapture.event_id == event_key)) is not None:
+                                box.ack(item["id"], processed_key=event_key)
+                                continue
                             jpeg = b""
                             reference = str(recognized.get("image_ref") or "")
                             if reference.startswith("/media/"):
@@ -2359,8 +2356,22 @@ async def _outbox_loop():
                                     evidence = media_path(*pieces)
                                     if evidence is not None:
                                         jpeg = evidence.read_bytes()
+                            from .services import hybrid_fusion
+                            if hybrid_fusion.routes_camera(camera, db):
+                                await hybrid_fusion.offer_local(db, camera, recognized, jpeg=jpeg)
+                                box.ack(item["id"], processed_key=event_key)
+                                continue
+                            if adapter_has_native_plates(camera):
+                                from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+                                if camera_recognition_mode(camera) != LOCAL_ONLY:
+                                    # Native camera not fused by the worker path: the
+                                    # in-process native/fusion loop stays authoritative.
+                                    box.ack(item["id"], processed_key=event_key)
+                                    continue
+                            capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
+                                       "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
                             await _persist_capture_event(db, camera, capture, jpeg, b"")
-                            box.ack(item["id"])
+                            box.ack(item["id"], processed_key=event_key)
                             continue
                         gate = db.get(Gate, int(payload.get("gate_id") or 0)) if payload.get("gate_id") else None
                         from .services.modules import is_enabled
@@ -2381,7 +2392,7 @@ async def _outbox_loop():
                             source="outbox",
                             camera=camera,
                         )
-                    box.ack(item["id"])
+                    box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
                     box.note_failure()
                     note_worker_failure("outbox", str(exc))
@@ -2391,6 +2402,21 @@ async def _outbox_loop():
         except Exception:
             pass
         await asyncio.sleep(2.0)
+
+
+async def _fusion_flush_loop():
+    """Decide hybrid candidates whose counterpart never arrived (bounded wait)."""
+    from .services import hybrid_fusion
+    from .services.health import note_worker_failure
+
+    while True:
+        try:
+            await hybrid_fusion.flush(short_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("hybrid-fusion", str(exc))
+        await asyncio.sleep(0.5)
 
 
 async def _hvx_watch_loop():

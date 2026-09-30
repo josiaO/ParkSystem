@@ -13,38 +13,32 @@ import asyncio
 import json
 import sys
 import time
-from dataclasses import dataclass
 
 
-@dataclass
-class PlateTrack:
-    last_plate: str = ""
-    streak: int = 0
-    published_plate: str = ""
-    published_at: float = 0.0
-    last_read_at: float | None = None
+from app.core.consensus import ConsensusTrack, TrackDecision
 
 
-def note_reading(track: PlateTrack, plate: str, now: float, *, hold_seconds: float = 20.0, consensus_seconds: float = 2.0) -> bool:
-    """Publish after two agreeing reads, then hold the same plate briefly."""
-    plate = str(plate or "").strip()
-    if not plate:
-        track.last_plate = ""
-        track.streak = 0
-        return False
-    if plate == track.last_plate and track.last_read_at is not None and 0 <= now - track.last_read_at <= consensus_seconds:
-        track.streak += 1
-    else:
-        track.last_plate = plate
-        track.streak = 1
-    track.last_read_at = now
-    if track.streak < 2:
-        return False
-    if plate == track.published_plate and ((now - track.published_at) < hold_seconds or track.streak > 2):
-        return False
-    track.published_plate = plate
-    track.published_at = now
-    return True
+class PlateTrack(ConsensusTrack):
+    """Per-camera temporal consensus (similarity + confidence weighted)."""
+
+
+def note_reading(
+    track: PlateTrack,
+    plate: str,
+    now: float,
+    *,
+    hold_seconds: float = 20.0,
+    consensus_seconds: float = 2.0,
+    confidence: float = 1.0,
+) -> bool:
+    """Publish once per visit after agreeing reads; never re-publish while visible."""
+    track.hold_seconds = float(hold_seconds)
+    track.window_seconds = float(consensus_seconds)
+    return track.observe(plate, now, confidence=confidence).publish
+
+
+def note_reading_detail(track: PlateTrack, plate: str, now: float, *, confidence: float = 1.0) -> TrackDecision:
+    return track.observe(plate, now, confidence=confidence)
 
 
 _owns_cache: dict[int, tuple[float, bool]] = {}
@@ -136,14 +130,23 @@ def _publish_frame(event: dict, jpeg: bytes) -> dict:
     return publish_recognition(event)
 
 
-def _software_camera(camera, db) -> bool:
-    from app.services.modules import is_enabled, load_config
-    from app.services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+WORKER_MODES = frozenset({"LOCAL_ONLY", "NATIVE_WITH_LOCAL_VERIFY"})
 
-    # Hybrid stays on the existing native/fusion path until worker fusion exists.
+
+def _software_camera(camera, db) -> bool:
+    """Cameras whose FastALPR reads this worker owns.
+
+    LOCAL_ONLY cameras publish accepted plates. HYBRID cameras publish FastALPR
+    *candidates*; the Site Service fuses them with the native reading through
+    ``services.hybrid_fusion`` so one vehicle yields one capture. NATIVE_ONLY
+    cameras never run software reads here.
+    """
+    from app.services.modules import is_enabled, load_config
+    from app.services.ocr_policy import camera_recognition_mode
+
     return (bool(camera.enabled) and is_enabled("recognition.alpr", db)
             and load_config(db).get("recognition_default") != "VIDEO_ONLY"
-            and camera_recognition_mode(camera) == LOCAL_ONLY)
+            and camera_recognition_mode(camera) in WORKER_MODES)
 
 
 def _camera_rows() -> list[dict]:
@@ -157,6 +160,8 @@ def _camera_rows() -> list[dict]:
         for camera in db.query(Camera).filter(Camera.enabled == True).all():  # noqa: E712
             if not media_mtx_for_camera(int(camera.id), db) or not _software_camera(camera, db):
                 continue
+            from app.services.ocr_policy import camera_recognition_mode
+
             rows.append({
                 "id": int(camera.id),
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
@@ -164,6 +169,7 @@ def _camera_rows() -> list[dict]:
                 "lane_id": camera.lane_id,
                 "site_id": camera.gate.site_id if camera.gate is not None else None,
                 "plate_policy": site_policy(db),
+                "recognition_mode": camera_recognition_mode(camera),
             })
     return rows
 
@@ -269,19 +275,33 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
                 stats["state"] = "DEGRADED"
                 await asyncio.sleep(interval)
                 continue
-            if not note_reading(track, stats["last_plate"], time.monotonic()):
+            decision = note_reading_detail(
+                track, stats["last_plate"], time.monotonic(), confidence=float(event.get("confidence") or 0),
+            )
+            stats["consensus"] = decision.as_dict()
+            if not decision.publish:
                 await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
                 continue
             try:
-                event["needs_review"] = bool(event.get("needs_review") or float(event.get("confidence") or 0) < .75)
+                # Consensus text/confidence replace the single-frame read; the raw
+                # frame read stays in the payload as evidence.
+                event["frame_plate"] = event.get("normalized_plate")
+                event["frame_confidence"] = event.get("confidence")
+                event["normalized_plate"] = decision.plate
+                event["plate_text"] = decision.plate
+                event["confidence"] = decision.confidence
+                event["recognition_confidence"] = decision.confidence
+                event["consensus"] = decision.as_dict()
+                event["recognition_mode"] = camera.get("recognition_mode") or "LOCAL_ONLY"
+                event["fusion_role"] = "candidate" if camera.get("recognition_mode") == "NATIVE_WITH_LOCAL_VERIFY" else "accepted"
+                event["needs_review"] = bool(event.get("needs_review") or decision.confidence < .75)
                 await asyncio.to_thread(_publish_frame, event, sample.jpeg)
                 stats["published"] = int(stats.get("published") or 0) + 1
             except Exception as exc:
                 stats["last_error"] = type(exc).__name__
                 # A failed durable write must be eligible for retry on the next
                 # agreeing frame; only successful publication owns the hold.
-                track.published_plate = ""
-                track.published_at = 0.0
+                track.release()
             await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
 
     decode_task = asyncio.create_task(_decode(), name=f"detect-decode-{camera_id}")
