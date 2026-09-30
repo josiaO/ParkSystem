@@ -6,7 +6,6 @@ Live cameras and simulation share this path. HVX GPIO stays in gates.controller.
 
 from __future__ import annotations
 
-import secrets
 import time
 from datetime import datetime, timezone
 
@@ -24,6 +23,7 @@ from app.services.decisions import record_access_decision, record_gate_command
 from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from app.services.gates import controller
 from app.services.led_udp import send_led_text
+from app.services.parking_sessions import _allocate_identity
 from app.services.receipts import (
     issue_receipt,
     policy_requires_taken,
@@ -198,7 +198,7 @@ def create_entry(
         return existing
     if camera is None and gate is not None:
         camera = _side_camera(gate, side)
-    token = secrets.token_urlsafe(10)
+    token, human = _allocate_identity(db)
     tariff = ensure_car1_tariff(db)
     entitlement = entitlement or Entitlement(plate=plate)
     site_id = getattr(gate, "site_id", None) or DEFAULT_SITE_ID
@@ -212,6 +212,7 @@ def create_entry(
         status=status,
         receipt_status=receipt_status,
         public_token=token,
+        human_reference=human,
         simulated=bool(simulated),
         currency=(tariff.currency if tariff else "TZS"),
         parker_kind=entitlement.kind if entitlement.registered else "CASUAL",

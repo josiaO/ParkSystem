@@ -7,7 +7,6 @@ stay out of this module.
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from sqlalchemy import select
@@ -40,6 +39,7 @@ from app.domain.parking_engine import (
     infer_lifecycle,
     stored_status_for,
 )
+from app.domain.receipt_engine import new_human_reference, new_public_token
 from app.domain.recognition import NormalizedRecognitionEvent
 from app.domain.site import DEFAULT_SITE_ID
 from app.models import ParkingSession, utcnow
@@ -83,6 +83,17 @@ def _commit_transition(db: Session, row: ParkingSession, target: str, policy: La
     db.commit()
     db.refresh(row)
     return row
+
+
+def _allocate_identity(db: Session) -> tuple[str, str]:
+    for _ in range(8):
+        token = new_public_token()
+        ref = new_human_reference()
+        taken_token = db.scalar(select(ParkingSession.id).where(ParkingSession.public_token == token))
+        taken_ref = db.scalar(select(ParkingSession.id).where(ParkingSession.human_reference == ref))
+        if taken_token is None and taken_ref is None:
+            return token, ref
+    raise RuntimeError("Could not allocate a unique receipt token")
 
 
 def session_by_entry_event(db: Session, site_id: int, event_id: str) -> ParkingSession | None:
@@ -139,6 +150,7 @@ def start_entry(
     open_row = active_for_plate(db, plate, site_id=site_id)
     if open_row is not None:
         return open_row, False
+    token, human = _allocate_identity(db)
     row = ParkingSession(
         site_id=site_id,
         plate=plate,
@@ -150,7 +162,8 @@ def start_entry(
         lane_direction="ENTRY",
         status="WAITING_RECEIPT" if policy.receipt_required_before_open and parker_kind.upper() == "CASUAL" else "ACTIVE",
         lifecycle=VEHICLE_DETECTED,
-        public_token=secrets.token_urlsafe(16),
+        public_token=token,
+        human_reference=human,
         entry_event_id=event_id or "",
         entry_image_ref=image_ref or "",
         parker_kind=parker_kind or "CASUAL",
@@ -380,6 +393,10 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "entry_event_id": row.entry_event_id,
         "exit_event_id": row.exit_event_id,
         "public_token": row.public_token,
+        "human_reference": row.human_reference,
+        "print_job_id": row.print_job_id,
+        "print_job_status": row.print_job_status,
+        "print_retry_count": int(row.print_retry_count or 0),
         "parker_kind": row.parker_kind,
         "receipt_status": row.receipt_status,
         "open_command_uuid": row.open_command_uuid,

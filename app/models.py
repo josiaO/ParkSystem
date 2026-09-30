@@ -246,6 +246,20 @@ class ParkingSession(Base):
             sqlite_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
             postgresql_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
         ),
+        Index(
+            "uq_parking_sessions_public_token",
+            "public_token",
+            unique=True,
+            sqlite_where=text("public_token != ''"),
+            postgresql_where=text("public_token != ''"),
+        ),
+        Index(
+            "uq_parking_sessions_human_reference",
+            "human_reference",
+            unique=True,
+            sqlite_where=text("human_reference != ''"),
+            postgresql_where=text("human_reference != ''"),
+        ),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     site_id: Mapped[int] = mapped_column(
@@ -271,9 +285,14 @@ class ParkingSession(Base):
     breakdown: Mapped[list] = mapped_column(JSON, default=list)
     tariff_rules: Mapped[dict] = mapped_column(JSON, default=dict)
     public_token: Mapped[str] = mapped_column(String(64), default="", index=True)
+    human_reference: Mapped[str] = mapped_column(String(16), default="", server_default="")
     receipt_status: Mapped[str] = mapped_column(String(20), default="")
     receipt_printed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     receipt_taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    print_job_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    print_job_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    print_retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
     payment_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payment_exit_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -369,6 +388,9 @@ class Receipt(Base):
     qr_path: Mapped[str] = mapped_column(String(260), default="")
     printer_adapter: Mapped[str] = mapped_column(String(40), default="simulated")
     status: Mapped[str] = mapped_column(String(20), default="SIMULATED")
+    print_job_id: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

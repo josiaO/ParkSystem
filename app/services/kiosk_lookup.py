@@ -7,12 +7,12 @@ against the car that actually entered.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from urllib.parse import unquote, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.plate import normalize_plate
+from app.domain.receipt_engine import extract_session_token, normalize_human_reference
 from app.models import ParkingSession, VehicleCapture
 from app.services.public_pay import session_by_public_token
 from app.services.simulation import OPEN_STATUSES
@@ -22,29 +22,9 @@ def extract_receipt_token(raw: str) -> str:
     """Pull the public receipt token out of a scanner string.
 
     Scanners often type the full URL printed in the QR, not only the code.
+    Accepts `/s/{token}` (canonical) and `/p/{token}` (existing public page).
     """
-    text = (raw or "").strip().strip('"').strip("'")
-    if not text:
-        return ""
-    candidate = text
-    if "://" in text or text.startswith("/"):
-        parsed = urlparse(text if "://" in text else f"http://local{text}")
-        parts = [unquote(part) for part in parsed.path.split("/") if part]
-        if "p" in parts:
-            idx = parts.index("p")
-            if idx + 1 < len(parts):
-                token = parts[idx + 1]
-                if token.lower() not in {"qr.png", "status", "pay", "kiosk-pay", "snapshot.jpg", "crop.jpg"}:
-                    return token
-        query = parsed.query or ""
-        for bit in query.split("&"):
-            if bit.startswith("token="):
-                return unquote(bit.split("=", 1)[1])
-        return ""
-    if "token=" in candidate:
-        tail = candidate.split("token=", 1)[1]
-        return unquote(tail.split("&", 1)[0].strip())
-    return candidate.split()[0]
+    return extract_session_token(raw)
 
 
 def format_stay(seconds: int) -> str:
@@ -136,6 +116,13 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
     token = extract_receipt_token(raw)
     if token:
         row = session_by_public_token(db, token)
+        if row is not None:
+            return row
+    ref = normalize_human_reference(raw)
+    if ref:
+        row = db.scalar(
+            select(ParkingSession).where(ParkingSession.human_reference == ref).order_by(ParkingSession.id.desc())
+        )
         if row is not None:
             return row
     plate = normalize_plate(raw)
