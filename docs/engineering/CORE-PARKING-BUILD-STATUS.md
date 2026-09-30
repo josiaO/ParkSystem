@@ -10,7 +10,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 0 Baseline and safety | PASS | `6a63eb0` |
 | 1 Parking domain engine | PASS | `f1c5e85` |
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
-| 3 Receipt and QR | PASS | |
+| 3 Receipt and QR | PASS | `b1ce995` |
 | 4 Entry orchestration | not started | |
 | 5 Tariff and local payment | not started | |
 | 6 Exit orchestration | not started | |
@@ -246,4 +246,4 @@ Same as Phase 0–2. Physical presenter / taken sensor not attached. USB kit reb
 
 Connect recognition + parking + printer + gate in one entry orchestrator. Presence → consensus → session → print → presented → taken → authorize → idempotent OPEN → vehicle passed → ACTIVE. Do not put the sequence in a FastAPI route or camera callback. Printer/taken failure must not silently open. Subscribers may skip receipt per lane policy.
 
-Commit: filled after commit.
+Commit: `b1ce995`.
