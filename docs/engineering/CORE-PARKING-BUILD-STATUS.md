@@ -8,7 +8,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | Phase | Status | Commit |
 | --- | --- | --- |
 | 0 Baseline and safety | PASS | `6a63eb0` |
-| 1 Parking domain engine | PASS | (this commit) |
+| 1 Parking domain engine | PASS | `f1c5e85` |
 | 2 Recognition good enough for a session | not started | |
 | 3 Receipt and QR | not started | |
 | 4 Entry orchestration | not started | |
@@ -154,8 +154,6 @@ Same as Phase 0. Passage sensors not wired; default policy counts OPEN as passed
 - `simulation.create_entry` does not yet write `entry_event_id` / `lifecycle`.
 - Public token entropy still Phase 3.
 - No printer/taken-sensor in this phase (by design).
-
-### Commit SHA
 
 Filled after commit.
 
