@@ -421,7 +421,7 @@ class CameraLivePane(QFrame):
             self.stop_live()
             self.video.setText("Click to choose a camera")
             return
-        if same and self._snap_timer.isActive():
+        if same and ((self._mjpeg is not None and self._mjpeg.isRunning()) or self._snap_timer.isActive()):
             if not self._alpr_timer.isActive(): self._alpr_timer.start()
             return
         self.start_live()
@@ -438,9 +438,10 @@ class CameraLivePane(QFrame):
         cid=self.camera_id()
         if cid is None:
             self.stop_live(); return
-        if self._watching==cid and self._snap_timer.isActive():
+        if self._watching==cid and self._mjpeg is not None and self._mjpeg.isRunning():
             if not self._alpr_timer.isActive(): self._alpr_timer.start()
             return
+        self._snap_timer.stop()
         self._stop_mjpeg()
         if self._watching not in {None, cid}:
             try: api.post(f"/cameras/{self._watching}/live/unwatch", {}, timeout=4)
@@ -449,9 +450,11 @@ class CameraLivePane(QFrame):
         self.status.setText("Opening live view…")
         try: api.post(f"/cameras/{cid}/live/watch", {}, timeout=8)
         except Exception: pass
-        self._snap_timer.setInterval(100)
-        if not self._snap_timer.isActive(): self._snap_timer.start()
-        self._tick_snapshot()
+        stream=MjpegStream(cid)
+        stream.frame.connect(self._queue_live_frame)
+        stream.failed.connect(self._mjpeg_fail)
+        self._mjpeg=stream
+        stream.start()
         if not self._alpr_timer.isActive(): self._alpr_timer.start()
         self._tick_alpr()
     def _stop_mjpeg(self):
@@ -460,7 +463,10 @@ class CameraLivePane(QFrame):
         _stop_thread(stream)
     def _mjpeg_fail(self, err):
         self._live_fail(err)
+        # Snapshot polling is a compatibility fallback only. Keep it deliberately
+        # slow so it cannot become a second live-video engine beside MJPEG.
         if self.camera_id() is not None and not self._snap_timer.isActive():
+            self._snap_timer.setInterval(500)
             self._snap_timer.start()
             self._tick_snapshot()
     def _set_pixmap(self, label, jpeg, overlay=None):
