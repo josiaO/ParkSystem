@@ -12,7 +12,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
 | 3 Receipt and QR | PASS | `b1ce995` |
 | 4 Entry orchestration | PASS | `84b7d7a` |
-| 5 Tariff and local payment | PASS | |
+| 5 Tariff and local payment | PASS | `4cb63fe` |
 | 6 Exit orchestration | not started | |
 | 7 Physical lane hardware | not started | |
 | 8 Operator/kiosk usability | not started | |
@@ -325,4 +325,4 @@ Same as Phase 0–4. No live mobile-money provider calls in this phase (by desig
 
 ExitLaneController: plate (or QR fallback) → site-wide session → tariff → payment/grace → authorize or deny → idempotent OPEN → close. Unpaid stays closed. Lost ticket / QR fallback. Same site, different gates.
 
-Commit: filled after commit.
+Commit: `4cb63fe`.
