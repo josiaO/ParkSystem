@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from app.infrastructure.payments.clickpesa import ClickPesaPaymentProvider
+from app.infrastructure.payments.flutterwave import FlutterwavePaymentProvider
 from app.infrastructure.payments.mobile_money import MobileMoneyPaymentProvider
 
 from app.infrastructure.payments.ledger import (  # noqa: F401
@@ -64,7 +66,13 @@ PROVIDERS: dict[str, PaymentProvider] = {
     "simulated": SimulatedPaymentProvider(),
     "kiosk_manual": ManualKioskPaymentProvider(),
     "mobile_money": MobileMoneyPaymentProvider(),
+    "flutterwave": FlutterwavePaymentProvider(),
+    "clickpesa": ClickPesaPaymentProvider(),
 }
+
+# Providers whose money movement happens outside this process. Their intents
+# stay PENDING until server-side verification (webhook hint or reconciliation).
+EXTERNAL_PROVIDERS: tuple[str, ...] = ("flutterwave", "clickpesa")
 
 
 def payment_provider_for(provider_id: str) -> PaymentProvider:
@@ -73,3 +81,7 @@ def payment_provider_for(provider_id: str) -> PaymentProvider:
 
 def list_payment_providers() -> list[str]:
     return sorted(PROVIDERS.keys())
+
+
+def is_external_provider(provider_id: str) -> bool:
+    return (provider_id or "") in EXTERNAL_PROVIDERS

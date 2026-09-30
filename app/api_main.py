@@ -18,7 +18,7 @@ from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
-    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
+    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep,
@@ -132,12 +132,13 @@ async def lifespan(app: FastAPI):
     outbox = asyncio.create_task(_outbox_loop(), name="parking-outbox")
     hvx_watch = asyncio.create_task(_hvx_watch_loop(), name="hvx-watch")
     fusion_flush = asyncio.create_task(_fusion_flush_loop(), name="hybrid-fusion-flush")
+    payments_reconcile = asyncio.create_task(_payments_reconcile_loop(), name="payments-reconcile")
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch, fusion_flush):
+        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile):
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, return_exceptions=True)
+        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, return_exceptions=True)
         stop_live_pumps()
         # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
@@ -145,7 +146,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 from .api.module_routes import ModuleRoute
+from .services.public_ingress import PublicIngressGuard
 app.router.route_class = ModuleRoute
+# Requests arriving via the public payments tunnel may only reach /p/*,
+# /api/public/* and /api/webhooks/*. No-op when no ingress host is configured.
+app.add_middleware(PublicIngressGuard)
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
@@ -2419,6 +2424,30 @@ async def _fusion_flush_loop():
         await asyncio.sleep(0.5)
 
 
+async def _payments_reconcile_loop():
+    """Settle PENDING external intents whose webhook never arrived.
+
+    Runs only while payments.core is enabled and an external provider is the
+    active mobile provider; an LPR-only site never touches provider code.
+    """
+    from .services import mobile_payments
+    from .services.health import note_worker_failure
+    from .services.modules import is_enabled
+
+    while True:
+        delay = max(5.0, float(settings.payments_reconcile_seconds or 60.0))
+        try:
+            with short_session() as db:
+                enabled = is_enabled("payments.core", db)
+            if enabled and mobile_payments.active_mobile_provider_id() in mobile_payments.external_provider_ids():
+                await mobile_payments.reconcile_pending(SessionLocal)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("payments-reconcile", str(exc))
+        await asyncio.sleep(delay)
+
+
 async def _hvx_watch_loop():
     from .services.circuit import breaker
     from .services.runtime import mark_hardware
@@ -3144,6 +3173,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "Receipt not found")
     data = public_session_payload(db, row)
+    external_pay = str(data.get("pay_endpoint") or "").startswith("/api/public/")
     remaining = float(data["amount_remaining"])
     paid = float(data["amount_paid"])
     due = float(data["amount_due"])
@@ -3192,6 +3222,8 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       <p class="muted">Paid {currency} {paid:,.0f} of {due:,.0f}.</p>
       <p class="muted">{image_note}</p>
       <p class="muted">Receipt code <code id="code">{token}</code></p>
+      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX"
+             class="{'' if external_pay else 'hidden'}" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #dfe5ef;border-radius:8px;margin-top:12px;font-size:16px;{'' if external_pay else 'display:none'}">
       <button class="btn" id="pay-mobile" {pay_disabled}>Pay on phone (mobile)</button>
       <a class="btn secondary" href="#kiosk">Pay at kiosk</a>
       <p id="msg" class="muted"></p>
@@ -3204,35 +3236,68 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     <p class="muted">Lost paper is OK — the plate is the identity. This page is the payment link encoded in the receipt QR.</p>
     <script>
       const token = {token!r};
+      const externalPay = {'true' if external_pay else 'false'};
       const payBtn = document.getElementById("pay-mobile");
+      const phoneInput = document.getElementById("phone");
       const msg = document.getElementById("msg");
+      let pendingSince = 0;
+      const statusUrl = externalPay
+        ? "/api/public/payment-status/" + encodeURIComponent(token)
+        : "/p/" + encodeURIComponent(token) + "/status";
       async function refresh() {{
-        const res = await fetch("/p/" + encodeURIComponent(token) + "/status");
+        const res = await fetch(statusUrl);
         if (!res.ok) return;
         const data = await res.json();
         document.getElementById("status").textContent = data.paid ? "PAID" : data.status;
         document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
         if (data.duration_label) document.getElementById("stay").textContent = data.duration_label;
-        payBtn.disabled = !data.payable;
+        const intent = data.intent || null;
+        const waiting = externalPay && intent && intent.status === "PENDING" && !data.paid;
+        payBtn.disabled = !data.payable || waiting;
         if (!data.payable) {{
           msg.textContent = data.pay_blocked_reason || (data.paid ? "Paid. You can leave when the exit camera reads your plate." : "Nothing to pay.");
           msg.className = data.paid ? "ok" : "muted";
+        }} else if (waiting) {{
+          msg.textContent = "Approve the payment prompt on your phone. This page updates when the provider confirms.";
+          msg.className = "muted";
+        }} else if (externalPay && intent && ["FAILED", "EXPIRED", "BLOCKED", "MISMATCH"].includes(intent.status) && pendingSince) {{
+          msg.textContent = intent.status === "MISMATCH"
+            ? "Payment needs staff review at the kiosk."
+            : ("Payment was not completed" + (intent.message ? " (" + intent.message + ")" : "") + ". Try again or pay at the kiosk.");
+          msg.className = "muted";
+          pendingSince = 0;
         }}
       }}
       payBtn.addEventListener("click", async () => {{
         payBtn.disabled = true;
-        msg.textContent = "Confirming payment…";
         msg.className = "muted";
         try {{
-          const res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
-            method: "POST",
-            headers: {{"Content-Type": "application/json"}},
-            body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
-          }});
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.detail || "Payment failed");
-          msg.textContent = data.already_paid ? "Already paid." : "Payment recorded.";
-          msg.className = "ok";
+          let res, data;
+          if (externalPay) {{
+            const phone = (phoneInput && phoneInput.value || "").trim();
+            if (!phone) throw new Error("Enter the mobile number that will pay.");
+            msg.textContent = "Sending payment prompt to your phone…";
+            res = await fetch("/api/public/payment-intents", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify({{token: token, phone: phone}}),
+            }});
+            data = await res.json();
+            if (!res.ok) throw new Error(data.detail || data.error || "Payment could not be started");
+            if (data.already_paid) {{ msg.textContent = "Already paid."; msg.className = "ok"; }}
+            else {{ pendingSince = Date.now(); msg.textContent = "Approve the prompt on your phone. Waiting for confirmation…"; }}
+          }} else {{
+            msg.textContent = "Confirming payment…";
+            res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
+            }});
+            data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Payment failed");
+            msg.textContent = data.already_paid ? "Already paid." : "Payment recorded.";
+            msg.className = "ok";
+          }}
           await refresh();
         }} catch (err) {{
           msg.textContent = err.message || String(err);
@@ -3240,7 +3305,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
           payBtn.disabled = false;
         }}
       }});
-      setInterval(refresh, 5000);
+      setInterval(refresh, externalPay ? 3000 : 5000);
     </script>
     </main></body></html>"""
     return HTMLResponse(html)
@@ -3271,6 +3336,12 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     method = (payload.method or "MOBILE_SIMULATED").strip().upper()
     if method in {"KIOSK_CASH", "CASH", "KIOSK"}:
         raise HTTPException(401, "Kiosk cash requires a signed-in operator. Open Sessions and pay there, or POST /p/{token}/kiosk-pay.")
+    from app.services import mobile_payments
+
+    if mobile_payments.active_mobile_provider_id() in mobile_payments.external_provider_ids():
+        # A real aggregator is configured: the instant simulated path must not
+        # be reachable from a browser. Money only moves via payment intents.
+        raise HTTPException(409, "Mobile payments use POST /api/public/payment-intents on this site.")
     try:
         result = await pay_public_session(db, row, method=method, amount=payload.amount)
     except ValueError as exc:
@@ -3278,6 +3349,84 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     except Exception as exc:
         raise HTTPException(502, str(exc))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Narrow public payment surface (tunnel-exposed). Everything else stays LAN.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/public/payment-intents")
+async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session = Depends(get_db)):
+    """Start a mobile-money collection for a receipt token.
+
+    Creates a PENDING PaymentIntent and asks the provider to push a USSD
+    prompt. Nothing is marked paid here; verification happens server-side.
+    """
+    from app.services import mobile_payments
+    from app.services.public_pay import session_by_public_token
+
+    row = session_by_public_token(db, payload.token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    provider_id = (payload.provider or "").strip().lower() or mobile_payments.active_mobile_provider_id()
+    if provider_id not in mobile_payments.external_provider_ids():
+        raise HTTPException(409, "No external mobile-money provider is active on this site.")
+    try:
+        result = await mobile_payments.start_mobile_payment(
+            db, row, phone=payload.phone, provider_id=provider_id, network=payload.network, amount=payload.amount,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result.get("ok"):
+        return JSONResponse(status_code=503, content={**result, "token": row.public_token})
+    return {**result, "token": row.public_token}
+
+
+@app.get("/api/public/payment-status/{token}")
+def public_payment_status(token: str, db: Session = Depends(get_db)):
+    """Read-only status for the phone page: session paid state + latest intent."""
+    from app.services import mobile_payments
+    from app.services.public_pay import public_session_payload, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    body = public_session_payload(db, row)
+    latest = mobile_payments.latest_intent_for_session(db, row.id)
+    body["intent"] = mobile_payments.intent_dict(latest) if latest else None
+    body["mobile_provider"] = mobile_payments.active_mobile_provider_id()
+    return body
+
+
+@app.post("/api/webhooks/{provider_id}")
+async def payment_provider_webhook(provider_id: str, request: Request, db: Session = Depends(get_db)):
+    """Authenticated provider callback. Never opens a barrier; never trusts the body for money."""
+    from app.services import mobile_payments
+
+    if provider_id not in mobile_payments.external_provider_ids():
+        raise HTTPException(404, "Unknown provider")
+    raw = await request.body()
+    status, body = await mobile_payments.handle_webhook(
+        db, provider_id, raw_body=raw, headers={k.lower(): v for k, v in request.headers.items()},
+    )
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.get("/payments/health")
+def payments_health_ep(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view", "kiosk.use"))):
+    from app.services import mobile_payments
+    from app.services.public_ingress import describe as ingress_describe
+
+    return {**mobile_payments.payments_health(db), "public_ingress": ingress_describe()}
+
+
+@app.post("/payments/reconcile")
+async def payments_reconcile_ep(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "payments.create"))):
+    """Operator-triggered reconciliation (same code path as the background job)."""
+    from app.services import mobile_payments
+
+    return await mobile_payments.reconcile_pending(db=db)
 
 
 @app.post("/p/{token}/kiosk-pay")

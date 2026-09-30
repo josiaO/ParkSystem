@@ -64,36 +64,53 @@ def record_succeeded_payment(
     provider_id: str = "kiosk_manual",
     operator_id: int | None = None,
     idempotency_key: str | None = None,
+    intent: PaymentIntent | None = None,
+    provider_transaction_id: str | None = None,
+    extra: dict | None = None,
 ) -> dict:
     """Write an immutable SUCCEEDED transaction and recompute session paid state.
 
     Call this only after a kiosk operator confirms cash/local payment, or after
     a verified provider webhook. Do not call from a public browser POST.
+
+    ``intent`` links the ledger row to an existing PENDING intent (external
+    providers) instead of minting a synthetic one. ``provider_transaction_id``
+    is the provider's own id; the unique constraint on that column makes a
+    replayed provider transaction a duplicate even under a different key.
     """
     amount = float(amount or 0)
     if amount < 0:
         raise ValueError("Payment amount cannot be negative")
     key = (idempotency_key or "").strip() or f"session:{row.id}:{method}:{secrets.token_hex(8)}"
     existing = db.scalar(select(PaymentTransaction).where(PaymentTransaction.idempotency_key == key))
+    if existing is None and provider_transaction_id:
+        existing = db.scalar(
+            select(PaymentTransaction).where(PaymentTransaction.provider_transaction_id == provider_transaction_id)
+        )
     if existing is not None:
+        if intent is not None and intent.status != SUCCEEDED:
+            intent.status = SUCCEEDED
         apply_session_payment_state(db, row)
         db.commit()
         db.refresh(row)
         return {"session": row, "transaction": existing, "intent": db.get(PaymentIntent, existing.intent_id), "duplicate": True}
 
     now = utcnow()
-    intent = PaymentIntent(
-        session_id=row.id,
-        provider_id=provider_id,
-        method=method,
-        amount=amount,
-        currency=row.currency or "TZS",
-        status=SUCCEEDED,
-        idempotency_key=f"intent:{key}",
-        operator_id=operator_id,
-        extra={"source": "ledger"},
-    )
-    db.add(intent)
+    if intent is None:
+        intent = PaymentIntent(
+            session_id=row.id,
+            provider_id=provider_id,
+            method=method,
+            amount=amount,
+            currency=row.currency or "TZS",
+            status=SUCCEEDED,
+            idempotency_key=f"intent:{key}",
+            operator_id=operator_id,
+            extra={"source": "ledger"},
+        )
+        db.add(intent)
+    else:
+        intent.status = SUCCEEDED
     db.flush()
     txn = PaymentTransaction(
         intent_id=intent.id,
@@ -103,11 +120,11 @@ def record_succeeded_payment(
         amount=amount,
         currency=row.currency or "TZS",
         status=SUCCEEDED,
-        provider_transaction_id=f"{provider_id}:{secrets.token_hex(10)}",
+        provider_transaction_id=provider_transaction_id or f"{provider_id}:{secrets.token_hex(10)}",
         idempotency_key=key,
         operator_id=operator_id,
         confirmed_at=now,
-        extra={"source": "ledger"},
+        extra={"source": "ledger", **(extra or {})},
     )
     db.add(txn)
     db.flush()

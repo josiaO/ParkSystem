@@ -3133,6 +3133,12 @@
           lines.push(`${label} needs attention (${state}).`);
         }
       });
+      const pay = (details.domains && details.domains.payment) || {};
+      if (pay.active_mobile_provider && pay.active_mobile_provider !== "simulated") {
+        const prov = (pay.providers || {})[pay.active_mobile_provider] || {};
+        if (prov.available) lines.push(`Phone payments go through ${pay.active_mobile_provider} in ${prov.mode || "?"} mode. Money is only marked paid after the provider confirms it.`);
+        else lines.push(`Phone payments via ${pay.active_mobile_provider} are not available: ${prov.reason || "not configured"}. Cash and kiosk payments still work.`);
+      }
       if (lines.length === 1) lines.push("No extra warnings.");
       return lines;
     }
@@ -3188,6 +3194,12 @@
           ["HVX host", hvxLabel],
           ["ALPR mode", details.alpr_mode || "FASTALPR_ONLY"],
         ];
+        const pay = (details.domains && details.domains.payment) || {};
+        if (pay.active_mobile_provider) {
+          const prov = (pay.providers || {})[pay.active_mobile_provider] || {};
+          const mode = prov.mode ? ` ${prov.mode}` : "";
+          items.push(["Mobile pay", `${pay.active_mobile_provider}${mode}`]);
+        }
         const components = (modules && modules.components) || modules || {};
         Object.keys(components).forEach((key) => {
           if (key === "components" || key === "profile" || key === "enabled_modules") return;

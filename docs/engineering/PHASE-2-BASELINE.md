@@ -77,3 +77,15 @@ See `ALPR-EVALUATION.md` for the fixed-label evaluation harness and
 Concurrent desktop/UI edits appeared while this session was running and were
 preserved. These results describe the workspace tested at the end of the session;
 this report does not attribute those concurrent edits to the recognition changes.
+
+## Slices after the baseline
+
+| Slice | Tests after | Verification |
+| --- | --- | --- |
+| §4 MediaMTX (`468a841`) | 306 | compileall 0, full suite green, `git diff --check` 0 |
+| §6.3 Hybrid fusion (`45ea6ce`) | 326 | compileall 0, full suite green, `git diff --check` 0 |
+| §8 Payments (Flutterwave TEST, ClickPesa live-disabled, public ingress) | 364 | compileall 0, full suite green, `git diff --check` 0 |
+
+Payment provider behaviour was implemented from the official Flutterwave v3 and
+ClickPesa documentation and exercised only against faked HTTP in tests. No real
+sandbox transaction or merchant webhook was executed in this environment.
