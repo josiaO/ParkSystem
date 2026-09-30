@@ -198,6 +198,7 @@ def capture_dict(row: VehicleCapture) -> dict:
         "local_plate": (row.bbox or {}).get("local_plate") if isinstance(row.bbox, dict) else "",
         "needs_review": bool((row.bbox or {}).get("needs_review")) if isinstance(row.bbox, dict) else False,
         "pending_confirmation": bool((row.bbox or {}).get("pending_confirmation")) if isinstance(row.bbox, dict) else False,
+        "ai_review": getattr(row, "ai_review", None) or None,
     }
 
 

@@ -39,7 +39,7 @@ def modules_for_route(path: str) -> tuple[str, ...]:
                  "fees": "parking.tariffs", "tariffs": "parking.tariffs",
                  "vehicles": "parking.subscribers", "access-plans": "parking.subscribers",
                  "alpr": "recognition.alpr", "recognition": "recognition.alpr",
-                 "captures": "recognition.alpr", "reports": "reports",
+                 "captures": "recognition.alpr", "reports": "reports", "ai": "recognition.alpr",
                  "media": "media.streaming", "printers": "parking.sessions"}
     if path == "/settings/parking":
         return ("parking.sessions",)

@@ -23,7 +23,7 @@ from .schemas import (
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
-    ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep,
+    ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
 )
 from .security import authenticate_user, create_session, current_user, oauth2_scheme, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
@@ -1720,6 +1720,44 @@ def post_plate_correction(
     return {"ok": True, "correction": row, "training": training_status(engine_id=engine.id)}
 
 
+@app.get("/ai/health")
+def ai_health(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+    """Optional cloud AI reviewer: disabled by default, never a gate authority."""
+    from .services import ai_review
+    return ai_review.health(db)
+
+
+@app.get("/ai/reviews")
+def ai_recent_reviews(_: User = Depends(require("cameras.view"))):
+    from .services import ai_review
+    return {"items": ai_review.recent(), "stats": ai_review.stats()}
+
+
+@app.post("/ai/review/{capture_id}")
+async def ai_review_capture(capture_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Operator-requested second opinion on a stored capture. Stores the verdict; never edits the plate."""
+    from .services import ai_review
+    if not ai_review.enabled(db):
+        raise HTTPException(409, "AI review is disabled (SMARTPARK_AI_ENABLED=false)")
+    try:
+        review = await ai_review.review_capture(db, capture_id)
+    except LookupError:
+        raise HTTPException(404, "Capture not found")
+    write_audit(db, user, "ai.review", "capture", str(capture_id), f"AI verdict {review.verdict}")
+    return {"ok": review.verdict != "unavailable", "review": review.as_dict()}
+
+
+@app.post("/ai/incidents/summary")
+async def ai_incident_summary(payload: AIIncidentSummaryRequest, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+    from .services import ai_review
+    body = await ai_review.summarize_incident(
+        db, capture_ids=payload.capture_ids, plate=payload.plate, limit=payload.limit, question=payload.question or "",
+    )
+    if not body.get("ok") and body.get("reason") == "ai_disabled":
+        raise HTTPException(409, "AI review is disabled (SMARTPARK_AI_ENABLED=false)")
+    return body
+
+
 @app.post("/recognition/model-pack")
 def post_model_pack(
     payload: ModelPackRequest,
@@ -2211,6 +2249,10 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     latest = row or previous
     if latest:
         remember_last_car(camera.id, capture_dict(latest))
+    if row is not None and row.id != previous_id:
+        # Optional cloud second opinion: background task, never on the gate path.
+        from .services import ai_review
+        ai_review.schedule_capture_review(capture_dict(row), crop=crop, jpeg=jpeg, db=db)
     from .services.modules import is_enabled
     if not is_enabled("parking.sessions", db):
         return capture_dict(latest) if latest else None

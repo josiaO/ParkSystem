@@ -89,6 +89,22 @@ class Settings(BaseSettings):
     # this Site Service. Requests arriving on those hosts may only reach the
     # narrow public payment surface (see app/services/public_ingress.py).
     public_ingress_hosts: str = ""
+    # Optional cloud AI review (Codex §9). Off by default; never a gate authority.
+    ai_enabled: bool = False
+    ai_provider: str = "gemini"
+    ai_model: str = "gemini-2.5-flash-lite"
+    ai_timeout_seconds: float = 4.0
+    ai_max_concurrency: int = 2
+    ai_daily_request_cap: int = 200
+    ai_min_interval_seconds: float = 2.0  # per camera
+    ai_low_confidence_below: float = 0.75  # trigger a second opinion under this
+    ai_send_vehicle_image: bool = False  # only the plate crop unless explicitly allowed
+    ai_vehicle_image_max_px: int = 640
+    # Free-tier Gemini may use submitted content to improve Google products.
+    # Real (non-simulated) imagery is only sent once a deployment accepts that.
+    ai_data_treatment_accepted: bool = False
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     default_camera_password: str = "admin"
     gate_physical_control_enabled: bool = True
     board_tcp_port: int = 5000

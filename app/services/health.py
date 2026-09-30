@@ -44,6 +44,23 @@ def _onvif_events_stats() -> dict:
         return {"error": str(exc)[:120]}
 
 
+def _ai_review_stats() -> dict:
+    try:
+        from app.services.ai_review import health
+
+        body = health()
+        return {
+            "enabled": body.get("enabled"),
+            "provider": (body.get("provider") or {}).get("provider_id"),
+            "available": (body.get("provider") or {}).get("available"),
+            "budget": body.get("budget"),
+            "pending": body.get("pending"),
+            "stats": body.get("stats"),
+        }
+    except Exception as exc:  # health must never fail because of a stats helper
+        return {"enabled": False, "error": str(exc)[:120]}
+
+
 def _payments_stats() -> dict:
     try:
         from app.services.mobile_payments import payments_health
@@ -218,6 +235,7 @@ def details() -> dict:
             "native_alpr_enabled": migration_flags().get("native_alpr_enabled"),
             "hybrid_fusion": _hybrid_fusion_stats(),
             "onvif_events": _onvif_events_stats(),
+            "ai_review": _ai_review_stats(),
         },
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
         "database": {"ok": True, "avg_query_ms": _avg(_db_latencies), "schema": _schema_status()},
