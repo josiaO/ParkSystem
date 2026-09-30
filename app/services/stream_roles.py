@@ -176,6 +176,10 @@ def public_profiles(profiles: dict[str, Any] | None) -> dict[str, Any]:
             item["uri_redacted"] = redact_url(uri)
             item.pop("uri", None)
             item.pop("url", None)
+        snapshot = str(item.get("snapshot_uri") or "")
+        if snapshot:
+            item["snapshot_uri_redacted"] = redact_url(snapshot)
+            item.pop("snapshot_uri", None)
         out[str(role).upper()] = item
     return out
 
