@@ -184,6 +184,15 @@ class PaymentConfirm(BaseModel):
     amount: float | None = None
 
 
+class PublicPaymentIntentRequest(BaseModel):
+    """Public 'pay by phone' request. Amount is a string so money never passes through float."""
+    token: str
+    phone: str
+    provider: str | None = None
+    network: str | None = None
+    amount: str | None = None
+
+
 class PlateCorrection(BaseModel):
     plate: str = ""
     capture_id: int | None = None

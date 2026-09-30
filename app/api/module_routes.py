@@ -15,6 +15,12 @@ def modules_for_route(path: str) -> tuple[str, ...]:
         if parts[-1] == "kiosk-pay":
             return ("payments.kiosk",)
         return ("payments.public_web",)
+    if root == "api" and len(parts) >= 2:
+        # Narrow public payment surface (see app/services/public_ingress.py).
+        if parts[1] == "public":
+            return ("payments.core", "payments.public_web")
+        if parts[1] == "webhooks":
+            return ("payments.core",)
     if root in {"sessions", "sim"}:
         if parts[-1] == "pay":
             return ("parking.sessions", "payments.core", "payments.kiosk")

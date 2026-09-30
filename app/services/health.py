@@ -35,6 +35,23 @@ def _hybrid_fusion_stats() -> dict:
         return {"error": str(exc)[:120]}
 
 
+def _payments_stats() -> dict:
+    try:
+        from app.services.mobile_payments import payments_health
+
+        body = payments_health()
+        providers = body.get("providers") or {}
+        return {
+            "ok": True,
+            "active_mobile_provider": body.get("active_mobile_provider"),
+            "providers": {pid: {"mode": p.get("mode"), "available": p.get("available"), "reason": p.get("reason")}
+                          for pid, p in providers.items()},
+            "stats": body.get("stats"),
+        }
+    except Exception as exc:  # health must never fail because of a stats helper
+        return {"ok": True, "error": str(exc)[:120]}
+
+
 def note_db_latency(ms: float, statement: str = "") -> None:
     _db_latencies.append(float(ms))
     if ms >= 200:
@@ -194,7 +211,7 @@ def details() -> dict:
         },
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
         "database": {"ok": True, "avg_query_ms": _avg(_db_latencies)},
-        "payment": {"ok": True},
+        "payment": _payments_stats(),
     }
     body = {
         "ok": True,

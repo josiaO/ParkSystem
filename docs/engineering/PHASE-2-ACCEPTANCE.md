@@ -1,9 +1,19 @@
 # Phase 2 acceptance and remaining gates
 
-This phase is **not complete**. Current edits establish the baseline and repair
-recognition isolation, event transport, capture policy and route entitlement.
-No external payment provider or cloud AI was activated. Existing HVX SDK host,
-vendor bindings and physical gate adapters were preserved.
+This phase is **not complete**. The baseline commit repaired recognition
+isolation, event transport, capture policy and route entitlement. Three Codex
+slices have since landed on top of it, each behind a rollback flag:
+
+| Slice | Commit | Rollback |
+| --- | --- | --- |
+| §4 MediaMTX role-aware paths, Control API telemetry, WHEP, codec reporting | `468a841` | `live_view_provider=DIRECT_LEGACY`, `media_gateway_enabled=false` |
+| §6.3 Process-safe native/FastALPR hybrid fusion, weighted consensus, durable event idempotency | `45ea6ce` | camera `recognition_mode` ≠ HYBRID; `fastalpr_new_pipeline_enabled=false` |
+| §8 Flutterwave TEST + ClickPesa (live-disabled) providers, verified settlement, reconciliation, public ingress guard | this slice | `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=simulated` (default) |
+
+No external payment provider is *active* by default and no cloud AI was
+activated. Existing HVX SDK host, vendor bindings and physical gate adapters
+were preserved. See `docs/MEDIAMTX-INTEGRATION.md`, `docs/FASTALPR-PIPELINE.md`
+and `docs/MOBILE-MONEY-PROVIDERS.md` for each slice.
 
 ## Automated checks
 
@@ -23,9 +33,18 @@ persisted plate policy, expired consensus, stale worker ownership, neutral
 capture thresholds, hybrid disagreement review, disabled APIs, profile changes
 without restart, LPR captures with zero parking sessions, and evaluation metrics.
 
-Latest automated result: **286 tests passed**, with one pre-existing
-Starlette/httpx deprecation warning; compilation, evaluation CLI smoke check and
-diff whitespace checks pass.
+Later slices add MediaMTX telemetry/path-plan tests, hybrid-fusion coordinator
+and consensus tests, and payment tests: invalid webhook signature rejected,
+signed webhook still requires server-side verification, duplicate webhooks
+never double-credit, wrong amount/currency/reference never credits,
+reconciliation converts PENDING→SUCCEEDED exactly once and expires stale
+intents, provider outage leaves cash/kiosk working, ClickPesa live-disabled
+with no network call, official ClickPesa checksum algorithm, and the public
+ingress guard hiding every non-payment route on tunnel hostnames.
+
+Latest automated result: **364 tests passed** (baseline 286 → 326 after fusion
+→ 364 after payments), with one pre-existing Starlette/httpx deprecation
+warning; compilation, evaluation CLI smoke check and diff whitespace checks pass.
 
 ## Outbox upgrade and rollback
 
@@ -87,23 +106,27 @@ do not infer successful hardware operation from unit tests.
     MediaMTX readers, frame ages, packet loss/jitter, reconnects and inference
     p95. Counts/memory must stabilize; repeated multi-second backlog fails.
 
-Flutterwave end-to-end tests and duplicate webhook tests must be added to this
-procedure once that adapter and its verification/reconciliation path are built.
-ClickPesa must remain live-disabled until documented merchant testing is approved.
+11. **Payments (merchant-dependent).** With Flutterwave TEST keys and a public
+    tunnel hostname configured (`docs/MOBILE-MONEY-PROVIDERS.md`): open a
+    receipt `/p/{token}` on a phone, start a payment, approve the sandbox
+    prompt, and confirm the ledger gains exactly one `SUCCEEDED` row after the
+    webhook (or, with the webhook URL deliberately wrong, after reconciliation
+    ≤ 60 s later). Replay the webhook from the dashboard and confirm no second
+    row. On the tunnel hostname, `GET /cameras`, `/gates`, `/docs` and
+    `/auth/login` must return 404. ClickPesa must remain `LIVE_DISABLED` in
+    `/payments/health` until documented merchant testing is approved.
 
 ## Outstanding engineering requirements
 
 - Real immutable ALPR images/labels and measured camera/night/country accuracy.
-- Process-safe native/FastALPR hybrid fusion and durable business-event
-  idempotency across crashes; confidence calibration and tracking beyond exact
-  adjacent text consensus.
-- Complete stream-role modelling and shared-upstream deduplication, MediaMTX
-  path/packet telemetry, real video-reader lifecycle integration and codec errors.
+- Confidence calibration and tracking beyond similarity-weighted text consensus
+  (process-safe hybrid fusion and durable event idempotency landed in `45ea6ce`).
+- Real video-reader lifecycle integration and soak evidence for the MediaMTX
+  path plan/telemetry landed in `468a841`.
 - Verified ONVIF Media2 discovery and capability-driven Profile M events.
-- Flutterwave TEST adapter, authenticated verified callbacks, exact money/reference
-  checks, reconciliation and end-to-end test transactions.
-- ClickPesa adapter based on current official documentation, live-disabled safety
-  configuration, and restricted public ingress.
+- End-to-end Flutterwave TEST transaction against the real sandbox and ClickPesa
+  merchant testing (adapters, verification, reconciliation, idempotency and the
+  public ingress guard landed in this slice; refunds remain dashboard-only).
 - Optional Gemini reviewer with privacy/budget/timeouts and no gate authority.
 - Alembic migrations, site-scoped constraints, PostgreSQL acceptance, SecretStore
   integration and complete diagnostics redaction.
