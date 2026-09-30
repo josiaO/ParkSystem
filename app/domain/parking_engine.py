@@ -79,7 +79,11 @@ class InvalidTransition(ValueError):
 
 @dataclass(frozen=True)
 class LanePolicy:
-    """Per-lane parking policy. Not Rock City constants."""
+    """Per-lane parking policy. Not Rock City constants.
+
+    ``receipt_required_before_open`` is RECEIPT_REQUIRED_BEFORE_OPEN: the gate
+    stays closed until the receipt is taken, unless this lane opts out.
+    """
 
     receipt_required_before_open: bool = False
     passage_sensing: str = PASSAGE_OPEN_COUNTS
