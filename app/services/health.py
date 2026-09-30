@@ -159,6 +159,7 @@ def details() -> dict:
     from app.services.flags import flags as migration_flags
     from app.services import mediamtx
     from app.services.modules import module_health
+    from app.recognition_worker import worker_health
     from app.db import short_session
     with short_session() as _db:
         modules_snapshot = module_health(_db)
@@ -211,6 +212,7 @@ def details() -> dict:
         "queues": queue_snapshots(),
         "circuit_breakers": all_breakers(),
         "worker_failures": list(_worker_failures),
+        "recognition_worker": worker_health(),
         "disk": _disk(settings.data_dir),
         "time": datetime.now(timezone.utc).isoformat(),
     }

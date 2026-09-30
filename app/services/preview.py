@@ -216,6 +216,28 @@ async def snapshot_for_camera(
 
     if mediamtx_live_active(camera_id):
         local = mediamtx.live_endpoint(camera_id).get("rtsp") or ""
+        sample = gateway.peek_live(camera_id)
+        if sample is not None and sample.jpeg[:2] == JPEG_SOI:
+            return {
+                "ok": True,
+                "jpeg": sample.jpeg,
+                "url": sample.url or local,
+                "url_redacted": redact_url(sample.url or local),
+                "cached": True,
+                "source": sample.source or "mediamtx",
+            }
+        row = get_state(camera_id)
+        if row.jpeg[:2] == JPEG_SOI and (time.monotonic() - row.captured_at) < 2.0:
+            return {
+                "ok": True,
+                "jpeg": row.jpeg,
+                "url": row.url or local,
+                "url_redacted": row.url_redacted,
+                "cached": True,
+                "source": row.source or "mediamtx",
+            }
+        # One evidence still when the live decoder has not produced a frame yet.
+        # Live video must not call this in a loop.
         if local.startswith("rtsp://"):
             from app.services.frame_grab import capture_frame
             grabbed = await capture_frame(local)
@@ -331,8 +353,8 @@ def acquire_live(spec: CameraLiveSpec) -> None:
     _last_view[spec.id] = time.monotonic()
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
-        from app.services.mediamtx_detect import ensure_detect_consumer
-        ensure_detect_consumer(spec)
+        from app.services.mediamtx_live import ensure_live_consumer
+        ensure_live_consumer(spec)
         return
     touch_live(spec)
 
@@ -419,8 +441,8 @@ def start_live_pump(spec: CameraLiveSpec) -> None:
     """One gateway producer. MJPEG readers and FastALPR share the latest JPEG."""
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
-        from app.services.mediamtx_detect import ensure_detect_consumer
-        ensure_detect_consumer(spec)
+        from app.services.mediamtx_live import ensure_live_consumer
+        ensure_live_consumer(spec)
         return
     start_idle_watch()
     row = gateway._session_for(spec)
@@ -437,6 +459,8 @@ def stop_live_pump(camera_id: int) -> None:
 
 def stop_live_pumps() -> None:
     from app.services.mediamtx_detect import stop_all as stop_mediamtx_detect
+    from app.services.mediamtx_live import stop_all as stop_mediamtx_live
+    stop_mediamtx_live()
     stop_mediamtx_detect()
     gateway.stop_all()
     _viewers.clear()

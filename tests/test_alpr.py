@@ -123,6 +123,7 @@ class PlateFusionTests(unittest.TestCase):
         decision = resolve_readings(native_plate="T123ABC", native_confidence=0.5, local_plate="T123ABD", local_confidence=0.92)
         self.assertEqual(decision.resolved_plate, "T123ABD")
         self.assertEqual(decision.method, "LOCAL_SELECTED")
+        self.assertTrue(decision.needs_review)
 
     def test_fuse_local_only_mode(self):
         decision = resolve_readings(native_plate="NATIVE1", native_confidence=0.99, local_plate="LOCAL1", local_confidence=0.4, mode="LOCAL")
@@ -149,9 +150,15 @@ class PlateFusionTests(unittest.TestCase):
         self.assertFalse(assess_plate("AB")["likely"])
         self.assertFalse(assess_plate("")["likely"])
         self.assertTrue(assess_plate("T285DQP")["likely"])
-        fixed = correct_ocr_confusions("T28SDQP")
+        self.assertTrue(assess_plate("123456")["likely"])
+        self.assertTrue(assess_plate("ABCDE")["likely"])
+        self.assertTrue(assess_plate("123", policy="AE")["likely"])
+        fixed = correct_ocr_confusions("T28SDQP", policy="TZ")
         self.assertEqual(fixed["plate"], "T285DQP")
         self.assertTrue(fixed["corrected"])
+        neutral = correct_ocr_confusions("T28SDQP")
+        self.assertEqual(neutral["plate"], "T28SDQP")
+        self.assertFalse(neutral["corrected"])
 
     def test_local_consensus_skips_single_frame_hold(self):
         decision = resolve_readings(
@@ -243,7 +250,7 @@ class AlprApiTests(unittest.TestCase):
         body = res.json()
         self.assertIn(body["backend"], {"fastalpr", "none"})
         self.assertIn("installed", body)
-        self.assertEqual(body["country"], "Tanzania")
+        self.assertIn(body["country"], {None, ""})
         self.assertEqual(body["camera"]["camera_type"], DVCAM_QY)
         self.assertEqual(body["camera"]["sdk_port"], QY_SDK_PORT)
         self.assertEqual(body["camera"]["picture_port"], 40000)
@@ -296,7 +303,7 @@ class AlprApiTests(unittest.TestCase):
         grabbed = {"ok": True, "jpeg": b"\xff\xd8fake", "url_redacted": "rtsp://192.168.1.49/av0_0"}
         recognized = {
             "ok": True, "backend": "fastalpr", "plates": [{"plate": "T123ABC", "confidence": 0.91}],
-            "count": 1, "best": {"plate": "T123ABC", "confidence": 0.91}, "detail": "1 plate(s)",
+            "count": 1, "best": {"plate": "T123ABC", "confidence": 0.91, "bbox": {"x1": 10, "y1": 20, "x2": 120, "y2": 50}}, "detail": "1 plate(s)",
         }
         with patch("app.api_main.live_snapshot", new=AsyncMock(return_value=grabbed)):
             with patch("app.api_main.recognize_frame", return_value=recognized):

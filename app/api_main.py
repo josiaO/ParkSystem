@@ -39,6 +39,7 @@ from .services.hvx_vendor import vendor_inventory
 from .services.camera_lpr import choose_overlay_box, local_from_fastalpr, native_from_sdk_capture
 from .services.ocr_policy import fusion_mode, should_run_local
 from .services.presence import coil_watch
+from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
     pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, snapshot_for_camera, start_idle_watch,
@@ -140,6 +141,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+from .api.module_routes import ModuleRoute
+app.router.route_class = ModuleRoute
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
@@ -1232,6 +1235,7 @@ async def _run_local_alpr_locked(
     from .services.presence import coil_watch
     allowed, reason = should_persist_vehicle_capture(
         capture, coil_occupied=coil_watch.occupied(camera.id),
+        plate_policy=site_policy(db).get("plate_validation", "NONE"),
     )
     if not allowed:
         alpr = dict(alpr or {})
@@ -1794,13 +1798,13 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         capture = _capture_from_readings(native, local, fused, image_id=image_id)
         if native.get("have_vehicle"):
             capture["have_vehicle"] = True
-        allowed, reason = should_persist_vehicle_capture(capture, coil_occupied=coil_watch.occupied(c.id))
+        allowed, reason = should_persist_vehicle_capture(capture, coil_occupied=coil_watch.occupied(c.id), plate_policy=site_policy(db).get("plate_validation", "NONE"))
         if not allowed and native.get("have_vehicle"):
             capture = {
                 "plate": "", "image_id": image_id, "have_vehicle": True,
                 "score": 0, "source": native.get("source") or "camera",
             }
-            allowed, reason = should_persist_vehicle_capture(capture)
+            allowed, reason = should_persist_vehicle_capture(capture, plate_policy=site_policy(db).get("plate_validation", "NONE"))
         if not allowed:
             raise HTTPException(409, f"No vehicle in frame ({reason}). Snapshot not saved.")
         row = persist_event(db, c, jpeg=jpeg, crop=_crop_from_alpr(alpr), capture=capture)
@@ -2060,6 +2064,9 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     latest = row or previous
     if latest:
         remember_last_car(camera.id, capture_dict(latest))
+    from .services.modules import is_enabled
+    if not is_enabled("parking.sessions", db):
+        return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
     new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
     entitlement = lookup_entitlement(db, row.plate) if row and row.plate else None
@@ -2084,7 +2091,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     from .core.plate import apply_site_plate
     hold = bool((capture or {}).get("needs_review") or (capture or {}).get("pending_confirmation"))
     if row and row.plate:
-        assessed = apply_site_plate(row.plate, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+        assessed = apply_site_plate(row.plate, validation=site_policy(db).get("plate_validation", "NONE"))
         if assessed.get("hold_for_operator"):
             hold = True
     if latest and hold:
@@ -2238,6 +2245,9 @@ async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
 
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
     """FastALPR samples the detect buffer. It never sits in the live-view decode loop."""
+    from .recognition_worker import worker_owns_software_reads
+    if worker_owns_software_reads(camera_id):
+        return
     from .services.media_gateway import gateway
     watching = viewers_for(camera_id) > 0
     sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
@@ -2294,12 +2304,45 @@ async def _outbox_loop():
             box = parking_outbox()
             for item in box.pending(limit=20):
                 payload = item.get("payload") or {}
-                if item.get("kind") != "plate-event":
+                from .services.events import recognition_from_outbox
+                recognized = recognition_from_outbox(item)
+                if recognized is None and item.get("kind") != "plate-event":
                     box.ack(item["id"])
                     continue
                 try:
                     with short_session() as db:
+                        if recognized is not None:
+                            from .services.modules import is_enabled
+                            if not is_enabled("recognition.alpr", db):
+                                continue
+                            camera = db.get(Camera, int(recognized.get("camera_id") or 0)) if recognized.get("camera_id") else None
+                            if camera is not None and adapter_has_native_plates(camera):
+                                from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+                                if camera_recognition_mode(camera) != LOCAL_ONLY:
+                                    box.ack(item["id"])
+                                    continue
+                            if camera is None or not camera.enabled:
+                                box.ack(item["id"])
+                                continue
+                            capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
+                                       "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
+                            jpeg = b""
+                            reference = str(recognized.get("image_ref") or "")
+                            if reference.startswith("/media/"):
+                                pieces = reference.removeprefix("/media/").split("/")
+                                if len(pieces) == 2:
+                                    evidence = media_path(*pieces)
+                                    if evidence is not None:
+                                        jpeg = evidence.read_bytes()
+                            await _persist_capture_event(db, camera, capture, jpeg, b"")
+                            box.ack(item["id"])
+                            continue
                         gate = db.get(Gate, int(payload.get("gate_id") or 0)) if payload.get("gate_id") else None
+                        from .services.modules import is_enabled
+                        if not is_enabled("parking.sessions", db):
+                            # Keep pending business work for an explicit profile
+                            # re-enable rather than processing it while disabled.
+                            continue
                         camera = db.get(Camera, int(payload.get("camera_id") or 0)) if payload.get("camera_id") else None
                         if gate is None and camera is None and not payload.get("plate"):
                             box.ack(item["id"])
@@ -2349,6 +2392,9 @@ async def _hvx_watch_loop():
 
 async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     """Periodic FastALPR for cameras that have no onboard plate engine."""
+    from .recognition_worker import worker_owns_software_reads
+    if worker_owns_software_reads(camera_id):
+        return
     if not _local_alpr_ready(camera_id):
         return
     from .services.media_gateway import gateway
@@ -2394,7 +2440,8 @@ async def _camera_event_loop():
     while True:
         try:
             with short_session() as db:
-                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all())
+                from .services.modules import is_enabled
+                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
                 hvx_specs = [
                     (int(c.id), int(c.sdk_handle))
                     for c in rows

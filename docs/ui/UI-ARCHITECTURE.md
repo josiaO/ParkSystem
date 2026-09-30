@@ -1,6 +1,6 @@
 # UI architecture
 
-The canonical product interface is the web app in `app/web/index.html`. The Windows desktop client remains a local shell and is not being redesigned in parallel with media work.
+The canonical product interface is the web app in `app/web/index.html`. The Windows desktop client is a local shell with the same operator language: Devices instead of IPs, Detections instead of Plate Engine, and technician controls hidden unless the account can view hardware. Live video reconnect logic is unchanged.
 
 ## Layers
 

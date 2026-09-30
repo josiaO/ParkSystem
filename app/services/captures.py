@@ -57,8 +57,9 @@ def plausible_vehicle_plate(plate: str | None) -> bool:
         return False
     letters = sum(ch.isalpha() for ch in p)
     digits = sum(ch.isdigit() for ch in p)
-    # Vehicle plates mix letters and digits (TZ T###XXX, etc.).
-    return letters >= 1 and digits >= 2
+    # Numeric-only and letter-only registrations exist internationally. A
+    # detector box/confidence supplies the vehicle evidence, not a TZ shape.
+    return letters + digits == len(p)
 
 
 def should_persist_vehicle_capture(
@@ -66,6 +67,7 @@ def should_persist_vehicle_capture(
     *,
     coil_occupied: bool = False,
     allow_empty_vehicle: bool = True,
+    plate_policy: str = "NONE",
 ) -> tuple[bool, str]:
     """Return whether this frame is a car event worth writing to disk/DB.
 
@@ -97,7 +99,9 @@ def should_persist_vehicle_capture(
             return True, "native-vehicle"
         return False, "vehicle-no-plate"
 
-    if coil_occupied and plate and plausible_vehicle_plate(plate) and conf >= MIN_FASTALPR_CONF_TZ:
+    tz_like = str(plate_policy).upper() == "TZ" and bool(_TZ_PLATE_RE.match(plate))
+    min_conf = MIN_FASTALPR_CONF_TZ if tz_like else MIN_FASTALPR_CONF
+    if coil_occupied and plate and plausible_vehicle_plate(plate) and conf >= min_conf:
         return True, "coil-plate"
 
     if not plate:
@@ -106,8 +110,6 @@ def should_persist_vehicle_capture(
     if not plausible_vehicle_plate(plate):
         return False, "implausible-plate"
 
-    tz_like = bool(_TZ_PLATE_RE.match(plate))
-    min_conf = MIN_FASTALPR_CONF_TZ if tz_like else MIN_FASTALPR_CONF
     if conf < min_conf:
         return False, "low-confidence"
 
@@ -218,8 +220,10 @@ def persist_event(
     if jpeg[:2] != b"\xff\xd8" and crop[:2] != b"\xff\xd8" and not native.get("plate"):
         return None
     if not force:
+        from app.services.site_policy import site_policy
         allowed, _reason = should_persist_vehicle_capture(
             capture, coil_occupied=coil_occupied, allow_empty_vehicle=True,
+            plate_policy=site_policy(db).get("plate_validation", "NONE"),
         )
         if not allowed:
             return None

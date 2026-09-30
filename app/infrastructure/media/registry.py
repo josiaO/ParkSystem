@@ -30,7 +30,6 @@ def mediamtx_live_active(camera_id: int, db=None) -> bool:
     return (
         _camera_enabled(camera_id, db)
         and str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX
-        and bool(cfg.get("webrtc_live_enabled"))
         and mediamtx.running()
     )
 
@@ -76,6 +75,10 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
     """
     camera_id = int(camera_id)
     if mediamtx_live_active(camera_id, db):
+        if not _migration_flags(db).get("webrtc_live_enabled"):
+            endpoint = await gateway.get_live_endpoint(camera_id)
+            return {**endpoint, "provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id,
+                    "transport": "MJPEG", "state": "LIVE"}
         endpoint = mediamtx.live_endpoint(camera_id)
         return {
             "provider": LIVE_VIEW_MEDIAMTX,

@@ -19,6 +19,30 @@ Optional LAN sidecar that can re-publish camera RTSP as local RTSP/WebRTC. Smart
 
 Rollback: `SMARTPARK_LIVE_VIEW_PROVIDER=DIRECT_LEGACY` (or PATCH `/settings/migration`).
 
+## Paths and control API
+
+Generated config writes two paths per camera:
+
+- `cam{id}` — operator live (WebRTC and the desktop MJPEG cache)
+- `cam{id}_detect` — software recognition
+
+`detect_endpoint()` returns `rtsp://127.0.0.1:8554/cam{id}_detect`. Path changes are written to `mediamtx.yml` (MediaMTX hot-reloads that file) and pushed with the Control API:
+
+- `POST /v3/config/paths/add/{name}`
+- `POST /v3/config/paths/replace/{name}` when the path already exists
+- `DELETE /v3/config/paths/delete/{name}`
+
+There is no `/v3/config/paths/reload`. Site Service must not start or stop MediaMTX; `SmartParkMediaService` owns the process.
+
+Metrics listen on `127.0.0.1:9998` (`metrics: yes`). The control API stays on `127.0.0.1:9997`.
+
+Desktop live view reads `/cameras/{id}/live.mjpeg`. When MediaMTX is the live provider, one persistent decoder fills that JPEG cache from `cam{id}`. A failed MJPEG stream retries the same stream. It does not poll `snapshot.jpg`.
+
+The `webrtc_live_enabled` flag controls browser transport, not MediaMTX source
+selection. With MediaMTX selected and WebRTC disabled, `/live/endpoint` reports
+MediaMTX with MJPEG transport, and desktop/browser MJPEG reads the local proxy
+cache. Disabling WebRTC must not reopen a direct camera connection.
+
 ## Failure behavior
 
 Binary missing → health `ok=false`, note that the sidecar is optional. HVX JPEG live view continues.
