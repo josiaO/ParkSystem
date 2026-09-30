@@ -10,7 +10,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 0 Baseline and safety | PASS | `6a63eb0` |
 | 1 Parking domain engine | PASS | `f1c5e85` |
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
-| 3 Receipt and QR | not started | |
+| 3 Receipt and QR | PASS | |
 | 4 Entry orchestration | not started | |
 | 5 Tariff and local payment | not started | |
 | 6 Exit orchestration | not started | |
@@ -203,3 +203,47 @@ Same as Phase 0/1. Native HVX + FastALPR agreement was simulated, not driven thr
 4. Tests listed in the sequential prompt (token uniqueness, QR lookup, retry, duplicate taken, paper/offline, never-taken timeout, audited override). Do not send gate OPEN in this phase.
 
 Commit: `d5efae7`.
+
+---
+
+## Phase 3 — Receipt and QR
+
+### Implemented behavior
+
+- `ReceiptPrinterAdapter` (`app/domain/receipt_engine.py`) with print / status / presented / taken / recover. Capabilities are declared, never assumed.
+- Simulated kiosk adapter has `PAPER_STATUS`, `PRESENTER`, `TAKEN_SENSOR`, `CUTTER`. USB/LAN thermal wrap does **not** claim a taken sensor.
+- High-entropy opaque `public_token` (`secrets.token_urlsafe(32)`), unique when non-empty. Short `human_reference` (`XXXX-XXXX`, no 0/O/1/I) is operator lookup only and is not the auth token.
+- QR payload is `/s/{token}` (optional public base URL). Local lookup accepts `/s/` and existing `/p/` scanner strings. Token is not derived from plate or DB id.
+- Print job is `session_id` + `print_job_id`. Retry reprints the same session; presented/taken duplicates are no-ops. Out of paper / offline → `ASSISTANCE_REQUIRED`. Never-taken timeout → assistance. Operator override is audited and does not pulse a gate.
+- Lane policy remains `receipt_required_before_open` (`RECEIPT_REQUIRED_BEFORE_OPEN`). This phase does not send gate OPEN.
+- Alembic `0005_receipt_qr_jobs`: print-job columns and unique token/reference indexes.
+- Windows USB requirements now list `alembic`, `mako`, `markupsafe`, `typing_extensions`, `python-dotenv`, `greenlet` so `--no-deps` install gets the migration stack.
+
+### Tests run
+
+```text
+.venv/bin/python -m compileall -q app tools
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_parking_receipts.py
+.venv/bin/python -m pytest -q -p no:cacheprovider
+git diff --check
+```
+
+### Test results
+
+**466 passed** (454 Phase 2 + 12 parking-receipt tests; USB payload assertion waits on kit rebuild), 1 pre-existing Starlette/httpx warning. `compileall` exit 0.
+
+### Unresolved hardware verification
+
+Same as Phase 0–2. Physical presenter / taken sensor not attached. USB kit rebuild with Alembic wheels is the follow-up packaging step.
+
+### Known limitations
+
+- Live cameras still print through `issue_receipt` / `handle_plate_event` (Phase 4 wires print jobs into entry orchestration).
+- Public HTTP page remains `/p/{token}`; the QR is `/s/{token}` and both parse locally.
+- Hardware thermal adapters do not invent a taken sensor; taken confirmation is simulated or operator/override until hardware exists.
+
+### Phase 4 implementation plan (do this next; do not start Phase 5)
+
+Connect recognition + parking + printer + gate in one entry orchestrator. Presence → consensus → session → print → presented → taken → authorize → idempotent OPEN → vehicle passed → ACTIVE. Do not put the sequence in a FastAPI route or camera callback. Printer/taken failure must not silently open. Subscribers may skip receipt per lane policy.
+
+Commit: filled after commit.

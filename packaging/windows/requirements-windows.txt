@@ -18,5 +18,11 @@ protobuf
 fast-alpr[onnx]
 colorama
 qrcode
+alembic
+mako
+markupsafe
+typing_extensions
+python-dotenv
+greenlet
 # PostgreSQL later: psycopg[binary]
 # Do not add watchfiles — it is only used by uvicorn --reload and conflicts with production.
