@@ -198,9 +198,19 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
         stats["last_error"] = "MediaMTX detect endpoint unavailable"
         return
     url = str(endpoint.get("rtsp") or "")
+    from app.domain.recognition_engine import policy_from_settings
+
     provider = recognition_provider_for("fastalpr")
     decoder = LocalMediaGateway()
-    track = PlateTrack()
+    rec_policy = policy_from_settings()
+    track = PlateTrack(
+        window_seconds=rec_policy.consensus_window_seconds,
+        hold_seconds=rec_policy.hold_seconds,
+        min_reads=rec_policy.min_reads,
+        min_agreeing=rec_policy.min_agreeing,
+        min_share=rec_policy.min_share,
+        similarity=rec_policy.similarity,
+    )
     frames = LatestFrameBuffer(f"worker-{camera_id}", maxsize=1)
     ready = asyncio.Event()
     inference_lock = inference_lock or asyncio.Lock()
@@ -250,7 +260,7 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
                 if sample is None or sample.jpeg[:2] != b"\xff\xd8":
                     continue
                 stats["input_frame_age_ms"] = sample.age_ms()
-                if sample.age_ms() > 1000:
+                if sample.age_ms() > rec_policy.stale_frame_ms:
                     stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
                     continue
                 started = time.monotonic()

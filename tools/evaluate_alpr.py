@@ -56,6 +56,8 @@ def _ratio(top: int, bottom: int) -> float | None:
 def _metrics(labels: list[dict], predictions: dict[str, dict], iou_threshold: float) -> dict[str, Any]:
     positives = exact = characters = errors = box_labels = detected = negatives = false_positives = 0
     gate_negatives = false_acceptances = 0
+    session_negatives = false_sessions = 0
+    visits: dict[str, set[str]] = {}
     latencies = []
     for label in labels:
         prediction = predictions[label["id"]]
@@ -78,12 +80,22 @@ def _metrics(labels: list[dict], predictions: dict[str, dict], iou_threshold: fl
         if label.get("gate_allowed") is False and isinstance(prediction.get("accepted"), bool):
             gate_negatives += 1
             false_acceptances += int(prediction["accepted"])
+        visit = label.get("visit_id")
+        if visit:
+            event_id = str(prediction.get("event_id") or "")
+            visits.setdefault(str(visit), set())
+            if event_id:
+                visits[str(visit)].add(event_id)
+        if label.get("session_expected") is False:
+            session_negatives += 1
+            false_sessions += int(bool(prediction.get("session_created")))
         latency = prediction.get("latency_ms")
         if latency is not None:
             latency = float(latency)
             if not math.isfinite(latency) or latency < 0:
                 raise ValueError("Inference latency must be finite and non-negative")
             latencies.append(latency)
+    extra_events = sum(max(0, len(ids) - 1) for ids in visits.values())
     return {
         "samples": len(labels), "positive_samples": positives, "negative_samples": negatives,
         "plate_exact_match_accuracy": _ratio(exact, positives),
@@ -95,6 +107,8 @@ def _metrics(labels: list[dict], predictions: dict[str, dict], iou_threshold: fl
         "gate_negative_decisions": gate_negatives,
         "latency_ms": {"count": len(latencies), "mean": statistics.mean(latencies) if latencies else None,
                        "p50": percentile(latencies, .5), "p95": percentile(latencies, .95)},
+        "duplicate_event_rate": (extra_events / len(visits)) if visits else None,
+        "false_session_creation": _ratio(false_sessions, session_negatives),
     }
 
 
