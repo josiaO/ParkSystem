@@ -12,7 +12,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
 | 3 Receipt and QR | PASS | `b1ce995` |
 | 4 Entry orchestration | PASS | `84b7d7a` |
-| 5 Tariff and local payment | not started | |
+| 5 Tariff and local payment | PASS | |
 | 6 Exit orchestration | not started | |
 | 7 Physical lane hardware | not started | |
 | 8 Operator/kiosk usability | not started | |
@@ -287,3 +287,42 @@ Same as Phase 0–3. Full entry path is simulated. Not validated on a physical l
 Pure tariff engine from configuration (not Rock City constants). Cash settlement on local SQLite with PaymentIntent/PaymentTransaction, Decimal/minor units, duplicate cash idempotency, `payment_exit_grace_until`. No public payment web app.
 
 Commit: `84b7d7a`.
+
+---
+
+## Phase 5 — Tariff and local payment
+
+### Implemented behavior
+
+- `quote_stay` (`app/domain/tariff_engine.py`) prices a stay from tariff JSON only. Empty rules are rejected so 45-minute / TZS 1,000 values stay configuration (`fee_engine.CAR1_RULES` / site tariff row), not domain constants.
+- Cash settlement remains `PaymentIntent` + `PaymentTransaction`. Ledger statuses include CREATED/PENDING/SUCCEEDED/FAILED/EXPIRED/REFUNDED/PARTIALLY_REFUNDED. Duplicate cash submit is idempotent (`session:{id}:settle`). Paid total is derived from SUCCEEDED rows.
+- On full payment the session is `PAID`, `paid_at` is set, and `payment_exit_grace_until` is stored from `payment_exit_grace_seconds` (default 15 minutes). Cash does not call the network.
+
+### Tests run
+
+```text
+.venv/bin/python -m compileall -q app tools
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_parking_tariff.py
+.venv/bin/python -m pytest -q -p no:cacheprovider
+git diff --check
+```
+
+### Test results
+
+**489 passed**, 1 pre-existing Starlette/httpx warning.
+
+### Unresolved hardware verification
+
+Same as Phase 0–4. No live mobile-money provider calls in this phase (by design).
+
+### Known limitations
+
+- Amounts on the session row are still Numeric/float at the SQLAlchemy boundary; quotes use integer minor units.
+- Day/night/holiday overlays exist in `fee_engine` but are not expanded in this phase.
+- Public/mobile payment web app is still out of scope.
+
+### Phase 6 implementation plan (do this next; do not start Phase 7)
+
+ExitLaneController: plate (or QR fallback) → site-wide session → tariff → payment/grace → authorize or deny → idempotent OPEN → close. Unpaid stays closed. Lost ticket / QR fallback. Same site, different gates.
+
+Commit: filled after commit.
