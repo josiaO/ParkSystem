@@ -9,7 +9,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | --- | --- | --- |
 | 0 Baseline and safety | PASS | `6a63eb0` |
 | 1 Parking domain engine | PASS | `f1c5e85` |
-| 2 Recognition good enough for a session | PASS | |
+| 2 Recognition good enough for a session | PASS | `d5efae7` |
 | 3 Receipt and QR | not started | |
 | 4 Entry orchestration | not started | |
 | 5 Tariff and local payment | not started | |
@@ -202,4 +202,4 @@ Same as Phase 0/1. Native HVX + FastALPR agreement was simulated, not driven thr
 3. Print job tied to `session_id` + `print_job_id`; retries must not create a second session. Receipt-taken is lane policy `RECEIPT_REQUIRED_BEFORE_OPEN`, not a global constant.
 4. Tests listed in the sequential prompt (token uniqueness, QR lookup, retry, duplicate taken, paper/offline, never-taken timeout, audited override). Do not send gate OPEN in this phase.
 
-Filled after commit.
+Commit: `d5efae7`.
