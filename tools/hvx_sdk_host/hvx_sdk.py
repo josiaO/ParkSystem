@@ -686,7 +686,7 @@ class HVXSDK:
     def _latest_jpg_buffer(self, handle: int) -> bytes:
         """Net_GetJpgBuffer is a queue. Drain it and keep only the newest frame."""
         latest = b""
-        for _ in range(16):
+        for _ in range(8):
             jpeg = self._get_jpg_buffer(handle)
             if not jpeg:
                 break
@@ -717,13 +717,25 @@ class HVXSDK:
         while self._video_running:
             with self._lock:
                 handles = list(self._video_handles)
+            fresh = False
             for handle in handles:
                 jpeg = self._latest_jpg_buffer(handle)
-                if jpeg:
-                    with self._lock:
+                if not jpeg:
+                    continue
+                with self._lock:
+                    previous = self._last_live_jpeg.get(handle, b"")
+                    if jpeg != previous:
                         self._last_live_jpeg[handle] = jpeg
+                        fresh = True
             self._pump_messages()
-            time.sleep(0.025 if handles else 0.2)
+            # Empty Net_GetJpgBuffer calls print "no frame" inside the vendor DLL.
+            # Wait longer when nothing new arrived so the queue cannot pile up.
+            if not handles:
+                time.sleep(0.2)
+            elif fresh:
+                time.sleep(0.04)
+            else:
+                time.sleep(0.12)
         self._video_thread = None
 
     def write_gpio(self, handle: int, index: int, value: int) -> int:
