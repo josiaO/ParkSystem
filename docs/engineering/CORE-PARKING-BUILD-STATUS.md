@@ -11,7 +11,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | 1 Parking domain engine | PASS | `f1c5e85` |
 | 2 Recognition good enough for a session | PASS | `d5efae7` |
 | 3 Receipt and QR | PASS | `b1ce995` |
-| 4 Entry orchestration | PASS | |
+| 4 Entry orchestration | PASS | `84b7d7a` |
 | 5 Tariff and local payment | not started | |
 | 6 Exit orchestration | not started | |
 | 7 Physical lane hardware | not started | |
@@ -286,4 +286,4 @@ Same as Phase 0–3. Full entry path is simulated. Not validated on a physical l
 
 Pure tariff engine from configuration (not Rock City constants). Cash settlement on local SQLite with PaymentIntent/PaymentTransaction, Decimal/minor units, duplicate cash idempotency, `payment_exit_grace_until`. No public payment web app.
 
-Commit: filled after commit.
+Commit: `84b7d7a`.
