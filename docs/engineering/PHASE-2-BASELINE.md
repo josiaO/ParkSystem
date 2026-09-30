@@ -85,7 +85,8 @@ this report does not attribute those concurrent edits to the recognition changes
 | §4 MediaMTX (`468a841`) | 306 | compileall 0, full suite green, `git diff --check` 0 |
 | §6.3 Hybrid fusion (`45ea6ce`) | 326 | compileall 0, full suite green, `git diff --check` 0 |
 | §8 Payments (Flutterwave TEST, ClickPesa live-disabled, public ingress) (`a2a6543`) | 364 | compileall 0, full suite green, `git diff --check` 0 |
-| §7 ONVIF Media2 discovery + Profile M plate-event poller | 385 | compileall 0, full suite green, `git diff --check` 0; fake SOAP device only |
+| §7 ONVIF Media2 discovery + Profile M plate-event poller (`31a8932`) | 385 | compileall 0, full suite green, `git diff --check` 0; fake SOAP device only |
+| §11/§12 Alembic runner, site-scoped constraints, SecretStore + redaction | 403 | compileall 0, full suite green, `git diff --check` 0; migration also run against a copy of a real pre-Alembic evaluation file; DPAPI not executed (Linux host) |
 
 Payment provider behaviour was implemented from the official Flutterwave v3 and
 ClickPesa documentation and exercised only against faked HTTP in tests. No real
