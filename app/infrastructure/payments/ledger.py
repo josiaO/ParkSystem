@@ -7,6 +7,8 @@ a verified provider callback or a logged-in kiosk/manual confirmation.
 from __future__ import annotations
 
 import secrets
+from datetime import timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,13 @@ from app.models import PaymentIntent, PaymentTransaction, ParkingSession, utcnow
 SUCCEEDED = "SUCCEEDED"
 CREATED = "CREATED"
 PENDING = "PENDING"
+FAILED = "FAILED"
+EXPIRED = "EXPIRED"
+REFUNDED = "REFUNDED"
+PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
+
+PAYMENT_STATUSES = (CREATED, PENDING, SUCCEEDED, FAILED, EXPIRED, REFUNDED, PARTIALLY_REFUNDED)
+DEFAULT_EXIT_GRACE_SECONDS = 15 * 60
 
 
 def transaction_dict(row: PaymentTransaction) -> dict:
@@ -45,12 +54,24 @@ def paid_total(db: Session, session_id: int) -> float:
     return float(total or 0)
 
 
-def apply_session_payment_state(db: Session, row: ParkingSession) -> ParkingSession:
+def apply_session_payment_state(
+    db: Session,
+    row: ParkingSession,
+    *,
+    grace_seconds: int | None = None,
+) -> ParkingSession:
     paid = paid_total(db, row.id)
     row.amount_paid = paid
     due = float(row.amount_due or 0)
     if paid + 0.0001 >= due and due >= 0:
         row.status = "PAID"
+        row.payment_status = SUCCEEDED
+        row.paid_at = row.paid_at or utcnow()
+        seconds = int(grace_seconds if grace_seconds is not None else DEFAULT_EXIT_GRACE_SECONDS)
+        if seconds > 0 and row.payment_exit_grace_until is None:
+            row.payment_exit_grace_until = row.paid_at + timedelta(seconds=seconds)
+    elif paid > 0 and paid < due:
+        row.payment_status = PENDING
     db.flush()
     return row
 
