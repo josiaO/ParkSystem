@@ -160,7 +160,16 @@ def from_recognition_dict(recognition: dict[str, Any]) -> dict[str, Any]:
         recognition_provider=str(recognition.get("source") or "FASTALPR"),
         image_ref=recognition.get("image_ref"),
         plate_crop_ref=recognition.get("plate_crop_ref"),
+        validation_result=recognition.get("validation_result"),
+        model_version=recognition.get("model_version"),
+        bbox=recognition.get("bbox"),
+        needs_review=bool(recognition.get("needs_review")),
+        validation_ok=recognition.get("validation_ok"),
     )
     if recognition.get("event_id"):
         event["event_id"] = recognition["event_id"]
+        event["payload"]["event_id"] = recognition["event_id"]
+    if recognition.get("occurred_at"):
+        event["occurred_at"] = recognition["occurred_at"]
+        event["payload"]["occurred_at"] = recognition["occurred_at"]
     return event

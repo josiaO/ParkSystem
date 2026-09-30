@@ -110,30 +110,16 @@ def confusion_variants(plate: str, *, max_subs: int = 2) -> list[str]:
     return list(found)
 
 
-def correct_ocr_confusions(raw: str | None, *, known_plates: Iterable[str] | None = None) -> dict[str, Any]:
-    """Prefer a TZ-shaped or registered variant before database lookup."""
-    normalised = normalize_plate(raw)
-    known = {normalize_plate(p) for p in (known_plates or []) if normalize_plate(p)}
-    variants = confusion_variants(normalised)
-    if normalised in known:
-        return {"plate": normalised, "corrected": False, "reason": "exact-known"}
-    for plate in variants:
-        if plate in known:
-            return {"plate": plate, "corrected": plate != normalised, "reason": "known-confusion"}
-    best = normalised
-    best_score = plate_shape_score(normalised)
-    for plate in variants:
-        score = plate_shape_score(plate)
-        if score > best_score:
-            best, best_score = plate, score
-    tz_forced = _force_tz_positions(normalised)
-    if plate_shape_score(tz_forced) > best_score:
-        best, best_score = tz_forced, plate_shape_score(tz_forced)
-    return {
-        "plate": best,
-        "corrected": best != normalised,
-        "reason": "tz-shape" if best != normalised else "unchanged",
-    }
+def correct_ocr_confusions(
+    raw: str | None,
+    *,
+    known_plates: Iterable[str] | None = None,
+    policy: str = "NONE",
+) -> dict[str, Any]:
+    """Correct OCR lookalikes using the site plate policy. Default is neutral."""
+    from app.core.plate_policy import plate_policy_for
+
+    return plate_policy_for(policy).correct(raw, known_plates=known_plates)
 
 
 def _force_tz_positions(plate: str) -> str:
@@ -162,14 +148,10 @@ def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
         likely, flag = False, "EMPTY"
     elif normalised in _DENYLIST:
         likely, flag = False, "DENYLIST"
-    elif not _letter_digit_mix(normalised):
+    elif chosen not in {"", "NONE", "CUSTOM"} and not checked["ok"]:
         likely, flag = False, "UNLIKELY_PATTERN"
-    elif len(normalised) < 5 or len(normalised) > 10:
+    elif chosen in {"", "NONE", "CUSTOM"} and not 5 <= len(normalised) <= 12:
         likely, flag = False, "UNLIKELY_LENGTH"
-    elif chosen == "TZ" and not _TZ_RE.match(normalised):
-        likely, flag = False, "UNLIKELY_TZ"
-    elif plate_shape_score(normalised) == 0:
-        likely, flag = False, "UNLIKELY_PATTERN"
     return {
         **checked,
         "likely": likely,
@@ -180,7 +162,7 @@ def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
 
 def apply_site_plate(raw: str | None, *, normalization: str = "ALNUM_UPPER", validation: str = "NONE") -> dict[str, Any]:
     normalised = normalize_plate(raw, normalization)
-    corrected = correct_ocr_confusions(normalised)
+    corrected = correct_ocr_confusions(normalised, policy=validation)
     chosen = corrected.get("plate") or normalised
     checked = assess_plate(chosen, validation)
     return {

@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     camera_tcp_probe_seconds: float = 1.0
     rtsp_probe_timeout_seconds: float = 5.0
     alpr_timeout_seconds: float = 15.0
-    alpr_country: str = "Tanzania"
+    alpr_country: str = ""
     alpr_csf: float = 0.918
     default_hvx_sdk_port: int = 30000
     bootstrap_username: str = "admin"
