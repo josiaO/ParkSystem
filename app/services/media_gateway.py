@@ -452,6 +452,10 @@ class LocalMediaGateway:
                 id=camera_id, ip="", username="", password="", rtsp_url="", sdk_handle=None,
             ))
             self._sessions[camera_id] = row
+        previous = row.live.latest()
+        if previous is not None and previous.jpeg == jpeg:
+            row.last_frame_received_at = time.monotonic()
+            return previous
         now = time.monotonic()
         sample = row.live.put(jpeg, source=source, url=url)
         row.last_frame_received_at = now

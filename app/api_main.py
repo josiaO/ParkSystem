@@ -1145,13 +1145,54 @@ async def _run_local_alpr(
         return None
     if not force and not _local_alpr_ready(camera.id):
         return None
+    if not force and _alpr_busy():
+        return None
+    _alpr_enter()
+    try:
+        return await _run_local_alpr_locked(
+            db, camera, jpeg, native=native, presence=presence, image_id=image_id, force=force,
+        )
+    except Exception as exc:
+        from .services.health import note_worker_failure
+        note_worker_failure("alpr", str(exc))
+        return {"ok": False, "backend": "fastalpr", "plates": [], "detail": str(exc), "error": str(exc)}
+    finally:
+        _alpr_leave()
+
+
+def _alpr_busy() -> bool:
+    return int(_alpr_inflight["n"]) > 0
+
+
+def _alpr_enter() -> None:
+    _alpr_inflight["n"] = int(_alpr_inflight["n"]) + 1
+
+
+def _alpr_leave() -> None:
+    _alpr_inflight["n"] = max(0, int(_alpr_inflight["n"]) - 1)
+
+
+_alpr_inflight = {"n": 0}
+
+
+async def _run_local_alpr_locked(
+    db: Session,
+    camera: Camera,
+    jpeg: bytes,
+    *,
+    native: dict | None = None,
+    presence: bool = True,
+    image_id: int = 0,
+    force: bool = False,
+) -> dict | None:
+    native = native or {}
     from .services.media_gateway import gateway
     from .services.queues import AI_FRAMES
     sample = gateway.peek_detect(camera.id)
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))
     started = time.perf_counter()
-    alpr = await asyncio.to_thread(recognize_bytes, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}")
+    alpr = await asyncio.to_thread(recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}")
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     remember_alpr(camera.id, alpr)
     local = local_from_fastalpr(alpr)
@@ -1164,7 +1205,7 @@ async def _run_local_alpr(
             if not sample or sample.jpeg[:2] != b"\xff\xd8" or sample.jpeg == jpeg:
                 continue
             extra = await asyncio.to_thread(
-                recognize_bytes, sample.jpeg, camera_label=f"cam-{camera.id}-detect",
+                recognize_frame, sample.jpeg, camera_label=f"cam-{camera.id}-detect",
             )
             hit = local_from_fastalpr(extra)
             if hit.get("plate"):
@@ -1739,7 +1780,7 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")
     jpeg = grabbed["jpeg"]
     native = await _native_capture_for_camera(c)
-    alpr = await asyncio.to_thread(recognize_bytes, jpeg, camera_label=f"cam-{c.id}-snap")
+    alpr = await asyncio.to_thread(recognize_frame, jpeg, camera_label=f"cam-{c.id}-snap")
     local = local_from_fastalpr(alpr)
     fused = resolve_readings(
         native_plate=native.get("plate") or "",
@@ -1841,7 +1882,7 @@ async def camera_preview(
         native_plates=adapter_has_native_plates(c),
     ):
         alpr = await asyncio.to_thread(
-            recognize_bytes, grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
+            recognize_frame, grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
         )
         remember_alpr(c.id, alpr)
     plates = _plate_payload(c, native, alpr, db)
