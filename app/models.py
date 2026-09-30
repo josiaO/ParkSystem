@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from .db import Base
+from .domain.site import DEFAULT_SITE_ID
 
 
 def utcnow():
@@ -101,12 +102,15 @@ class Zone(Base):
 
 class Gate(Base):
     __tablename__ = "gates"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_gates_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
     mode: Mapped[str] = mapped_column(String(30), default=GateMode.COMMISSIONING.value)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     physical_control_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id"), nullable=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
     zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id"), nullable=True)
     cameras: Mapped[list["Camera"]] = relationship(back_populates="gate")
     sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate")
@@ -128,12 +132,20 @@ class Lane(Base):
 
 class Camera(Base):
     __tablename__ = "cameras"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_cameras_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), index=True)
     ip_address: Mapped[str] = mapped_column(String(64), index=True)
     sdk_port: Mapped[int] = mapped_column(Integer, default=30000)
     username: Mapped[str] = mapped_column(String(120), default="admin")
-    password_secret: Mapped[str] = mapped_column(String(300), default="")  # local MVP; replace with OS secret store
+    # Legacy column. With an external SecretStore this holds "" and the real
+    # value lives behind ``credentials_ref``; use the ``password_secret``
+    # property, never the column directly.
+    _password_secret: Mapped[str] = mapped_column("password_secret", String(300), default="")
+    credentials_ref: Mapped[str] = mapped_column(String(120), default="", server_default="")
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
     lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
     lane_direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
@@ -162,6 +174,30 @@ class Camera(Base):
     onvif_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     gate: Mapped[Gate | None] = relationship(back_populates="cameras")
 
+    @property
+    def password_secret(self) -> str:
+        """Raw camera password for adapters. Resolved through the SecretStore when configured."""
+        from app.infrastructure.secrets import resolve_secret
+
+        return resolve_secret(self.credentials_ref, fallback=self._password_secret or "")
+
+    @password_secret.setter
+    def password_secret(self, value: str | None) -> None:
+        from app.infrastructure.secrets import SecretStoreError, store_secret, uses_external_store
+
+        value = value or ""
+        if uses_external_store():
+            try:
+                self.credentials_ref = store_secret(value, kind="camera", ref=self.credentials_ref or None)
+                self._password_secret = ""
+                return
+            except SecretStoreError:
+                pass  # fall back to the legacy column rather than losing the credential
+        self._password_secret = value
+
+    def has_password(self) -> bool:
+        return bool(self._password_secret) or bool(self.credentials_ref)
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -177,8 +213,12 @@ class AuditLog(Base):
 class Tariff(Base):
     """Car1 tariff snapshot. Portable JSON so PostgreSQL can take over later."""
     __tablename__ = "tariffs"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_tariffs_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), index=True)
     car_type: Mapped[str] = mapped_column(String(40), default="Car1", index=True)
     currency: Mapped[str] = mapped_column(String(8), default="TZS")
     source: Mapped[str] = mapped_column(String(200), default="Car1")
@@ -244,8 +284,12 @@ class VehicleCapture(Base):
 class AccessPlan(Base):
     """Season / VIP / staff policy. Registered plates use a plan, not RFID cards."""
     __tablename__ = "access_plans"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_access_plans_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), index=True)
     kind: Mapped[str] = mapped_column(String(40), default="MONTHLY", index=True)
     auto_open: Mapped[bool] = mapped_column(Boolean, default=True)
     print_receipt: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -257,8 +301,12 @@ class AccessPlan(Base):
 class RegisteredVehicle(Base):
     """Plate that may auto-open because it is on an access plan."""
     __tablename__ = "registered_vehicles"
+    __table_args__ = (UniqueConstraint("site_id", "plate", name="uq_registered_vehicles_site_plate"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    plate: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    plate: Mapped[str] = mapped_column(String(32), index=True)
     owner_name: Mapped[str] = mapped_column(String(160), default="")
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

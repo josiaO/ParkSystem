@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_timeout_seconds: float = 8.0
+    # Where camera credentials live: auto (= dpapi on Windows, db elsewhere),
+    # dpapi, file, memory, or db (legacy raw column).
+    secrets_backend: str = "auto"
     hvx_host_url: str = "http://127.0.0.1:8765"
     alpr_mode: str = "FASTALPR_ONLY"
     alpr_engine: str = "fastalpr"

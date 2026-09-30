@@ -2,19 +2,22 @@
 
 This phase is **not complete**. The baseline commit repaired recognition
 isolation, event transport, capture policy and route entitlement. Four Codex
-slices have since landed on top of it, each behind a rollback flag:
+slices have since landed on top of it, each behind a rollback flag, followed by
+the §11/§12 platform slice:
 
 | Slice | Commit | Rollback |
 | --- | --- | --- |
 | §4 MediaMTX role-aware paths, Control API telemetry, WHEP, codec reporting | `468a841` | `live_view_provider=DIRECT_LEGACY`, `media_gateway_enabled=false` |
 | §6.3 Process-safe native/FastALPR hybrid fusion, weighted consensus, durable event idempotency | `45ea6ce` | camera `recognition_mode` ≠ HYBRID; `fastalpr_new_pipeline_enabled=false` |
 | §8 Flutterwave TEST + ClickPesa (live-disabled) providers, verified settlement, reconciliation, public ingress guard | `a2a6543` | `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=simulated` (default) |
-| §7 ONVIF Media2 discovery (GetServices/GetProfiles/GetStreamUri/GetSnapshotUri), Profile M plate events → recognition contract | this slice | `PATCH /cameras/{id}/onvif/events {"enabled": false}` or `adapter_id=rtsp` |
+| §7 ONVIF Media2 discovery (GetServices/GetProfiles/GetStreamUri/GetSnapshotUri), Profile M plate events → recognition contract | `31a8932` | `PATCH /cameras/{id}/onvif/events {"enabled": false}` or `adapter_id=rtsp` |
+| §11/§12 Alembic runner + site-scoped constraints, SecretStore (`credentials_ref`), redaction of API/log/exception/diagnostics output | this slice | `SMARTPARK_SECRETS_BACKEND=db` for credentials; schema: `alembic downgrade 0001_baseline` after a file backup |
 
 No external payment provider is *active* by default and no cloud AI was
 activated. Existing HVX SDK host, vendor bindings and physical gate adapters
 were preserved. See `docs/MEDIAMTX-INTEGRATION.md`, `docs/FASTALPR-PIPELINE.md`
-`docs/MOBILE-MONEY-PROVIDERS.md` and `docs/ONVIF-MEDIA2-PROFILE-M.md` for each slice.
+`docs/MOBILE-MONEY-PROVIDERS.md`, `docs/ONVIF-MEDIA2-PROFILE-M.md`,
+`docs/DATABASE-MIGRATIONS.md` and `docs/SECRETS-AND-REDACTION.md` for each slice.
 
 ## Automated checks
 
@@ -43,9 +46,20 @@ intents, provider outage leaves cash/kiosk working, ClickPesa live-disabled
 with no network call, official ClickPesa checksum algorithm, and the public
 ingress guard hiding every non-payment route on tunnel hostnames.
 
-Latest automated result: **385 tests passed** (baseline 286 → 326 after fusion
-→ 364 after payments → 385 after ONVIF), with one pre-existing Starlette/httpx deprecation
-warning; compilation, evaluation CLI smoke check and diff whitespace checks pass.
+The platform slice adds: a pre-Alembic SQLite file (raw `UNIQUE (name)`
+tables, `gates.site_id NULL`) adopted to head with `site_id` backfilled and
+per-site uniqueness, fresh files stamped at head, second run a no-op, the same
+name accepted on two sites and rejected on one, camera passwords stored behind
+`credentials_ref` with the legacy column emptied, startup migration of
+plaintext rows, `db` rollback still reading moved credentials, file store 0600
+permissions and ref validation, redaction of URL credentials / key-value
+secrets / key formats / registered values / logging records, camera API never
+echoing the password or RTSP credential, and a redacted diagnostics bundle.
+
+Latest automated result: **403 tests passed** (baseline 286 → 326 after fusion
+→ 364 after payments → 385 after ONVIF → 403 after platform), with one
+pre-existing Starlette/httpx deprecation warning; compilation, evaluation CLI
+smoke check and diff whitespace checks pass.
 
 ## Outbox upgrade and rollback
 
@@ -125,6 +139,19 @@ do not infer successful hardware operation from unit tests.
     `VehicleCapture` per read, snapshot evidence attached, and reconnect backoff
     after unplugging the camera. Cameras without plate topics must keep the
     Recognition Worker path.
+13. **Schema adoption.** Back up `%PROGRAMDATA%\SmartParkEdge\smartpark.db`,
+    start the Site Service once and confirm the log line `schema adopt:
+    revision=0002_site_scoped_constraints`, then `GET /health/details` →
+    `database.schema.up_to_date=true`. Existing gates/cameras must keep their
+    names and show `site_id=1`. A second start must log nothing about schema.
+14. **DPAPI secrets (Windows-only, unverified here).** With the default
+    `SMARTPARK_SECRETS_BACKEND=auto` confirm `GET /health/details` →
+    `secret_store.backend=dpapi`, that `%PROGRAMDATA%\SmartParkEdge\secrets\`
+    fills with one `.bin` per camera after the first start, that the
+    `cameras.password_secret` column is empty and `credentials_ref` set, and
+    that HVX login and RTSP/ONVIF connects still succeed. Then fetch
+    `GET /health/diagnostics` and search the JSON for any camera password —
+    none may appear.
 
 ## Outstanding engineering requirements
 
@@ -134,13 +161,14 @@ do not infer successful hardware operation from unit tests.
 - Real video-reader lifecycle integration and soak evidence for the MediaMTX
   path plan/telemetry landed in `468a841`.
 - Real-camera verification of ONVIF Media2 discovery and Profile M plate topics
-  (capability-driven discovery, pull-point poller and normalisation landed in this slice).
+  (capability-driven discovery, pull-point poller and normalisation landed in `31a8932`).
 - End-to-end Flutterwave TEST transaction against the real sandbox and ClickPesa
   merchant testing (adapters, verification, reconciliation, idempotency and the
-  public ingress guard landed in this slice; refunds remain dashboard-only).
+  public ingress guard landed in `a2a6543`; refunds remain dashboard-only).
 - Optional Gemini reviewer with privacy/budget/timeouts and no gate authority.
-- Alembic migrations, site-scoped constraints, PostgreSQL acceptance, SecretStore
-  integration and complete diagnostics redaction.
+- PostgreSQL acceptance run of revision `0002` and DPAPI execution on Windows
+  (Alembic runner, site-scoped constraints, SecretStore with `credentials_ref`
+  and API/log/exception/diagnostics redaction landed in this slice).
 - Full API-router extraction and runtime supervision/health enforcement for every
   disabled optional background/scheduled job.
 - The hardware and soak procedure above.

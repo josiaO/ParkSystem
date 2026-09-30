@@ -13,9 +13,6 @@ import time
 from typing import Any
 
 ZERO_DECIMAL_CURRENCIES = {"TZS", "UGX", "RWF", "XAF", "XOF", "JPY", "KRW"}
-_SECRET_KEY_HINTS = ("secret", "key", "token", "hash", "authorization", "password", "pin", "signature", "checksum")
-_PHONE_KEY_HINTS = ("phone", "msisdn", "mobile")
-
 
 def to_decimal(value: Any, default: Decimal | None = None) -> Decimal:
     """Parse provider/user input into Decimal without going through float."""
@@ -102,36 +99,18 @@ def new_reference(prefix: str = "SP") -> str:
     return f"{prefix}-{int(time.time())}-{secrets.token_hex(6).upper()}"
 
 
-def redact(value: Any, *, _depth: int = 0) -> Any:
+def redact(value: Any) -> Any:
     """Deep-copy *value* masking secrets and phone numbers. Safe for API/logs."""
-    if _depth > 8:
-        return "…"
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            k = str(key)
-            kl = k.lower()
-            if any(h in kl for h in _SECRET_KEY_HINTS):
-                out[k] = "***" if item not in (None, "") else item
-            elif any(h in kl for h in _PHONE_KEY_HINTS) and isinstance(item, (str, int)):
-                out[k] = mask_msisdn(str(item))
-            else:
-                out[k] = redact(item, _depth=_depth + 1)
-        return out
-    if isinstance(value, list):
-        return [redact(v, _depth=_depth + 1) for v in value[:50]]
-    if isinstance(value, (bytes, bytearray)):
-        return f"<{len(value)} bytes>"
-    return value
+    from app.services.redaction import redact_obj
+
+    return redact_obj(value)
 
 
 def scrub_text(text: str, *secrets_: str) -> str:
     """Remove known secret material from free text (exceptions, error bodies)."""
-    out = text or ""
-    for s in secrets_:
-        if s and len(s) >= 6:
-            out = out.replace(s, "***")
-    return out[:600]
+    from app.services.redaction import redact_text
+
+    return redact_text(text or "", extra=tuple(s for s in secrets_ if s))[:600]
 
 
 class ProviderError(RuntimeError):

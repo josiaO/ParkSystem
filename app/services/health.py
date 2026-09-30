@@ -220,8 +220,9 @@ def details() -> dict:
             "onvif_events": _onvif_events_stats(),
         },
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
-        "database": {"ok": True, "avg_query_ms": _avg(_db_latencies)},
+        "database": {"ok": True, "avg_query_ms": _avg(_db_latencies), "schema": _schema_status()},
         "payment": _payments_stats(),
+        "secret_store": _secrets_status(),
     }
     body = {
         "ok": True,
@@ -249,6 +250,7 @@ def details() -> dict:
         "database": {
             "avg_query_ms": _avg(_db_latencies),
             "slow_queries": list(_slow_queries),
+            "schema": _schema_status(),
         },
         "api": {"avg_latency_ms": _avg(_api_latencies)},
         "queues": queue_snapshots(),
@@ -258,7 +260,28 @@ def details() -> dict:
         "disk": _disk(settings.data_dir),
         "time": datetime.now(timezone.utc).isoformat(),
     }
-    return health_cache.set("details", body, ttl=1.0)
+    from app.services.redaction import redact_obj
+
+    return health_cache.set("details", redact_obj(body), ttl=1.0)
+
+
+def _schema_status() -> dict:
+    try:
+        from app.db import engine
+        from app.migrations.runner import status
+
+        return status(engine)
+    except Exception as exc:
+        return {"error": str(exc)[:200], "up_to_date": False}
+
+
+def _secrets_status() -> dict:
+    try:
+        from app.infrastructure.secrets import describe
+
+        return describe()
+    except Exception as exc:
+        return {"backend": "unknown", "error": str(exc)[:200]}
 
 
 def _disk(path) -> dict:

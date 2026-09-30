@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import logging
 import time
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
+from .domain.site import DEFAULT_SITE_ID
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
@@ -28,6 +30,9 @@ from .core.fusion import resolve_readings
 from .infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
 from .infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
 from .services.alpr import status as alpr_status
+from .services.redaction import redact_text
+
+log = logging.getLogger("smartpark")
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
 from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event, should_persist_vehicle_capture
@@ -121,6 +126,12 @@ async def lifespan(app: FastAPI):
         ensure_modules_initialized(db)
         ensure_default_site(db)
         sync_gate_lanes_from_cameras(db)
+        from .services.secrets_migration import migrate_plaintext_secrets
+
+        try:
+            migrate_plaintext_secrets(db)
+        except Exception as exc:  # a secret-store problem must not stop parking
+            log.warning("secrets migration skipped: %s", exc)
     mark_core_ready()
     start_idle_watch()
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
@@ -155,6 +166,23 @@ app.router.route_class = ModuleRoute
 # Requests arriving via the public payments tunnel may only reach /p/*,
 # /api/public/* and /api/webhooks/*. No-op when no ingress host is configured.
 app.add_middleware(PublicIngressGuard)
+
+
+@app.exception_handler(HTTPException)
+async def _redacted_http_exception(request: Request, exc: HTTPException):
+    """Error bodies never carry RTSP passwords, provider keys or webhook hashes."""
+    from .services.redaction import redact_obj
+
+    return JSONResponse({"detail": redact_obj(exc.detail)}, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(Exception)
+async def _redacted_unhandled_exception(request: Request, exc: Exception):
+    """Unhandled errors log the redacted traceback and return a redacted message."""
+    from .services.redaction import redact_text
+
+    log.error("unhandled error on %s %s: %s", request.method, request.url.path, redact_text(repr(exc)), exc_info=exc)
+    return JSONResponse({"detail": redact_text(f"{type(exc).__name__}: {exc}")[:400]}, status_code=500)
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
@@ -221,6 +249,13 @@ def health_ready():
 def health_details(_: User = Depends(require("hardware.view"))):
     from .services.health import details
     return details()
+
+
+@app.get("/health/diagnostics")
+def health_diagnostics(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+    """Support bundle: health, schema, secrets backend, cameras. Always redacted."""
+    from .services.diagnostics import bundle
+    return bundle(db)
 
 
 @app.get("/auth/setup")
@@ -521,7 +556,10 @@ def camera_dict(c: Camera):
         plate_engine = "fastalpr"
     return {
         "id": c.id, "name": c.name, "ip_address": c.ip_address, "sdk_port": c.sdk_port,
+        "site_id": getattr(c, "site_id", None) or DEFAULT_SITE_ID,
         "username": c.username, "gate_id": c.gate_id, "gate_name": lane_name,
+        "credentials_ref": getattr(c, "credentials_ref", "") or "",
+        "password_configured": bool(c.has_password()) if hasattr(c, "has_password") else False,
         "lane_name": lane_name or "",
         "side": side_label(c.lane_direction),
         "lane_direction": c.lane_direction,
@@ -537,7 +575,9 @@ def camera_dict(c: Camera):
         "model_name": getattr(c, "model_name", None) or "",
         "serial": getattr(c, "serial", None) or "",
         "timezone": getattr(c, "timezone", None) or "",
-        "rtsp_url": c.rtsp_url, "status": c.status, "sdk_handle": c.sdk_handle,
+        # Embedded RTSP credentials never leave the API; PATCH accepts the masked
+        # form back unchanged (see update_camera).
+        "rtsp_url": redact_text(c.rtsp_url or ""), "status": c.status, "sdk_handle": c.sdk_handle,
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(getattr(c, "stream_profiles", None) or {}),
@@ -1306,6 +1346,8 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
         data.pop("password", None)
     else:
         data["password_secret"] = data.pop("password")
+    if "rtsp_url" in data and data["rtsp_url"] and data["rtsp_url"] == redact_text(c.rtsp_url or ""):
+        data.pop("rtsp_url")  # masked value round-tripped from the edit form; keep the stored URL
     if "gate_id" in data and data["gate_id"] is not None:
         get_gate_or_404(db, data["gate_id"])
     if data.get("adapter_id"):
@@ -1337,8 +1379,15 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
 def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
     c = get_camera_or_404(db, camera_id)
     name = c.name
+    ref = getattr(c, "credentials_ref", "") or ""
     db.delete(c)
     db.commit()
+    if ref:
+        from .infrastructure.secrets import secret_store
+        try:
+            secret_store().delete(ref)
+        except Exception as exc:
+            log.warning("camera %s: could not delete stored credential %s: %s", camera_id, ref, exc)
     write_audit(db, user, "camera.delete", "camera", str(camera_id), f"Deleted {name}")
     return {"ok": True}
 
