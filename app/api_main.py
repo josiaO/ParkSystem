@@ -122,7 +122,7 @@ async def lifespan(app: FastAPI):
         sync_gate_lanes_from_cameras(db)
     mark_core_ready()
     start_idle_watch()
-    # MediaMTX has one owner: SmartParkMediaService. The Site Service only
+    # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
     # consumes its local control/stream endpoints and must not spawn a competing
     # sidecar process.
     ingest = asyncio.create_task(_camera_event_loop(), name="camera-events")
