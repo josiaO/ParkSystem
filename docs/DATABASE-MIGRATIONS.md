@@ -18,6 +18,8 @@ app/migrations/alembic/env.py            target_metadata = Base.metadata, batch 
 app/migrations/alembic/versions/
   0001_baseline.py                       empty marker = "schema as create_all produced it"
   0002_site_scoped_constraints.py        site_id + per-site uniqueness + cameras.credentials_ref
+  0003_vehicle_capture_ai_review.py      vehicle_captures.ai_review JSON
+  0004_parking_session_engine.py         session site_id, lanes, lifecycle, event ids, open-plate uniqueness
 ```
 
 ## What happens at start-up
