@@ -9,7 +9,7 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 | --- | --- | --- |
 | 0 Baseline and safety | PASS | `6a63eb0` |
 | 1 Parking domain engine | PASS | `f1c5e85` |
-| 2 Recognition good enough for a session | not started | |
+| 2 Recognition good enough for a session | PASS | |
 | 3 Receipt and QR | not started | |
 | 4 Entry orchestration | not started | |
 | 5 Tariff and local payment | not started | |
@@ -159,6 +159,47 @@ Filled after commit.
 
 ---
 
-## Phase 2 —
+## Phase 2 — Recognition good enough for a session
 
-(not started)
+### Implemented behavior
+
+- Parking consumes `NormalizedRecognitionEvent` (`app/domain/recognition.py`): `event_id`, `site_id`, `camera_id`, `lane_id`, `occurred_at`, `provider`, `plate_raw`, `plate_normalized`, `confidence`, `bbox`, `vehicle_detected`, `image_ref`, `plate_crop_ref`. Native ALPR and FastALPR map to the same contract (`provider` aliases `source`).
+- `LaneRecognitionEngine` (`app/domain/recognition_engine.py`) wraps the existing `ConsensusTrack` + `FusionCoordinator`. No printers, HVX DLLs, or UI.
+- Temporal consensus is configurable (`SMARTPARK_RECOGNITION_CONSENSUS_WINDOW_SECONDS`, default 2s). HIGH ≥ 0.92 / MEDIUM ≥ 0.75 / LOW below that. LOW never becomes a parking candidate. Tanzania OCR corrections stay opt-in (`plate_validation=TZ`).
+- Modes: `NATIVE_ONLY`, `FASTALPR_ONLY`, `HYBRID`. HYBRID agreement → one event; disagreement → held, no session; a missing counterpart uses the available provider after wait.
+- Presence-capable lanes ignore background plates until occupied. Stale frames older than 1000 ms are dropped (`LatestFrameBuffer` latest-wins). The recognition worker reads the same window/stale policy.
+- `start_entry_from_recognition` is the only parking ingest for this contract. Live `handle_plate_event` is unchanged until Phase 4.
+- Accuracy harness (`tools.evaluate_alpr`) now also reports `duplicate_event_rate` and `false_session_creation` when labels carry `visit_id` / `session_expected`.
+
+### Tests run
+
+```text
+.venv/bin/python -m compileall -q app tools
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_parking_recognition.py tests/test_alpr_evaluation.py
+.venv/bin/python -m pytest -q -p no:cacheprovider
+git diff --check
+```
+
+### Test results
+
+**454 passed** (439 Phase 1 + 14 parking-recognition + 1 evaluation metric test), 1 pre-existing Starlette/httpx warning. `compileall` exit 0.
+
+### Unresolved hardware verification
+
+Same as Phase 0/1. Native HVX + FastALPR agreement was simulated, not driven through a physical lane. Presence sensor still optional (`presence_capable`).
+
+### Known limitations
+
+- Live cameras still publish through `handle_plate_event` (Phase 4 wires `LaneRecognitionEngine` into the orchestrator).
+- Receipt printing and gate OPEN are still out of this phase.
+- Default consensus still needs two agreeing reads; a single HIGH frame does not skip the track (avoids one-OCR-frame sessions).
+- Evaluation metrics for duplicate/false-session require labelled `visit_id` / `session_expected` fields; the smoke fixture does not include them.
+
+### Phase 3 implementation plan (do this next; do not start Phase 4)
+
+1. ReceiptPrinterAdapter protocol (print / status / presented / taken / recover) with capability flags. Simulated adapter for development; do not claim production taken-sensor if hardware lacks it.
+2. One high-entropy public token on the session (raise entropy; unique DB constraint). Short human reference is separate and not the auth token. QR payload locally resolvable.
+3. Print job tied to `session_id` + `print_job_id`; retries must not create a second session. Receipt-taken is lane policy `RECEIPT_REQUIRED_BEFORE_OPEN`, not a global constant.
+4. Tests listed in the sequential prompt (token uniqueness, QR lookup, retry, duplicate taken, paper/offline, never-taken timeout, audited override). Do not send gate OPEN in this phase.
+
+Filled after commit.

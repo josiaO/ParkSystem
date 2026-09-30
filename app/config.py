@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     site_language: str = "en"
     plate_normalization: str = "ALNUM_UPPER"
     plate_validation: str = "NONE"
+    recognition_consensus_window_seconds: float = 2.0
+    recognition_high_confidence: float = 0.92
+    recognition_medium_confidence: float = 0.75
 
     @field_validator("api_port", "default_hvx_sdk_port", "board_tcp_port", "led_udp_port", "printer_escpos_port")
     @classmethod
@@ -151,6 +154,22 @@ class Settings(BaseSettings):
         if not 1.0 <= fps <= 30.0:
             raise ValueError("SMARTPARK_DETECT_FPS must be between 1 and 30")
         return fps
+
+    @field_validator("recognition_consensus_window_seconds")
+    @classmethod
+    def _consensus_window(cls, value: float) -> float:
+        seconds = float(value)
+        if not 0.2 <= seconds <= 30.0:
+            raise ValueError("SMARTPARK_RECOGNITION_CONSENSUS_WINDOW_SECONDS must be between 0.2 and 30")
+        return seconds
+
+    @field_validator("recognition_high_confidence", "recognition_medium_confidence")
+    @classmethod
+    def _confidence_range(cls, value: float) -> float:
+        score = float(value)
+        if not 0.0 <= score <= 1.0:
+            raise ValueError("Recognition confidence thresholds must be between 0 and 1")
+        return score
 
     @field_validator("alpr_mode")
     @classmethod

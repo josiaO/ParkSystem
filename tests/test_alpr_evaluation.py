@@ -28,6 +28,23 @@ class EvaluationTests(unittest.TestCase):
         self.assertIsNone(report["detection_recall"])
         self.assertIsNone(report["false_acceptance_rate"])
         self.assertIsNone(report["latency_ms"]["mean"])
+        self.assertIsNone(report["duplicate_event_rate"])
+        self.assertIsNone(report["false_session_creation"])
+
+    def test_visit_duplicate_and_false_session_metrics(self):
+        labels = [
+            {"id": "a", "plate": "ABC", "visit_id": "v1", "session_expected": True},
+            {"id": "b", "plate": "ABC", "visit_id": "v1", "session_expected": True},
+            {"id": "c", "plate": "", "visit_id": "v2", "session_expected": False},
+        ]
+        predictions = [
+            {"id": "a", "plate": "ABC", "event_id": "e1", "session_created": True},
+            {"id": "b", "plate": "ABC", "event_id": "e2", "session_created": True},
+            {"id": "c", "plate": "XYZ", "event_id": "e3", "session_created": True},
+        ]
+        overall = evaluate(labels, predictions)["overall"]
+        self.assertEqual(overall["duplicate_event_rate"], 0.5)
+        self.assertEqual(overall["false_session_creation"], 1.0)
 
     def test_invalid_latency_is_rejected(self):
         with self.assertRaises(ValueError):
