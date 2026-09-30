@@ -17,6 +17,7 @@ from app.config import settings as app_settings
 from app.core.plate import normalize_plate
 from app.domain.gates import should_pulse_physical
 from app.infrastructure.payments.ledger import record_succeeded_payment
+from app.domain.site import DEFAULT_SITE_ID
 from app.models import Camera, Gate, ParkingSession, SiteSetting, utcnow
 from app.services.access import Entitlement, lookup_entitlement
 from app.services.decisions import record_access_decision, record_gate_command
@@ -200,8 +201,11 @@ def create_entry(
     token = secrets.token_urlsafe(10)
     tariff = ensure_car1_tariff(db)
     entitlement = entitlement or Entitlement(plate=plate)
+    site_id = getattr(gate, "site_id", None) or DEFAULT_SITE_ID
     row = ParkingSession(
+        site_id=site_id,
         plate=plate,
+        plate_raw=plate,
         gate_id=gate.id if gate else None,
         camera_id=camera.id if camera else None,
         lane_direction=(side or "ENTRY").upper(),

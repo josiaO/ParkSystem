@@ -7,8 +7,8 @@ Do not start mobile/public payment web, cloud AI, watchlists, or multi-site clou
 
 | Phase | Status | Commit |
 | --- | --- | --- |
-| 0 Baseline and safety | PASS | (this commit) |
-| 1 Parking domain engine | not started | |
+| 0 Baseline and safety | PASS | `6a63eb0` |
+| 1 Parking domain engine | PASS | (this commit) |
 | 2 Recognition good enough for a session | not started | |
 | 3 Receipt and QR | not started | |
 | 4 Entry orchestration | not started | |
@@ -120,9 +120,44 @@ Do not touch printers, UI, MediaMTX, HVX host, or recognition internals in Phase
 
 ---
 
-## Phase 1 —
+## Phase 1 — Parking domain engine
 
-(not started)
+### Implemented behavior
+
+- Explicit lifecycle in `app/domain/parking_engine.py` with `InvalidTransition` for illegal jumps (including `SESSION_CREATED → GATE_OPEN_REQUESTED` when receipt must be taken).
+- Persistence in `app/services/parking_sessions.py`: `start_entry`, `mark_receipt_taken`, `request_entry_open`, `mark_vehicle_passed`, `start_exit`, `complete_authorized_exit`. No HVX/printer imports.
+- Alembic `0004`: `site_id`, lane/camera/event ids, `lifecycle`, receipt/payment timestamps, partial unique indexes for `(site_id, entry_event_id)` and one open plate per site.
+- Stored `status` values unchanged so live `simulation.py` and reports keep working.
+- Passage fallback `OPEN_COMMAND_COUNTS_AS_PASSED` (default) vs `WAIT_FOR_PASSAGE`.
+- Site-wide sessions: enter lane A, exit lane B.
+
+### Tests run
+
+```text
+.venv/bin/python -m compileall -q app tools
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_parking_engine.py
+.venv/bin/python -m pytest -q -p no:cacheprovider
+git diff --check
+```
+
+### Test results
+
+**439 passed** (421 baseline + 18 parking-engine tests), 1 pre-existing Starlette/httpx warning.
+
+### Unresolved hardware verification
+
+Same as Phase 0. Passage sensors not wired; default policy counts OPEN as passed.
+
+### Known limitations
+
+- Live cameras still use `handle_plate_event` (Phase 4 will switch the orchestrator).
+- `simulation.create_entry` does not yet write `entry_event_id` / `lifecycle`.
+- Public token entropy still Phase 3.
+- No printer/taken-sensor in this phase (by design).
+
+### Commit SHA
+
+Filled after commit.
 
 ---
 
