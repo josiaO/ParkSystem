@@ -1429,19 +1429,35 @@ async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User 
     from app.infrastructure.media import registry as media_registry
     live_endpoint = await media_registry.get_live_endpoint(c.id, db)
     detect_endpoint = await media_registry.get_detect_endpoint(c.id, db)
+    evidence_endpoint = await media_registry.get_evidence_endpoint(c.id, db)
+    mediamtx_telemetry = (
+        media_registry.media_telemetry(c.id)
+        if media_registry.mediamtx_detect_active(c.id, db) or media_registry.mediamtx_live_active(c.id, db)
+        else None
+    )
+    warnings = profile_warnings(profiles, upstream_consumers=1 if health.get("pumping") else 0)
+    if mediamtx_telemetry:
+        compat = mediamtx_telemetry.get("webrtc") or {}
+        if compat.get("compatible") is False and compat.get("reason"):
+            warnings.append(str(compat["reason"]))
+        for role, row in (mediamtx_telemetry.get("roles") or {}).items():
+            lost = int(((row.get("rtp") or {}).get("packets_lost")) or 0)
+            if lost:
+                warnings.append(f"{role}: {lost} RTP packets lost")
     return {
         "camera": camera_dict(c),
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(profiles),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),
-        "warnings": profile_warnings(profiles, upstream_consumers=1 if health.get("pumping") else 0),
-        "media": health,
+        "warnings": warnings,
+        "media": {**health, "mediamtx": mediamtx_telemetry},
         "profiles": list_profiles(),
         "live_url": f"/cameras/{c.id}/live.mjpeg",
         "main_url": f"/cameras/{c.id}/live.mjpeg?role=MAIN",
         "live_endpoint": live_endpoint,
         "detect": detect_endpoint,
+        "evidence": evidence_endpoint,
     }
 
 
@@ -1499,13 +1515,22 @@ async def media_gateway_health(db: Session = Depends(get_db), _: User = Depends(
     from .services.flags import flags as migration_flags
     sessions = gateway.live_metrics()
     pids = gateway.child_pids()
+    mediamtx_health = mediamtx.health()
+    mediamtx_paths: dict = {}
+    if mediamtx_health.get("running"):
+        try:
+            from .services.mediamtx_telemetry import refresh as mediamtx_refresh
+            mediamtx_paths = dict(mediamtx_refresh().get("paths") or {})
+        except Exception as exc:
+            mediamtx_paths = {"error": str(exc)[:200]}
     return {
         "cameras": sessions,
         "child_pids": pids,
         "ffmpeg_profiles": list_profiles(),
         "decode": await detect_decode_path(),
         "local": {"sessions": sessions, "child_pids": pids},
-        "mediamtx": mediamtx.health(),
+        "mediamtx": mediamtx_health,
+        "mediamtx_paths": mediamtx_paths,
         "flags": migration_flags(db),
         "rollback": {
             "live_view_provider": ["DIRECT_LEGACY", "MEDIAMTX"],
