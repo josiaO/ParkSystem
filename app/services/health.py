@@ -25,6 +25,16 @@ def note_api_latency(ms: float) -> None:
     _api_latencies.append(float(ms))
 
 
+def _hybrid_fusion_stats() -> dict:
+    try:
+        from app.services.hybrid_fusion import stats
+
+        body = stats()
+        return {k: v for k, v in body.items() if k != "recent"}
+    except Exception as exc:  # health must never fail because of a stats helper
+        return {"error": str(exc)[:120]}
+
+
 def note_db_latency(ms: float, statement: str = "") -> None:
     _db_latencies.append(float(ms))
     if ms >= 200:
@@ -176,7 +186,12 @@ def details() -> dict:
     domains = {
         "camera_connection": {"ok": hvx_ok or not hvx.get("required", True), "detail": camera_detail},
         "media_gateway": {"ok": True, "local_sessions": len(gateway.live_metrics()), "mediamtx": mediamtx.health()},
-        "recognition": {"ok": True, "alpr_mode": alpr_mode(), "native_alpr_enabled": migration_flags().get("native_alpr_enabled")},
+        "recognition": {
+            "ok": True,
+            "alpr_mode": alpr_mode(),
+            "native_alpr_enabled": migration_flags().get("native_alpr_enabled"),
+            "hybrid_fusion": _hybrid_fusion_stats(),
+        },
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
         "database": {"ok": True, "avg_query_ms": _avg(_db_latencies)},
         "payment": {"ok": True},

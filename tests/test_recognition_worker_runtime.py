@@ -98,11 +98,14 @@ class CameraSelectionTests(unittest.TestCase):
                 db.commit()
             with patch("app.db.SessionLocal", factory), patch("app.services.flags.media_mtx_for_camera", return_value=True):
                 rows = _camera_rows()
-                self.assertEqual(len(rows), 1)
+                # FASTALPR_ONLY publishes accepted plates; HYBRID publishes FastALPR
+                # candidates for Site Service fusion. NATIVE_ONLY/VIDEO_ONLY never
+                # run software reads in the worker.
+                self.assertEqual(sorted(row["recognition_mode"] for row in rows), ["LOCAL_ONLY", "NATIVE_WITH_LOCAL_VERIFY"])
                 self.assertEqual(rows[0]["plate_policy"]["plate_validation"], "TZ")
                 with factory() as db:
-                    row = db.get(Camera, 1)
-                    row.enabled = False
+                    for ident in (1, 3):
+                        db.get(Camera, ident).enabled = False
                     db.commit()
                 self.assertEqual(_camera_rows(), [])
         finally:

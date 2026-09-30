@@ -148,14 +148,20 @@ class SQLiteOutbox:
     Legacy JSONL is imported once transactionally and retained for rollback.
     """
 
+    PROCESSED_RETENTION_SECONDS = 7 * 24 * 3600.0
+
     def __init__(self, path: Path, *, legacy_path: Path | None = None):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.acked = 0
         self.failed = 0
+        self.duplicates = 0
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, ts REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # Business-event idempotency that survives a crash between "processed"
+            # and "acknowledged": the ack and the processed mark commit together.
+            db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY, ts REAL NOT NULL)")
             db.execute("BEGIN IMMEDIATE")
             if not db.execute("SELECT 1 FROM metadata WHERE key = 'legacy_imported'").fetchone():
                 if legacy_path is not None and legacy_path.is_file():
@@ -188,10 +194,24 @@ class SQLiteOutbox:
             rows = db.execute("SELECT id, kind, payload, ts FROM events ORDER BY sequence LIMIT ?", (max(0, int(limit)),)).fetchall()
         return [{"id": row[0], "kind": row[1], "payload": json.loads(row[2]), "ts": row[3]} for row in rows]
 
-    def ack(self, item_id: str) -> None:
+    def ack(self, item_id: str, *, processed_key: str | None = None) -> None:
+        """Delete the row and, atomically, remember ``processed_key`` as done."""
         with self._connect() as db:
             cursor = db.execute("DELETE FROM events WHERE id = ?", (item_id,))
             self.acked += cursor.rowcount
+            if processed_key:
+                now = time.time()
+                db.execute("INSERT OR REPLACE INTO processed (key, ts) VALUES (?, ?)", (str(processed_key), now))
+                db.execute("DELETE FROM processed WHERE ts < ?", (now - self.PROCESSED_RETENTION_SECONDS,))
+
+    def was_processed(self, key: str | None) -> bool:
+        if not key:
+            return False
+        with self._connect() as db:
+            hit = db.execute("SELECT 1 FROM processed WHERE key = ?", (str(key),)).fetchone()
+        if hit:
+            self.duplicates += 1
+        return bool(hit)
 
     def note_failure(self) -> None:
         self.failed += 1
@@ -202,7 +222,7 @@ class SQLiteOutbox:
 
     def snapshot(self) -> dict:
         return {"name": "outbox", "backend": "sqlite", "depth": self.depth(),
-                "acked": self.acked, "failed": self.failed, "path": str(self.path)}
+                "acked": self.acked, "failed": self.failed, "duplicates": self.duplicates, "path": str(self.path)}
 
 
 VIDEO_FRAMES = BoundedQueue("video-frames", maxsize=1, overflow="drop_oldest")

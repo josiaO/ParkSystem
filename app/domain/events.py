@@ -165,6 +165,8 @@ def from_recognition_dict(recognition: dict[str, Any]) -> dict[str, Any]:
         bbox=recognition.get("bbox"),
         needs_review=bool(recognition.get("needs_review")),
         validation_ok=recognition.get("validation_ok"),
+        **{k: recognition[k] for k in ("consensus", "recognition_mode", "fusion_role", "frame_plate", "frame_confidence")
+           if k in recognition},
     )
     if recognition.get("event_id"):
         event["event_id"] = recognition["event_id"]
