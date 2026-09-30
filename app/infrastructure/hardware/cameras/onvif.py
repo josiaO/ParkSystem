@@ -32,10 +32,31 @@ class ONVIFCameraAdapter:
         }
 
     async def health(self, device: CameraLike) -> dict[str, Any]:
-        return {"ok": False, "adapter_id": self.id, "message": "ONVIF adapter is a stub"}
+        profile = dict(getattr(device, "onvif_profile", None) or {})
+        caps = dict(profile.get("capabilities") or {})
+        if not profile:
+            return {"ok": False, "adapter_id": self.id, "message": "ONVIF not discovered yet; run ONVIF discovery"}
+        return {
+            "ok": bool(profile.get("media_url")),
+            "adapter_id": self.id,
+            "media_version": profile.get("media_version") or 0,
+            "profile_m": bool(caps.get("profile_m")),
+            "plate_metadata": bool(caps.get("plate_metadata")),
+            "events_enabled": bool(profile.get("events_enabled")),
+            "message": "ONVIF discovered" if profile.get("media_url") else "ONVIF media service missing",
+        }
 
     async def snapshot(self, device: CameraLike) -> bytes:
-        return b""
+        """Evidence still from the Media2/Media1 GetSnapshotUri result, never a guessed URL."""
+        profile = dict(getattr(device, "onvif_profile", None) or {})
+        uri = str(profile.get("snapshot_uri") or "")
+        if not uri:
+            return b""
+        from app.services.onvif_runtime import fetch_snapshot
+        try:
+            return await fetch_snapshot(uri, getattr(device, "username", "") or "", getattr(device, "password_secret", "") or "")
+        except Exception:
+            return b""
 
     async def live_sources(self, device: CameraLike) -> list[dict[str, Any]]:
         from app.services.onvif_discover import discover_onvif_streams

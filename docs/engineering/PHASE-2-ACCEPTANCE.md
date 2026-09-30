@@ -1,19 +1,20 @@
 # Phase 2 acceptance and remaining gates
 
 This phase is **not complete**. The baseline commit repaired recognition
-isolation, event transport, capture policy and route entitlement. Three Codex
+isolation, event transport, capture policy and route entitlement. Four Codex
 slices have since landed on top of it, each behind a rollback flag:
 
 | Slice | Commit | Rollback |
 | --- | --- | --- |
 | §4 MediaMTX role-aware paths, Control API telemetry, WHEP, codec reporting | `468a841` | `live_view_provider=DIRECT_LEGACY`, `media_gateway_enabled=false` |
 | §6.3 Process-safe native/FastALPR hybrid fusion, weighted consensus, durable event idempotency | `45ea6ce` | camera `recognition_mode` ≠ HYBRID; `fastalpr_new_pipeline_enabled=false` |
-| §8 Flutterwave TEST + ClickPesa (live-disabled) providers, verified settlement, reconciliation, public ingress guard | this slice | `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=simulated` (default) |
+| §8 Flutterwave TEST + ClickPesa (live-disabled) providers, verified settlement, reconciliation, public ingress guard | `a2a6543` | `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=simulated` (default) |
+| §7 ONVIF Media2 discovery (GetServices/GetProfiles/GetStreamUri/GetSnapshotUri), Profile M plate events → recognition contract | this slice | `PATCH /cameras/{id}/onvif/events {"enabled": false}` or `adapter_id=rtsp` |
 
 No external payment provider is *active* by default and no cloud AI was
 activated. Existing HVX SDK host, vendor bindings and physical gate adapters
 were preserved. See `docs/MEDIAMTX-INTEGRATION.md`, `docs/FASTALPR-PIPELINE.md`
-and `docs/MOBILE-MONEY-PROVIDERS.md` for each slice.
+`docs/MOBILE-MONEY-PROVIDERS.md` and `docs/ONVIF-MEDIA2-PROFILE-M.md` for each slice.
 
 ## Automated checks
 
@@ -42,8 +43,8 @@ intents, provider outage leaves cash/kiosk working, ClickPesa live-disabled
 with no network call, official ClickPesa checksum algorithm, and the public
 ingress guard hiding every non-payment route on tunnel hostnames.
 
-Latest automated result: **364 tests passed** (baseline 286 → 326 after fusion
-→ 364 after payments), with one pre-existing Starlette/httpx deprecation
+Latest automated result: **385 tests passed** (baseline 286 → 326 after fusion
+→ 364 after payments → 385 after ONVIF), with one pre-existing Starlette/httpx deprecation
 warning; compilation, evaluation CLI smoke check and diff whitespace checks pass.
 
 ## Outbox upgrade and rollback
@@ -115,6 +116,15 @@ do not infer successful hardware operation from unit tests.
     row. On the tunnel hostname, `GET /cameras`, `/gates`, `/docs` and
     `/auth/login` must return 404. ClickPesa must remain `LIVE_DISABLED` in
     `/payments/health` until documented merchant testing is approved.
+12. **ONVIF (hardware-dependent).** On a generic ONVIF camera run
+    `POST /cameras/{id}/onvif/discover` and confirm `media_version=2` (or 1 with a
+    reason), stream URIs match the device, and no credential appears in the
+    response. If the camera advertises plate topics, run
+    `POST /cameras/{id}/onvif/events/pull` while a vehicle passes and confirm a
+    normalised capture; then leave the poller running and confirm one
+    `VehicleCapture` per read, snapshot evidence attached, and reconnect backoff
+    after unplugging the camera. Cameras without plate topics must keep the
+    Recognition Worker path.
 
 ## Outstanding engineering requirements
 
@@ -123,7 +133,8 @@ do not infer successful hardware operation from unit tests.
   (process-safe hybrid fusion and durable event idempotency landed in `45ea6ce`).
 - Real video-reader lifecycle integration and soak evidence for the MediaMTX
   path plan/telemetry landed in `468a841`.
-- Verified ONVIF Media2 discovery and capability-driven Profile M events.
+- Real-camera verification of ONVIF Media2 discovery and Profile M plate topics
+  (capability-driven discovery, pull-point poller and normalisation landed in this slice).
 - End-to-end Flutterwave TEST transaction against the real sandbox and ClickPesa
   merchant testing (adapters, verification, reconciliation, idempotency and the
   public ingress guard landed in this slice; refunds remain dashboard-only).

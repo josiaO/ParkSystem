@@ -133,12 +133,16 @@ async def lifespan(app: FastAPI):
     hvx_watch = asyncio.create_task(_hvx_watch_loop(), name="hvx-watch")
     fusion_flush = asyncio.create_task(_fusion_flush_loop(), name="hybrid-fusion-flush")
     payments_reconcile = asyncio.create_task(_payments_reconcile_loop(), name="payments-reconcile")
+    from .services import onvif_runtime
+    onvif_runtime.set_persist(_onvif_capture)
+    onvif_events = asyncio.create_task(_onvif_events_loop(), name="onvif-events")
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile):
+        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events):
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, return_exceptions=True)
+        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, return_exceptions=True)
+        await onvif_runtime.shutdown()
         stop_live_pumps()
         # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
@@ -538,11 +542,34 @@ def camera_dict(c: Camera):
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(getattr(c, "stream_profiles", None) or {}),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),
+        "onvif": _camera_onvif_brief(c),
         "media": _camera_media_brief(c.id),
         "operator": {
             "camera": "Online" if c.status in (CameraStatus.SDK_CONNECTED.value, CameraStatus.VIDEO_CONNECTED.value) else "Offline",
         },
         "last_error": c.last_error, "last_seen_at": c.last_seen_at, "enabled": c.enabled,
+    }
+
+
+def _camera_onvif_brief(c: Camera) -> dict:
+    """Public-safe ONVIF summary (no credentials in URIs)."""
+    profile = dict(getattr(c, "onvif_profile", None) or {})
+    if not profile:
+        return {}
+    caps = dict(profile.get("capabilities") or {})
+    from .services import onvif_runtime
+    return {
+        "media_version": profile.get("media_version") or 0,
+        "media2": bool(caps.get("media2")),
+        "events": bool(caps.get("events")),
+        "profile_m": bool(caps.get("profile_m")),
+        "plate_metadata": bool(caps.get("plate_metadata")),
+        "plate_topics": list(caps.get("plate_topics") or [])[:10],
+        "snapshot_uri": profile.get("snapshot_uri_redacted") or "",
+        "events_enabled": bool(profile.get("events_enabled")),
+        "events_url_present": bool(profile.get("events_url")),
+        "discovered_at": profile.get("discovered_at"),
+        "poller": onvif_runtime.stats_for(c.id),
     }
 
 
@@ -1486,12 +1513,70 @@ async def camera_onvif_discover(camera_id: int, db: Session = Depends(get_db), u
     c = get_camera_or_404(db, camera_id)
     from .services.stream_discover import discover_camera_streams
     from .services.stream_roles import merge_profiles
+    from .services.onvif_profile import apply_discovery
     found = await discover_camera_streams(c.ip_address, c.username, c.password_secret, c.rtsp_url or "")
     if found.get("stream_profiles"):
         c.stream_profiles = merge_profiles(c.stream_profiles, found["stream_profiles"])
-        db.commit()
+    apply_discovery(c, found.get("onvif") or {})
+    db.commit()
     write_audit(db, user, "camera.onvif_discover", "camera", str(c.id), found.get("source") or "")
-    return {"camera": camera_dict(c), **found}
+    from .services.stream_roles import public_profiles
+    public = {k: v for k, v in found.items() if k not in {"onvif", "discovered", "stream_profiles"}}
+    public["discovered"] = _strip_credential_uris(found.get("discovered") or [])
+    public["stream_profiles"] = public_profiles(found.get("stream_profiles") or {})
+    public["onvif"] = _public_onvif_discovery(found.get("onvif") or {})
+    return {"camera": camera_dict(c), **public}
+
+
+def _strip_credential_uris(rows: list) -> list:
+    return [{k: v for k, v in dict(row).items() if k not in {"uri", "url", "snapshot_uri"}} for row in rows]
+
+
+def _public_onvif_discovery(onvif: dict) -> dict:
+    """Discovery payload without credential-bearing URIs."""
+    out = {k: v for k, v in onvif.items() if k not in {"profiles", "snapshot_uri"}}
+    out["profiles"] = _strip_credential_uris(onvif.get("profiles") or [])
+    return out
+
+
+@app.patch("/cameras/{camera_id}/onvif/events")
+async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Enable/disable Profile M plate-event pulling for a camera that advertises it."""
+    c = get_camera_or_404(db, camera_id)
+    from .services.onvif_profile import set_events_enabled
+    try:
+        set_events_enabled(c, bool(payload.get("enabled")))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    db.commit()
+    write_audit(db, user, "camera.onvif_events", "camera", str(c.id), "on" if payload.get("enabled") else "off")
+    return camera_dict(c)
+
+
+@app.post("/cameras/{camera_id}/onvif/events/pull")
+async def camera_onvif_events_pull(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Hardware-lab diagnostic: one subscribe → pull → unsubscribe round trip."""
+    c = get_camera_or_404(db, camera_id)
+    profile = dict(c.onvif_profile or {})
+    events_url = str(profile.get("events_url") or "")
+    if not events_url:
+        raise HTTPException(409, "Camera did not advertise an ONVIF Events service; run ONVIF discovery first.")
+    from .services.onvif_events import ONVIFPullPoint, event_to_capture
+    from .services.onvif_discover import ONVIFError
+    pullpoint = ONVIFPullPoint(events_url, c.username or "", c.password_secret or "", timeout=6.0)
+    try:
+        await pullpoint.subscribe()
+        events = await pullpoint.pull(wait="PT3S", limit=20)
+    except ONVIFError as exc:
+        raise HTTPException(502, str(exc))
+    finally:
+        await pullpoint.unsubscribe()
+    write_audit(db, user, "camera.onvif_events_pull", "camera", str(c.id), f"{len(events)} messages")
+    return {
+        "ok": True,
+        "messages": len(events),
+        "events": [{**e, "capture": event_to_capture(e)} for e in events[:20]],
+    }
 
 
 @app.get("/media/gateway")
@@ -2422,6 +2507,44 @@ async def _fusion_flush_loop():
         except Exception as exc:
             note_worker_failure("hybrid-fusion", str(exc))
         await asyncio.sleep(0.5)
+
+
+async def _onvif_capture(camera_id: int, capture: dict, jpeg: bytes) -> None:
+    """Profile M plate metadata enters the same path as an HVX native read."""
+    from .services.dedup import camera_events
+    from .services import hybrid_fusion
+
+    plate = str(capture.get("plate") or "")
+    image_id = int(capture.get("image_id") or 0)
+    if camera_events.seen(camera_id=camera_id, plate=plate, image_id=image_id):
+        return
+    native = native_from_sdk_capture(capture)
+    if not native.get("plate"):
+        return
+    coil_watch.observe(camera_id, True, source="onvif-metadata")
+    with short_session() as db:
+        row = db.get(Camera, camera_id)
+        if row is None or not row.enabled:
+            return
+        if hybrid_fusion.routes_camera(row, db):
+            await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=b"", capture=capture)
+            return
+        await _persist_capture_event(db, row, capture, jpeg, b"")
+
+
+async def _onvif_events_loop():
+    """Keep one Profile M poller per ONVIF camera that advertises plate events."""
+    from .services import onvif_runtime
+    from .services.health import note_worker_failure
+
+    while True:
+        try:
+            await onvif_runtime.reconcile(short_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("onvif-events", str(exc))
+        await asyncio.sleep(5.0)
 
 
 async def _payments_reconcile_loop():

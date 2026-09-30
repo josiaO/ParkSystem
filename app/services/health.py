@@ -35,6 +35,15 @@ def _hybrid_fusion_stats() -> dict:
         return {"error": str(exc)[:120]}
 
 
+def _onvif_events_stats() -> dict:
+    try:
+        from app.services.onvif_runtime import stats
+
+        return stats()
+    except Exception as exc:  # health must never fail because of a stats helper
+        return {"error": str(exc)[:120]}
+
+
 def _payments_stats() -> dict:
     try:
         from app.services.mobile_payments import payments_health
@@ -208,6 +217,7 @@ def details() -> dict:
             "alpr_mode": alpr_mode(),
             "native_alpr_enabled": migration_flags().get("native_alpr_enabled"),
             "hybrid_fusion": _hybrid_fusion_stats(),
+            "onvif_events": _onvif_events_stats(),
         },
         "gate": {"ok": True, "opens_ok": _gate_ok, "opens_failed": _gate_fail},
         "database": {"ok": True, "avg_query_ms": _avg(_db_latencies)},
