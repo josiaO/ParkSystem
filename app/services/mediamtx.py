@@ -16,6 +16,8 @@ _process: subprocess.Popen | None = None
 _started_at: float = 0.0
 _sources: dict[int, dict[str, Any]] = {}
 _last_error: str = ""
+_external_checked_at: float = 0.0
+_external_running_cache: bool = False
 
 
 def mediamtx_bin() -> Path | None:
@@ -83,8 +85,29 @@ def available() -> bool:
     return mediamtx_bin() is not None
 
 
+def _external_running() -> bool:
+    """Detect a MediaMTX instance owned by SmartParkMediaService.
+
+    Process-local globals cannot tell the Site Service whether another process
+    owns MediaMTX, so probe the local control API with a short cached check.
+    """
+    global _external_checked_at, _external_running_cache
+    now = time.monotonic()
+    if now - _external_checked_at < 1.0:
+        return _external_running_cache
+    _external_checked_at = now
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:9997/v3/config/global/get", timeout=0.25) as resp:
+            _external_running_cache = 200 <= int(resp.status) < 300
+    except Exception:
+        _external_running_cache = False
+    return _external_running_cache
+
+
 def running() -> bool:
-    return _process is not None and _process.poll() is None
+    owned = _process is not None and _process.poll() is None
+    return owned or _external_running()
 
 
 def start() -> dict[str, Any]:
@@ -112,6 +135,7 @@ def start() -> dict[str, Any]:
 
 
 def stop() -> None:
+    """Stop only a MediaMTX process started by this Python process."""
     global _process
     proc = _process
     _process = None
@@ -184,7 +208,8 @@ def health() -> dict[str, Any]:
         "running": running(),
         "binary": str(mediamtx_bin() or ""),
         "sources": sorted(_sources),
-        "uptime_seconds": round(time.monotonic() - _started_at, 1) if running() else 0,
+        "uptime_seconds": round(time.monotonic() - _started_at, 1) if (_process is not None and _process.poll() is None) else 0,
+        "owned_by_this_process": bool(_process is not None and _process.poll() is None),
         "last_error": _last_error,
         "note": (
             "MediaMTX is optional. HVX native ALPR and LocalMediaGateway stay up if this sidecar is missing."
