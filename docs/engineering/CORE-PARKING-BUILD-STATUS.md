@@ -230,11 +230,11 @@ git diff --check
 
 ### Test results
 
-**466 passed** (454 Phase 2 + 12 parking-receipt tests; USB payload assertion waits on kit rebuild), 1 pre-existing Starlette/httpx warning. `compileall` exit 0.
+**467 passed** (454 Phase 2 + 12 parking-receipt tests + packaging), 1 pre-existing Starlette/httpx warning. `compileall` exit 0. USB kit rebuilt with Alembic/Mako/MarkupSafe/python-dotenv/greenlet wheels.
 
 ### Unresolved hardware verification
 
-Same as Phase 0–2. Physical presenter / taken sensor not attached. USB kit rebuild with Alembic wheels is the follow-up packaging step.
+Same as Phase 0–2. Physical presenter / taken sensor not attached. Windows USB kit at `dist/SmartParkEdge-Install` now includes the Alembic wheel set for `--no-deps` install.
 
 ### Known limitations
 
