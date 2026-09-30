@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -229,13 +229,40 @@ class Tariff(Base):
 
 class ParkingSession(Base):
     __tablename__ = "parking_sessions"
+    __table_args__ = (
+        Index(
+            "uq_parking_sessions_site_entry_event",
+            "site_id",
+            "entry_event_id",
+            unique=True,
+            sqlite_where=text("entry_event_id != ''"),
+            postgresql_where=text("entry_event_id != ''"),
+        ),
+        Index(
+            "uq_parking_sessions_one_open_plate",
+            "site_id",
+            "plate",
+            unique=True,
+            sqlite_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
+            postgresql_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
     plate: Mapped[str] = mapped_column(String(32), index=True)
+    plate_raw: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    plate_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
     camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True)
+    entry_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
+    exit_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
+    exit_camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True)
     lane_direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
     car_type: Mapped[str] = mapped_column(String(40), default="Car1")
     status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    lifecycle: Mapped[str] = mapped_column(String(40), default="", server_default="")
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     currency: Mapped[str] = mapped_column(String(8), default="TZS")
@@ -245,11 +272,22 @@ class ParkingSession(Base):
     tariff_rules: Mapped[dict] = mapped_column(JSON, default=dict)
     public_token: Mapped[str] = mapped_column(String(64), default="", index=True)
     receipt_status: Mapped[str] = mapped_column(String(20), default="")
+    receipt_printed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt_taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_exit_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    entry_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    exit_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    entry_image_ref: Mapped[str] = mapped_column(String(260), default="", server_default="")
+    open_command_uuid: Mapped[str] = mapped_column(String(64), default="", server_default="")
     simulated: Mapped[bool] = mapped_column(Boolean, default=False)
     parker_kind: Mapped[str] = mapped_column(String(40), default="CASUAL", index=True)
     access_plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("registered_vehicles.id"), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     gate: Mapped[Gate | None] = relationship(back_populates="sessions")
 
 
