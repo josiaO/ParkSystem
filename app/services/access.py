@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.plate import correct_ocr_confusions, normalize_plate, plate_similarity
-from app.models import AccessPlan, RegisteredVehicle, utcnow
+from app.models import AccessPlan, RegisteredVehicle, as_utc, utcnow
 
 REGISTERED_FUZZY_MIN = 0.85
 
@@ -49,9 +49,12 @@ def ensure_access_plans(db: Session) -> list[AccessPlan]:
 
 
 def _in_window(vehicle: RegisteredVehicle, at: datetime) -> bool:
-    if vehicle.valid_from and vehicle.valid_from > at:
+    now = as_utc(at) or utcnow()
+    start = as_utc(vehicle.valid_from)
+    finish = as_utc(vehicle.valid_until)
+    if start and start > now:
         return False
-    if vehicle.valid_until and vehicle.valid_until < at:
+    if finish and finish < now:
         return False
     return True
 
