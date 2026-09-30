@@ -3,7 +3,7 @@
 This phase is **not complete**. The baseline commit repaired recognition
 isolation, event transport, capture policy and route entitlement. Four Codex
 slices have since landed on top of it, each behind a rollback flag, followed by
-the §11/§12 platform slice:
+the §11/§12 platform slice and the §9 optional AI reviewer:
 
 | Slice | Commit | Rollback |
 | --- | --- | --- |
@@ -11,13 +11,15 @@ the §11/§12 platform slice:
 | §6.3 Process-safe native/FastALPR hybrid fusion, weighted consensus, durable event idempotency | `45ea6ce` | camera `recognition_mode` ≠ HYBRID; `fastalpr_new_pipeline_enabled=false` |
 | §8 Flutterwave TEST + ClickPesa (live-disabled) providers, verified settlement, reconciliation, public ingress guard | `a2a6543` | `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=simulated` (default) |
 | §7 ONVIF Media2 discovery (GetServices/GetProfiles/GetStreamUri/GetSnapshotUri), Profile M plate events → recognition contract | `31a8932` | `PATCH /cameras/{id}/onvif/events {"enabled": false}` or `adapter_id=rtsp` |
-| §11/§12 Alembic runner + site-scoped constraints, SecretStore (`credentials_ref`), redaction of API/log/exception/diagnostics output | this slice | `SMARTPARK_SECRETS_BACKEND=db` for credentials; schema: `alembic downgrade 0001_baseline` after a file backup |
+| §11/§12 Alembic runner + site-scoped constraints, SecretStore (`credentials_ref`), redaction of API/log/exception/diagnostics output | `23c4776` | `SMARTPARK_SECRETS_BACKEND=db` for credentials; schema: `alembic downgrade 0001_baseline` after a file backup |
+| §9 `AIReviewProvider` + `GeminiAIReviewProvider`: bounded second opinion on hard reads, incident summary, no gate/plate authority | this slice | `SMARTPARK_AI_ENABLED=false` (default) |
 
-No external payment provider is *active* by default and no cloud AI was
-activated. Existing HVX SDK host, vendor bindings and physical gate adapters
+No external payment provider is *active* by default and cloud AI stays off
+unless `SMARTPARK_AI_ENABLED=true` is set with a key. Existing HVX SDK host, vendor bindings and physical gate adapters
 were preserved. See `docs/MEDIAMTX-INTEGRATION.md`, `docs/FASTALPR-PIPELINE.md`
 `docs/MOBILE-MONEY-PROVIDERS.md`, `docs/ONVIF-MEDIA2-PROFILE-M.md`,
-`docs/DATABASE-MIGRATIONS.md` and `docs/SECRETS-AND-REDACTION.md` for each slice.
+`docs/DATABASE-MIGRATIONS.md`, `docs/SECRETS-AND-REDACTION.md` and
+`docs/AI-REVIEW.md` for each slice.
 
 ## Automated checks
 
@@ -56,10 +58,18 @@ permissions and ref validation, redaction of URL credentials / key-value
 secrets / key formats / registered values / logging records, camera API never
 echoing the password or RTSP credential, and a redacted diagnostics bundle.
 
-Latest automated result: **403 tests passed** (baseline 286 → 326 after fusion
-→ 364 after payments → 385 after ONVIF → 403 after platform), with one
-pre-existing Starlette/httpx deprecation warning; compilation, evaluation CLI
-smoke check and diff whitespace checks pass.
+The AI slice adds: disabled by default with zero provider calls, privacy gate
+blocking real imagery until accepted while simulated captures pass, daily cap
+and per-camera interval enforced, timeout → `unavailable`, conflicting read
+never edits the plate, Gemini request carries only the crop plus a strict JSON
+schema (no confidence field, no key in the body), 429/outage trip the breaker
+while 4xx do not, open breaker skips the network, manual review and incident
+summary endpoints, and `/ai/*` hidden when the recognition module is off.
+
+Latest automated result: **421 tests passed** (baseline 286 → 326 after fusion
+→ 364 after payments → 385 after ONVIF → 403 after platform → 421 after AI),
+with one pre-existing Starlette/httpx deprecation warning; compilation,
+evaluation CLI smoke check and diff whitespace checks pass.
 
 ## Outbox upgrade and rollback
 
@@ -152,6 +162,14 @@ do not infer successful hardware operation from unit tests.
     that HVX login and RTSP/ONVIF connects still succeed. Then fetch
     `GET /health/diagnostics` and search the JSON for any camera password —
     none may appear.
+15. **AI reviewer (key-dependent, optional).** Only with a test project and
+    synthetic captures: set `SMARTPARK_AI_ENABLED=true` and
+    `SMARTPARK_GEMINI_API_KEY`, run a simulated entry with a low-confidence
+    crop, confirm `GET /ai/reviews` shows one verdict, the capture's `plate`
+    is unchanged, and `GET /ai/health` shows the budget decrement. Leave
+    `SMARTPARK_AI_DATA_TREATMENT_ACCEPTED=false` unless the deployment has
+    accepted Google's data treatment; real captures must then log
+    `skipped_privacy` and nothing must be sent.
 
 ## Outstanding engineering requirements
 
@@ -165,10 +183,11 @@ do not infer successful hardware operation from unit tests.
 - End-to-end Flutterwave TEST transaction against the real sandbox and ClickPesa
   merchant testing (adapters, verification, reconciliation, idempotency and the
   public ingress guard landed in `a2a6543`; refunds remain dashboard-only).
-- Optional Gemini reviewer with privacy/budget/timeouts and no gate authority.
+- Live Gemini call with a real key and measured usefulness of the second
+  opinion (provider, limits, privacy gate and endpoints landed in this slice).
 - PostgreSQL acceptance run of revision `0002` and DPAPI execution on Windows
   (Alembic runner, site-scoped constraints, SecretStore with `credentials_ref`
-  and API/log/exception/diagnostics redaction landed in this slice).
+  and API/log/exception/diagnostics redaction landed in `23c4776`).
 - Full API-router extraction and runtime supervision/health enforcement for every
   disabled optional background/scheduled job.
 - The hardware and soak procedure above.
