@@ -157,6 +157,9 @@ class Camera(Base):
     serial: Mapped[str] = mapped_column(String(80), default="")
     timezone: Mapped[str] = mapped_column(String(80), default="")
     camera_type: Mapped[str] = mapped_column(String(40), default="")
+    # ONVIF capability snapshot from the last discovery: services, capabilities,
+    # snapshot URI, plate topics and whether Profile M event pulling is enabled.
+    onvif_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     gate: Mapped[Gate | None] = relationship(back_populates="cameras")
 
 

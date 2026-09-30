@@ -149,6 +149,8 @@ def ensure_schema() -> None:
             conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN camera_type VARCHAR(40) DEFAULT ''")
         if "lane_id" not in cols:
             conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN lane_id INTEGER")
+        if "onvif_profile" not in cols:
+            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN onvif_profile JSON")
         gate_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(gates)")}
         if gate_cols:
             if "site_id" not in gate_cols:
