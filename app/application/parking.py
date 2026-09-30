@@ -17,5 +17,6 @@ from app.services.parking_sessions import (  # noqa: F401
     request_entry_open,
     snapshot,
     start_entry,
+    start_entry_from_recognition,
     start_exit,
 )

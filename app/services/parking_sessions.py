@@ -40,6 +40,7 @@ from app.domain.parking_engine import (
     infer_lifecycle,
     stored_status_for,
 )
+from app.domain.recognition import NormalizedRecognitionEvent
 from app.domain.site import DEFAULT_SITE_ID
 from app.models import ParkingSession, utcnow
 
@@ -169,6 +170,38 @@ def start_entry(
     _commit_transition(db, row, IDENTITY_RESOLVED, policy)
     _commit_transition(db, row, SESSION_CREATED, policy)
     return row, True
+
+
+def start_entry_from_recognition(
+    db: Session,
+    event: NormalizedRecognitionEvent | dict[str, Any],
+    *,
+    gate_id: int | None = None,
+    policy: LanePolicy | None = None,
+    parker_kind: str = "CASUAL",
+) -> tuple[ParkingSession | None, bool]:
+    """Create a session only from a normalized recognition event.
+
+    LOW-confidence, held, or incomplete events return ``(None, False)``.
+    """
+    rec = event if isinstance(event, NormalizedRecognitionEvent) else NormalizedRecognitionEvent.from_mapping(event)
+    candidate = rec.as_entry_candidate()
+    if candidate is None:
+        return None, False
+    site_id = int(candidate["site_id"] or DEFAULT_SITE_ID)
+    return start_entry(
+        db,
+        plate=str(candidate["plate_normalized"]),
+        event_id=str(candidate["event_id"]),
+        site_id=site_id,
+        plate_raw=str(candidate.get("plate_raw") or ""),
+        gate_id=gate_id,
+        lane_id=candidate.get("lane_id"),
+        camera_id=candidate.get("camera_id"),
+        image_ref=str(candidate.get("image_ref") or ""),
+        parker_kind=parker_kind,
+        policy=policy,
+    )
 
 
 def advance(db: Session, row: ParkingSession, target: str, *, policy: LanePolicy | None = None) -> ParkingSession:
