@@ -540,7 +540,7 @@
                   <span class="chip c-mut" data-role="online">Waiting</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
@@ -585,7 +585,7 @@
                   <span class="chip c-mut" data-role="online">Waiting</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
@@ -1271,6 +1271,62 @@
     const liveOverlays = [null, null];
     const liveLastCars = [null, null];
     const snapshotTimers = [null, null];
+    // One WHEP session per pane. Closed before any other transport starts.
+    const whepSessions = [null, null];
+
+    async function whepStart(video, whepUrl, onState) {
+      if (typeof RTCPeerConnection === "undefined") throw new Error("WebRTC unavailable in this browser");
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      const session = { pc, location: null, closed: false, whepUrl };
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      pc.ontrack = (evt) => {
+        if (session.closed) return;
+        if (evt.streams && evt.streams[0]) video.srcObject = evt.streams[0];
+        else if (!video.srcObject) video.srcObject = new MediaStream([evt.track]);
+        video.play().catch(() => {});
+      };
+      pc.onconnectionstatechange = () => { if (!session.closed && onState) onState(pc.connectionState); };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === "complete") return resolve();
+        const timer = setTimeout(resolve, 1500);
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === "complete") { clearTimeout(timer); resolve(); }
+        };
+      });
+      const res = await fetch(whepUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: pc.localDescription.sdp,
+      });
+      if (!res.ok) throw new Error(`WHEP ${res.status}`);
+      session.location = res.headers.get("Location");
+      if (session.location && !/^https?:/i.test(session.location)) {
+        session.location = new URL(session.location, whepUrl).toString();
+      }
+      await pc.setRemoteDescription({ type: "answer", sdp: await res.text() });
+      return session;
+    }
+
+    function whepStop(slot) {
+      const session = whepSessions[slot];
+      whepSessions[slot] = null;
+      if (!session) return;
+      session.closed = true;
+      try { session.pc.ontrack = null; session.pc.onconnectionstatechange = null; session.pc.close(); } catch (_) {}
+      // Release the MediaMTX reader promptly so reader counts settle after a switch.
+      if (session.location) fetch(session.location, { method: "DELETE" }).catch(() => {});
+    }
+
+    function whepCodec(session) {
+      try {
+        const receivers = session.pc.getReceivers().filter((r) => r.track && r.track.kind === "video");
+        const codecs = receivers.flatMap((r) => (r.getParameters().codecs || []).map((c) => c.mimeType));
+        return codecs[0] ? codecs[0].replace("video/", "") : "";
+      } catch (_) { return ""; }
+    }
 
     function mediaUrl(path) {
       const join = path.includes("?") ? "&" : "?";
@@ -1459,8 +1515,11 @@
       liveWatchIds[slot] = null;
       if (release) unwatchCamera(prev);
       const els = paneEls(slot);
+      whepStop(slot);
       if (els.webrtc) {
         els.webrtc.style.display = "none";
+        try { els.webrtc.pause(); } catch (_) {}
+        els.webrtc.srcObject = null;
         els.webrtc.removeAttribute("src");
       }
       if (els.img) {
@@ -1591,7 +1650,7 @@
       const id = camera.id;
       liveCameras[slot] = camera;
       saveSlotId(slot, id);
-      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || (els.webrtc && els.webrtc.style.display !== "none"))) {
+      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || whepSessions[slot])) {
         refreshPlates(slot);
         return;
       }
@@ -1604,25 +1663,48 @@
       els.status.textContent = "Opening live view…";
       els.img.dataset.cameraId = String(id);
       watchCamera(id);
-      try {
-        const ep = await api(`/cameras/${id}/live/endpoint`);
-        if (ep.provider === "MEDIAMTX" && ep.webrtc) {
-          if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
-          els.img.style.display = "none";
-          if (els.webrtc) {
-            els.webrtc.style.display = "block";
-            els.webrtc.src = ep.webrtc;
-          }
-          els.status.textContent = "Live (MediaMTX)";
-          // WebRTC is the live transport. Do not also poll snapshot.jpg:
-          // that creates a second decode path and can spawn repeated FFmpeg work.
+      let ep = null;
+      try { ep = await api(`/cameras/${id}/live/endpoint`); } catch (_) {}
+      if (liveWatchIds[slot] !== id) return; // switched while resolving
+      if (ep && ep.provider === "MEDIAMTX" && ep.transport === "WEBRTC" && (ep.whep || ep.webrtc) && els.webrtc) {
+        // WebRTC is the only live transport for this pane. Do not also poll
+        // snapshot.jpg or MJPEG: that is a second decode path per viewer.
+        if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
+        els.img.style.display = "none";
+        els.webrtc.style.display = "block";
+        const codec = ep.codec ? ` · ${ep.codec}` : "";
+        const stateLabel = ep.state && ep.state !== "LIVE" ? ep.state : "LIVE";
+        els.status.textContent = `${stateLabel} (WebRTC${codec})`;
+        try {
+          const session = await whepStart(els.webrtc, ep.whep || `${ep.webrtc.replace(/\/$/, "")}/whep`, (connState) => {
+            if (liveWatchIds[slot] !== id) return;
+            if (connState === "connected") {
+              const seen = whepCodec(session) || ep.codec || "";
+              els.status.textContent = `LIVE (WebRTC${seen ? " · " + seen : ""})`;
+            } else if (connState === "disconnected") {
+              els.status.textContent = "DEGRADED (WebRTC reconnecting)";
+            } else if (connState === "failed" || connState === "closed") {
+              els.status.textContent = "OFFLINE (WebRTC lost) · retrying…";
+              whepStop(slot);
+              setTimeout(() => { if (liveWatchIds[slot] === id) startLiveSlot(slot, camera, true); }, 3000);
+            }
+          });
+          if (liveWatchIds[slot] !== id) { session.closed = true; try { session.pc.close(); } catch (_) {} return; }
+          whepSessions[slot] = session;
           refreshPlates(slot);
           return;
+        } catch (err) {
+          // WHEP unavailable: report it and use the MediaMTX-fed MJPEG cache.
+          // The failed peer connection is closed first, so still one transport.
+          whepStop(slot);
+          els.status.textContent = `DEGRADED (WebRTC unavailable: ${err.message}) · MJPEG`;
         }
-      } catch (_) {}
+      } else if (ep && ep.provider === "MEDIAMTX" && ep.state === "DEGRADED" && ep.reason) {
+        els.status.textContent = `DEGRADED · ${ep.reason}`;
+      }
       if (els.webrtc) {
         els.webrtc.style.display = "none";
-        els.webrtc.removeAttribute("src");
+        els.webrtc.srcObject = null;
       }
       els.img.style.display = "block";
       startMjpegLive(slot, id);
@@ -1770,8 +1852,41 @@
       box.innerHTML = `
         <div class="stream-grid">${cards.join("") || "<p class='muted'>No profiles stored yet. Probe RTSP or ONVIF profiles after Connect.</p>"}</div>
         <p class="muted">${age.join(" · ") || "Frame age appears after the media gateway produces frames."}</p>
+        ${renderMediaMtxTelemetry(media.mediamtx, data.live_endpoint)}
         ${warnings ? `<ul class="warn-list">${warnings}</ul>` : ""}
       `;
+    }
+
+    function renderMediaMtxTelemetry(tele, liveEndpoint) {
+      if (!tele) return "";
+      const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const transport = (liveEndpoint && liveEndpoint.transport) || "";
+      const head = [
+        `Media <strong>${esc(tele.state || "OFFLINE")}</strong>`,
+        transport ? `Live transport ${esc(transport)}` : "",
+        tele.codec ? `Codec ${esc(tele.codec)}` : "",
+        tele.control_api_ok ? "Control API OK" : "Control API unreachable",
+      ].filter(Boolean).join(" · ");
+      const rows = Object.entries(tele.roles || {}).map(([role, row]) => {
+        const rtp = row.rtp || {};
+        const bits = [
+          `<strong>${esc(role)}</strong>`,
+          `path ${esc(row.mediamtx_path || "")}${row.shared_upstream ? " (shared upstream)" : ""}${row.on_demand ? " (on demand)" : ""}`,
+          row.ready ? "ready" : (row.registered ? "not ready" : "not registered"),
+          row.readers != null ? `readers ${row.readers}` : "",
+          rtp.packets_lost != null ? `RTP loss ${rtp.packets_lost}` : "",
+          rtp.packets_in_error != null ? `RTP errors ${rtp.packets_in_error}` : "",
+          rtp.jitter_max != null ? `jitter ${Math.round(Number(rtp.jitter_max) * 100) / 100}` : "",
+          row.reconnects != null ? `reconnects ${row.reconnects}` : "",
+          row.bytes_received != null ? `in ${Math.round(Number(row.bytes_received) / 1024)} KiB` : "",
+        ].filter(Boolean).join(" · ");
+        return `<li>${bits}</li>`;
+      }).join("");
+      const compat = tele.webrtc || {};
+      const compatLine = compat.compatible === false
+        ? `<li class="warn">${esc(compat.reason)}</li>`
+        : (compat.compatible === null && compat.reason && tele.codec ? `<li>${esc(compat.reason)}</li>` : "");
+      return `<div class="mediamtx-telemetry"><p class="muted">${head}</p><ul class="muted">${rows}${compatLine}</ul></div>`;
     }
 
     async function refreshStreamProfiles(id) {
@@ -1841,7 +1956,10 @@
           els.online.className = "chip " + (data.live ? "c-ok" : "c-wrn");
         }
         if (els.bizVideo) els.bizVideo.textContent = data.live ? "Live" : "Waiting";
-        if (data.live) {
+        if (whepSessions[slot]) {
+          // WebRTC pane: the transport state (LIVE / DEGRADED / OFFLINE) is
+          // owned by the peer-connection callbacks; do not overwrite it here.
+        } else if (data.live) {
           if (isTechnician()) {
             const fps = data.live_fps ? ` · ${data.live_fps} fps` : "";
             const src = data.live_source ? ` · ${data.live_source}` : "";

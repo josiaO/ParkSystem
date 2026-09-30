@@ -23,12 +23,68 @@ CONTROL_API = "http://127.0.0.1:9997"
 METRICS_ADDRESS = "127.0.0.1:9998"
 
 
+ROLE_LIVE = "LIVE"
+ROLE_DETECT = "DETECT"
+ROLE_EVIDENCE = "EVIDENCE"
+
+
 def live_path_name(camera_id: int) -> str:
     return f"cam{int(camera_id)}"
 
 
 def detect_path_name(camera_id: int) -> str:
     return f"cam{int(camera_id)}_detect"
+
+
+def evidence_path_name(camera_id: int) -> str:
+    return f"cam{int(camera_id)}_evidence"
+
+
+def _source_uris(source: dict[str, Any]) -> tuple[str, str, str]:
+    live = str(source.get("uri") or source.get("rtsp_url") or "")
+    detect = str(source.get("detect_uri") or live)
+    evidence = str(source.get("evidence_uri") or source.get("main_uri") or "")
+    return live, detect, evidence
+
+
+def path_plan(camera_id: int, source: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """One MediaMTX path per *distinct upstream*, tagged with the roles it serves.
+
+    Roles that resolve to the same camera URI share one upstream connection, so
+    a camera exposing a single stream is pulled once, not once per role. LIVE and
+    DETECT are always-on (software recognition must not stop when nobody views).
+    EVIDENCE is pulled on demand because it is only read for explicit snapshots.
+    """
+    camera_id = int(camera_id)
+    row = source if source is not None else (_sources.get(camera_id) or {})
+    live, detect, evidence = _source_uris(row)
+    plan: list[dict[str, Any]] = [
+        {"name": live_path_name(camera_id), "uri": live, "roles": [ROLE_LIVE], "on_demand": False},
+    ]
+    if detect and detect != live:
+        plan.append({"name": detect_path_name(camera_id), "uri": detect, "roles": [ROLE_DETECT], "on_demand": False})
+    else:
+        plan[0]["roles"].append(ROLE_DETECT)
+    if evidence:
+        shared = next((p for p in plan if p["uri"] == evidence), None)
+        if shared is not None:
+            shared["roles"].append(ROLE_EVIDENCE)
+        else:
+            plan.append({"name": evidence_path_name(camera_id), "uri": evidence, "roles": [ROLE_EVIDENCE], "on_demand": True})
+    return plan
+
+
+def path_for_role(camera_id: int, role: str, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    wanted = str(role or ROLE_LIVE).upper()
+    plan = path_plan(camera_id, source)
+    for item in plan:
+        if wanted in item["roles"]:
+            return item
+    return plan[0]
+
+
+def all_path_names(camera_id: int) -> tuple[str, ...]:
+    return (live_path_name(camera_id), detect_path_name(camera_id), evidence_path_name(camera_id))
 
 
 def mediamtx_bin() -> Path | None:
@@ -78,15 +134,13 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
     if not rows:
         lines.append("  all_others:")
     for camera_id, source in sorted(rows.items()):
-        live_uri = str(source.get("uri") or source.get("rtsp_url") or "")
-        detect_uri = str(source.get("detect_uri") or live_uri)
-        live_name = live_path_name(camera_id)
-        detect_name = detect_path_name(camera_id)
-        for name, uri in ((live_name, live_uri), (detect_name, detect_uri)):
-            lines.append(f"  {name}:")
+        for item in path_plan(camera_id, source):
+            uri = str(item["uri"])
+            lines.append(f"  {item['name']}:")
+            lines.append(f"    # roles: {', '.join(item['roles'])}")
             if uri.startswith("rtsp://"):
                 lines.append(f"    source: {uri}")
-                lines.append("    sourceOnDemand: no")
+                lines.append(f"    sourceOnDemand: {'yes' if item['on_demand'] else 'no'}")
                 lines.append("    rtspTransport: tcp")
             else:
                 lines.append("    source: publisher")
@@ -161,9 +215,9 @@ def stop() -> None:
         proc.kill()
 
 
-def _path_conf(uri: str) -> dict[str, Any]:
+def _path_conf(uri: str, *, on_demand: bool = False) -> dict[str, Any]:
     if str(uri).startswith("rtsp://"):
-        return {"source": uri, "sourceOnDemand": False, "rtspTransport": "tcp"}
+        return {"source": uri, "sourceOnDemand": bool(on_demand), "rtspTransport": "tcp"}
     return {"source": "publisher"}
 
 
@@ -190,8 +244,8 @@ def _control_api(method: str, path: str, body: dict[str, Any] | None = None) -> 
         return None
 
 
-def _upsert_path(name: str, uri: str) -> int | None:
-    conf = _path_conf(uri)
+def _upsert_path(name: str, uri: str, *, on_demand: bool = False) -> int | None:
+    conf = _path_conf(uri, on_demand=on_demand)
     status = _control_api("POST", f"/v3/config/paths/add/{name}", conf)
     if status == 400:
         status = _control_api("POST", f"/v3/config/paths/replace/{name}", conf)
@@ -209,15 +263,17 @@ def sync_paths() -> bool:
         return False
     ok = True
     for camera_id, source in sorted(_sources.items()):
-        live_uri = str(source.get("uri") or source.get("rtsp_url") or "")
-        detect_uri = str(source.get("detect_uri") or live_uri)
-        for name, uri in (
-            (live_path_name(camera_id), live_uri),
-            (detect_path_name(camera_id), detect_uri),
-        ):
-            status = _upsert_path(name, uri)
+        planned = path_plan(camera_id, source)
+        for item in planned:
+            status = _upsert_path(item["name"], item["uri"], on_demand=item["on_demand"])
             if status is None or status >= 400:
                 ok = False
+        # Roles that were split earlier but now share an upstream must not leave a
+        # stale second pull running against the camera.
+        planned_names = {item["name"] for item in planned}
+        for name in all_path_names(camera_id):
+            if name not in planned_names:
+                _control_api("DELETE", f"/v3/config/paths/delete/{name}")
     return ok
 
 
@@ -239,47 +295,61 @@ def unregister_source(camera_id: int) -> None:
     _sources.pop(camera_id, None)
     write_config()
     if running():
-        for name in (live_path_name(camera_id), detect_path_name(camera_id)):
+        for name in all_path_names(camera_id):
             _control_api("DELETE", f"/v3/config/paths/delete/{name}")
 
 
-def live_endpoint(camera_id: int) -> dict[str, Any]:
-    name = live_path_name(camera_id)
-    source = _sources.get(int(camera_id)) or {}
+def _endpoint(camera_id: int, role: str, kind: str) -> dict[str, Any]:
+    item = path_for_role(camera_id, role)
+    name = item["name"]
     return {
         "camera_id": int(camera_id),
-        "kind": "mediamtx",
+        "kind": kind,
+        "role": role,
+        "mediamtx_path": name,
+        "roles": list(item["roles"]),
+        "shared_upstream": len(item["roles"]) > 1,
+        "on_demand": bool(item["on_demand"]),
         "rtsp": f"rtsp://127.0.0.1:8554/{name}",
         "webrtc": f"http://127.0.0.1:8889/{name}",
+        "whep": f"http://127.0.0.1:8889/{name}/whep",
         "hls": f"http://127.0.0.1:8888/{name}",
-        "upstream_redacted": redact_url(str(source.get("uri") or source.get("rtsp_url") or "")),
+        "upstream_redacted": redact_url(str(item["uri"] or "")),
         "running": running(),
     }
+
+
+def live_endpoint(camera_id: int) -> dict[str, Any]:
+    return _endpoint(camera_id, ROLE_LIVE, "mediamtx")
 
 
 def detect_endpoint(camera_id: int) -> dict[str, Any]:
-    name = detect_path_name(camera_id)
-    source = _sources.get(int(camera_id)) or {}
-    return {
-        "camera_id": int(camera_id),
-        "kind": "mediamtx-detect",
-        "rtsp": f"rtsp://127.0.0.1:8554/{name}",
-        "webrtc": f"http://127.0.0.1:8889/{name}",
-        "hls": f"http://127.0.0.1:8888/{name}",
-        "upstream_redacted": redact_url(
-            str(source.get("detect_uri") or source.get("uri") or source.get("rtsp_url") or "")
-        ),
-        "running": running(),
-    }
+    return _endpoint(camera_id, ROLE_DETECT, "mediamtx-detect")
+
+
+def evidence_endpoint(camera_id: int) -> dict[str, Any]:
+    return _endpoint(camera_id, ROLE_EVIDENCE, "mediamtx-evidence")
 
 
 def health() -> dict[str, Any]:
+    is_running = running()
+    paths_summary: dict[str, Any] = {}
+    if is_running:
+        try:
+            from app.services.mediamtx_telemetry import summary as telemetry_summary
+
+            paths_summary = telemetry_summary()
+        except Exception as exc:  # telemetry is best-effort; never fail health
+            paths_summary = {"error": str(exc)[:200]}
     return {
-        "ok": running(),
+        "ok": is_running,
         "available": available(),
-        "running": running(),
+        "running": is_running,
         "binary": str(mediamtx_bin() or ""),
         "sources": sorted(_sources),
+        "paths": [item["name"] for cid in sorted(_sources) for item in path_plan(cid)],
+        "control_api": CONTROL_API,
+        "telemetry": paths_summary,
         "uptime_seconds": round(time.monotonic() - _started_at, 1) if (_process is not None and _process.poll() is None) else 0,
         "owned_by_this_process": bool(_process is not None and _process.poll() is None),
         "metrics_enabled": True,

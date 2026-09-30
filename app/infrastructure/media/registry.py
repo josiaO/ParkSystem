@@ -80,10 +80,31 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
             return {**endpoint, "provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id,
                     "transport": "MJPEG", "state": "LIVE"}
         endpoint = mediamtx.live_endpoint(camera_id)
+        telemetry = media_telemetry(camera_id)
+        compat = dict(telemetry.get("webrtc") or {})
+        if compat.get("compatible") is False:
+            # Report the codec problem and keep the operator on the established
+            # MediaMTX-fed MJPEG cache. Never start a hidden high-CPU transcode.
+            fallback = await gateway.get_live_endpoint(camera_id)
+            return {
+                **fallback,
+                "provider": LIVE_VIEW_MEDIAMTX,
+                "camera_id": camera_id,
+                "transport": "MJPEG",
+                "state": "DEGRADED",
+                "codec": telemetry.get("codec") or "",
+                "reason": compat.get("reason") or "codec not supported by browser WebRTC",
+                "webrtc_compatible": False,
+            }
         return {
             "provider": LIVE_VIEW_MEDIAMTX,
             "camera_id": camera_id,
             **endpoint,
+            "transport": "WEBRTC",
+            "state": telemetry.get("state") or "LIVE",
+            "codec": telemetry.get("codec") or "",
+            "webrtc_compatible": compat.get("compatible"),
+            "codec_note": compat.get("reason") or "",
         }
 
     endpoint = await gateway.get_live_endpoint(camera_id)
@@ -115,3 +136,38 @@ async def get_detect_endpoint(camera_id: int, db=None) -> dict[str, Any]:
         "camera_id": camera_id,
         **endpoint,
     }
+
+
+async def get_evidence_endpoint(camera_id: int, db=None) -> dict[str, Any]:
+    """Highest-quality stream for explicit snapshots. Shares the live upstream unless
+    a distinct MAIN stream is configured, in which case MediaMTX pulls it on demand."""
+    camera_id = int(camera_id)
+    if mediamtx_detect_active(camera_id, db):
+        endpoint = mediamtx.evidence_endpoint(camera_id)
+        return {"provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id, **endpoint}
+    return {
+        "provider": LIVE_VIEW_DIRECT_LEGACY,
+        "camera_id": camera_id,
+        "kind": "snapshot",
+        "role": "EVIDENCE",
+        "path": f"/cameras/{camera_id}/snapshot.jpg?role=MAIN",
+    }
+
+
+def media_telemetry(camera_id: int) -> dict[str, Any]:
+    """Per-role MediaMTX path telemetry for one camera, or an offline stub.
+
+    Only this seam decides whether MediaMTX telemetry applies to a camera; the
+    Control API is the health source, never a process handle in another service.
+    """
+    camera_id = int(camera_id)
+    if not mediamtx.running():
+        return {"camera_id": camera_id, "control_api_ok": False, "state": "OFFLINE", "codec": "",
+                "webrtc": {"compatible": None, "reason": "MediaMTX not running"}, "roles": {}}
+    from app.services.mediamtx_telemetry import camera_telemetry
+
+    try:
+        return camera_telemetry(camera_id)
+    except Exception as exc:  # telemetry must never break live view
+        return {"camera_id": camera_id, "control_api_ok": False, "state": "OFFLINE", "codec": "",
+                "webrtc": {"compatible": None, "reason": str(exc)[:120]}, "roles": {}}
