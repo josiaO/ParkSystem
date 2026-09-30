@@ -24,17 +24,15 @@ Vendor-independent OCR on JPEG frames. It is a **consumer** of the DETECT buffer
 ## Worker safeguards
 
 The worker selects its endpoint through `app/infrastructure/media/registry.py`.
-Only enabled software-only cameras in the rollout set run in the worker; native
-and hybrid cameras retain the existing Site Service fusion path. Module and
+Enabled `FASTALPR_ONLY` and `HYBRID` cameras in the rollout set run in the
+worker; `NATIVE_ONLY` cameras never run software reads there. Module and
 VIDEO_ONLY configuration disable worker inference. Persisted site plate policy
 and numeric lane ownership accompany every read.
 
 Model work runs off the asyncio event loop. Worker model calls are serialized;
 each camera takes its newest frame only when model capacity is available.
 Buffers hold one frame, inputs older than 1000 ms are dropped, and the configured
-DETECT FPS caps sampling. Consensus requires nearby agreeing reads; widely
-separated visits do not establish agreement. Low-confidence or policy-held
-events remain held for operator review.
+DETECT FPS caps sampling.
 
 The worker archives evidence once per consensus event, then publishes through a
 SQLite outbox shared with Site Service. Site Service persists the capture through
@@ -44,8 +42,53 @@ or frame timestamps release software ownership to the legacy Site Service loop.
 snapshot, not an in-memory reference to another process.
 
 Camera removal, policy changes and shutdown cancel and await decoder tasks.
-An individual failed camera task is restarted independently. Hybrid worker
-fusion and hardware soak remain acceptance gates, not completed claims.
+An individual failed camera task is restarted independently. Hardware soak
+remains an acceptance gate, not a completed claim.
+
+## Temporal consensus (`app/core/consensus.py::ConsensusTrack`)
+
+Reads within 2 s of each other form one *visit*. Every read votes for each
+candidate text it resembles (`plate_similarity` ≥ 0.7), weighted by OCR
+confidence and similarity, so `T285DOP` supports `T285DQP` instead of splitting
+the vote. Publication requires ≥ 2 reads, ≥ 2 identical reads for the winner and
+≥ 60 % of the weight; the consensus confidence is the mean of the identical
+reads. A plate is published once per visit, never while continuously visible,
+and not again within the 20 s hold. The published event carries `consensus`
+(`reads`, `agreeing`, `share`, `candidates`) plus the raw `frame_plate` /
+`frame_confidence`; a failed durable publish releases the hold so the next
+agreeing frame retries.
+
+## Hybrid fusion (native + FastALPR)
+
+For `HYBRID` cameras with a live worker (`worker_owns_software_reads`), the
+worker publishes FastALPR *candidates* (`fusion_role=candidate`) and the Site
+Service fuses them with the native HVX callback in
+`app/services/hybrid_fusion.py` (`app/core/hybrid.py::FusionCoordinator`):
+
+- native and software candidates are paired per camera within 3 s
+- agreement is accepted immediately (`AGREED`)
+- when the counterpart provider is unavailable (no native adapter / stale worker
+  heartbeat) the single provider decides at once; otherwise the first candidate
+  waits 1.5 s (`_fusion_flush_loop`) and then decides alone
+- disagreements are held for operator review by `resolve_readings`
+- a second decision for the same or near-identical plate (similarity ≥ 0.85) on
+  the same camera within 20 s is suppressed, so one vehicle never yields two
+  captures/sessions
+
+The fused capture is persisted once through `_persist_capture_event` with
+`source=hybrid` and the fusion audit on the row. `/health/details` →
+`domains.recognition.hybrid_fusion` exposes offered/paired/held/suppressed
+counters and pending candidates. When the worker is down the camera falls back to
+the in-process native/fusion loop unchanged.
+
+## Durable event idempotency
+
+`SQLiteOutbox.ack(item_id, processed_key=event_id)` deletes the row and records
+the event as processed in the same transaction; `was_processed(event_id)`
+(7-day retention) and a `vehicle_captures.event_id` lookup are both checked
+before a redelivered `PlateRecognized` row is processed. A crash between
+business processing and ACK therefore replays the row but cannot create a second
+capture or session.
 
 ## Modes
 
