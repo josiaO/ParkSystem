@@ -454,13 +454,18 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         if len(plate) < MIN_PLATE_CHARS:
             continue
         raw_conf = max(0.0, min(float(conf or 0), 1.0))
+        box = bbox_dict(bbox) or {}
+        box["image_width"] = int(bgr.shape[1])
+        box["image_height"] = int(bgr.shape[0])
+        left, top, right, bottom = _xy
+        box["crop"] = {"x1": int(left), "y1": int(top), "x2": int(right), "y2": int(bottom)}
         hits.append(
             PlateHit(
                 plate_raw=text,
                 plate_normalized=plate,
                 plate_confidence=raw_conf,
                 plate_crop_path=_save_crop_bgr(crop),
-                bbox=bbox_dict(bbox),
+                bbox=box,
             )
         )
     hits.sort(

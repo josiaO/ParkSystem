@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select, text
@@ -82,6 +82,20 @@ class AlembicRunnerTests(unittest.TestCase):
         self.assertEqual(current_revision(engine), head_revision())
         self.assertIn("cameras", inspect(engine).get_table_names())
         self.assertEqual(upgrade_to_head(engine)["mode"], "upgrade")
+
+    def test_windows_percent_encoded_sqlite_url_does_not_break_alembic(self):
+        from app.migrations.runner import alembic_config
+
+        encoded = "sqlite:///C%3A/ProgramData/SmartParkEdge/smartpark.db"
+        engine = MagicMock()
+        engine.url.render_as_string.return_value = encoded
+        cfg = alembic_config(engine)
+        self.assertEqual(cfg.get_main_option("sqlalchemy.url"), encoded)
+
+        file_engine = create_engine(f"sqlite:///{Path(self.tmp.name) / 'C%3A_drive.db'}")
+        summary = upgrade_to_head(file_engine)
+        self.assertEqual(summary["mode"], "fresh")
+        self.assertEqual(current_revision(file_engine), head_revision())
 
     def test_pre_alembic_sqlite_is_adopted_and_site_scoped(self):
         engine = self._engine("legacy.db")

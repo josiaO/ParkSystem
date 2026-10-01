@@ -5,7 +5,7 @@ from enum import Enum
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, TypeDecorator
 
 from .db import Base
 from .domain.site import DEFAULT_SITE_ID
@@ -21,7 +21,23 @@ def as_utc(dt: datetime | None) -> datetime | None:
         return None
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.astimezone(timezone.utc)
+
+
+class AwareDateTime(TypeDecorator):
+    """Always return UTC-aware datetimes from SQLite."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def __init__(self) -> None:
+        super().__init__(timezone=True)
+
+    def process_bind_param(self, value, dialect):
+        return as_utc(value) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        return as_utc(value)
 
 
 class UserStatus(str, Enum):
@@ -55,7 +71,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(160), default="")
     password_hash: Mapped[str] = mapped_column(String(300))
     status: Mapped[str] = mapped_column(String(30), default=UserStatus.ACTIVE.value)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     roles: Mapped[list["UserRole"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
@@ -84,8 +100,8 @@ class AuthSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(AwareDateTime())
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class Site(Base):
@@ -170,7 +186,7 @@ class Camera(Base):
     status: Mapped[str] = mapped_column(String(30), default=CameraStatus.UNKNOWN.value)
     sdk_handle: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     recognition_mode: Mapped[str] = mapped_column(String(40), default="")
     vendor: Mapped[str] = mapped_column(String(80), default="")
@@ -216,7 +232,7 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(80), default="")
     target_id: Mapped[str] = mapped_column(String(80), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class Tariff(Base):
@@ -233,7 +249,7 @@ class Tariff(Base):
     source: Mapped[str] = mapped_column(String(200), default="Car1")
     rules: Mapped[dict] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class ParkingSession(Base):
@@ -286,8 +302,8 @@ class ParkingSession(Base):
     car_type: Mapped[str] = mapped_column(String(40), default="Car1")
     status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
     lifecycle: Mapped[str] = mapped_column(String(40), default="", server_default="")
-    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    entry_time: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+    exit_time: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     currency: Mapped[str] = mapped_column(String(8), default="TZS")
     amount_due: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     amount_paid: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
@@ -296,15 +312,15 @@ class ParkingSession(Base):
     public_token: Mapped[str] = mapped_column(String(64), default="", index=True)
     human_reference: Mapped[str] = mapped_column(String(16), default="", server_default="")
     receipt_status: Mapped[str] = mapped_column(String(20), default="")
-    receipt_printed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    receipt_taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt_printed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    receipt_taken_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     print_job_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     print_job_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
     print_retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
     payment_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
-    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    payment_exit_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    payment_exit_grace_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     entry_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     exit_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     entry_image_ref: Mapped[str] = mapped_column(String(260), default="", server_default="")
@@ -313,9 +329,9 @@ class ParkingSession(Base):
     parker_kind: Mapped[str] = mapped_column(String(40), default="CASUAL", index=True)
     access_plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("registered_vehicles.id"), nullable=True)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     gate: Mapped[Gate | None] = relationship(back_populates="sessions")
 
 
@@ -346,7 +362,7 @@ class VehicleCapture(Base):
     event_id: Mapped[str] = mapped_column(String(64), default="")
     # Optional cloud AI second opinion (supporting/conflicting/unreadable). Never the plate authority.
     ai_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class AccessPlan(Base):
@@ -378,10 +394,10 @@ class RegisteredVehicle(Base):
     owner_name: Mapped[str] = mapped_column(String(160), default="")
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     plan: Mapped[AccessPlan | None] = relationship(back_populates="vehicles")
 
 
@@ -401,7 +417,7 @@ class Receipt(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class AccessDecision(Base):
@@ -419,7 +435,7 @@ class AccessDecision(Base):
     barrier_opened: Mapped[bool] = mapped_column(Boolean, default=False)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class GateCommandRecord(Base):
@@ -435,7 +451,7 @@ class GateCommandRecord(Base):
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
     message: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class PaymentIntent(Base):
@@ -452,7 +468,7 @@ class PaymentIntent(Base):
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class PaymentTransaction(Base):
@@ -473,8 +489,8 @@ class PaymentTransaction(Base):
     provider_transaction_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 

@@ -550,7 +550,7 @@ class LocalMediaGateway:
         if spec.sdk_handle is None:
             return False
         host = HVXHostClient()
-        interval = float(getattr(settings, "live_sdk_interval_seconds", 0.04) or 0.04)
+        interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
         got = False
         row.state = "STREAMING"
         row.source = "sdk"
@@ -643,9 +643,9 @@ class LocalMediaGateway:
         return False
 
     async def _http_stills(self, row: StreamSession) -> bool:
-        """Poll HTTP snapshot endpoints continuously — not a one-shot still."""
+        """Poll HTTP snapshot endpoints slowly — not a live transport."""
         spec = row.spec
-        interval = float(getattr(settings, "live_sdk_interval_seconds", 0.025) or 0.025)
+        interval = 0.2
         got = False
         row.state = "CONNECTING"
         while row.wanted() or row.viewers > 0:
@@ -764,7 +764,11 @@ def _kill_pid(pid: int, *, force: bool = False) -> None:
     try:
         import os
         import signal
-        os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+        # Windows has no SIGKILL; os.kill(SIGTERM) already calls TerminateProcess.
+        sig = signal.SIGTERM
+        if force and os.name != "nt":
+            sig = getattr(signal, "SIGKILL", signal.SIGTERM)
+        os.kill(pid, sig)
     except Exception:
         pass
 

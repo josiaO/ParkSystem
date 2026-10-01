@@ -140,6 +140,13 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(body["barrier_opened"])
         self.assertEqual(body["session"]["status"], "ACTIVE")
         self.assertTrue(body["session"]["public_token"])
+        token = body["session"]["public_token"]
+        self.assertEqual(body.get("qr_url"), f"/p/{token}/qr.png")
+        self.assertTrue((body.get("qr_payload") or "").endswith(f"/s/{token}"))
+        qr = self.client.get(body["qr_url"])
+        self.assertEqual(qr.status_code, 200, qr.text)
+        self.assertEqual(qr.headers.get("content-type"), "image/png")
+        self.assertTrue(qr.content.startswith(b"\x89PNG"))
         self.assertIn("latency_ms", body)
         self.assertIn("PARKING ENTRY", body["receipt"])
         mock_ctrl.open.assert_awaited()
@@ -324,6 +331,7 @@ class SimulationTests(unittest.TestCase):
                 self.assertEqual(body["action"], "ENTRY")
                 self.assertTrue(body["barrier_opened"])
                 self.assertIn("T123ABC", body["receipt"])
+                self.assertTrue((body.get("session") or {}).get("snapshot_url"))
                 sid = body["session"]["id"]
                 mock_ctrl.open.assert_awaited()
                 self._age_session(sid)

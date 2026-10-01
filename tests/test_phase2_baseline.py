@@ -131,6 +131,8 @@ class DesktopMediaMTXTests(unittest.TestCase):
         fail = text.split("def _mjpeg_fail", 1)[1].split("def _retry_mjpeg", 1)[0]
         self.assertNotIn("_snap_timer.start()", fail)
         self.assertIn("_retry_mjpeg", fail)
+        self.assertIn("10054", fail)
+        self.assertIn("250", fail)
 
 
 class PlatePolicyTests(unittest.TestCase):

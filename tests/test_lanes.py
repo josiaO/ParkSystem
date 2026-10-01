@@ -149,3 +149,51 @@ class LaneViewTests(unittest.TestCase):
             self.assertEqual(filled.id, empty.id)
             self.assertEqual(filled.plate, "T349DLG")
             self.assertEqual(filled.bbox["source"], "fastalpr")
+
+    def test_persist_pads_plate_crop_and_rejects_full_frame_crop(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from app.services.captures import _crop_from_bbox
+
+        img = Image.new("RGB", (640, 480), (20, 20, 20))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((100, 200, 280, 250), fill=(230, 230, 230))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=92)
+        jpeg = buf.getvalue()
+        box = {"x1": 100, "y1": 200, "x2": 280, "y2": 250, "image_width": 640, "image_height": 480}
+        padded = _crop_from_bbox(jpeg, box)
+        crop = Image.open(BytesIO(padded))
+        self.assertLess(crop.width, 640)
+        self.assertLess(crop.height, 480)
+        self.assertGreaterEqual(crop.width, 180)
+        self.assertGreater(crop.height, 50)
+
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            row = persist_event(
+                db, camera, jpeg=jpeg, crop=jpeg,
+                capture={"image_id": 88, "plate": "T123ABC", "score": 0.9, "bbox": box, "source": "fastalpr"},
+            )
+            self.assertTrue(row.crop_path)
+            saved = Image.open(self.media / row.crop_path)
+            self.assertLess(saved.width, 400)
+            self.assertLess(saved.height, 200)
+
+    def test_same_image_id_fills_missing_crop_when_plate_unchanged(self):
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            first = persist_event(
+                db, camera, jpeg=JPEG, crop=b"",
+                capture={"image_id": 91, "plate": "T123ABC", "score": 90, "have_vehicle": True},
+            )
+            self.assertFalse(first.crop_path)
+            filled = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 91, "plate": "T123ABC", "score": 90, "have_vehicle": True},
+            )
+            self.assertEqual(filled.id, first.id)
+            self.assertTrue(filled.crop_path)
+            self.assertTrue((self.media / filled.crop_path).is_file())

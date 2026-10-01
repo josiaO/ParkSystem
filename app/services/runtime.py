@@ -6,6 +6,7 @@ truth lives in the database, not in these in-memory flags.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import os
 import sys
@@ -127,6 +128,37 @@ def install_crash_hooks(name: str = "") -> None:
 
     if hasattr(threading, "excepthook"):
         threading.excepthook = _thread_hook
+
+
+def is_benign_disconnect(exc: BaseException | None) -> bool:
+    """Windows Proactor raises ConnectionResetError (WinError 10054) when a peer RSTs."""
+    if exc is None:
+        return False
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    if isinstance(exc, OSError) and int(getattr(exc, "winerror", 0) or 0) == 10054:
+        return True
+    text = str(exc).lower()
+    return "10054" in text or "forcibly closed" in text or "connection reset" in text
+
+
+def install_asyncio_exception_filter() -> None:
+    """Keep live MJPEG running; do not dump Proactor RST traces into the console."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    previous = loop.get_exception_handler()
+
+    def _handler(loop, context):
+        if is_benign_disconnect(context.get("exception")):
+            return
+        if previous is not None:
+            previous(loop, context)
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
 
 
 def acquire_instance_lock(name: str) -> bool:

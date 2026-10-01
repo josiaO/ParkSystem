@@ -49,12 +49,12 @@ def ensure_access_plans(db: Session) -> list[AccessPlan]:
 
 
 def _in_window(vehicle: RegisteredVehicle, at: datetime) -> bool:
-    now = as_utc(at) or utcnow()
+    now_ts = (as_utc(at) or utcnow()).timestamp()
     start = as_utc(vehicle.valid_from)
     finish = as_utc(vehicle.valid_until)
-    if start and start > now:
+    if start is not None and start.timestamp() > now_ts:
         return False
-    if finish and finish < now:
+    if finish is not None and finish.timestamp() < now_ts:
         return False
     return True
 
