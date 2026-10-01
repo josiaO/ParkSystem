@@ -114,7 +114,8 @@ class EntryLaneController:
             }
 
         plate = rec.plate_normalized
-        entitlement = lookup_entitlement(db, plate)
+        event_site_id = int(rec.site_id or (camera.site_id if camera is not None else 0) or (gate.site_id if gate is not None else 0) or 1)
+        entitlement = lookup_entitlement(db, plate, site_id=event_site_id)
         if entitlement.registered and entitlement.plate:
             plate = entitlement.plate
         parker_kind = entitlement.kind if entitlement.registered else "CASUAL"
@@ -230,7 +231,7 @@ class EntryLaneController:
         policy = policy or LanePolicy(receipt_required_before_open=True)
         await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
         db.refresh(row)
-        entitlement = lookup_entitlement(db, row.plate)
+        entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id)
         return await self._authorize_and_open(
             db, row, gate=gate or (db.get(Gate, row.gate_id) if row.gate_id else None),
             camera=camera, policy=policy, entitlement=entitlement, source="receipt_taken", created=False,
