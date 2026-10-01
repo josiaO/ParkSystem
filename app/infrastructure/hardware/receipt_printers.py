@@ -12,7 +12,8 @@ from typing import Any
 
 from app.domain.receipt_engine import (
     CAP_CUTTER,
-     CAP_PRESENTER,
+    CAP_PAPER_STATUS,
+    CAP_PRESENTER,
     CAP_TAKEN_SENSOR,
     PrintOutcome,
     PrinterStatus,
