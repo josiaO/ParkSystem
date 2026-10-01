@@ -67,6 +67,32 @@ def bbox_from_lp_box(box) -> dict | None:
     return {"x1": left, "y1": top, "x2": right, "y2": bottom}
 
 
+def plate_capture_quality(box: dict | None) -> dict:
+    """Classify plate pixel width for camera-installation diagnostics.
+
+    This is a capture-quality hint, not an OCR acceptance rule. 130 px is the
+    preferred one-line target; lower bands remain measurable because different
+    plate styles/models can still succeed.
+    """
+    if not isinstance(box, dict):
+        return {"plate_width_px": 0, "quality": "UNKNOWN"}
+    try:
+        width = max(0, int(box.get("x2") or 0) - int(box.get("x1") or 0))
+    except (TypeError, ValueError):
+        width = 0
+    if width >= 130:
+        quality = "GOOD"
+    elif width >= 100:
+        quality = "USABLE"
+    elif width >= 75:
+        quality = "MARGINAL"
+    elif width > 0:
+        quality = "TOO_SMALL"
+    else:
+        quality = "UNKNOWN"
+    return {"plate_width_px": width, "quality": quality}
+
+
 def choose_overlay_box(native: dict | None = None, local: dict | None = None) -> dict | None:
     """Prefer the camera usLpBox overlay; FastALPR box is the fallback."""
     for src in (native or {}, local or {}):
@@ -135,6 +161,8 @@ def capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0
     box = local.get("bbox") if method.startswith("LOCAL") else native.get("bbox")
     if not isinstance(box, dict):
         box = native.get("bbox") or local.get("bbox")
+    if isinstance(box, dict):
+        box = {**box, **plate_capture_quality(box)}
     source = "fastalpr" if "LOCAL" in method else (native.get("source") or "camera")
     fusion = fused.as_dict() if hasattr(fused, "as_dict") else {}
     return {
