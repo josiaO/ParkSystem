@@ -90,6 +90,19 @@ class PrinterTests(unittest.TestCase):
         raster = escpos_qr_raster(doc.qr_png, max_width=256)
         self.assertTrue(raster.startswith(b"\x1d\x76\x30"))
 
+    def test_stored_html_slip_embeds_qr_png(self):
+        from app.infrastructure.hardware.printers import store_slip_files
+        doc = _doc()
+        doc.public_url = "http://127.0.0.1:8760/s/opaque-token-value"
+        doc.qr_payload = "http://127.0.0.1:8760/s/opaque-token-value"
+        path = store_slip_files(doc)
+        self.assertTrue(path.endswith(".html"))
+        html = Path(path).read_text(encoding="utf-8")
+        self.assertIn("data:image/png;base64,", html)
+        self.assertIn('class="qr"', html)
+        self.assertNotIn("/p/ABC/qr.png", html)
+        self.assertTrue((self.media / "receipts" / "opaque-token-value.png").is_file())
+
     def test_system_adapter_without_name_is_file_only(self):
         adapter = printer_adapter("system", printer_name="")
         self.assertEqual(adapter.id, "system")

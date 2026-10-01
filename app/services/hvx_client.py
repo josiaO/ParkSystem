@@ -14,6 +14,20 @@ class HVXHostUnavailable(RuntimeError):
 _live_clients: dict[int, httpx.AsyncClient] = {}
 
 
+def _drop_live_client() -> None:
+    try:
+        key = id(asyncio.get_running_loop())
+    except RuntimeError:
+        return
+    client = _live_clients.pop(key, None)
+    if client is None:
+        return
+    try:
+        asyncio.create_task(client.aclose())
+    except Exception:
+        pass
+
+
 def _shared_live_client(base_url: str) -> httpx.AsyncClient:
     """Reuse one HTTP client so live JPEG polling can keep up with moving video."""
     key = id(asyncio.get_running_loop())
@@ -21,8 +35,8 @@ def _shared_live_client(base_url: str) -> httpx.AsyncClient:
     if client is None or client.is_closed:
         client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(1.2, connect=0.5),
-            limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+            timeout=httpx.Timeout(0.8, connect=0.4),
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8, keepalive_expiry=2.0),
         )
         _live_clients[key] = client
     return client
@@ -213,6 +227,14 @@ class HVXHostClient:
             r = await client.get(f"/live-jpeg/{int(handle)}")
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
                 return r.content
+        except (httpx.TransportError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            _drop_live_client()
+            return b""
+        except OSError as exc:
+            if int(getattr(exc, "winerror", 0) or 0) == 10054:
+                _drop_live_client()
+                return b""
+            return b""
         except Exception:
             return b""
         return b""

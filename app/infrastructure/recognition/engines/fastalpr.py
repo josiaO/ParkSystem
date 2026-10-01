@@ -35,7 +35,7 @@ class FastALPRPlateEngine:
             "loaded": bool(info.get("loaded")),
             "retrainable": True,
             "replaceable": True,
-            "country": settings.alpr_country or "Tanzania",
+            "country": settings.alpr_country or "",
             "contrast_sensitivity": float(settings.alpr_csf or 0.918),
             "pipeline": "detect_crop_ocr",
             "flow": [

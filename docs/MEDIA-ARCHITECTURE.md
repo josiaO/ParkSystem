@@ -31,7 +31,11 @@ PHYSICAL CAMERA
 
 Default live view provider is `DIRECT_LEGACY` (LocalMediaGateway). Set `live_view_provider=MEDIAMTX` and `media_gateway_enabled=true` only after a camera has soaked in parallel.
 
-`GET /media/gateway` reports local sessions, FFmpeg profiles, decode path, MediaMTX health, and rollback names (`DIRECT_LEGACY` / `FASTALPR_LEGACY`).
+`GET /media/gateway` reports local sessions, FFmpeg profiles, decode path, MediaMTX health, per-path MediaMTX telemetry (`mediamtx_paths`), and rollback names (`DIRECT_LEGACY` / `FASTALPR_LEGACY`).
+
+## Stream roles
+
+`MAIN`, `SUB`, `LIVE`, `DETECT`, `EVIDENCE` are stored per camera in `stream_profiles`. Roles are resolved to upstream URIs by `mediamtx_sources.upstream_role_uris`; `mediamtx.path_plan` then creates one MediaMTX path per *distinct* URI so a single-stream camera is pulled once. LIVE/DETECT paths are never on demand; EVIDENCE is on demand. The registry exposes `get_live_endpoint`, `get_detect_endpoint`, `get_evidence_endpoint` and `media_telemetry`; nothing outside `app/infrastructure/media/registry.py` chooses between MediaMTX and legacy.
 
 ## Failure behavior
 
@@ -39,4 +43,4 @@ MediaMTX missing or crashed → live view stays on LocalMediaGateway; HVX native
 
 ## Tests
 
-`tests/test_media_gateway.py`, `tests/test_migration_architecture.py`.
+`tests/test_media_gateway.py`, `tests/test_migration_architecture.py`, `tests/test_media_registry.py`, `tests/test_mediamtx_telemetry.py`.

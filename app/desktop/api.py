@@ -73,14 +73,22 @@ class ApiClient:
         if page == "payments":
             return self.can("payments.view") or self.can("fees.view") or self.can("kiosk.use")
         if page == "health":
-            return self.can("hardware.view") or self.can("dashboard.view")
+            return self.can("hardware.view")
         return bool(perm and self.can(perm))
 
     def nav_label(self, page: str, default: str) -> str:
+        friendly = {
+            "Plate Engine": "Detections",
+            "Simulation": "Testing & Simulation",
+            "Tariffs": "Tariffs & Schedules",
+            "Users": "Users & Roles",
+        }
+        label = default
         for row in self.navigation:
             if row.get("page") == page:
-                return str(row.get("label") or default)
-        return default
+                label = str(row.get("label") or default)
+                break
+        return friendly.get(label, label)
 
     def login(self, username, password):
         r=_check(httpx.post(f"{BASE}/auth/login", json={"username":username,"password":password}, timeout=5))

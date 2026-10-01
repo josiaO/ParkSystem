@@ -27,12 +27,15 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_timeout_seconds: float = 8.0
+    # Where camera credentials live: auto (= dpapi on Windows, db elsewhere),
+    # dpapi, file, memory, or db (legacy raw column).
+    secrets_backend: str = "auto"
     hvx_host_url: str = "http://127.0.0.1:8765"
     alpr_mode: str = "FASTALPR_ONLY"
     alpr_engine: str = "fastalpr"
     live_idle_seconds: float = 20.0
-    live_sdk_interval_seconds: float = 0.025
-    snapshot_cache_seconds: float = 0.025
+    live_sdk_interval_seconds: float = 0.05
+    snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
     detect_fps: float = 5.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
@@ -53,12 +56,55 @@ class Settings(BaseSettings):
     camera_tcp_probe_seconds: float = 1.0
     rtsp_probe_timeout_seconds: float = 5.0
     alpr_timeout_seconds: float = 15.0
-    alpr_country: str = "Tanzania"
+    alpr_country: str = ""
     alpr_csf: float = 0.918
     default_hvx_sdk_port: int = 30000
     bootstrap_username: str = "admin"
     bootstrap_password: str = ""
     mobile_money_webhook_secret: str = ""
+    # --- External payment providers (Phase 2 §8) -------------------------
+    # Which provider backs the public "pay by phone" flow. simulated keeps the
+    # legacy instant path; flutterwave / clickpesa create PENDING intents that
+    # only become SUCCEEDED after server-side verification.
+    payments_mobile_provider: str = "simulated"
+    # ClickPesa has no sandbox. A live collection is refused unless BOTH flags
+    # below are set explicitly by the operator (LIVE_PROVIDER_CONFIRMATION_REQUIRED).
+    payments_live_provider_confirmation_required: bool = True
+    payments_live_provider_confirmed: bool = False
+    payments_reconcile_seconds: float = 60.0
+    payments_intent_expiry_minutes: int = 30
+    payments_http_timeout_seconds: float = 8.0
+    flutterwave_secret_key: str = ""          # FLWSECK_TEST-... by default
+    flutterwave_secret_hash: str = ""         # webhook verif-hash / signature secret
+    flutterwave_base_url: str = "https://api.flutterwave.com/v3"
+    flutterwave_allow_live_keys: bool = False
+    flutterwave_customer_email: str = "payments@smartpark.local"
+    flutterwave_default_network: str = ""     # Airtel | Tigo | Halopesa | Vodafone | ""
+    clickpesa_client_id: str = ""
+    clickpesa_api_key: str = ""
+    clickpesa_checksum_key: str = ""
+    clickpesa_base_url: str = "https://api.clickpesa.com/third-parties"
+    clickpesa_live_enabled: bool = False
+    # Comma-separated hostnames that a public tunnel/reverse proxy forwards to
+    # this Site Service. Requests arriving on those hosts may only reach the
+    # narrow public payment surface (see app/services/public_ingress.py).
+    public_ingress_hosts: str = ""
+    # Optional cloud AI review (Codex §9). Off by default; never a gate authority.
+    ai_enabled: bool = False
+    ai_provider: str = "gemini"
+    ai_model: str = "gemini-2.5-flash-lite"
+    ai_timeout_seconds: float = 4.0
+    ai_max_concurrency: int = 2
+    ai_daily_request_cap: int = 200
+    ai_min_interval_seconds: float = 2.0  # per camera
+    ai_low_confidence_below: float = 0.75  # trigger a second opinion under this
+    ai_send_vehicle_image: bool = False  # only the plate crop unless explicitly allowed
+    ai_vehicle_image_max_px: int = 640
+    # Free-tier Gemini may use submitted content to improve Google products.
+    # Real (non-simulated) imagery is only sent once a deployment accepts that.
+    ai_data_treatment_accepted: bool = False
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     default_camera_password: str = "admin"
     gate_physical_control_enabled: bool = True
     board_tcp_port: int = 5000
@@ -89,6 +135,9 @@ class Settings(BaseSettings):
     site_language: str = "en"
     plate_normalization: str = "ALNUM_UPPER"
     plate_validation: str = "NONE"
+    recognition_consensus_window_seconds: float = 2.0
+    recognition_high_confidence: float = 0.92
+    recognition_medium_confidence: float = 0.75
 
     @field_validator("api_port", "default_hvx_sdk_port", "board_tcp_port", "led_udp_port", "printer_escpos_port")
     @classmethod
@@ -105,6 +154,22 @@ class Settings(BaseSettings):
         if not 1.0 <= fps <= 30.0:
             raise ValueError("SMARTPARK_DETECT_FPS must be between 1 and 30")
         return fps
+
+    @field_validator("recognition_consensus_window_seconds")
+    @classmethod
+    def _consensus_window(cls, value: float) -> float:
+        seconds = float(value)
+        if not 0.2 <= seconds <= 30.0:
+            raise ValueError("SMARTPARK_RECOGNITION_CONSENSUS_WINDOW_SECONDS must be between 0.2 and 30")
+        return seconds
+
+    @field_validator("recognition_high_confidence", "recognition_medium_confidence")
+    @classmethod
+    def _confidence_range(cls, value: float) -> float:
+        score = float(value)
+        if not 0.0 <= score <= 1.0:
+            raise ValueError("Recognition confidence thresholds must be between 0 and 1")
+        return score
 
     @field_validator("alpr_mode")
     @classmethod

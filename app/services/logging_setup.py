@@ -36,4 +36,8 @@ def configure_logging(process_name: str = "smartpark") -> logging.Logger:
     _configured.add(process_name)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Secrets (RTSP passwords, provider keys, webhook hashes) never reach a log line.
+    from app.services.redaction import install_logging_redaction
+
+    install_logging_redaction(log, logging.getLogger(), logging.getLogger("uvicorn"), logging.getLogger("uvicorn.error"))
     return log
