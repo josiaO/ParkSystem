@@ -3304,8 +3304,45 @@ async def sim_receipt_taken(session_id: int, db: Session = Depends(get_db), user
 
 
 @app.post("/sessions/{session_id}/receipt-taken")
-async def session_receipt_taken(session_id: int, db: Session = Depends(get_db), user: User = Depends(require_any("simulation.run", "gates.open"))):
-    return await sim_receipt_taken(session_id, db, user)
+async def session_receipt_taken(
+    session_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("gates.open")),
+):
+    """Confirm a real entry ticket removal through the authoritative controller.
+
+    Generic printers without a taken sensor fail closed. The simulation endpoint
+    remains separate and is never used as production receipt authority.
+    """
+    from app.application.entry_lane import EntryLaneController, policy_from_parking_settings
+    from app.domain.receipt_engine import InvalidPrintJob
+    from app.infrastructure.hardware.receipt_printers import receipt_printer_for
+
+    row = db.get(ParkingSession, session_id)
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    cfg = parking_settings(db)
+    controller = EntryLaneController(
+        printer=receipt_printer_for(
+            str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
+            str(cfg.get("printer_name") or settings.printer_name or ""),
+        )
+    )
+    gate = db.get(Gate, row.gate_id) if row.gate_id else None
+    camera = db.get(Camera, row.camera_id) if row.camera_id else None
+    try:
+        result = await controller.confirm_receipt_taken(
+            db,
+            row,
+            policy=policy_from_parking_settings(cfg),
+            gate=gate,
+            camera=camera,
+            sensor_confirmed=False,
+        )
+    except InvalidPrintJob as exc:
+        raise HTTPException(409, str(exc)) from exc
+    write_audit(db, user, "receipt.taken", "parking_session", str(row.id), "sensor-confirmed path")
+    return result
 
 
 @app.post("/sessions/{session_id}/correct-plate")
