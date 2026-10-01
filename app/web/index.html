@@ -926,6 +926,21 @@
           <button class="secondary" type="button" id="check-media">Check media gateway</button>
           <button class="secondary" type="button" id="check-decode">Check decode path</button>
         </div>
+        <div class="card card-b" id="recognition-commissioning">
+          <div class="toolbar" style="align-items:end">
+            <label style="min-width:260px">Recognition commissioning camera
+              <select id="commission-camera"></select>
+            </label>
+            <button type="button" id="commission-refresh">Refresh diagnostics</button>
+            <button class="secondary" type="button" id="commission-read">Run one software read</button>
+          </div>
+          <p class="muted">Diagnostic only. It does not create a parking session, print a receipt, or open a barrier.</p>
+          <div id="commission-summary" class="muted">Choose a camera to inspect recognition quality.</div>
+          <div id="commission-evidence" class="biz-grid" style="margin-top:12px"></div>
+          <div id="commission-recommendations" style="margin-top:12px"></div>
+          <pre id="commission-details" class="tech-col" style="margin-top:12px"></pre>
+          <p class="error" id="commission-error"></p>
+        </div>
         <pre id="hvx-info">Loading…</pre>
       </div>
 
