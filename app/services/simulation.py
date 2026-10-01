@@ -225,6 +225,7 @@ async def _pulse_gate(
     led_text: str,
     session: ParkingSession | None = None,
     automatic: bool = True,
+    command_uuid: str = "",
 ):
     if not gate or not cameras:
         return None
@@ -252,6 +253,7 @@ async def _pulse_gate(
         dry_run=dry_run,
         ok=bool(opened and opened.ok),
         message=(opened.message if opened else "") or "",
+        command_uuid=command_uuid or None,
     )
     return opened
 
