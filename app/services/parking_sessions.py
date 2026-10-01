@@ -110,11 +110,17 @@ def session_by_entry_event(db: Session, site_id: int, event_id: str) -> ParkingS
     )
 
 
-def active_for_plate(db: Session, plate: str, *, site_id: int = DEFAULT_SITE_ID) -> ParkingSession | None:
+def active_for_plate(
+    db: Session,
+    plate: str,
+    *,
+    site_id: int = DEFAULT_SITE_ID,
+    for_update: bool = False,
+) -> ParkingSession | None:
     plate = (plate or "").strip().upper()
     if not plate:
         return None
-    return db.scalar(
+    stmt = (
         select(ParkingSession)
         .where(
             ParkingSession.site_id == site_id,
@@ -123,6 +129,12 @@ def active_for_plate(db: Session, plate: str, *, site_id: int = DEFAULT_SITE_ID)
         )
         .order_by(ParkingSession.id.desc())
     )
+    if for_update:
+        # PostgreSQL production: serialize competing exit-lane claims for the
+        # same active session. SQLite ignores FOR UPDATE and remains suitable
+        # for local development/tests, not multi-lane production authority.
+        stmt = stmt.with_for_update()
+    return db.scalar(stmt)
 
 
 def start_entry(
@@ -340,7 +352,7 @@ def start_exit(
         )
         if by_exit is not None:
             return by_exit, _current(by_exit)
-    row = active_for_plate(db, plate, site_id=site_id)
+    row = active_for_plate(db, plate, site_id=site_id, for_update=True)
     if row is None:
         return None, ""
     if row.exit_event_id and event_id and row.exit_event_id == event_id:
