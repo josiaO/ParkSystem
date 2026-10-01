@@ -40,8 +40,8 @@ from app.models import ParkingSession, PaymentIntent, PaymentTransaction, Role, 
 from app.security import hash_password
 from app.services import mobile_payments
 
-SECRET_KEY = "FLWSECK_TEST-0123456789abcdef0123456789abcdef-X"
-SECRET_HASH = "smartpark-webhook-hash-1234"
+SECRET_KEY = "test-secret-key"
+SECRET_HASH = "test-secret-hash"
 
 
 class FakeHTTP:
