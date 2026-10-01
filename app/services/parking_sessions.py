@@ -391,11 +391,11 @@ def complete_authorized_exit(db: Session, row: ParkingSession, *, policy: LanePo
         row.exit_open_command_uuid = command_uuid
         db.commit()
     if policy.passage_fallback() and _current(row) == EXIT_GATE_OPEN_REQUESTED:
+        # Commissioning fallback only: a successful OPEN command is treated as
+        # passage when no physical passage sensor is configured.
         return advance(db, row, CLOSED, policy=policy)
-    if _current(row) == EXIT_GATE_OPEN_REQUESTED:
-        row = advance(db, row, EXIT_VEHICLE_PASSED, policy=policy)
-    if _current(row) == EXIT_VEHICLE_PASSED:
-        return advance(db, row, CLOSED, policy=policy)
+    # With WAIT_FOR_PASSAGE, the session deliberately remains open until a
+    # loop/beam/sensor calls mark_vehicle_passed(side="EXIT").
     return row
 
 
