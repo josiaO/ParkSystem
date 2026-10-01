@@ -200,7 +200,7 @@ def _load_engine():
             models = ensure_alpr_model_cache()
             kwargs = {
                 "detector_model": DETECTOR_MODEL,
-                "detector_conf_thresh": 0.15,
+                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.18) or 0.18),
                 "ocr_device": "cpu",
                 "detector_providers": ["CPUExecutionProvider"],
                 "ocr_providers": ["CPUExecutionProvider"],
@@ -269,11 +269,9 @@ def decode_alpr_image(data: bytes):
     width, height = img.size
     min_side = min(width, height)
     max_side = max(width, height)
-    if min_side < 720:
-        scale = 720 / float(min_side)
-        img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
-        width, height = img.size
-        max_side = max(width, height)
+    # Do not enlarge the full vehicle frame. The detector resizes internally;
+    # upscaling the whole frame burns CPU without creating plate detail. Only the
+    # detected plate crop is enlarged before OCR.
     if max_side > 1920:
         scale = 1920 / float(max_side)
         img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
@@ -327,7 +325,7 @@ def _prepare_ocr_crop(crop_bgr):
         return crop_bgr
     h, w = crop_bgr.shape[:2]
     # OCR models like ~a few hundred px wide plates.
-    target_w = 320
+    target_w = int(getattr(settings, "alpr_ocr_target_width", 320) or 320)
     if w < target_w:
         scale = target_w / float(max(w, 1))
         crop_bgr = cv2.resize(
@@ -441,7 +439,11 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         bbox = getattr(detection, "bounding_box", None)
         if bbox is None:
             continue
-        crop, _xy = _crop_bgr(bgr, bbox, pad_ratio=0.18)
+        crop, _xy = _crop_bgr(
+            bgr,
+            bbox,
+            pad_ratio=float(getattr(settings, "alpr_crop_padding_ratio", 0.18) or 0.18),
+        )
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
         ocr_input = _prepare_ocr_crop(crop)
