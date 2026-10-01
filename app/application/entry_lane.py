@@ -33,7 +33,7 @@ from app.services.parking_sessions import (
     start_entry_from_recognition,
 )
 from app.services.receipt_jobs import mark_receipt_taken, print_entry_receipt
-from app.services.receipts import policy_requires_taken, resolve_receipt_policy
+from app.services.receipts import policy_requires_taken, policy_should_print, resolve_receipt_policy
 
 
 GateOpener = Callable[..., Awaitable[Any]]
@@ -41,8 +41,10 @@ GateOpener = Callable[..., Awaitable[Any]]
 
 def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     cfg = cfg or {}
+    resolved = resolve_receipt_policy(cfg)
     return LanePolicy(
-        receipt_required_before_open=policy_requires_taken(resolve_receipt_policy(cfg)),
+        receipt_required_before_open=policy_requires_taken(resolved),
+        print_receipt_on_entry=policy_should_print(resolved),
         subscriber_skip_receipt=True,
     )
 
@@ -166,7 +168,9 @@ class EntryLaneController:
 
         need_receipt = bool(policy.receipt_required_before_open) and not subscriber
         skip_print = subscriber and not entitlement.print_receipt
-        should_print = (not skip_print) and (need_receipt or auto_take or entitlement.print_receipt)
+        should_print = (not skip_print) and (
+            policy.print_receipt_on_entry or need_receipt or auto_take or entitlement.print_receipt
+        )
         if should_print:
             printed = await print_entry_receipt(db, row, printer=self._printer(), policy=policy)
             db.refresh(row)
@@ -211,8 +215,9 @@ class EntryLaneController:
                     "source": source,
                     "message": "Receipt printed. Take the receipt to open the barrier.",
                 }
-            await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
-            db.refresh(row)
+            if need_receipt:
+                await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
+                db.refresh(row)
 
         return await self._authorize_and_open(
             db, row, gate=gate, camera=camera, policy=policy,
