@@ -505,6 +505,60 @@ def _hits_from_predict(rows, crop_source: str) -> list[PlateHit]:
     return hits
 
 
+def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop") -> dict:
+    """OCR a JPEG that is already a plate crop, skipping full-frame detection.
+
+    Native ALPR cameras often provide a plate JPEG alongside the vehicle image.
+    Re-reading that crop is the cheapest ParkWatch-style software verification:
+    camera event -> plate crop -> FastPlateOCR. Generic cameras still use the
+    detector-first path because they do not know the plate box.
+    """
+    started = time.monotonic()
+    if not jpeg or not fastalpr_installed():
+        return {"ok": False, "backend": "none", "plates": [], "detail": "plate crop unavailable"}
+    try:
+        bgr = decode_alpr_image(jpeg)
+        engine = _load_engine()
+        ocr_input = _prepare_ocr_crop(bgr)
+        ocr = engine.ocr.predict(ocr_input)
+        text, conf = _ocr_result_text(ocr)
+        plate, _rank = _apply_country_profile(text, conf)
+        if len(plate) < MIN_PLATE_CHARS:
+            return {
+                "ok": True, "backend": "fastalpr", "pipeline": "crop_ocr",
+                "plates": [], "best": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "detail": "no readable plate in crop",
+            }
+        hit = PlateHit(
+            plate_raw=text,
+            plate_normalized=plate,
+            plate_confidence=max(0.0, min(float(conf or 0), 1.0)),
+            plate_crop_path=_save_crop_bgr(bgr),
+            bbox=None,
+        )
+        return {
+            "ok": True,
+            "backend": "fastalpr",
+            "pipeline": "crop_ocr",
+            "plates": [hit.as_dict()],
+            "count": 1,
+            "best": hit.as_dict(),
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "detail": "plate crop OCR",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "backend": "fastalpr",
+            "pipeline": "crop_ocr",
+            "plates": [],
+            "best": None,
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "detail": str(exc),
+        }
+
+
 def recognize_bgr(bgr, *, crop_source: str) -> tuple[list[PlateHit], dict]:
     started = time.monotonic()
     if not fastalpr_installed():
