@@ -26,6 +26,7 @@ class FastALPRProvider:
         local = local_from_fastalpr(result)
         from app.infrastructure.recognition import normalize_event
 
+        best = result.get("best") or {}
         return normalize_event(
             camera_id=event_or_frame.get("camera_id"),
             site_id=event_or_frame.get("site_id"),
@@ -35,7 +36,7 @@ class FastALPRProvider:
             confidence=float(local.get("confidence") or 0),
             source="FASTALPR",
             image_ref=result.get("image_url") or event_or_frame.get("image_ref"),
-            plate_crop_ref=(local.get("crop_url") or (local.get("best") or {}).get("crop_url") if isinstance(local, dict) else None),
+            plate_crop_ref=best.get("crop_url") or best.get("plate_crop_path"),
             extra={"local": local, "backend": result.get("backend"), "ok": result.get("ok"),
                    "bbox": local.get("bbox"), "model_version": result.get("engine_version")},
             plate_policy=event_or_frame.get("plate_policy"),
