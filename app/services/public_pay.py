@@ -40,8 +40,12 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
         pay_methods = ["MOBILE_MONEY", "KIOSK_CASH"]
         pay_endpoint = "/api/public/payment-intents"
     else:
-        pay_methods = ["MOBILE_SIMULATED", "MOBILE_MONEY", "KIOSK_CASH"]
-        pay_endpoint = f"/p/{row.public_token}/pay"
+        from app.config import settings
+        pay_methods = ["KIOSK_CASH"]
+        pay_endpoint = ""
+        if settings.allow_public_simulated_payments:
+            pay_methods.insert(0, "MOBILE_SIMULATED")
+            pay_endpoint = f"/p/{row.public_token}/pay"
     return {
         "mobile_provider": mobile_provider,
         "pay_endpoint": pay_endpoint,
@@ -97,6 +101,9 @@ async def pay_public_session(
         pay_amount = remaining
 
     if method in {"MOBILE_SIMULATED", "MOBILE_MONEY", "SIMULATED"}:
+        from app.config import settings
+        if not settings.allow_public_simulated_payments:
+            raise PermissionError("Public simulated payments are disabled")
         provider = payment_provider_for("simulated")
         intent = await provider.create_intent({
             "session_id": row.id,
