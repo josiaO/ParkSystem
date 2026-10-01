@@ -280,9 +280,13 @@ def cancel_entry_attempt(db: Session, row: ParkingSession, *, policy: LanePolicy
 
 def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, policy: LanePolicy | None = None) -> ParkingSession:
     policy = policy or LanePolicy()
-    if command_uuid and row.open_command_uuid == command_uuid:
-        return row
     current = _current(row)
+    if (
+        command_uuid
+        and row.open_command_uuid == command_uuid
+        and current in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}
+    ):
+        return row
     if current in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}:
         return row
     if current == SESSION_CREATED and policy.receipt_required_before_open and (row.parker_kind or "CASUAL").upper() == "CASUAL":
@@ -357,7 +361,17 @@ def start_exit(
         return None, ""
     if row.exit_event_id and event_id and row.exit_event_id == event_id:
         return row, _current(row)
-    if _current(row) == CLOSED:
+    current = _current(row)
+    if (
+        row.exit_event_id
+        and event_id
+        and row.exit_event_id != event_id
+        and current in {AUTHORIZED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED, CLOSED}
+    ):
+        # Another exit event already owns this session attempt. New camera
+        # frames must not produce a second barrier pulse.
+        return row, current
+    if current == CLOSED:
         return row, CLOSED
     if _current(row) == ACTIVE:
         row = advance(db, row, EXIT_VEHICLE_DETECTED, policy=policy)
