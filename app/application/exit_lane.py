@@ -224,7 +224,7 @@ class ExitLaneController:
     ) -> dict[str, Any]:
         policy = policy or LanePolicy()
         at = _aware(at) or datetime.now(timezone.utc)
-        entitlement = lookup_entitlement(db, row.plate, at=at, site_id=row.site_id)
+        entitlement = lookup_entitlement(db, row.plate, at=at, site_id=row.site_id, strict=True)
         financial = self._fresh_financial_state(db, row, at=at, entitlement=entitlement)
         db.commit()
         db.refresh(row)
