@@ -25,8 +25,8 @@ def upgrade() -> None:
         return
     cols = _columns("parking_sessions")
     additions = (
-        ("entry_gate_id", sa.Column("entry_gate_id", sa.Integer(), nullable=True)),
-        ("exit_gate_id", sa.Column("exit_gate_id", sa.Integer(), nullable=True)),
+        ("entry_gate_id", sa.Column("entry_gate_id", sa.Integer(), sa.ForeignKey("gates.id"), nullable=True)),
+        ("exit_gate_id", sa.Column("exit_gate_id", sa.Integer(), sa.ForeignKey("gates.id"), nullable=True)),
         ("exit_open_command_uuid", sa.Column("exit_open_command_uuid", sa.String(64), nullable=False, server_default="")),
     )
     for name, col in additions:
