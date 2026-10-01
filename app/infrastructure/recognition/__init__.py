@@ -61,10 +61,15 @@ def normalize_event(
         image_ref=image_ref,
         plate_crop_ref=plate_crop_ref,
         source=source,
+        provider=source,
         raw_plate=applied["raw_plate"],
+        plate_raw=applied["raw_plate"],
         normalized_plate=applied["normalized_plate"],
+        plate_normalized=applied["normalized_plate"],
         recognition_confidence=float(confidence or 0),
         validation_result=applied["validation_result"],
+        validation_ok=applied["validation_ok"],
+        needs_review=applied["hold_for_operator"],
     )
     if extra:
         body.update(extra)

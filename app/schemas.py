@@ -184,6 +184,23 @@ class PaymentConfirm(BaseModel):
     amount: float | None = None
 
 
+class PublicPaymentIntentRequest(BaseModel):
+    """Public 'pay by phone' request. Amount is a string so money never passes through float."""
+    token: str
+    phone: str
+    provider: str | None = None
+    network: str | None = None
+    amount: str | None = None
+
+
+class AIIncidentSummaryRequest(BaseModel):
+    """Ask the optional AI reviewer to summarise stored captures. Facts come from the ledger."""
+    capture_ids: list[int] | None = None
+    plate: str | None = None
+    limit: int = Field(default=30, ge=1, le=100)
+    question: str | None = Field(default=None, max_length=300)
+
+
 class PlateCorrection(BaseModel):
     plate: str = ""
     capture_id: int | None = None

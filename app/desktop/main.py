@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog
+    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog, QGroupBox
 )
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
@@ -58,6 +58,70 @@ def configure_table(table: QTableWidget):
     header.setStretchLastSection(True)
 
 
+def is_technician():
+    return api.can("hardware.view")
+
+
+def deployment_kind():
+    profile = str((api.modules or {}).get("profile") or "")
+    enabled = set((api.modules or {}).get("enabled") or [])
+    if profile == "LPR_ONLY":
+        return "lpr"
+    if profile == "SECURITY":
+        return "security"
+    if profile == "ACCESS_CONTROL":
+        return "access"
+    if profile in {"PARKING_LITE", "PARKING_PRO", "ENTERPRISE"}:
+        return "parking"
+    if "parking.sessions" in enabled or "payments.core" in enabled:
+        return "parking"
+    if "security.watchlists" in enabled or "security.alerts" in enabled:
+        return "security"
+    if "access.gates" in enabled:
+        return "access"
+    if "recognition.alpr" in enabled:
+        return "lpr"
+    return "parking"
+
+
+def source_label(source):
+    text = str(source or "").lower()
+    if not text or text == "—":
+        return "—"
+    if "operator" in text:
+        return "Operator"
+    if "hybrid" in text or "fusion" in text:
+        return "Camera + SmartPark"
+    if "fast" in text or "local" in text:
+        return "SmartPark AI"
+    if "native" in text or "camera" in text or "sdk" in text:
+        return "Camera"
+    return str(source) if is_technician() else "Recognition"
+
+
+def money_label(amount, currency=""):
+    try:
+        number = float(amount or 0)
+    except (TypeError, ValueError):
+        number = 0
+    text = f"{number:,.0f}" if number == int(number) else f"{number:,.2f}"
+    cur = str(currency or "").strip()
+    return f"{cur} {text}".strip()
+
+
+def method_label(method):
+    text = str(method or "").lower()
+    if not text:
+        return "—"
+    if "cash" in text:
+        return "Cash"
+    if "card" in text:
+        return "Card"
+    if "mobile" in text or "mpesa" in text or "m-pesa" in text or "wallet" in text:
+        return "Mobile Money"
+    return str(method) if is_technician() else "Other"
+
+
 class Worker(QThread):
     done=Signal(object)
     failed=Signal(str)
@@ -80,25 +144,66 @@ def _stop_thread(thread, wait_ms=3000):
         thread.wait(400)
 
 
-def show_printable_receipt(parent, body, path="", qr_url=""):
-    dlg=QDialog(parent)
-    dlg.setWindowTitle("Parking receipt")
-    dlg.setMinimumSize(420, 520)
-    layout=QVBoxLayout(dlg)
-    text=QPlainTextEdit(); text.setReadOnly(True); text.setPlainText(body or "")
-    layout.addWidget(text, 1)
+def _qr_png_from_sources(qr_url="", qr_payload=""):
+    """Load the ticket QR from the API, or draw it locally if that image is blocked."""
+    png = b""
     if qr_url:
         try:
             png = api.get_bytes(qr_url, timeout=8)
-            pix = QPixmap(); pix.loadFromData(png)
-            if not pix.isNull():
-                qr_label = QLabel(); qr_label.setAlignment(Qt.AlignCenter)
-                qr_label.setPixmap(pix.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                layout.addWidget(qr_label)
-                tip = QLabel("Scan to pay on your phone, or use the code at the kiosk.")
-                tip.setWordWrap(True); tip.setAlignment(Qt.AlignCenter); layout.addWidget(tip)
         except Exception:
-            pass
+            png = b""
+    if not png.startswith(b"\x89PNG"):
+        png = b""
+    if not png:
+        from app.infrastructure.hardware.printers import qr_png_bytes
+        payload = (qr_payload or "").strip()
+        if not payload and qr_url:
+            path = str(qr_url).split("?")[0]
+            if path.endswith("/qr.png"):
+                path = path[: -len("/qr.png")]
+            payload = f"{BASE}{path}" if path.startswith("/") else path
+        png = qr_png_bytes(payload)
+    return png if png.startswith(b"\x89PNG") else b""
+
+
+def _receipt_print_html(body, qr_png=b""):
+    from html import escape
+    import base64
+    safe = escape(body or "").replace("\n", "<br>\n")
+    qr = ""
+    if qr_png and qr_png.startswith(b"\x89PNG"):
+        uri = "data:image/png;base64," + base64.b64encode(qr_png).decode("ascii")
+        qr = (
+            '<p style="text-align:center;margin:16px 0">'
+            f'<img src="{uri}" width="200" height="200" alt="QR" '
+            'style="border:1px solid #ccc;padding:8px;background:#fff"></p>'
+            '<p style="text-align:center;font-size:12px">Scan this QR at the kiosk if the camera cannot read the plate.</p>'
+        )
+    return (
+        "<html><head><meta charset='utf-8'></head>"
+        "<body style='font:14px/1.45 ui-monospace,monospace;padding:16px;max-width:420px'>"
+        f"<div>{safe}</div>{qr}</body></html>"
+    )
+
+
+def show_printable_receipt(parent, body, path="", qr_url="", qr_payload=""):
+    dlg=QDialog(parent)
+    dlg.setWindowTitle("Parking receipt")
+    dlg.setMinimumSize(420, 640)
+    layout=QVBoxLayout(dlg)
+    text=QPlainTextEdit(); text.setReadOnly(True)
+    text.setPlainText(body or "Parking receipt")
+    layout.addWidget(text, 1)
+    qr_png=_qr_png_from_sources(qr_url, qr_payload)
+    if qr_png:
+        pix = QPixmap(); pix.loadFromData(qr_png)
+        if not pix.isNull():
+            qr_label = QLabel(); qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setMinimumHeight(220)
+            qr_label.setPixmap(pix.scaled(220, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            layout.addWidget(qr_label)
+            tip = QLabel("Scan this QR at the kiosk if the camera cannot read the plate.")
+            tip.setWordWrap(True); tip.setAlignment(Qt.AlignCenter); layout.addWidget(tip)
     if path:
         hint=QLabel(f"Printer-ready file: {path}"); hint.setWordWrap(True); layout.addWidget(hint)
     row=QHBoxLayout()
@@ -108,22 +213,23 @@ def show_printable_receipt(parent, body, path="", qr_url=""):
     layout.addLayout(row)
 
     def do_print():
+        html=_receipt_print_html(body, qr_png)
         try:
             from PySide6.QtPrintSupport import QPrintDialog, QPrinter
             printer=QPrinter()
             dialog=QPrintDialog(printer, dlg)
             if dialog.exec()==QDialog.DialogCode.Accepted:
-                doc=QTextDocument(); doc.setPlainText(body or "")
+                doc=QTextDocument(); doc.setHtml(html)
                 doc.print_(printer)
                 return
         except Exception:
             pass
         target=path
-        if not target:
+        if not target or not str(target).endswith(".html"):
             folder=os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"
-            target=os.path.join(folder, "smartpark-receipt.txt")
+            target=os.path.join(folder, "smartpark-receipt.html")
             with open(target, "w", encoding="utf-8") as fh:
-                fh.write(body or "")
+                fh.write(html)
         try:
             if os.name=="nt":
                 os.startfile(target, "print")
@@ -345,7 +451,7 @@ class CameraLivePane(QFrame):
         self.last_snap.setMinimumHeight(80)
         self.last_snap.setMaximumHeight(110)
         snap_col.addWidget(self.last_snap)
-        crop_col=QVBoxLayout(); crop_col.addWidget(QLabel("Cropped plate"))
+        crop_col=QVBoxLayout(); crop_col.addWidget(QLabel("Plate crop"))
         self.crop=QLabel("—")
         self.crop.setObjectName("video")
         self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -357,10 +463,13 @@ class CameraLivePane(QFrame):
         self.plate=QLabel("—"); self.plate.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.plate.setStyleSheet("font-size:22px;font-weight:700;letter-spacing:4px")
         l.addWidget(self.plate)
-        self.details=QLabel("No car yet. Connect all on the IPs tab, then wait for a vehicle.")
+        self.details=QLabel("No vehicle yet. Add a camera on Devices, then wait for a vehicle.")
         self.details.setWordWrap(True)
         l.addWidget(self.details)
-        self.open_btn=QPushButton("Open this side"); self.open_btn.clicked.connect(self.open_this_side)
+        self.decision=QLabel("")
+        self.decision.setWordWrap(True)
+        l.addWidget(self.decision)
+        self.open_btn=QPushButton("Manual open"); self.open_btn.clicked.connect(self.open_this_side)
         l.addWidget(self.open_btn)
         self.correct_btn=QPushButton("Correct plate")
         self.correct_btn.clicked.connect(self.correct_plate)
@@ -374,6 +483,8 @@ class CameraLivePane(QFrame):
         self._last_jpeg=b""
         self._last_overlay=None
         self._mjpeg=None
+        self._live_gen=0
+        self._mjpeg_retry_ms=1000
         self._snap_timer=QTimer(self); self._snap_timer.setInterval(200); self._snap_timer.timeout.connect(self._tick_snapshot)
         self._alpr_timer=QTimer(self); self._alpr_timer.setInterval(2000); self._alpr_timer.timeout.connect(self._tick_alpr)
         self._paint_busy=False
@@ -418,6 +529,7 @@ class CameraLivePane(QFrame):
             self.status.setText("Click this view or the list to choose a camera.")
             self.details.setText("Any added camera can go on the left or the right.")
             self.plate.setText("—")
+            self.decision.setText("")
             self.stop_live()
             self.video.setText("Click to choose a camera")
             return
@@ -426,6 +538,7 @@ class CameraLivePane(QFrame):
             return
         self.start_live()
     def stop_live(self):
+        self._live_gen += 1
         self._snap_timer.stop(); self._alpr_timer.stop(); self._stop_mjpeg()
         watching=self._watching
         self._watching=None
@@ -441,6 +554,7 @@ class CameraLivePane(QFrame):
         if self._watching==cid and self._mjpeg is not None and self._mjpeg.isRunning():
             if not self._alpr_timer.isActive(): self._alpr_timer.start()
             return
+        self._live_gen += 1
         self._snap_timer.stop()
         self._stop_mjpeg()
         if self._watching not in {None, cid}:
@@ -463,12 +577,28 @@ class CameraLivePane(QFrame):
         _stop_thread(stream)
     def _mjpeg_fail(self, err):
         self._live_fail(err)
-        # Snapshot polling is a compatibility fallback only. Keep it deliberately
-        # slow so it cannot become a second live-video engine beside MJPEG.
-        if self.camera_id() is not None and not self._snap_timer.isActive():
-            self._snap_timer.setInterval(500)
-            self._snap_timer.start()
-            self._tick_snapshot()
+        # Stay on the MJPEG stream. snapshot.jpg grabs one FFmpeg frame per
+        # request, so polling it as live video restarts a decoder every tick.
+        if self.camera_id() is None:
+            return
+        self._snap_timer.stop()
+        gen = self._live_gen
+        text=str(err or "").lower()
+        reset = any(token in text for token in ("10054", "forcibly closed", "connection reset", "connectionreset", "winerror"))
+        if reset:
+            delay = 250
+            self._mjpeg_retry_ms = 1000
+        else:
+            delay = self._mjpeg_retry_ms
+            self._mjpeg_retry_ms = min(8000, max(1000, delay * 2))
+        self.status.setText("Reconnecting live view…")
+        QTimer.singleShot(delay, lambda g=gen: self._retry_mjpeg(g))
+    def _retry_mjpeg(self, gen):
+        if gen != self._live_gen or self.camera_id() is None:
+            return
+        if self._mjpeg is not None and self._mjpeg.isRunning():
+            return
+        self.start_live()
     def _set_pixmap(self, label, jpeg, overlay=None):
         image=QImage.fromData(jpeg)
         if image.isNull(): return False
@@ -524,6 +654,7 @@ class CameraLivePane(QFrame):
                 self.video.setText("Waiting for a JPEG frame")
             else:
                 self.status.setText("Live")
+                self._mjpeg_retry_ms = 1000
         finally:
             self._paint_busy=False
         if self._pending_live and self._pending_live != jpeg:
@@ -531,7 +662,10 @@ class CameraLivePane(QFrame):
     def _live_fail(self, err):
         text=str(err or "")
         if "409" in text or "ffmpeg" in text.lower() or "ffprobe" in text.lower():
-            self.video.setText("Waiting for a camera JPEG.\nHVX: SDK login on port 30000. Generic IP: HTTP snapshot or RTSP + FastALPR.")
+            if is_technician():
+                self.video.setText("Waiting for a camera JPEG.\nHVX: SDK login on port 30000. Generic IP: HTTP snapshot or RTSP + FastALPR.")
+            else:
+                self.video.setText("Waiting for the first frame.\nPlate recognition can continue while this picture reconnects.")
             self.status.setText("Waiting for live video")
             return
         self.status.setText(text)
@@ -568,20 +702,33 @@ class CameraLivePane(QFrame):
         if fps: live_bits.append(f"{fps:g} fps")
         if age is not None: live_bits.append(f"{int(round(age))} ms")
         if payload.get("live"):
-            self.status.setText("Live" + ((" · " + " · ".join(live_bits)) if live_bits else ""))
+            if is_technician():
+                self.status.setText("Live" + ((" · " + " · ".join(live_bits)) if live_bits else ""))
+            else:
+                self.status.setText("Video is live.")
         elif payload.get("error"):
-            self.status.setText(str(payload.get("error")))
+            self.status.setText(str(payload.get("error")) if is_technician() else "Video unavailable. The camera may still be reading plates.")
         conf=shown.get("confidence")
-        conf_txt=f"{int(round(conf*100))}%" if conf is not None else "—"
-        source=shown.get("source") or fusion.get("method") or "—"
-        side=shown.get("lane_direction") or (self.camera or {}).get("side") or (self.camera or {}).get("lane_direction") or "—"
-        when=str(shown.get("created_at") or "")[:19].replace("T"," ") or "—"
+        pct=None
+        if conf is not None:
+            number=float(conf)
+            pct=int(round(number*100 if number<=1 else number))
+        conf_txt=f"{pct}%" if pct is not None else ""
+        source=source_label(shown.get("source") or fusion.get("method") or "")
+        side=shown.get("lane_direction") or (self.camera or {}).get("side") or (self.camera or {}).get("lane_direction") or ""
+        when=str(shown.get("created_at") or "")[:19].replace("T"," ")
+        held=bool(shown.get("pending_confirmation") or shown.get("needs_review") or fusion.get("needs_review"))
+        low=pct is not None and pct < 80
         if plate:
-            decision = "held for confirmation" if (shown.get("pending_confirmation") or shown.get("needs_review") or fusion.get("needs_review")) else "auto-accepted"
-            self.details.setText(f"Time {when}  ·  {side}  ·  {conf_txt}  ·  {source}  ·  {decision}")
-            self.hold_label.setText("Waiting: confirm or correct this plate before the gate auto-decides." if decision.startswith("held") else "")
+            bits=[bit for bit in (when, side, source if is_technician() else "") if bit]
+            self.details.setText("  ·  ".join(bits) or "Plate read")
+            self.decision.setText("Check plate" if held or low else "Plate read")
+            if conf_txt:
+                self.plate.setText(f"{chars}    {conf_txt}")
+            self.hold_label.setText("Confirm or correct this plate before the barrier decides." if held else "")
         else:
-            self.details.setText("No car yet. Connect all on the IPs tab, then wait for a vehicle.")
+            self.details.setText("No vehicle yet. Add a camera on Devices, then wait for a vehicle.")
+            self.decision.setText("")
             self.hold_label.setText("")
         snap=shown.get("snapshot_url")
         if snap:
@@ -654,14 +801,7 @@ class Dashboard(QWidget):
         self._keep(w); w.start()
     def _apply(self, data):
         data=data or {}
-        stats=[
-            ("Vehicles inside", data.get("vehicles_inside", 0)),
-            ("Entries today", data.get("entries_today", 0)),
-            ("Exits today", data.get("exits_today", 0)),
-            ("Revenue today", data.get("revenue_today_label") or data.get("revenue_today") or 0),
-            ("Unpaid active", data.get("unpaid_active", 0)),
-            ("Subscribers inside", data.get("subscribers_inside", 0)),
-        ]
+        stats=self._dashboard_stats(data)
         while self.grid.count():
             item=self.grid.takeAt(0)
             w=item.widget()
@@ -686,6 +826,36 @@ class Dashboard(QWidget):
         alerts=data.get("alerts") or []
         self.alert.setText("  ·  ".join(alerts) if alerts else "No hardware alerts.")
         self._load_backup()
+    def _dashboard_stats(self, data):
+        kind=deployment_kind()
+        online=data.get("sdk_connected", 0)
+        cameras=data.get("cameras", 0)
+        if kind=="lpr":
+            return [
+                ("Cameras online", online),
+                ("Cameras configured", cameras),
+                ("Registered vehicles", data.get("registered_plates", 0)),
+            ]
+        if kind=="security":
+            return [
+                ("Cameras online", online),
+                ("Cameras configured", cameras),
+                ("Active notices", len(data.get("alerts") or [])),
+            ]
+        if kind=="access":
+            return [
+                ("Registered vehicles", data.get("registered_plates", 0)),
+                ("Cameras online", online),
+                ("Devices configured", cameras),
+            ]
+        return [
+            ("Vehicles inside", data.get("vehicles_inside", 0)),
+            ("Entries today", data.get("entries_today", 0)),
+            ("Exits today", data.get("exits_today", 0)),
+            ("Revenue today", data.get("revenue_today_label") or money_label(data.get("revenue_today"), data.get("currency"))),
+            ("Unpaid sessions", data.get("unpaid_active", 0)),
+            ("Subscribers inside", data.get("subscribers_inside", 0)),
+        ]
     def _load_backup(self):
         try:
             status=api.get("/backup")
@@ -731,33 +901,45 @@ class CameraDialog(QDialog):
         self.password=QLineEdit(); self.password.setEchoMode(QLineEdit.Password)
         if camera: self.password.setPlaceholderText("Leave blank to keep current password")
         else: self.password.setText("admin")
-        self.direction=QComboBox(); self.direction.addItems(["ENTRY","EXIT"])
+        self.direction=QComboBox()
+        self.direction.addItem("Entry", "ENTRY")
+        self.direction.addItem("Exit", "EXIT")
+        self.direction.addItem("Bidirectional", "BOTH")
         self.adapter=QComboBox()
         for key, label in (
-            ("hvx", "hvx — this site (NetSDK + onboard ALPR)"),
-            ("rtsp", "rtsp — generic IP + FastALPR"),
-            ("dahua", "dahua — IP camera + FastALPR"),
-            ("hikvision", "hikvision — IP camera + FastALPR"),
-            ("onvif", "onvif — not implemented"),
-            ("simulated", "simulated — no hardware"),
+            ("hvx", "hvx"),
+            ("rtsp", "rtsp"),
+            ("dahua", "dahua"),
+            ("hikvision", "hikvision"),
+            ("onvif", "onvif"),
+            ("simulated", "simulated"),
         ):
             self.adapter.addItem(label, key)
         self.rtsp=QLineEdit()
-        self.rtsp.setPlaceholderText("leave blank to auto-try Dahua/Hikvision paths")
+        self.rtsp.setPlaceholderText("Leave blank to discover")
         self.ffmpeg_profile=QComboBox(); self.ffmpeg_profile.addItems(["LOW_LATENCY_LAN","COMPATIBLE","LOSSY_NETWORK","VENDOR_SPECIAL"])
         self.transport=QComboBox(); self.transport.addItems(["TCP","UDP","AUTO"])
-        self.recognition=QComboBox(); self.recognition.addItem("Default for adapter", "")
-        for key in ("NATIVE_ONLY","FASTALPR_ONLY","HYBRID"):
-            self.recognition.addItem(key, key)
+        self.recognition=QComboBox()
+        self.recognition.addItem("Use the site default", "")
+        for key, label in (
+            ("NATIVE_ONLY", "Use camera recognition"),
+            ("FASTALPR_ONLY", "Use SmartPark AI recognition"),
+            ("HYBRID", "Use both"),
+            ("VIDEO_ONLY", "Video only"),
+        ):
+            self.recognition.addItem(label, key)
         self.controller=QLineEdit(); self.display=QLineEdit()
-        self.gate=QComboBox(); self.gate.addItem("None", None)
+        self.gate=QComboBox(); self.gate.addItem("No gate — monitoring only", None)
         try:
             for g in api.get("/gates"): self.gate.addItem(g["name"], g["id"])
         except Exception:
             pass
         if camera:
             self.name.setText(camera["name"]); self.ip.setText(camera["ip_address"]); self.port.setText(str(camera["sdk_port"]))
-            self.username.setText(camera["username"]); self.direction.setCurrentText(camera["lane_direction"]); self.rtsp.setText(camera.get("rtsp_url") or "")
+            self.username.setText(camera["username"])
+            dir_idx=self.direction.findData(str(camera.get("lane_direction") or "ENTRY"))
+            if dir_idx>=0: self.direction.setCurrentIndex(dir_idx)
+            self.rtsp.setText(camera.get("rtsp_url") or "")
             self.controller.setText(camera.get("controller_ip") or "")
             self.display.setText(camera.get("display_ip") or "")
             if camera.get("adapter_id"):
@@ -774,10 +956,16 @@ class CameraDialog(QDialog):
                 if idx>=0: self.recognition.setCurrentIndex(idx)
             idx=self.gate.findData(camera.get("gate_id")); 
             if idx>=0: self.gate.setCurrentIndex(idx)
-        for label,w in [("Name",self.name),("Camera IP",self.ip),("HVX SDK port",self.port),("Username",self.username),("Password",self.password),("Side",self.direction),("Lane",self.gate),("Adapter",self.adapter),("Recognition",self.recognition),("Controller IP (Board*)",self.controller),("Display IP (IpAddr*)",self.display),("RTSP URL (optional, auto-tried if blank)",self.rtsp),("FFmpeg profile",self.ffmpeg_profile),("RTSP transport",self.transport)]: form.addRow(label,w)
+        for label,w in [("Name",self.name),("Camera address",self.ip),("Username",self.username),("Password",self.password),("Direction",self.direction),("Gate",self.gate),("Recognition",self.recognition)]: form.addRow(label,w)
+        advanced=QGroupBox("Advanced")
+        advanced_form=QFormLayout(advanced)
+        for label,w in [("SDK port",self.port),("Adapter",self.adapter),("Controller IP",self.controller),("Display IP",self.display),("RTSP URI",self.rtsp),("FFmpeg profile",self.ffmpeg_profile),("RTSP transport",self.transport)]:
+            advanced_form.addRow(label,w)
+        advanced.setVisible(is_technician())
+        form.addRow(advanced)
         save=QPushButton("Save Camera"); save.clicked.connect(self.accept); form.addRow(save)
     def payload(self):
-        data={"name":self.name.text().strip(),"ip_address":self.ip.text().strip(),"sdk_port":int(self.port.text()),"username":self.username.text(),"lane_direction":self.direction.currentText(),"adapter_id":self.adapter.currentData(),"recognition_mode":self.recognition.currentData() or "","controller_ip":self.controller.text().strip(),"display_ip":self.display.text().strip(),"rtsp_url":self.rtsp.text().strip(),"ffmpeg_profile":self.ffmpeg_profile.currentText(),"rtsp_transport":self.transport.currentText(),"gate_id":self.gate.currentData()}
+        data={"name":self.name.text().strip(),"ip_address":self.ip.text().strip(),"sdk_port":int(self.port.text() or "30000"),"username":self.username.text(),"lane_direction":self.direction.currentData() or "ENTRY","adapter_id":self.adapter.currentData(),"recognition_mode":self.recognition.currentData() or "","controller_ip":self.controller.text().strip(),"display_ip":self.display.text().strip(),"rtsp_url":self.rtsp.text().strip(),"ffmpeg_profile":self.ffmpeg_profile.currentText(),"rtsp_transport":self.transport.currentText(),"gate_id":self.gate.currentData()}
         if self.password.text() or not self.camera:
             data["password"]=self.password.text()
         return data
@@ -829,26 +1017,35 @@ class Cameras(QWidget):
         refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
         for w in (add, seed, discover, onboard, connect_all, edit, delete, refresh): tools.addWidget(w)
         tools.addStretch(); ips_l.addLayout(tools)
-        ips_hint=QLabel("Discover, Connect all, and camera IPs live here. Select a row for Connect, Probe, FastALPR, or Capture snapshot.")
+        ips_hint=QLabel("Cameras on this site. Add one to start live monitoring and plate recognition.")
         ips_hint.setWordWrap(True); ips_l.addWidget(ips_hint)
-        self.table=QTableWidget(0,10); self.table.setHorizontalHeaderLabels(["ID","Name","Lane","Side","Camera","Controller","Display","Status","SDK","Error"])
+        self.table=QTableWidget(0,10); self.table.setHorizontalHeaderLabels(["ID","Name","Location","Direction","Address","Controller","Display","Health","SDK","Detail"])
         configure_table(self.table); ips_l.addWidget(self.table, 1)
-        self.stream_info=QLabel("Stream profiles appear after Connect. Live and FastALPR share one gateway producer.")
-        self.stream_info.setWordWrap(True); ips_l.addWidget(self.stream_info)
+        self.empty_devices=QLabel("")
+        self.empty_devices.setWordWrap(True)
+        ips_l.addWidget(self.empty_devices)
+        self.stream_info=QLabel("Stream profiles appear after Connect. Live and recognition share one gateway producer.")
+        self.stream_info.setWordWrap(True)
+        self.stream_info.setVisible(is_technician())
+        ips_l.addWidget(self.stream_info)
         actions=QHBoxLayout()
-        self.connect_btn=QPushButton("Connect"); self.connect_btn.clicked.connect(self.sdk_connect)
-        self.probe_btn=QPushButton("Probe video"); self.probe_btn.clicked.connect(self.rtsp_probe)
-        self.onvif_btn=QPushButton("ONVIF profiles"); self.onvif_btn.clicked.connect(self.onvif_discover)
-        self.alpr_btn=QPushButton("FastALPR"); self.alpr_btn.clicked.connect(self.fastalpr)
-        self.disconnect_btn=QPushButton("SDK Disconnect"); self.disconnect_btn.clicked.connect(self.sdk_disconnect)
-        self.open_side_btn=QPushButton("Open this side"); self.open_side_btn.clicked.connect(self.open_this_side)
+        tech=is_technician()
+        self.connect_btn=QPushButton("Connect"); self.connect_btn.clicked.connect(self.sdk_connect); self.connect_btn.setVisible(tech)
+        self.probe_btn=QPushButton("Test Video"); self.probe_btn.clicked.connect(self.rtsp_probe); self.probe_btn.setVisible(tech)
+        self.onvif_btn=QPushButton("Discover Streams"); self.onvif_btn.clicked.connect(self.onvif_discover); self.onvif_btn.setVisible(tech)
+        self.alpr_btn=QPushButton("Test Recognition"); self.alpr_btn.clicked.connect(self.fastalpr); self.alpr_btn.setVisible(tech)
+        self.disconnect_btn=QPushButton("Disconnect camera"); self.disconnect_btn.clicked.connect(self.sdk_disconnect); self.disconnect_btn.setVisible(tech)
+        self.open_side_btn=QPushButton("Manual open"); self.open_side_btn.clicked.connect(self.open_this_side)
         self.snap_btn=QPushButton("Capture snapshot"); self.snap_btn.clicked.connect(self.capture_snapshot)
         for w in (self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.snap_btn, self.disconnect_btn, self.open_side_btn):
             actions.addWidget(w)
         actions.addStretch(); ips_l.addLayout(actions)
+        if not tech:
+            for col in (0, 4, 5, 6, 8, 9):
+                self.table.setColumnHidden(col, True)
 
         self.tabs.addTab(live, "Live")
-        self.tabs.addTab(ips, "IPs")
+        self.tabs.addTab(ips, "Devices")
         self.tabs.currentChanged.connect(self._on_tab)
         l.addWidget(self.tabs, 1)
         self.rows=[]
@@ -879,6 +1076,7 @@ class Cameras(QWidget):
                 (c.get("last_error") or "—")[:80],
             ]
             for col,v in enumerate(vals): self.table.setItem(r,col,QTableWidgetItem(str(v)))
+        self.empty_devices.setText("" if rows else "No cameras configured. Add a camera to start live monitoring and plate recognition.")
         self._fill_lanes()
         self._maybe_start_pair()
     def selected_camera(self):
@@ -890,7 +1088,7 @@ class Cameras(QWidget):
     def discover(self):
         w=Worker(lambda: api.get("/cameras/discover?scan_lan=true", timeout=45)); w.done.connect(self._show_discover); w.failed.connect(lambda e:QMessageBox.critical(self,"Discover",e)); self._keep(w); w.start()
     def onboard(self):
-        ip, ok = QInputDialog.getText(self, "Onboard camera", "Camera IP")
+        ip, ok = QInputDialog.getText(self, "Add Camera", "Camera address")
         if not ok or not str(ip).strip():
             return
         payload={"ip_address": str(ip).strip(), "username": "admin", "password": "admin"}
@@ -992,7 +1190,10 @@ class Cameras(QWidget):
         cid=self.selected_id()
         if cid is not None: self._load_streams(cid)
     def sdk_connect(self): self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/connect", timeout=25),"Connect")
-    def sdk_disconnect(self): self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/disconnect"),"SDK Disconnect")
+    def sdk_disconnect(self):
+        if QMessageBox.question(self, "Disconnect camera", "Disconnect this camera? Live video for it stops until someone connects it again.") != QMessageBox.Yes:
+            return
+        self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/disconnect"), "Disconnect camera")
     def rtsp_probe(self): self._run(lambda cid: api.post(f"/cameras/{cid}/rtsp/probe"),"RTSP Probe")
     def onvif_discover(self): self._run(lambda cid: api.post(f"/cameras/{cid}/onvif/discover", timeout=20),"ONVIF profiles")
     def fastalpr(self): self._run(lambda cid: api.post(f"/cameras/{cid}/alpr/recognize", timeout=30),"FastALPR")
@@ -1476,8 +1677,8 @@ class Sessions(QWidget):
                 s.get("status") or "",
                 s.get("receipt_status") or "—",
                 (s.get("entry_time") or "")[:19].replace("T"," "),
-                f"{int(float(s.get('amount_due') or 0)):,}",
-                f"{int(float(s.get('amount_paid') or 0)):,}",
+                money_label(s.get("amount_due"), s.get("currency")),
+                money_label(s.get("amount_paid"), s.get("currency")),
                 s.get("gate_id") or "—",
             ]
             for c,val in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(val)))
@@ -1500,14 +1701,18 @@ class Sessions(QWidget):
         qr_url=(issued or {}).get("qr_url") or ""
         if not qr_url and (issued or {}).get("public_token"):
             qr_url=f"/p/{issued['public_token']}/qr.png"
+        qr_payload=(issued or {}).get("qr_payload") or (issued or {}).get("public_url") or ""
         if not body:
             try:
                 slip=api.get(f"/sessions/{s['id']}/receipt")
                 body=slip.get("body_text") or ""
                 path=(slip.get("payload") or {}).get("path") or path
+                qr_payload=qr_payload or slip.get("qr_payload") or ""
+                if not qr_url and slip.get("qr_url"):
+                    qr_url=slip.get("qr_url")
             except Exception:
                 pass
-        show_printable_receipt(self, body, path, qr_url=qr_url)
+        show_printable_receipt(self, body, path, qr_url=qr_url, qr_payload=qr_payload)
         self.refresh()
     def correct_plate(self):
         visit=self.visit or {}
@@ -1583,26 +1788,27 @@ class Payments(QWidget):
             vals=[
                 (p.get("confirmed_at") or p.get("created_at") or "")[:19].replace("T"," "),
                 p.get("session_id") or "—",
-                p.get("method") or "",
-                f"TZS {int(float(p.get('amount') or 0)):,}",
+                method_label(p.get("method")),
+                money_label(p.get("amount"), p.get("currency")),
                 p.get("status") or "",
                 p.get("provider_id") or "",
             ]
             for c,val in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(val)))
+        self.table.setColumnHidden(5, not is_technician())
 
 
 class Vehicles(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
-        title=QLabel("Registered plates"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Season, VIP, staff, and tenant plates open the gate automatically when the camera reads them. Set a start and end date, or use today.")
+        title=QLabel("Registered vehicles"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
+        note=QLabel("Registered vehicles and access plans. A matching plate can be allowed through when gate access is enabled.")
         note.setWordWrap(True); l.addWidget(note)
         self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(["Plate","Owner","Plan","Auto-open","Enabled","From","Until"])
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         configure_table(self.table); l.addWidget(self.table, 1)
         bulk_note=QLabel("Register many, one plate per line: plate, owner, start date, end date")
         l.addWidget(bulk_note)
-        self.bulk=QPlainTextEdit(); self.bulk.setPlaceholderText("T111AAA, Jane, 2026-09-01, 2026-10-01"); self.bulk.setMaximumHeight(90)
+        self.bulk=QPlainTextEdit(); self.bulk.setPlaceholderText("ABC1234, Owner, 2026-09-01, 2026-10-01"); self.bulk.setMaximumHeight(90)
         l.addWidget(self.bulk)
         row=QHBoxLayout()
         manage=api.can("subscribers.manage")
@@ -1692,11 +1898,11 @@ class Vehicles(QWidget):
 class Fees(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
-        title=QLabel("Tariffs"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
+        title=QLabel("Tariffs & Schedules"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
         note=QLabel("Day and night rates for this site. Times and amounts are normal fields — save them here.")
         note.setWordWrap(True); l.addWidget(note)
         form=QFormLayout()
-        self.currency=QLineEdit("TZS")
+        self.currency=QLineEdit()
         self.day_start=QTimeEdit(); self.day_start.setDisplayFormat("HH:mm")
         self.day_end=QTimeEdit(); self.day_end.setDisplayFormat("HH:mm")
         self.free_day=QSpinBox(); self.free_night=QSpinBox()
@@ -1740,7 +1946,7 @@ class Fees(QWidget):
         try: data=api.get("/fees/tariff")
         except Exception as e: self.out.setText(str(e)); return
         editor=(data or {}).get("editor") or {}
-        self.currency.setText(editor.get("currency") or data.get("currency") or "TZS")
+        self.currency.setText(editor.get("currency") or data.get("currency") or "")
         self._set_time(self.day_start, editor.get("day_start"))
         self._set_time(self.day_end, editor.get("day_end"))
         self.free_day.setValue(int(float(editor.get("free_day_minutes") or 0)))
@@ -1838,13 +2044,13 @@ class Hardware(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Hardware Lab"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        warn=QLabel("Advanced integration diagnostics. The HVX vendor SDK requires a 32-bit Windows host process."); warn.setWordWrap(True); l.addWidget(warn)
+        warn=QLabel("Technician tools: camera connection, media streaming, recognition, gate I/O, and logs."); warn.setWordWrap(True); l.addWidget(warn)
         self.info=QPlainTextEdit(); self.info.setReadOnly(True); self.info.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         l.addWidget(self.info, 1)
         row=QHBoxLayout()
         b=QPushButton("Check HVX SDK Host"); b.clicked.connect(self.check)
-        a=QPushButton("Check FastALPR"); a.clicked.connect(self.check_alpr)
+        a=QPushButton("Check recognition"); a.clicked.connect(self.check_alpr)
         m=QPushButton("Check media gateway"); m.clicked.connect(self.check_media)
         d=QPushButton("Check decode path"); d.clicked.connect(self.check_decode)
         row.addWidget(b); row.addWidget(a); row.addWidget(m); row.addWidget(d); row.addStretch(); l.addLayout(row)
@@ -1882,12 +2088,12 @@ class Hardware(QWidget):
 class SimPage(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
-        title=QLabel("Simulation"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Does not need cameras. Choose a car photo, Upload as ENTRY — FastALPR on this PC reads the plate, then Receipt taken / Mark paid / Upload as EXIT.")
+        title=QLabel("Testing & Simulation"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
+        note=QLabel("Practice entry and exit without live cameras. Registered vehicles follow the same access rules as the live site.")
         note.setWordWrap(True); l.addWidget(note)
         form=QFormLayout()
         self.gate=QComboBox()
-        self.plate=QLineEdit(); self.plate.setPlaceholderText("T453ETH")
+        self.plate=QLineEdit(); self.plate.setPlaceholderText("ABC 1234")
         self.file_label=QLabel("No photo selected")
         pick=QPushButton("Choose car photo…"); pick.clicked.connect(self.pick_file)
         form.addRow("Lane", self.gate); form.addRow("Plate", self.plate); form.addRow("Photo", pick); form.addRow("", self.file_label)
@@ -1958,13 +2164,31 @@ class SimPage(QWidget):
         if data.get("message"): parts.append(data["message"])
         alpr=data.get("alpr") or {}
         best=(alpr.get("best") or {})
-        if best.get("plate"): parts.append(f"FastALPR: {best.get('plate')} ({int(round((best.get('confidence') or 0)*100))}%)")
+        if best.get("plate"): parts.append(f"Recognition: {best.get('plate')} ({int(round((best.get('confidence') or 0)*100))}%)")
         parts.append(json.dumps({k:v for k,v in data.items() if k not in {"alpr","receipt"}}, indent=2, default=str))
         self.out.setPlainText("\n\n".join(parts))
-        crop=best.get("crop_url") or alpr.get("annotated_url")
+        crop=(
+            best.get("crop_url")
+            or sess.get("crop_url")
+            or (data.get("capture") or {}).get("crop_url")
+            or alpr.get("annotated_url")
+            or sess.get("snapshot_url")
+        )
         if crop:
             w=Worker(lambda url=crop: api.get_bytes(url, timeout=8))
             w.done.connect(lambda jpeg: self._pix(jpeg)); self._keep(w); w.start()
+        if str(data.get("action") or "").upper() == "ENTRY" and (data.get("receipt") or data.get("qr_url") or sess.get("public_token")):
+            qr_url=data.get("qr_url") or ""
+            token=sess.get("public_token") or data.get("public_token") or ""
+            if not qr_url and token:
+                qr_url=f"/p/{token}/qr.png"
+            show_printable_receipt(
+                self,
+                data.get("receipt") or "",
+                ((data.get("print") or {}).get("path") or ""),
+                qr_url=qr_url,
+                qr_payload=data.get("qr_payload") or data.get("public_url") or sess.get("qr_payload") or "",
+            )
     def _pix(self, jpeg):
         image=QImage.fromData(jpeg)
         if image.isNull(): return
@@ -2004,7 +2228,7 @@ class OnboardingWizard(QWidget):
 
         # 1 purpose
         p1 = QWidget(); l1 = QVBoxLayout(p1)
-        l1.addWidget(QLabel("What is this site for?"))
+        l1.addWidget(QLabel("What do you want to use this site for?"))
         self.use_case = QComboBox()
         for cid, label in [
             ("LPR", "License Plate Recognition"),
@@ -2019,26 +2243,39 @@ class OnboardingWizard(QWidget):
 
         # 2 topology
         p2 = QWidget(); l2 = QVBoxLayout(p2)
-        l2.addWidget(QLabel("Site topology preset"))
+        l2.addWidget(QLabel("How is this site laid out?"))
         self.topo_preset = QComboBox()
         self.topo_preset.addItem("1 entry / 1 exit", "1in1out")
         self.topo_preset.addItem("One bidirectional lane", "bidirectional")
-        self.topo_preset.addItem("No gates (LPR / security)", "lpr_only")
-        self.topo_preset.addItem("Keep current topology", "keep")
+        self.topo_preset.addItem("No gates", "lpr_only")
+        self.topo_preset.addItem("Multiple lanes — keep current", "keep")
         l2.addWidget(self.topo_preset)
         form2 = QFormLayout()
         self.site_name = QLineEdit("Default Site")
         self.site_tz = QLineEdit("UTC")
-        self.site_cur = QLineEdit("USD")
+        self.site_cur = QComboBox()
+        for code, label in (
+            ("USD", "US Dollar (USD)"),
+            ("EUR", "Euro (EUR)"),
+            ("GBP", "British Pound (GBP)"),
+            ("KES", "Kenyan Shilling (KES)"),
+            ("TZS", "Tanzanian Shilling (TZS)"),
+            ("AED", "UAE Dirham (AED)"),
+        ):
+            self.site_cur.addItem(label, code)
+        self.site_lang = QComboBox()
+        for code, label in (("en", "English"), ("sw", "Kiswahili"), ("ar", "Arabic"), ("fr", "French"), ("pt", "Portuguese")):
+            self.site_lang.addItem(label, code)
         form2.addRow("Site name", self.site_name)
         form2.addRow("Timezone", self.site_tz)
         form2.addRow("Currency", self.site_cur)
+        form2.addRow("Language", self.site_lang)
         l2.addLayout(form2)
         self.stack.addWidget(p2)
 
         # 3 hardware
         p3 = QWidget(); l3 = QVBoxLayout(p3)
-        l3.addWidget(QLabel("Hardware — discover cameras or skip and commission later in Live Gates."))
+        l3.addWidget(QLabel("Add cameras now, or skip and add them later under Devices."))
         self.hw_info = QPlainTextEdit(); self.hw_info.setReadOnly(True)
         l3.addWidget(self.hw_info)
         disc = QPushButton("Discover cameras on LAN")
@@ -2048,12 +2285,12 @@ class OnboardingWizard(QWidget):
 
         # 4 recognition
         p4 = QWidget(); l4 = QVBoxLayout(p4)
-        l4.addWidget(QLabel("Default recognition mode for cameras"))
+        l4.addWidget(QLabel("How should plates be read?"))
         self.rec_mode = QComboBox()
         for mid, label in [
-            ("NATIVE_ONLY", "Native ALPR"),
-            ("FASTALPR_ONLY", "SmartPark FastALPR"),
-            ("HYBRID", "Hybrid"),
+            ("NATIVE_ONLY", "Use camera recognition"),
+            ("FASTALPR_ONLY", "Use SmartPark AI recognition"),
+            ("HYBRID", "Use both"),
             ("VIDEO_ONLY", "Video only"),
         ]:
             self.rec_mode.addItem(label, mid)
@@ -2063,7 +2300,7 @@ class OnboardingWizard(QWidget):
 
         # 5 modules
         p5 = QWidget(); l5 = QVBoxLayout(p5)
-        l5.addWidget(QLabel("Optional modules (disabled modules disappear from navigation)"))
+        l5.addWidget(QLabel("Optional features. Disabled features disappear from navigation."))
         self.mod_list = QListWidget()
         self.mod_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         l5.addWidget(self.mod_list)
@@ -2117,7 +2354,7 @@ class OnboardingWizard(QWidget):
             data = api.get("/cameras/discover?scan_lan=true")
             cams = data.get("cameras") if isinstance(data, dict) else data
             n = len(cams) if isinstance(cams, list) else 0
-            self.hw_info.setPlainText(f"{n} device(s) found.\nImport and connect them under Live Gates → IPs.")
+            self.hw_info.setPlainText(f"{n} camera(s) found.\nOpen Devices to add and connect them.")
         except Exception as e:
             self.hw_info.setPlainText(str(e))
 
@@ -2137,7 +2374,16 @@ class OnboardingWizard(QWidget):
             if site.get("timezone"):
                 self.site_tz.setText(site["timezone"])
             if site.get("currency"):
-                self.site_cur.setText(site["currency"])
+                idx = self.site_cur.findData(site["currency"])
+                if idx < 0:
+                    self.site_cur.addItem(str(site["currency"]), site["currency"])
+                    idx = self.site_cur.findData(site["currency"])
+                if idx >= 0:
+                    self.site_cur.setCurrentIndex(idx)
+            if site.get("language"):
+                idx = self.site_lang.findData(site["language"])
+                if idx >= 0:
+                    self.site_lang.setCurrentIndex(idx)
             self.mod_list.clear()
             for row in self._status.get("optional_module_choices") or []:
                 item = QListWidgetItem(f"{row.get('label')} — {row.get('description', '')}")
@@ -2180,7 +2426,9 @@ class OnboardingWizard(QWidget):
             body["site"] = {
                 "name": self.site_name.text().strip(),
                 "timezone": self.site_tz.text().strip() or "UTC",
-                "currency": self.site_cur.text().strip() or "USD",
+                "currency": self.site_cur.currentData() or "USD",
+                "language": self.site_lang.currentData() or "en",
+                "locale": self.site_lang.currentData() or "en",
             }
             preset = self.topo_preset.currentData()
             if preset != "keep":
@@ -2235,26 +2483,26 @@ class OnboardingWizard(QWidget):
 
 
 class PlateEnginePage(QWidget):
-    """ParkWatch-style reader: the camera snaps, FastALPR reads, the pack can be replaced."""
+    """Recent plate reads. Engine files stay in the technician view."""
 
     def __init__(self):
         super().__init__()
         root = QVBoxLayout(self)
-        title = QLabel("Plate Engine")
+        title = QLabel("Detections")
         title.setStyleSheet("font-size:24px;font-weight:700")
         root.addWidget(title)
-        intro = QLabel(
-            "Same split as ParkWatch. The lane camera saves the photo. "
-            "FastALPR finds the plate and reads it. Tanzania is the country profile. "
-            "Drop a new ONNX pack to retrain, or register another engine to change the library. "
-            "This desktop runs on Windows and Linux."
-        )
+        intro = QLabel("Recent plate reads from this site. Camera and model details stay in Hardware Lab.")
         intro.setWordWrap(True)
         intro.setObjectName("muted")
         root.addWidget(intro)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Time", "Plate", "Camera", "Lane", "Confidence"])
+        configure_table(self.table)
+        root.addWidget(self.table, 1)
         self.card = QLabel("")
         self.card.setWordWrap(True)
         self.card.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.card.setVisible(is_technician())
         root.addWidget(self.card)
         row = QHBoxLayout()
         refresh = QPushButton("Refresh")
@@ -2262,6 +2510,7 @@ class PlateEnginePage(QWidget):
         pack = QPushButton("Apply model pack…")
         pack.setObjectName("secondary")
         pack.clicked.connect(self.apply_pack)
+        pack.setVisible(is_technician())
         row.addWidget(refresh)
         row.addWidget(pack)
         row.addStretch()
@@ -2269,7 +2518,6 @@ class PlateEnginePage(QWidget):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        root.addStretch()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2277,9 +2525,35 @@ class PlateEnginePage(QWidget):
 
     def load(self):
         try:
+            rows = api.get("/captures?limit=50") or []
+        except Exception as exc:
+            self.status.setText(f"Detections could not be loaded. {exc}")
+            rows = []
+        self.table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            conf = row.get("confidence")
+            pct = ""
+            if conf is not None:
+                pct = f"{int(round(float(conf) * 100 if float(conf) <= 1 else float(conf)))}%"
+            vals = [
+                str(row.get("created_at") or "")[:19].replace("T", " "),
+                row.get("plate") or "—",
+                row.get("camera_id") if row.get("camera_id") is not None else "—",
+                row.get("lane_direction") or "—",
+                pct or "—",
+            ]
+            for c, val in enumerate(vals):
+                self.table.setItem(r, c, QTableWidgetItem(str(val)))
+        if not rows:
+            self.status.setText("No detections yet. Detected vehicles will appear here automatically.")
+        elif not is_technician():
+            self.status.setText("")
+        if not is_technician():
+            return
+        try:
             data = api.get("/recognition/engine")
         except Exception as exc:
-            self.status.setText(str(exc))
+            self.card.setText(str(exc))
             return
         models = data.get("models") or {}
         training = data.get("training") or {}
@@ -2296,7 +2570,7 @@ class PlateEnginePage(QWidget):
             str(training.get("retrain") or ""),
         ]
         self.card.setText("\n".join(lines))
-        self.status.setText("Reading every lane photo in software.")
+        self.status.setText("Technician recognition details are below the detection list.")
 
     def apply_pack(self):
         folder = QFileDialog.getExistingDirectory(self, "Model pack folder")
@@ -2464,7 +2738,7 @@ class MainWindow(QMainWindow):
         if api.nav_page("cameras"):
             self.add_page(api.nav_label("cameras", "Live Gates"), Cameras)
         if api.nav_page("plates"):
-            self.add_page(api.nav_label("plates", "Plate Engine"), PlateEnginePage)
+            self.add_page(api.nav_label("plates", "Detections"), PlateEnginePage)
         if api.nav_page("onboarding") or (
             api.can("settings.manage") and not (api.modules or {}).get("onboarding_completed", True)
         ):
@@ -2476,22 +2750,22 @@ class MainWindow(QMainWindow):
         if api.nav_page("payments"):
             self.add_page(api.nav_label("payments", "Payments"), Payments)
         if api.nav_page("fees"):
-            self.add_page(api.nav_label("fees", "Tariffs"), Fees)
+            self.add_page(api.nav_label("fees", "Tariffs & Schedules"), Fees)
         if api.nav_page("reports"):
             self.add_page(api.nav_label("reports", "Reports"), ReportsPage)
         if api.nav_page("gates"):
             self.add_page(api.nav_label("gates", "Gates"), Gates)
         if api.nav_page("users"):
-            self.add_page(api.nav_label("users", "Users"), Users)
+            self.add_page(api.nav_label("users", "Users & Roles"), Users)
         if api.nav_page("settings") or api.can("settings.view") or api.can("dashboard.view"):
             self.add_page(api.nav_label("settings", "Settings"), lambda: SettingsPage(self))
         if api.nav_page("hardware"):
             self.add_page(api.nav_label("hardware", "Hardware Lab"), Hardware)
         if api.nav_page("sim"):
-            self.add_page(api.nav_label("sim", "Simulation"), SimPage)
+            self.add_page(api.nav_label("sim", "Testing & Simulation"), SimPage)
         self.nav.currentRowChanged.connect(self._show_page)
         self.apply_theme("Light")
-        self.statusBar().showMessage("Camera snaps the photo. FastALPR reads the plate. Windows and Linux.")
+        self.statusBar().showMessage("SmartPark Edge")
         self.setMinimumSize(960, 640)
         # Do not setGeometry() to the full screen rect. On Windows the frame is
         # taller than the client area, Qt retries, and the window grows forever.

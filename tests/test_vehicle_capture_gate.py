@@ -62,6 +62,20 @@ class VehicleCaptureGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bbox-not-plate-shaped")
 
+    def test_tanzania_threshold_requires_explicit_policy(self):
+        capture = {"plate": "T104EJW", "score": .25, "source": "fastalpr",
+                   "bbox": {"x1": 100, "y1": 200, "x2": 260, "y2": 245}}
+        self.assertFalse(should_persist_vehicle_capture(capture)[0])
+        self.assertTrue(should_persist_vehicle_capture(capture, plate_policy="TZ")[0])
+        self.assertFalse(should_persist_vehicle_capture(capture, coil_occupied=True)[0])
+
+    def test_neutral_accepts_numeric_and_letter_registrations_with_evidence(self):
+        for plate in ("123456", "ABCDE", "KAA123A"):
+            self.assertTrue(should_persist_vehicle_capture({
+                "plate": plate, "score": .9, "source": "fastalpr",
+                "bbox": {"x1": 10, "y1": 20, "x2": 120, "y2": 50},
+            })[0])
+
 
 if __name__ == "__main__":
     unittest.main()

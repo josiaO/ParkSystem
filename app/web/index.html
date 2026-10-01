@@ -186,7 +186,8 @@
     }
     #sidebar.collapsed { width: 58px; }
     #sidebar.collapsed .sl-label, #sidebar.collapsed .group, #sidebar.collapsed .side-foot { display: none; }
-    #sidebar.collapsed .sitem { justify-content: center; padding: 0; margin: 1px 7px; }
+    #sidebar.collapsed .sitem { justify-content: center; padding: 0; margin: 1px 7px; gap: 0; }
+    .sl-ico { width: 16px; flex: none; text-align: center; font-size: 13px; color: var(--accent); }
     nav .brand { display: none; }
     nav .group, .sec {
       font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
@@ -240,7 +241,35 @@
       background: var(--surface); font-weight: 700; font-size: 10.5px; letter-spacing: .06em;
       text-transform: uppercase; color: var(--text-secondary); position: sticky; top: 0; z-index: 1;
     }
-    tbody tr.click:hover, tr.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    tbody tr.click:hover, tbody tr:hover, tr.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .empty-state { padding: 22px 8px; text-align: center; }
+    .empty-state b { display: block; font-size: 14px; margin-bottom: 4px; color: var(--text-primary); }
+    .empty-state p { color: var(--text-secondary); font-size: 12.5px; max-width: 420px; margin: 0 auto; }
+    body:not(.role-tech) .tech-only, body:not(.role-tech) .tech-col { display: none !important; }
+    .lane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .lane-head select { max-width: 180px; }
+    .biz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-top: 8px; font-size: 12px; }
+    .biz-grid span { display: block; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+    .decision-banner { margin-top: 8px; min-height: 22px; }
+    .conf-line { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .conf-line .pct { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text-secondary); }
+    body.kiosk-mode #sidebar { display: none !important; }
+    body.kiosk-mode .shell { grid-template-columns: 1fr; }
+    body.kiosk-mode #page-sessions > p.muted,
+    body.kiosk-mode #page-sessions > .tblwrap,
+    body.kiosk-mode #page-sessions > #session-receipt,
+    body.kiosk-mode #page-sessions > #qr-camera,
+    body.kiosk-mode #open-kiosk,
+    body.kiosk-mode #pay-session,
+    body.kiosk-mode #print-session-receipt,
+    body.kiosk-mode #refresh-sessions { display: none !important; }
+    body.kiosk-mode #kiosk-card { display: block !important; max-width: 880px; margin: 24px auto !important; padding: 28px !important; }
+    body.kiosk-mode #kiosk-exit { display: inline-flex !important; }
+    #kiosk-exit { display: none; }
+    @media (max-width: 1400px) {
+      nav#sidebar, #sidebar { width: 210px; }
+      main { padding: 14px 16px 32px; }
+    }
     .subnav, .tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin: 0 0 14px; }
     .subnav button, .tab {
       padding: 8px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
@@ -406,7 +435,7 @@
         </div>
       </div>
       <h1>SmartPark Edge</h1>
-      <p class="muted" id="login-hint">Parking camera operations</p>
+      <p class="muted" id="login-hint">Sign in to operate this site</p>
       <p class="muted" id="login-platform" style="margin-top:8px;font-size:12px"></p>
       <label for="username">Username</label>
       <input id="username" name="username" autocomplete="username" required>
@@ -435,45 +464,50 @@
       </div>
     </header>
     <div class="shell">
-    <nav id="sidebar">
+    <nav id="sidebar" aria-label="Primary">
       <div class="brand">SmartPark Edge</div>
       <div class="group">Overview</div>
-      <button data-page="dashboard" data-nav-id="dashboard" class="sitem active">Dashboard</button>
-      <button data-page="cameras" data-nav-id="cameras" class="sitem">Live Gates</button>
-      <button data-page="health" data-nav-id="health" id="nav-health" class="sitem">System Health</button>
+      <button data-page="dashboard" data-nav-id="dashboard" class="sitem active"><span class="sl-ico" aria-hidden="true">▦</span><span class="sl-label">Dashboard</span></button>
+      <button data-page="cameras" data-nav-id="cameras" class="sitem"><span class="sl-ico" aria-hidden="true">▶</span><span class="sl-label">Live Gates</span></button>
       <div class="group">Operations</div>
-      <button data-page="sessions" data-nav-id="sessions" id="nav-sessions" class="sitem">Sessions</button>
-      <button data-page="vehicles" data-nav-id="vehicles" id="nav-vehicles" class="sitem">Vehicles</button>
-      <button data-page="watchlists" data-nav-id="watchlists" id="nav-watchlists" class="sitem hidden">Watchlists</button>
-      <button data-page="payments" data-nav-id="payments" id="nav-payments" class="sitem">Payments</button>
+      <button data-page="detections" data-nav-id="plates" id="nav-plates" class="sitem"><span class="sl-ico" aria-hidden="true">▣</span><span class="sl-label">Detections</span></button>
+      <button data-page="sessions" data-nav-id="sessions" id="nav-sessions" class="sitem"><span class="sl-ico" aria-hidden="true">☰</span><span class="sl-label">Sessions</span></button>
+      <button data-page="alerts" data-nav-id="alerts" id="nav-alerts" class="sitem"><span class="sl-ico" aria-hidden="true">!</span><span class="sl-label">Alerts</span></button>
+      <button data-page="incidents" data-nav-id="incidents" id="nav-incidents" class="sitem"><span class="sl-ico" aria-hidden="true">⚑</span><span class="sl-label">Incidents</span></button>
+      <button data-page="payments" data-nav-id="payments" id="nav-payments" class="sitem"><span class="sl-ico" aria-hidden="true">¤</span><span class="sl-label">Payments</span></button>
+      <button data-page="vehicles" data-nav-id="vehicles" id="nav-vehicles" class="sitem"><span class="sl-ico" aria-hidden="true">▣</span><span class="sl-label">Vehicles</span></button>
+      <button data-page="watchlists" data-nav-id="watchlists" id="nav-watchlists" class="sitem"><span class="sl-ico" aria-hidden="true">◉</span><span class="sl-label">Watchlists</span></button>
       <div class="group">Management</div>
-      <button data-page="fees" data-nav-id="fees" class="sitem">Tariffs</button>
-      <button data-page="reports" data-nav-id="reports" id="nav-reports" class="sitem">Reports</button>
-      <button data-page="onboarding" data-nav-id="onboarding" id="nav-onboarding" class="sitem hidden">Setup Wizard</button>
+      <button data-page="fees" data-nav-id="fees" class="sitem"><span class="sl-ico" aria-hidden="true">≡</span><span class="sl-label">Tariffs &amp; Schedules</span></button>
+      <button data-page="reports" data-nav-id="reports" id="nav-reports" class="sitem"><span class="sl-ico" aria-hidden="true">▤</span><span class="sl-label">Reports</span></button>
+      <button data-page="onboarding" data-nav-id="onboarding" id="nav-onboarding" class="sitem"><span class="sl-ico" aria-hidden="true">✦</span><span class="sl-label">Setup Wizard</span></button>
       <div class="group">System</div>
-      <button data-page="gates" data-nav-id="gates" class="sitem">Gates</button>
-      <button data-page="users" data-nav-id="users" id="nav-users" class="sitem">Users</button>
-      <button data-page="hardware" data-nav-id="hardware" id="nav-hardware" class="sitem">Hardware Lab</button>
-      <button data-page="sim" data-nav-id="sim" id="nav-sim" class="sitem">Simulation</button>
+      <button data-page="gates" data-nav-id="gates" class="sitem"><span class="sl-ico" aria-hidden="true">⊣</span><span class="sl-label">Gates</span></button>
+      <button data-page="users" data-nav-id="users" id="nav-users" class="sitem"><span class="sl-ico" aria-hidden="true">☺</span><span class="sl-label">Users &amp; Roles</span></button>
+      <button data-page="health" data-nav-id="health" id="nav-health" class="sitem"><span class="sl-ico" aria-hidden="true">✚</span><span class="sl-label">System Health</span></button>
+      <button data-page="settings" data-nav-id="settings" id="nav-settings" class="sitem"><span class="sl-ico" aria-hidden="true">⚙</span><span class="sl-label">Settings</span></button>
+      <button data-page="hardware" data-nav-id="hardware" id="nav-hardware" class="sitem"><span class="sl-ico" aria-hidden="true">⚒</span><span class="sl-label">Hardware Lab</span></button>
+      <button data-page="sim" data-nav-id="sim" id="nav-sim" class="sitem"><span class="sl-ico" aria-hidden="true">◌</span><span class="sl-label">Testing &amp; Simulation</span></button>
       <div class="side-foot"><b>SmartPark Edge</b><br>Modular edge platform</div>
     </nav>
     <main>
       <div class="view-head top">
         <div>
           <h2 id="page-title">Dashboard</h2>
-          <div class="sub muted" id="page-subtitle">Operations overview</div>
+          <div class="sub muted" id="page-subtitle">Site status for this deployment</div>
         </div>
       </div>
 
       <div id="page-dashboard">
         <div id="backup-banner" class="notice hidden"></div>
         <div class="stat-grid" id="dashboard-cards"></div>
+        <h3 id="dashboard-lanes-title" style="font-size:13px;margin:4px 0 8px">Lane status</h3>
         <div class="gates-overview" id="dashboard-lanes"></div>
         <p class="muted" id="dashboard-summary">Loading…</p>
       </div>
 
       <div id="page-health" class="hidden">
-        <p class="muted">Technician view. One failed camera or HVX host must not stop parking. Disabled modules show as neutral — not an error.</p>
+        <p class="muted">Core, database, cameras, video, recognition, gates, payments, and workers. Disabled is neutral — not a fault. One camera problem does not stop the site.</p>
         <div class="stat-grid" id="health-cards"></div>
         <div class="card" style="margin-top:14px"><div class="card-h"><h3>What this means</h3></div><div class="card-b" id="health-plain">Loading…</div></div>
         <details style="margin-top:12px"><summary>Technical details</summary><pre id="health-details">Loading…</pre></details>
@@ -483,7 +517,7 @@
         <div class="notice">Show 1 camera, 2 cameras, or every camera. A camera that is not on this screen still reads plates and fills its lane. Leaving this page only stops the picture, not recognition.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
-          <button type="button" data-sub="ips">IPs</button>
+          <button type="button" data-sub="ips">Devices</button>
         </div>
         <div id="cameras-sub-live">
           <div class="toolbar">
@@ -499,31 +533,44 @@
           <div class="dual-live">
             <div class="live-pane" data-slot="0">
               <div class="live-card">
-                <label class="live-title">Left camera
-                  <select data-role="camera"></select>
-                </label>
+                <div class="lane-head">
+                  <label class="live-title">Left camera
+                    <select data-role="camera" aria-label="Left camera"></select>
+                  </label>
+                  <span class="chip c-mut" data-role="online">Waiting</span>
+                </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
-                <p class="muted" data-role="status">Click this view or the list to choose a camera.</p>
+                <p class="muted" data-role="status">Choose a camera to start live video.</p>
+                <div class="car-meta">
+                  <div class="conf-line">
+                    <div class="plate-chars" data-role="plate">—</div>
+                    <div class="pct" data-role="confidence"></div>
+                  </div>
+                  <div class="decision-banner" data-role="decision"></div>
+                  <p class="muted" data-role="details">No vehicle yet. Add a camera on Devices, then wait for a vehicle.</p>
+                </div>
+                <div class="biz-grid" data-role="biz">
+                  <div><span>Camera</span><b data-role="biz-camera">—</b></div>
+                  <div><span>Video</span><b data-role="biz-video">—</b></div>
+                  <div><span>Recognition</span><b data-role="biz-recog">—</b></div>
+                  <div><span>Last detection</span><b data-role="biz-last">—</b></div>
+                </div>
                 <div class="car-stills">
                   <div>
                     <div class="live-title">Snapshot</div>
-                    <div data-role="snap"><p class="muted">Waiting for a car</p></div>
+                    <div data-role="snap"><p class="muted">Waiting for a vehicle</p></div>
                   </div>
                   <div>
-                    <div class="live-title">Cropped plate</div>
+                    <div class="live-title">Plate crop</div>
                     <div data-role="crop"><p class="muted">—</p></div>
                   </div>
                 </div>
-                <div class="car-meta">
-                  <div class="plate-chars" data-role="plate">—</div>
-                  <p class="muted" data-role="details">No car yet. Connect all on the IPs tab, then wait for a vehicle.</p>
-                </div>
                 <div class="pane-actions">
-                  <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                  <button class="secondary" type="button" data-role="open-side">Manual open</button>
                   <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
                   <p class="muted" data-role="hold"></p>
                 </div>
@@ -531,31 +578,44 @@
             </div>
             <div class="live-pane" data-slot="1">
               <div class="live-card">
-                <label class="live-title">Right camera
-                  <select data-role="camera"></select>
-                </label>
+                <div class="lane-head">
+                  <label class="live-title">Right camera
+                    <select data-role="camera" aria-label="Right camera"></select>
+                  </label>
+                  <span class="chip c-mut" data-role="online">Waiting</span>
+                </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <iframe data-role="webrtc" title="Live camera" style="width:100%;height:min(56vh,620px);max-height:620px;border:0;display:none;"></iframe>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
-                <p class="muted" data-role="status">Click this view or the list to choose a camera.</p>
+                <p class="muted" data-role="status">Choose a camera to start live video.</p>
+                <div class="car-meta">
+                  <div class="conf-line">
+                    <div class="plate-chars" data-role="plate">—</div>
+                    <div class="pct" data-role="confidence"></div>
+                  </div>
+                  <div class="decision-banner" data-role="decision"></div>
+                  <p class="muted" data-role="details">No vehicle yet. Add a camera on Devices, then wait for a vehicle.</p>
+                </div>
+                <div class="biz-grid" data-role="biz">
+                  <div><span>Camera</span><b data-role="biz-camera">—</b></div>
+                  <div><span>Video</span><b data-role="biz-video">—</b></div>
+                  <div><span>Recognition</span><b data-role="biz-recog">—</b></div>
+                  <div><span>Last detection</span><b data-role="biz-last">—</b></div>
+                </div>
                 <div class="car-stills">
                   <div>
                     <div class="live-title">Snapshot</div>
-                    <div data-role="snap"><p class="muted">Waiting for a car</p></div>
+                    <div data-role="snap"><p class="muted">Waiting for a vehicle</p></div>
                   </div>
                   <div>
-                    <div class="live-title">Cropped plate</div>
+                    <div class="live-title">Plate crop</div>
                     <div data-role="crop"><p class="muted">—</p></div>
                   </div>
                 </div>
-                <div class="car-meta">
-                  <div class="plate-chars" data-role="plate">—</div>
-                  <p class="muted" data-role="details">No car yet. Connect all on the IPs tab, then wait for a vehicle.</p>
-                </div>
                 <div class="pane-actions">
-                  <button class="secondary" type="button" data-role="open-side">Open this side</button>
+                  <button class="secondary" type="button" data-role="open-side">Manual open</button>
                   <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
                   <p class="muted" data-role="hold"></p>
                 </div>
@@ -572,17 +632,17 @@
           <button class="secondary" type="button" id="seed-site">Add site cameras</button>
           <button class="secondary" type="button" id="connect-all">Connect all</button>
           <button class="secondary" type="button" id="refresh-cameras">Refresh</button>
-          <button class="secondary" type="button" id="sdk-connect">Connect</button>
-          <button class="secondary" type="button" id="rtsp-probe">Probe RTSP</button>
-          <button class="secondary" type="button" id="onvif-discover">ONVIF profiles</button>
-          <button class="secondary" type="button" id="fastalpr">FastALPR</button>
+          <button class="secondary tech-only" type="button" id="sdk-connect">Connect</button>
+          <button class="secondary tech-only" type="button" id="rtsp-probe">Test Video</button>
+          <button class="secondary tech-only" type="button" id="onvif-discover">Discover Streams</button>
+          <button class="secondary tech-only" type="button" id="fastalpr">Test Recognition</button>
           <button class="secondary" type="button" id="capture-snapshot">Capture snapshot</button>
-          <button class="secondary" type="button" id="sdk-disconnect">SDK Disconnect</button>
-          <button class="secondary" type="button" id="open-this-side">Open this side</button>
+          <button class="secondary danger tech-only" type="button" id="sdk-disconnect">Disconnect camera</button>
+          <button class="secondary" type="button" id="open-this-side">Manual open</button>
         </div>
         <table>
           <thead>
-            <tr><th>ID</th><th>Name</th><th>Lane</th><th>Side</th><th>Camera</th><th>Controller</th><th>Display</th><th>Status</th><th>SDK</th><th>Error</th><th></th></tr>
+            <tr><th class="tech-col">ID</th><th>Name</th><th>Location</th><th>Direction</th><th class="tech-col">Address</th><th class="tech-col">Controller</th><th class="tech-col">Display</th><th>Health</th><th class="tech-col">SDK</th><th class="tech-col">Detail</th><th></th></tr>
           </thead>
           <tbody id="camera-rows"></tbody>
         </table>
@@ -598,7 +658,7 @@
           <tbody id="discover-rows"></tbody>
         </table>
         <pre class="hidden" id="camera-result"></pre>
-        <div class="live-card" style="margin-top:12px">
+        <div class="live-card tech-only" style="margin-top:12px">
           <div class="live-title">Stream profiles</div>
           <div id="stream-profiles"><p class="muted">Select a camera to see MAIN / SUB / DETECT roles, codec, FPS, GOP, transport, and frame age.</p></div>
         </div>
@@ -621,9 +681,59 @@
         <p class="error" id="gate-error"></p>
       </div>
 
-      <div id="page-sessions" class="hidden">
-        <p class="muted">Scan the receipt QR (a USB scanner types the code and presses Enter). The visit shows the time inside, the entry photo, and the amount. Payment stays closed when nothing is owed.</p>
+      <div id="page-detections" class="hidden">
+        <p class="muted">Recent plate reads from this site. Parking, access, and security details appear only when those features are enabled.</p>
         <div class="toolbar">
+          <label style="display:flex;gap:8px;align-items:center;margin:0">Plate
+            <input id="detect-filter" placeholder="Search plate" style="min-width:180px" autocomplete="off">
+          </label>
+          <button class="secondary" type="button" id="refresh-detections">Refresh</button>
+        </div>
+        <div class="tblwrap" style="overflow:auto">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Plate</th><th>Camera</th><th>Lane</th><th>Confidence</th><th>Source</th><th>Status</th></tr>
+            </thead>
+            <tbody id="detection-rows"></tbody>
+          </table>
+        </div>
+        <p class="error" id="detection-error"></p>
+        <div id="detection-detail" class="card hidden" style="margin-top:12px">
+          <div class="card-h"><h3>Detection</h3></div>
+          <div class="card-b" id="detection-detail-body"></div>
+        </div>
+      </div>
+
+      <div id="page-alerts" class="hidden">
+        <div class="empty-state card card-b">
+          <b>No alerts yet.</b>
+          <p>When watchlists are enabled, matching vehicles appear here with plate, camera, location, time, and severity.</p>
+        </div>
+      </div>
+
+      <div id="page-incidents" class="hidden">
+        <div class="empty-state card card-b">
+          <b>No incidents.</b>
+          <p>Incidents created from alerts will be listed here for follow-up.</p>
+        </div>
+      </div>
+
+      <div id="page-watchlists" class="hidden">
+        <div class="empty-state card card-b">
+          <b>No watchlists configured.</b>
+          <p>Create a watchlist to receive alerts when matching vehicles are detected. Typical lists are blocked vehicles, VIP or protected vehicles, and staff.</p>
+        </div>
+      </div>
+
+      <div id="page-settings" class="hidden">
+        <p class="muted">Site name, timezone, currency, and language. Technical stream and hardware options stay in Hardware Lab.</p>
+        <div class="card card-b" id="settings-summary"><p class="muted">Loading site settings…</p></div>
+      </div>
+
+      <div id="page-sessions" class="hidden">
+        <p class="muted">Find a visit by plate or receipt. Payment stays closed when nothing is owed.</p>
+        <div class="toolbar">
+          <button type="button" id="open-kiosk">Payment kiosk</button>
           <label style="display:flex;gap:8px;align-items:center;margin:0">Receipt QR or plate
             <input id="receipt-token" placeholder="Scan QR or type a plate" style="min-width:220px" autocomplete="off">
           </label>
@@ -634,6 +744,13 @@
           <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
         </div>
         <div id="kiosk-card" class="card hidden" style="margin:12px 0;padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div>
+              <div style="font-size:12px;letter-spacing:.12em;font-weight:700;color:var(--text-tertiary)">SMARTPARK PAYMENT</div>
+              <div class="muted">Scan a receipt or enter a plate, then continue.</div>
+            </div>
+            <button class="secondary" type="button" id="kiosk-exit">Exit kiosk</button>
+          </div>
           <div class="kiosk-grid">
             <div>
               <img id="kiosk-photo" alt="Car at entry" hidden>
@@ -676,7 +793,7 @@
         </div>
         <table>
           <thead>
-            <tr><th>When</th><th>Session</th><th>Method</th><th>Amount</th><th>Status</th><th>Provider</th></tr>
+            <tr><th>When</th><th>Session</th><th>Method</th><th>Amount</th><th>Status</th><th class="tech-col">Provider</th></tr>
           </thead>
           <tbody id="payment-rows"></tbody>
         </table>
@@ -684,7 +801,7 @@
       </div>
 
       <div id="page-vehicles" class="hidden">
-        <p class="muted">Register season, VIP, staff, and tenant plates. A live camera read of a registered plate opens the barrier. Casual cars still get a receipt.</p>
+        <p class="muted">Registered vehicles and access plans. A matching plate can be allowed through when gate access is enabled.</p>
         <div class="toolbar">
           <button type="button" id="add-vehicle">Register plate</button>
           <button class="secondary" type="button" id="refresh-vehicles">Refresh</button>
@@ -795,7 +912,14 @@
       </div>
 
       <div id="page-hardware" class="hidden">
-        <p class="muted">The HVX vendor SDK requires a 32-bit Windows host process. Stream profiles and decoder path are diagnostics, not a second camera login.</p>
+        <p class="muted">Technician tools: camera connection, media streaming, recognition, gate I/O, network, logs, and commissioning.</p>
+        <div class="subnav" aria-label="Hardware lab sections">
+          <span class="tab on">Camera connection</span>
+          <span class="tab">Media streaming</span>
+          <span class="tab">Recognition</span>
+          <span class="tab">Gate I/O</span>
+          <span class="tab">Logs</span>
+        </div>
         <div class="toolbar">
           <button type="button" id="check-hvx">Check HVX SDK Host</button>
           <button class="secondary" type="button" id="check-alpr">Check FastALPR</button>
@@ -806,7 +930,7 @@
       </div>
 
       <div id="page-sim" class="hidden">
-        <p class="muted">Does not need cameras. Type a registered plate, or upload a car photo. Registered plates open immediately. Casual ENTRY shows a receipt.</p>
+        <p class="muted">Practice entry and exit without live cameras. Registered vehicles follow the same access rules as the live site.</p>
         <div class="toolbar">
           <label>Lane <select id="sim-gate"></select></label>
         </div>
@@ -912,60 +1036,66 @@
   <dialog id="camera-dialog">
     <form class="card" id="camera-form">
       <h2 id="camera-dialog-title">Add Camera</h2>
+      <p class="muted">Enter the camera address and sign-in. SmartPark tests the connection and chooses a working video path.</p>
       <input type="hidden" name="id">
-      <label>Name <input name="name" required></label>
-      <label>Camera IP <input name="ip_address" required></label>
-      <label>HVX SDK port <input name="sdk_port" value="30000" required></label>
-      <label>Username <input name="username" value="admin"></label>
-      <label>Password <input name="password" type="password" value="admin" placeholder="Camera default: admin"></label>
-      <label>Side
+      <label>Name <input name="name" required placeholder="Gate A entry camera"></label>
+      <label>Camera address <input name="ip_address" required placeholder="192.168.1.49"></label>
+      <label>Username <input name="username" value="admin" autocomplete="off"></label>
+      <label>Password <input name="password" type="password" value="admin" placeholder="Camera password" autocomplete="off"></label>
+      <label>Direction
         <select name="lane_direction">
-          <option>ENTRY</option>
-          <option>EXIT</option>
+          <option value="ENTRY">Entry</option>
+          <option value="EXIT">Exit</option>
+          <option value="BOTH">Bidirectional</option>
         </select>
       </label>
-      <label>Lane
+      <label>Gate
         <select name="gate_id">
-          <option value="">None</option>
-        </select>
-      </label>
-      <label>Adapter
-        <select name="adapter_id">
-          <option value="hvx">hvx (this site, onboard ALPR)</option>
-          <option value="rtsp">rtsp — generic IP + FastALPR</option>
-          <option value="dahua">dahua — IP camera + FastALPR</option>
-          <option value="hikvision">hikvision — IP camera + FastALPR</option>
-          <option value="onvif">onvif (stub)</option>
-          <option value="simulated">simulated</option>
-        </select>
-      </label>
-      <label>Controller IP (Board*) <input name="controller_ip" placeholder="barrier board, not SDK"></label>
-      <label>Display IP (IpAddr*) <input name="display_ip" placeholder="LED screen, not SDK"></label>
-      <label>RTSP URL (optional) <input name="rtsp_url" placeholder="leave blank to auto-try Dahua/Hikvision paths"></label>
-      <label>FFmpeg profile
-        <select name="ffmpeg_profile">
-          <option value="LOW_LATENCY_LAN">LOW_LATENCY_LAN</option>
-          <option value="COMPATIBLE">COMPATIBLE</option>
-          <option value="LOSSY_NETWORK">LOSSY_NETWORK</option>
-          <option value="VENDOR_SPECIAL">VENDOR_SPECIAL</option>
-        </select>
-      </label>
-      <label>RTSP transport
-        <select name="rtsp_transport">
-          <option value="TCP">TCP</option>
-          <option value="UDP">UDP</option>
-          <option value="AUTO">AUTO</option>
+          <option value="">No gate — monitoring only</option>
         </select>
       </label>
       <label>Recognition
         <select name="recognition_mode">
-          <option value="">Default for adapter</option>
-          <option value="NATIVE_ONLY">NATIVE_ONLY</option>
-          <option value="FASTALPR_ONLY">FASTALPR_ONLY</option>
-          <option value="HYBRID">HYBRID</option>
+          <option value="">Use the site default</option>
+          <option value="NATIVE_ONLY">Use camera recognition</option>
+          <option value="FASTALPR_ONLY">Use SmartPark AI recognition</option>
+          <option value="HYBRID">Use both</option>
+          <option value="VIDEO_ONLY">Video only</option>
         </select>
       </label>
-      <p class="muted" id="camera-adapter-hint">Leave Adapter on hvx for this site’s QY cameras. The camera snaps the photo. FastALPR reads the plate. Pick rtsp/dahua/hikvision when the camera has no onboard reader — Connect still pulls video and FastALPR still reads the JPEG.</p>
+      <details id="camera-advanced">
+        <summary>Advanced</summary>
+        <label>SDK port <input name="sdk_port" value="30000" required></label>
+        <label>Adapter
+          <select name="adapter_id">
+            <option value="hvx">hvx</option>
+            <option value="rtsp">rtsp</option>
+            <option value="dahua">dahua</option>
+            <option value="hikvision">hikvision</option>
+            <option value="onvif">onvif</option>
+            <option value="simulated">simulated</option>
+          </select>
+        </label>
+        <label>Controller IP <input name="controller_ip" placeholder="Barrier controller"></label>
+        <label>Display IP <input name="display_ip" placeholder="Lane display"></label>
+        <label>RTSP URI <input name="rtsp_url" placeholder="Leave blank to discover"></label>
+        <label>FFmpeg profile
+          <select name="ffmpeg_profile">
+            <option value="LOW_LATENCY_LAN">LOW_LATENCY_LAN</option>
+            <option value="COMPATIBLE">COMPATIBLE</option>
+            <option value="LOSSY_NETWORK">LOSSY_NETWORK</option>
+            <option value="VENDOR_SPECIAL">VENDOR_SPECIAL</option>
+          </select>
+        </label>
+        <label>RTSP transport
+          <select name="rtsp_transport">
+            <option value="TCP">TCP</option>
+            <option value="UDP">UDP</option>
+            <option value="AUTO">AUTO</option>
+          </select>
+        </label>
+      </details>
+      <p class="muted" id="camera-adapter-hint">Advanced holds vendor, stream, and controller details. Leave them closed unless a technician is commissioning the camera.</p>
       <p class="error" id="camera-dialog-error"></p>
       <div class="toolbar">
         <button type="submit">Save Camera</button>
@@ -976,18 +1106,21 @@
 
   <dialog id="onboard-dialog">
     <form class="card" id="onboard-form">
-      <h2>Onboard camera</h2>
-      <p class="muted">Tries HVX, then ONVIF, RTSP, HTTP. HVX stays the site default when port 30000 answers.</p>
-      <label>IP / hostname <input name="ip_address" required></label>
+      <h2>Add Camera</h2>
+      <p class="muted">Test the address, then continue. SmartPark tries the known camera type, standard discovery, and a manual video path.</p>
+      <label>Camera address <input name="ip_address" required placeholder="192.168.1.49"></label>
       <label>Username <input name="username" value="admin"></label>
       <label>Password <input name="password" type="password" value="admin"></label>
-      <label>Optional port <input name="sdk_port" placeholder="30000"></label>
-      <label>Manual RTSP URL <input name="rtsp_url" placeholder="optional"></label>
+      <details>
+        <summary>Advanced</summary>
+        <label>SDK port <input name="sdk_port" placeholder="30000"></label>
+        <label>RTSP URI <input name="rtsp_url" placeholder="Optional"></label>
+      </details>
       <p class="error" id="onboard-error"></p>
       <pre class="hidden" id="onboard-result"></pre>
       <div class="toolbar">
-        <button type="submit">Discover</button>
-        <button class="secondary" type="button" id="onboard-test">Test path</button>
+        <button type="submit">Test &amp; Continue</button>
+        <button class="secondary" type="button" id="onboard-test">Test video</button>
         <button class="secondary" type="button" id="onboard-close">Close</button>
       </div>
     </form>
@@ -1024,7 +1157,7 @@
     <form class="card" id="vehicle-form">
       <h2 id="vehicle-dialog-title">Register plate</h2>
       <input type="hidden" name="id">
-      <label>Number plate <input name="plate" required placeholder="T453ETH"></label>
+      <label>Number plate <input name="plate" required placeholder="ABC 1234"></label>
       <label>Owner <input name="owner_name"></label>
       <label>Access plan <select name="plan_id"></select></label>
       <label>Enabled
@@ -1087,7 +1220,7 @@
 
     const loginView = document.getElementById("login-view");
     const appView = document.getElementById("app-view");
-    let pages = ["dashboard", "health", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim", "onboarding", "watchlists"];
+    let pages = ["dashboard", "health", "detections", "sessions", "vehicles", "payments", "fees", "cameras", "gates", "users", "hardware", "sim", "onboarding", "watchlists", "alerts", "incidents", "settings"];
     let hdrHealthTimer = null;
 
     function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
@@ -1138,6 +1271,62 @@
     const liveOverlays = [null, null];
     const liveLastCars = [null, null];
     const snapshotTimers = [null, null];
+    // One WHEP session per pane. Closed before any other transport starts.
+    const whepSessions = [null, null];
+
+    async function whepStart(video, whepUrl, onState) {
+      if (typeof RTCPeerConnection === "undefined") throw new Error("WebRTC unavailable in this browser");
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      const session = { pc, location: null, closed: false, whepUrl };
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      pc.ontrack = (evt) => {
+        if (session.closed) return;
+        if (evt.streams && evt.streams[0]) video.srcObject = evt.streams[0];
+        else if (!video.srcObject) video.srcObject = new MediaStream([evt.track]);
+        video.play().catch(() => {});
+      };
+      pc.onconnectionstatechange = () => { if (!session.closed && onState) onState(pc.connectionState); };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === "complete") return resolve();
+        const timer = setTimeout(resolve, 1500);
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === "complete") { clearTimeout(timer); resolve(); }
+        };
+      });
+      const res = await fetch(whepUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: pc.localDescription.sdp,
+      });
+      if (!res.ok) throw new Error(`WHEP ${res.status}`);
+      session.location = res.headers.get("Location");
+      if (session.location && !/^https?:/i.test(session.location)) {
+        session.location = new URL(session.location, whepUrl).toString();
+      }
+      await pc.setRemoteDescription({ type: "answer", sdp: await res.text() });
+      return session;
+    }
+
+    function whepStop(slot) {
+      const session = whepSessions[slot];
+      whepSessions[slot] = null;
+      if (!session) return;
+      session.closed = true;
+      try { session.pc.ontrack = null; session.pc.onconnectionstatechange = null; session.pc.close(); } catch (_) {}
+      // Release the MediaMTX reader promptly so reader counts settle after a switch.
+      if (session.location) fetch(session.location, { method: "DELETE" }).catch(() => {});
+    }
+
+    function whepCodec(session) {
+      try {
+        const receivers = session.pc.getReceivers().filter((r) => r.track && r.track.kind === "video");
+        const codecs = receivers.flatMap((r) => (r.getParameters().codecs || []).map((c) => c.mimeType));
+        return codecs[0] ? codecs[0].replace("video/", "") : "";
+      } catch (_) { return ""; }
+    }
 
     function mediaUrl(path) {
       const join = path.includes("?") ? "&" : "?";
@@ -1171,6 +1360,13 @@
         plate: pane.querySelector('[data-role="plate"]'),
         details: pane.querySelector('[data-role="details"]'),
         hold: pane.querySelector('[data-role="hold"]'),
+        online: pane.querySelector('[data-role="online"]'),
+        confidence: pane.querySelector('[data-role="confidence"]'),
+        decision: pane.querySelector('[data-role="decision"]'),
+        bizCamera: pane.querySelector('[data-role="biz-camera"]'),
+        bizVideo: pane.querySelector('[data-role="biz-video"]'),
+        bizRecog: pane.querySelector('[data-role="biz-recog"]'),
+        bizLast: pane.querySelector('[data-role="biz-last"]'),
       };
     }
 
@@ -1319,8 +1515,11 @@
       liveWatchIds[slot] = null;
       if (release) unwatchCamera(prev);
       const els = paneEls(slot);
+      whepStop(slot);
       if (els.webrtc) {
         els.webrtc.style.display = "none";
+        try { els.webrtc.pause(); } catch (_) {}
+        els.webrtc.srcObject = null;
         els.webrtc.removeAttribute("src");
       }
       if (els.img) {
@@ -1451,7 +1650,7 @@
       const id = camera.id;
       liveCameras[slot] = camera;
       saveSlotId(slot, id);
-      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || (els.webrtc && els.webrtc.style.display !== "none"))) {
+      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || whepSessions[slot])) {
         refreshPlates(slot);
         return;
       }
@@ -1464,25 +1663,48 @@
       els.status.textContent = "Opening live view…";
       els.img.dataset.cameraId = String(id);
       watchCamera(id);
-      try {
-        const ep = await api(`/cameras/${id}/live/endpoint`);
-        if (ep.provider === "MEDIAMTX" && ep.webrtc) {
-          if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
-          els.img.style.display = "none";
-          if (els.webrtc) {
-            els.webrtc.style.display = "block";
-            els.webrtc.src = ep.webrtc;
-          }
-          els.status.textContent = "Live (MediaMTX)";
-          // WebRTC is the live transport. Do not also poll snapshot.jpg:
-          // that creates a second decode path and can spawn repeated FFmpeg work.
+      let ep = null;
+      try { ep = await api(`/cameras/${id}/live/endpoint`); } catch (_) {}
+      if (liveWatchIds[slot] !== id) return; // switched while resolving
+      if (ep && ep.provider === "MEDIAMTX" && ep.transport === "WEBRTC" && (ep.whep || ep.webrtc) && els.webrtc) {
+        // WebRTC is the only live transport for this pane. Do not also poll
+        // snapshot.jpg or MJPEG: that is a second decode path per viewer.
+        if (snapshotTimers[slot]) { clearInterval(snapshotTimers[slot]); snapshotTimers[slot] = null; }
+        els.img.style.display = "none";
+        els.webrtc.style.display = "block";
+        const codec = ep.codec ? ` · ${ep.codec}` : "";
+        const stateLabel = ep.state && ep.state !== "LIVE" ? ep.state : "LIVE";
+        els.status.textContent = `${stateLabel} (WebRTC${codec})`;
+        try {
+          const session = await whepStart(els.webrtc, ep.whep || `${ep.webrtc.replace(/\/$/, "")}/whep`, (connState) => {
+            if (liveWatchIds[slot] !== id) return;
+            if (connState === "connected") {
+              const seen = whepCodec(session) || ep.codec || "";
+              els.status.textContent = `LIVE (WebRTC${seen ? " · " + seen : ""})`;
+            } else if (connState === "disconnected") {
+              els.status.textContent = "DEGRADED (WebRTC reconnecting)";
+            } else if (connState === "failed" || connState === "closed") {
+              els.status.textContent = "OFFLINE (WebRTC lost) · retrying…";
+              whepStop(slot);
+              setTimeout(() => { if (liveWatchIds[slot] === id) startLiveSlot(slot, camera, true); }, 3000);
+            }
+          });
+          if (liveWatchIds[slot] !== id) { session.closed = true; try { session.pc.close(); } catch (_) {} return; }
+          whepSessions[slot] = session;
           refreshPlates(slot);
           return;
+        } catch (err) {
+          // WHEP unavailable: report it and use the MediaMTX-fed MJPEG cache.
+          // The failed peer connection is closed first, so still one transport.
+          whepStop(slot);
+          els.status.textContent = `DEGRADED (WebRTC unavailable: ${err.message}) · MJPEG`;
         }
-      } catch (_) {}
+      } else if (ep && ep.provider === "MEDIAMTX" && ep.state === "DEGRADED" && ep.reason) {
+        els.status.textContent = `DEGRADED · ${ep.reason}`;
+      }
       if (els.webrtc) {
         els.webrtc.style.display = "none";
-        els.webrtc.removeAttribute("src");
+        els.webrtc.srcObject = null;
       }
       els.img.style.display = "block";
       startMjpegLive(slot, id);
@@ -1630,8 +1852,41 @@
       box.innerHTML = `
         <div class="stream-grid">${cards.join("") || "<p class='muted'>No profiles stored yet. Probe RTSP or ONVIF profiles after Connect.</p>"}</div>
         <p class="muted">${age.join(" · ") || "Frame age appears after the media gateway produces frames."}</p>
+        ${renderMediaMtxTelemetry(media.mediamtx, data.live_endpoint)}
         ${warnings ? `<ul class="warn-list">${warnings}</ul>` : ""}
       `;
+    }
+
+    function renderMediaMtxTelemetry(tele, liveEndpoint) {
+      if (!tele) return "";
+      const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const transport = (liveEndpoint && liveEndpoint.transport) || "";
+      const head = [
+        `Media <strong>${esc(tele.state || "OFFLINE")}</strong>`,
+        transport ? `Live transport ${esc(transport)}` : "",
+        tele.codec ? `Codec ${esc(tele.codec)}` : "",
+        tele.control_api_ok ? "Control API OK" : "Control API unreachable",
+      ].filter(Boolean).join(" · ");
+      const rows = Object.entries(tele.roles || {}).map(([role, row]) => {
+        const rtp = row.rtp || {};
+        const bits = [
+          `<strong>${esc(role)}</strong>`,
+          `path ${esc(row.mediamtx_path || "")}${row.shared_upstream ? " (shared upstream)" : ""}${row.on_demand ? " (on demand)" : ""}`,
+          row.ready ? "ready" : (row.registered ? "not ready" : "not registered"),
+          row.readers != null ? `readers ${row.readers}` : "",
+          rtp.packets_lost != null ? `RTP loss ${rtp.packets_lost}` : "",
+          rtp.packets_in_error != null ? `RTP errors ${rtp.packets_in_error}` : "",
+          rtp.jitter_max != null ? `jitter ${Math.round(Number(rtp.jitter_max) * 100) / 100}` : "",
+          row.reconnects != null ? `reconnects ${row.reconnects}` : "",
+          row.bytes_received != null ? `in ${Math.round(Number(row.bytes_received) / 1024)} KiB` : "",
+        ].filter(Boolean).join(" · ");
+        return `<li>${bits}</li>`;
+      }).join("");
+      const compat = tele.webrtc || {};
+      const compatLine = compat.compatible === false
+        ? `<li class="warn">${esc(compat.reason)}</li>`
+        : (compat.compatible === null && compat.reason && tele.codec ? `<li>${esc(compat.reason)}</li>` : "");
+      return `<div class="mediamtx-telemetry"><p class="muted">${head}</p><ul class="muted">${rows}${compatLine}</ul></div>`;
     }
 
     async function refreshStreamProfiles(id) {
@@ -1655,18 +1910,28 @@
         ? `<img alt="cropped plate" src="${mediaUrl(shown.crop_url)}">`
         : `<p class="muted">—</p>`;
       const cam = liveCameras[slot] || {};
-      const conf = shown.confidence != null ? `${Math.round(shown.confidence * 100)}%` : "—";
-      const source = shown.source || (data && data.fusion && data.fusion.method) || "—";
-      const side = shown.lane_direction || cam.side || cam.lane_direction || "—";
+      const pct = confidencePercent(shown.confidence);
+      const conf = pct != null ? `${pct}%` : "";
+      const source = sourceLabel(shown.source || (data && data.fusion && data.fusion.method) || "");
+      const side = shown.lane_direction || cam.side || cam.lane_direction || "";
       const when = formatWhen(shown.created_at);
       const fusion = (data && data.fusion) || shown.fusion || {};
       const held = Boolean(shown.pending_confirmation || shown.needs_review || fusion.needs_review);
-      const decision = held ? "held for confirmation" : "auto-accepted";
+      const low = pct != null && pct < 80;
+      if (els.confidence) els.confidence.textContent = conf;
+      if (els.decision) {
+        if (!plate) els.decision.innerHTML = "";
+        else if (held || low) els.decision.innerHTML = `<span class="chip c-wrn">Check plate</span>`;
+        else els.decision.innerHTML = `<span class="chip c-ok">Plate read</span>`;
+      }
+      if (els.bizLast) els.bizLast.textContent = plate ? (when || "Just now") : "—";
+      if (els.bizRecog) els.bizRecog.textContent = plate ? source : "Waiting";
       if (plate) {
-        els.details.textContent = `Time ${when} · ${side} · ${conf} · ${source} · ${decision}`;
-        if (els.hold) els.hold.textContent = held ? "Waiting: confirm or correct this plate before the gate auto-decides." : "";
+        const bits = [when, side, isTechnician() ? source : ""].filter(Boolean);
+        els.details.textContent = bits.join(" · ");
+        if (els.hold) els.hold.textContent = held ? "Confirm or correct this plate before the barrier decides." : "";
       } else {
-        els.details.textContent = "No car yet. Connect all on the IPs tab, then wait for a vehicle.";
+        els.details.textContent = "No vehicle yet. Add a camera on Devices, then wait for a vehicle.";
         if (els.hold) els.hold.textContent = "";
       }
       liveOverlays[slot] = (data && data.overlay) || null;
@@ -1684,13 +1949,29 @@
         }
         const data = await api(`/cameras/${camera.id}/plates`);
         if (liveCameras[slot] && liveCameras[slot].id !== camera.id) return;
-        if (data.live) {
-          const fps = data.live_fps ? ` · ${data.live_fps} fps` : "";
-          const src = data.live_source ? ` · ${data.live_source}` : "";
-          const age = data.live_frame_age_ms != null ? ` · ${Math.round(data.live_frame_age_ms)} ms` : "";
-          els.status.textContent = (data.url_redacted ? `Live${src}${fps}${age} · ${data.url_redacted}` : `Live${src}${fps}${age}`);
+        const camName = (camera.name || "Camera");
+        if (els.bizCamera) els.bizCamera.textContent = camName;
+        if (els.online) {
+          els.online.textContent = data.live ? "Online" : "No video";
+          els.online.className = "chip " + (data.live ? "c-ok" : "c-wrn");
+        }
+        if (els.bizVideo) els.bizVideo.textContent = data.live ? "Live" : "Waiting";
+        if (whepSessions[slot]) {
+          // WebRTC pane: the transport state (LIVE / DEGRADED / OFFLINE) is
+          // owned by the peer-connection callbacks; do not overwrite it here.
+        } else if (data.live) {
+          if (isTechnician()) {
+            const fps = data.live_fps ? ` · ${data.live_fps} fps` : "";
+            const src = data.live_source ? ` · ${data.live_source}` : "";
+            const age = data.live_frame_age_ms != null ? ` · ${Math.round(data.live_frame_age_ms)} ms` : "";
+            els.status.textContent = (data.url_redacted ? `Live${src}${fps}${age} · ${data.url_redacted}` : `Live${src}${fps}${age}`);
+          } else {
+            els.status.textContent = "Video is live.";
+          }
         } else {
-          els.status.textContent = data.error || "No live JPEG yet. SDK Connect still enables native plates.";
+          els.status.textContent = isTechnician()
+            ? (data.error || "Waiting for first frame…")
+            : "Video unavailable. The camera may still be reading plates. Retry, or ask a technician if this continues.";
         }
         renderSlotCar(slot, data);
       } catch (err) {
@@ -1700,6 +1981,101 @@
 
     function can(permission) {
       return state.permissions.includes("*") || state.permissions.includes(permission);
+    }
+
+    function isTechnician() {
+      return can("hardware.view");
+    }
+
+    function syncRoleClass() {
+      document.body.classList.toggle("role-tech", isTechnician());
+    }
+
+    const FRIENDLY_NAV = {
+      "Plate Engine": "Detections",
+      "Simulation": "Testing & Simulation",
+      "Tariffs": "Tariffs & Schedules",
+      "Users": "Users & Roles",
+    };
+
+    function friendlyNavLabel(label) {
+      return FRIENDLY_NAV[label] || label;
+    }
+
+    function setNavLabel(btn, label) {
+      const text = friendlyNavLabel(label);
+      const slot = btn.querySelector(".sl-label");
+      if (slot) slot.textContent = text;
+      else btn.textContent = text;
+      btn.title = text;
+    }
+
+    function deploymentKind() {
+      const profile = String((state.modules && state.modules.profile) || "");
+      const enabled = new Set((state.modules && state.modules.enabled) || []);
+      if (profile === "LPR_ONLY") return "lpr";
+      if (profile === "SECURITY") return "security";
+      if (profile === "ACCESS_CONTROL") return "access";
+      if (profile === "PARKING_LITE" || profile === "PARKING_PRO" || profile === "ENTERPRISE") return "parking";
+      if (enabled.has("parking.sessions") || enabled.has("payments.core")) return "parking";
+      if (enabled.has("security.watchlists") || enabled.has("security.alerts")) return "security";
+      if (enabled.has("access.gates")) return "access";
+      if (enabled.has("recognition.alpr")) return "lpr";
+      return "parking";
+    }
+
+    function confidencePercent(value) {
+      if (value == null || value === "") return null;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      return Math.round(n <= 1 ? n * 100 : n);
+    }
+
+    function sourceLabel(source) {
+      const s = String(source || "").toLowerCase();
+      if (!s || s === "—") return "—";
+      if (s.includes("operator")) return "Operator";
+      if (s.includes("hybrid") || s.includes("fusion")) return "Camera + SmartPark";
+      if (s.includes("fast") || s.includes("local") || s.includes("smartpark")) return "SmartPark AI";
+      if (s.includes("native") || s.includes("camera") || s.includes("sdk")) return "Camera";
+      return isTechnician() ? String(source) : "Recognition";
+    }
+
+    function moneyLabel(amount, currency) {
+      const cur = String(currency || state.siteCurrency || "").trim();
+      const n = Number(amount || 0);
+      const formatted = n.toLocaleString(undefined, {
+        minimumFractionDigits: Number.isInteger(n) ? 0 : 2,
+        maximumFractionDigits: 2,
+      });
+      return cur ? `${cur} ${formatted}` : formatted;
+    }
+
+    function methodLabel(method) {
+      const m = String(method || "").toLowerCase();
+      if (!m) return "—";
+      if (m.includes("cash")) return "Cash";
+      if (m.includes("card")) return "Card";
+      if (m.includes("mobile") || m.includes("m-pesa") || m.includes("mpesa") || m.includes("wallet")) return "Mobile Money";
+      return isTechnician() ? String(method) : "Other";
+    }
+
+    function paymentChip(status) {
+      const s = String(status || "").toUpperCase();
+      if (s === "PAID" || s === "SUCCEEDED" || s === "SUCCESS") return `<span class="chip c-ok">${s === "SUCCEEDED" || s === "SUCCESS" ? "PAID" : s}</span>`;
+      if (s === "PENDING" || s === "CREATED") return `<span class="chip c-wrn">${s}</span>`;
+      if (s === "UNPAID" || s === "FAILED" || s === "EXPIRED") return `<span class="chip c-dgr">${s}</span>`;
+      if (s.includes("REFUND")) return `<span class="chip c-info">${s}</span>`;
+      return `<span class="chip c-mut">${s || "—"}</span>`;
+    }
+
+    function cameraHealth(status) {
+      const s = String(status || "").toLowerCase();
+      if (s.includes("online") || s.includes("connected") || s === "ok") return ["Online", "c-ok"];
+      if (s.includes("discover")) return ["Discovered", "c-info"];
+      if (!s) return ["Unknown", "c-mut"];
+      if (s.includes("error") || s.includes("fail") || s.includes("offline")) return ["Offline", "c-dgr"];
+      return [status, "c-wrn"];
     }
 
     function detailMessage(detail, fallback) {
@@ -1788,7 +2164,11 @@
         parts.push(JSON.stringify(data, null, 2));
         out.textContent = parts.join("\n\n");
         const preview = document.getElementById("sim-preview");
-        const shown = (best && best.crop_url) || (data.alpr && data.alpr.annotated_url);
+        const shown = (best && best.crop_url)
+          || (data.session && data.session.crop_url)
+          || (data.capture && data.capture.crop_url)
+          || (data.alpr && data.alpr.annotated_url)
+          || (data.session && data.session.snapshot_url);
         if (shown) { preview.src = mediaUrl(shown); preview.style.display = "block"; }
       } catch (err) {
         error.textContent = err.message;
@@ -1835,7 +2215,7 @@
               ${can("subscribers.manage") ? `<button type="button" data-edit-vehicle="${v.id}">Edit</button>
               <button class="danger" type="button" data-del-vehicle="${v.id}">Delete</button>` : ""}
             </td>
-          </tr>`).join("") || `<tr><td colspan="9">No registered plates yet.</td></tr>`;
+          </tr>`).join("") || `<tr><td colspan="9"><div class="empty-state"><b>No registered vehicles yet.</b><p>Add a vehicle so known plates can be allowed through.</p></div></td></tr>`;
       } catch (err) {
         error.textContent = err.message;
       }
@@ -1891,33 +2271,44 @@
         const el = document.getElementById(`page-${page}`);
         if (el) el.classList.toggle("hidden", page !== name);
       });
-      const navItem = (state.navigation || []).find((n) => n.page === name);
-      document.getElementById("page-title").textContent = (navItem && navItem.label) || {
+      const navItem = (state.navigation || []).find((n) => n.page === name || (name === "detections" && n.id === "plates"));
+      document.getElementById("page-title").textContent = friendlyNavLabel((navItem && navItem.label) || {
         dashboard: "Dashboard", health: "System Health", cameras: "Live Gates", gates: "Gates",
-        sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
-        fees: "Tariffs", reports: "Reports", users: "Users", hardware: "Hardware Lab", sim: "Simulation",
-        onboarding: "Setup Wizard", watchlists: "Watchlists",
-      }[name] || name;
+        detections: "Detections", sessions: "Parking Sessions", vehicles: "Vehicles", payments: "Payments",
+        fees: "Tariffs & Schedules", reports: "Reports", users: "Users & Roles", hardware: "Hardware Lab",
+        sim: "Testing & Simulation", onboarding: "Setup Wizard", watchlists: "Watchlists",
+        alerts: "Alerts", incidents: "Incidents", settings: "Settings",
+      }[name] || name);
       const sub = document.getElementById("page-subtitle");
       if (sub) {
+        const kind = deploymentKind();
         sub.textContent = {
-          dashboard: "Site occupancy, lanes and alerts",
-          health: "Module and component status — disabled is neutral",
-          cameras: "Live views and camera commissioning",
-          gates: "Barrier control per entry/exit side",
-          sessions: "Plate-first parking sessions",
-          vehicles: "Registered plates and access plans",
-          payments: "Kiosk and mobile payment ledger",
-          fees: "Day and night parking rates",
-          reports: "Visits, money, and backups",
-          users: "Operator accounts and roles",
-          hardware: "Technician diagnostics",
-          sim: "Simulate entry/exit without cameras",
-          onboarding: "Module-aware deployment setup",
-          watchlists: "Security watchlists",
+          dashboard: kind === "lpr" ? "Detections, cameras, and recognition health"
+            : kind === "security" ? "Alerts, cameras, and recognition health"
+            : kind === "access" ? "Access events, vehicles, and devices"
+            : "Vehicles on site, lanes, and payments",
+          health: "Healthy, degraded, offline, or disabled. Disabled is neutral.",
+          cameras: kind === "lpr" || kind === "security" ? "Monitor cameras and the latest plate read." : "Monitor active lanes and respond to access issues.",
+          gates: "Barrier control for each entry or exit.",
+          detections: "Search recent plate reads.",
+          sessions: "Plate, duration, amount, and payment.",
+          vehicles: "Registered vehicles and access plans.",
+          payments: "Method, amount, and payment status.",
+          fees: "Tariffs and schedules for this site.",
+          reports: "Visits, revenue, and backups.",
+          users: "Accounts and roles.",
+          hardware: "Technician diagnostics for cameras, video, recognition, and gates.",
+          sim: "Practice entry and exit without live cameras.",
+          onboarding: "Choose what this site is for, then confirm it is ready.",
+          watchlists: "Blocked, protected, and staff vehicles.",
+          alerts: "Vehicles that need attention.",
+          incidents: "Follow-up from alerts.",
+          settings: "Site name, time, currency, and language.",
         }[name] || "";
       }
       if (name === "dashboard") loadDashboard();
+      if (name === "detections") loadDetections();
+      if (name === "settings") loadSettingsPage();
       if (name === "health") startHealth();
       else stopHealth();
       if (name === "cameras") { loadCameras(); showCameraSub(cameraSub || "live"); }
@@ -1975,22 +2366,26 @@
         let visible = false;
         if (hasModuleNav) {
           visible = Boolean(item);
-          if (item) btn.textContent = item.label;
+          if (item) setNavLabel(btn, item.label);
         } else {
           // Permission-only fallback when /auth/me has no navigation yet.
           const permMap = {
             dashboard: "dashboard.view",
             cameras: "cameras.view",
             health: "hardware.view",
+            plates: "cameras.view",
             sessions: "sessions.view",
             vehicles: "subscribers.view",
             watchlists: null,
+            alerts: null,
+            incidents: null,
             payments: "payments.view",
             fees: "fees.view",
             reports: "dashboard.view",
             onboarding: "settings.manage",
             gates: "gates.view",
             users: "users.view",
+            settings: "settings.view",
             hardware: "hardware.view",
             sim: "simulation.run",
           };
@@ -1998,8 +2393,9 @@
           if (navId === "dashboard") visible = true;
           else if (navId === "sessions") visible = can("sessions.view") || can("fees.view") || can("kiosk.use");
           else if (navId === "payments") visible = can("payments.view") || can("fees.view") || can("kiosk.use");
-          else if (navId === "health") visible = can("hardware.view") || can("dashboard.view");
-          else if (navId === "watchlists" || navId === "onboarding") visible = false;
+          else if (navId === "health" || navId === "hardware") visible = can("hardware.view");
+          else if (navId === "watchlists" || navId === "alerts" || navId === "incidents" || navId === "onboarding") visible = false;
+          else if (navId === "plates") visible = can("cameras.view") && !can("sessions.view");
           else visible = Boolean(perm && can(perm));
         }
         btn.style.display = visible ? "" : "none";
@@ -2009,8 +2405,9 @@
         .filter((b) => b.style.display !== "none")
         .map((b) => b.dataset.page);
       if (!pages.includes("dashboard")) pages.unshift("dashboard");
-      if (!pages.includes("onboarding")) pages.push("onboarding");
-      if (!pages.includes("watchlists")) pages.push("watchlists");
+      ["onboarding", "watchlists", "alerts", "incidents", "detections", "settings"].forEach((page) => {
+        if (!pages.includes(page)) pages.push(page);
+      });
 
       document.querySelectorAll("nav .group").forEach((group) => {
         let next = group.nextElementSibling;
@@ -2021,6 +2418,7 @@
         }
         group.style.display = anyVisible ? "" : "none";
       });
+      syncRoleClass();
       setManageVisibility();
     }
 
@@ -2029,16 +2427,17 @@
     function updateOnboardStepsUi(step) {
       const n = Number(step) || 1;
       const steps = (onboardState.status && onboardState.status.steps) || [
-        {id:1,label:"Purpose"},{id:2,label:"Topology"},{id:3,label:"Hardware"},{id:4,label:"Recognition"},
-        {id:5,label:"Modules"},{id:6,label:"Users"},{id:7,label:"Health"},{id:8,label:"Activate"}
+        {id:1,label:"Purpose"},{id:2,label:"Site"},{id:3,label:"Hardware"},{id:4,label:"Recognition"},
+        {id:5,label:"Features"},{id:6,label:"Users"},{id:7,label:"Readiness"},{id:8,label:"Activate"}
       ];
+      const stepNames = { Topology: "Site", Modules: "Features", Health: "Readiness" };
       const root = document.getElementById("onboard-steps-ui");
       if (!root) return;
       root.innerHTML = steps.map((s, i) => {
         const cls = s.id === n ? "on" : (s.id < n ? "done" : "");
         const dot = s.id < n ? "✓" : String(s.id);
         const bar = i < steps.length - 1 ? '<span class="bar"></span>' : "";
-        return `<div class="ob-step ${cls}" data-ob-step="${s.id}"><span class="dot">${dot}</span>${s.label}</div>${bar}`;
+        return `<div class="ob-step ${cls}" data-ob-step="${s.id}"><span class="dot">${dot}</span>${stepNames[s.label] || s.label}</div>${bar}`;
       }).join("");
       document.getElementById("onboard-step-num").textContent = String(n);
       const back = document.getElementById("onboard-back");
@@ -2094,21 +2493,55 @@
 
       if (step === 2) {
         const preset = draft.topo_preset || "1in1out";
-        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Site topology</h1>
-          <p class="muted" style="margin:6px 0 18px">Start from a preset. Gates and lanes are data-driven — add more later in Live Gates.</p>
+        const site = Object.assign({}, (st.topology && st.topology.site) || {}, draft.site || {});
+        const lang = site.language || "en";
+        const cur = site.currency || "USD";
+        const plate = site.plate_validation || "NONE";
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Site</h1>
+          <p class="muted" style="margin:6px 0 18px">Name the site and how dates, money, and plates should be shown. You can add more lanes later.</p>
           <div class="ob-grid">
-            <button type="button" class="choice ${preset==='1in1out'?'on':''}" data-preset="1in1out"><span class="cic">1↔</span><div><b>1 entry / 1 exit</b><p>Parking lite default.</p></div></button>
-            <button type="button" class="choice ${preset==='bidirectional'?'on':''}" data-preset="bidirectional"><span class="cic">⇄</span><div><b>One bidirectional lane</b><p>Single shared lane.</p></div></button>
-            <button type="button" class="choice ${preset==='lpr_only'?'on':''}" data-preset="lpr_only"><span class="cic">0</span><div><b>No gates</b><p>LPR / security cameras only.</p></div></button>
-            <button type="button" class="choice ${preset==='keep'?'on':''}" data-preset="keep"><span class="cic">=</span><div><b>Keep current</b><p>${counts.gates||0} gates · ${counts.lanes||0} lanes · ${counts.cameras||0} cameras</p></div></button>
+            <button type="button" class="choice ${preset==='1in1out'?'on':''}" data-preset="1in1out"><span class="cic">1↔</span><div><b>1 entry / 1 exit</b><p>A typical small parking site.</p></div></button>
+            <button type="button" class="choice ${preset==='bidirectional'?'on':''}" data-preset="bidirectional"><span class="cic">⇄</span><div><b>One bidirectional lane</b><p>A single shared lane.</p></div></button>
+            <button type="button" class="choice ${preset==='keep'?'on':''}" data-preset="keep"><span class="cic">+</span><div><b>Multiple lanes</b><p>${counts.gates||0} gates already on this site. Keep them.</p></div></button>
+            <button type="button" class="choice ${preset==='lpr_only'?'on':''}" data-preset="lpr_only"><span class="cic">0</span><div><b>No gates</b><p>Cameras only. No barriers.</p></div></button>
           </div>
           <div class="card card-b" style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="field" style="grid-column:1/-1"><label>Site name</label><input class="inp" id="ob-site-name" value="${(draft.site&&draft.site.name)||(st.topology&&st.topology.site&&st.topology.site.name)||'Default Site'}"></div>
-            <div class="field"><label>Timezone</label><input class="inp" id="ob-site-tz" value="${(draft.site&&draft.site.timezone)||(st.topology&&st.topology.site&&st.topology.site.timezone)||'UTC'}" placeholder="UTC"></div>
-            <div class="field"><label>Currency</label><input class="inp" id="ob-site-cur" value="${(draft.site&&draft.site.currency)||(st.topology&&st.topology.site&&st.topology.site.currency)||'USD'}" placeholder="USD"></div>
-            <div class="field"><label>Language</label><select class="inp" id="ob-site-lang"><option value="en">en</option><option value="sw">sw</option><option value="ar">ar</option><option value="fr">fr</option><option value="pt">pt</option></select></div>
-            <div class="field"><label>Plate validation</label><select class="inp" id="ob-site-plate"><option value="NONE">NONE</option><option value="TZ">TZ</option><option value="KE">KE</option><option value="ZA">ZA</option><option value="AE">AE</option></select></div>
-          </div>`;
+            <div class="field" style="grid-column:1/-1"><label for="ob-site-name">Site name</label><input class="inp" id="ob-site-name" value="${site.name || "Site"}"></div>
+            <div class="field"><label for="ob-site-tz">Timezone</label><input class="inp" id="ob-site-tz" value="${site.timezone || "UTC"}" placeholder="Continent/City"></div>
+            <div class="field"><label for="ob-site-cur">Currency</label><select class="inp" id="ob-site-cur">
+              <option value="USD">US Dollar (USD)</option>
+              <option value="EUR">Euro (EUR)</option>
+              <option value="GBP">British Pound (GBP)</option>
+              <option value="KES">Kenyan Shilling (KES)</option>
+              <option value="TZS">Tanzanian Shilling (TZS)</option>
+              <option value="UGX">Ugandan Shilling (UGX)</option>
+              <option value="ZAR">South African Rand (ZAR)</option>
+              <option value="AED">UAE Dirham (AED)</option>
+            </select></div>
+            <div class="field"><label for="ob-site-lang">Language</label><select class="inp" id="ob-site-lang">
+              <option value="en">English</option>
+              <option value="sw">Kiswahili</option>
+              <option value="ar">Arabic</option>
+              <option value="fr">French</option>
+              <option value="pt">Portuguese</option>
+            </select></div>
+            <div class="field" style="grid-column:1/-1"><label for="ob-site-plate">Plate format check</label><select class="inp" id="ob-site-plate">
+              <option value="NONE">Accept any format</option>
+              <option value="TZ">Tanzania</option>
+              <option value="KE">Kenya</option>
+              <option value="ZA">South Africa</option>
+              <option value="AE">United Arab Emirates</option>
+            </select></div>
+          </div>
+          <p class="muted">Timezone example: Europe/London, Africa/Nairobi, Asia/Dubai. The product does not assume one country.</p>`;
+        const curSel = document.getElementById("ob-site-cur");
+        const langSel = document.getElementById("ob-site-lang");
+        const plateSel = document.getElementById("ob-site-plate");
+        if (cur && ![...curSel.options].some((o) => o.value === cur)) curSel.insertAdjacentHTML("beforeend", `<option value="${cur}">${cur}</option>`);
+        if (lang && ![...langSel.options].some((o) => o.value === lang)) langSel.insertAdjacentHTML("beforeend", `<option value="${lang}">${lang}</option>`);
+        curSel.value = cur;
+        langSel.value = lang;
+        plateSel.value = plate;
         document.querySelectorAll("[data-preset]").forEach((btn) => {
           btn.addEventListener("click", () => {
             draft.topo_preset = btn.dataset.preset;
@@ -2120,7 +2553,7 @@
 
       if (step === 3) {
         body.innerHTML = `<h1 style="font-size:22px;font-weight:700">Hardware</h1>
-          <p class="muted" style="margin:6px 0 18px">Add cameras now, or skip and commission them later under Live Gates. Technician terms (SDK / RTSP) stay in Advanced settings.</p>
+          <p class="muted" style="margin:6px 0 18px">Add cameras now, or skip and add them later under Devices. Vendor and stream details stay under Advanced.</p>
           <div class="statband">
             <div class="stat"><div class="k">Cameras</div><div class="v">${counts.cameras||0}</div></div>
             <div class="stat"><div class="k">Gates</div><div class="v">${counts.gates||0}</div></div>
@@ -2128,7 +2561,7 @@
           </div>
           <div class="toolbar" style="margin-top:14px">
             <button type="button" id="ob-discover">Discover cameras on LAN</button>
-            <button type="button" class="secondary" id="ob-goto-ips">Open Live Gates → IPs</button>
+            <button type="button" class="secondary" id="ob-goto-ips">Open Devices</button>
           </div>
           <pre id="ob-hw-result" class="muted" style="margin-top:12px">No discovery run yet.</pre>
           <p class="muted" style="margin-top:10px">Printers and kiosks can be configured after activation in Simulation / Hardware Lab.</p>`;
@@ -2139,7 +2572,7 @@
             const data = await api("/cameras/discover?scan_lan=true");
             const cams = data.cameras || data || [];
             out.textContent = Array.isArray(cams)
-              ? `${cams.length} device(s) found. Use Live Gates → IPs to import and connect.`
+              ? `${cams.length} camera(s) found. Open Devices to add and connect them.`
               : JSON.stringify(data, null, 2);
             draft.hardware = { discovered: Array.isArray(cams) ? cams.length : 0 };
           } catch (e) { out.textContent = e.message; }
@@ -2177,7 +2610,7 @@
           <div class="mod-list" id="ob-mod-list">${choices.map((m) => `
             <label class="mod-row" style="cursor:pointer">
               <input type="checkbox" class="bigck ob-mod" data-mid="${m.id}" ${m.enabled?'checked':''}>
-              <div style="flex:1"><b style="font-size:13px">${m.label}</b><div class="muted" style="font-size:11.5px">${m.description} · <span class="mono">${m.id}</span></div></div>
+              <div style="flex:1"><b style="font-size:13px">${m.label}</b><div class="muted" style="font-size:11.5px">${m.description}${isTechnician() ? ` · <span class="mono">${m.id}</span>` : ""}</div></div>
             </label>`).join("")}</div>`;
         return;
       }
@@ -2228,7 +2661,7 @@
         <h1 style="font-size:22px;font-weight:700">Ready to activate</h1>
         <p class="muted" style="margin:8px 0 18px">Profile <b>${profile}</b> · ${enabled.length} modules enabled</p>
         <div class="chips" style="justify-content:center;display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${enabled.map((m)=>`<span class="chip c-acc">${m}</span>`).join("")}</div>
-        <p class="muted">Activation unlocks the full operator UI. You can re-run Setup Wizard from navigation while you still have permission.</p>
+        <p class="muted">Activation opens the operator workspace. You can run Setup Wizard again while you still have permission.</p>
       </div>`;
     }
 
@@ -2329,6 +2762,8 @@
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
       const paySession = document.getElementById("pay-session");
       if (paySession) paySession.style.display = (can("payments.create") || can("kiosk.use")) ? "" : "none";
+      const openKiosk = document.getElementById("open-kiosk");
+      if (openKiosk) openKiosk.style.display = (can("kiosk.use") || can("payments.create") || can("sessions.view")) ? "" : "none";
       const saveTariff = document.getElementById("save-tariff");
       if (saveTariff) saveTariff.style.display = (can("fees.manage") || can("settings.manage")) ? "" : "none";
       const manageVehicles = can("subscribers.manage");
@@ -2374,6 +2809,7 @@
       loginView.classList.add("hidden");
       appView.classList.remove("hidden");
       applyModuleNavigation();
+      syncRoleClass();
       startHdrHealth();
       const onboardingDone = state.modules.onboarding_completed !== false;
       showPage(onboardingDone ? "dashboard" : "onboarding");
@@ -2383,6 +2819,8 @@
       state.token = ""; state.user = ""; state.userId = null; state.permissions = [];
       state.navigation = []; state.modules = {};
       sessionStorage.removeItem("smartpark_token");
+      document.body.classList.remove("role-tech");
+      document.body.classList.remove("kiosk-mode");
       stopHdrHealth();
       setHdrHealth("Offline", "c-mut");
       appView.classList.add("hidden");
@@ -2429,6 +2867,32 @@
     const themeApp = document.getElementById("theme-toggle-app");
     if (themeLogin) themeLogin.addEventListener("click", cycleTheme);
     if (themeApp) themeApp.addEventListener("click", cycleTheme);
+    function enterKiosk() {
+      document.body.classList.add("kiosk-mode");
+      const card = document.getElementById("kiosk-card");
+      if (card) card.classList.remove("hidden");
+      showPage("sessions");
+      const input = document.getElementById("receipt-token");
+      if (input) input.focus();
+    }
+    function exitKiosk() {
+      document.body.classList.remove("kiosk-mode");
+    }
+    const openKioskBtn = document.getElementById("open-kiosk");
+    if (openKioskBtn) openKioskBtn.addEventListener("click", enterKiosk);
+    const exitKioskBtn = document.getElementById("kiosk-exit");
+    if (exitKioskBtn) exitKioskBtn.addEventListener("click", exitKiosk);
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || document.querySelector("dialog[open]")) return;
+      if (document.body.classList.contains("kiosk-mode")) exitKiosk();
+    });
+    const refreshDetections = document.getElementById("refresh-detections");
+    if (refreshDetections) refreshDetections.addEventListener("click", loadDetections);
+    const detectFilter = document.getElementById("detect-filter");
+    if (detectFilter) detectFilter.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); loadDetections(); }
+    });
+
     const sideToggle = document.getElementById("sidebar-toggle");
     if (sideToggle) {
       sideToggle.addEventListener("click", () => {
@@ -2439,7 +2903,7 @@
     if (hdrHealthBtn) {
       hdrHealthBtn.style.cursor = "pointer";
       hdrHealthBtn.addEventListener("click", () => {
-        if (!appView.classList.contains("hidden")) showPage("health");
+        if (!appView.classList.contains("hidden") && isTechnician()) showPage("health");
       });
     }
 
@@ -2461,19 +2925,122 @@
       await submitOnboardStep(8, { activate: true });
     });
 
+    function dashboardCards(stats) {
+      const kind = deploymentKind();
+      const online = stats.sdk_connected ?? 0;
+      const cameras = stats.cameras ?? 0;
+      if (kind === "lpr") {
+        return [
+          ["Cameras online", online],
+          ["Cameras configured", cameras],
+          ["Registered vehicles", stats.registered_plates ?? 0],
+        ];
+      }
+      if (kind === "security") {
+        return [
+          ["Cameras online", online],
+          ["Cameras configured", cameras],
+          ["Active notices", (stats.alerts || []).length],
+        ];
+      }
+      if (kind === "access") {
+        return [
+          ["Registered vehicles", stats.registered_plates ?? 0],
+          ["Cameras online", online],
+          ["Devices configured", cameras],
+        ];
+      }
+      return [
+        ["Vehicles inside", stats.vehicles_inside],
+        ["Entries today", stats.entries_today],
+        ["Exits today", stats.exits_today],
+        ["Revenue today", stats.revenue_today_label || moneyLabel(stats.revenue_today, stats.currency)],
+        ["Unpaid sessions", stats.unpaid_active],
+        ["Subscribers inside", stats.subscribers_inside],
+      ];
+    }
+
+    async function loadDetections() {
+      const err = document.getElementById("detection-error");
+      const body = document.getElementById("detection-rows");
+      if (!body) return;
+      if (err) err.textContent = "";
+      const q = ((document.getElementById("detect-filter") || {}).value || "").trim().toUpperCase();
+      try {
+        const rows = await api("/captures?limit=50");
+        const filtered = (rows || []).filter((row) => !q || String(row.plate || "").toUpperCase().includes(q));
+        body.innerHTML = filtered.map((row) => {
+          const pct = confidencePercent(row.confidence);
+          const held = row.pending_confirmation || row.needs_review;
+          const status = held ? `<span class="chip c-wrn">Check plate</span>` : `<span class="chip c-ok">Read</span>`;
+          return `<tr class="click" data-det="${row.id}">
+            <td>${formatWhen(row.created_at)}</td>
+            <td><span class="plate">${row.plate || "—"}</span></td>
+            <td>${row.camera_id ?? "—"}</td>
+            <td>${row.lane_direction || "—"}</td>
+            <td>${pct == null ? "—" : pct + "%"}</td>
+            <td>${sourceLabel(row.source)}</td>
+            <td>${status}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="7"><div class="empty-state"><b>No detections yet.</b><p>Detected vehicles will appear here automatically.</p></div></td></tr>`;
+        body.querySelectorAll("tr[data-det]").forEach((tr) => {
+          tr.addEventListener("click", () => {
+            const row = filtered.find((item) => String(item.id) === tr.dataset.det);
+            const box = document.getElementById("detection-detail");
+            const dest = document.getElementById("detection-detail-body");
+            if (!box || !dest || !row) return;
+            box.classList.remove("hidden");
+            const pct = confidencePercent(row.confidence);
+            dest.innerHTML = `
+              <div class="kiosk-grid">
+                <div>${row.snapshot_url ? `<img alt="Detection" src="${mediaUrl(row.snapshot_url)}" style="width:100%;max-height:240px;object-fit:contain;background:#070B10;border-radius:8px">` : `<p class="muted">No image stored.</p>`}
+                ${row.crop_url ? `<img alt="Plate crop" src="${mediaUrl(row.crop_url)}" style="width:100%;max-height:80px;object-fit:contain;background:#070B10;border-radius:8px;margin-top:8px">` : ""}</div>
+                <div>
+                  <p class="plate-chars" style="text-align:left">${row.plate || "—"}</p>
+                  <p>Confidence <b>${pct == null ? "—" : pct + "%"}</b></p>
+                  <p>Time <b>${formatWhen(row.created_at)}</b></p>
+                  <p>Camera <b>${row.camera_id ?? "—"}</b></p>
+                  <p>Source <b>${sourceLabel(row.source)}</b></p>
+                </div>
+              </div>`;
+          });
+        });
+      } catch (e) {
+        if (err) err.textContent = `Detections could not be loaded. ${e.message}`;
+        body.innerHTML = `<tr><td colspan="7"><div class="empty-state"><b>Detections unavailable</b><p>Refresh, or ask a technician if this continues.</p></div></td></tr>`;
+      }
+    }
+
+    async function loadSettingsPage() {
+      const box = document.getElementById("settings-summary");
+      if (!box) return;
+      try {
+        const site = await api("/settings/site");
+        if (site.currency) state.siteCurrency = site.currency;
+        const lang = { en: "English", sw: "Kiswahili", ar: "Arabic", fr: "French", pt: "Portuguese" }[site.language] || site.language || "—";
+        box.innerHTML = `<div class="biz-grid">
+          <div><span>Site</span><b>${site.name || "—"}</b></div>
+          <div><span>Timezone</span><b>${site.timezone || "UTC"}</b></div>
+          <div><span>Currency</span><b>${site.currency || "—"}</b></div>
+          <div><span>Language</span><b>${lang}</b></div>
+        </div>
+        <p class="muted" style="margin-top:12px">Change these during setup, or in Testing &amp; Simulation when you have permission.</p>`;
+      } catch (e) {
+        box.innerHTML = `<div class="empty-state"><b>Settings unavailable</b><p>${e.message}</p></div>`;
+      }
+    }
+
     async function loadDashboard() {
       const el = document.getElementById("dashboard-summary");
       const cards = document.getElementById("dashboard-cards");
       try {
         const stats = await api("/dashboard");
-        const items = [
-          ["Vehicles inside", stats.vehicles_inside],
-          ["Entries today", stats.entries_today],
-          ["Exits today", stats.exits_today],
-          ["Revenue today", stats.revenue_today_label || stats.revenue_today],
-          ["Unpaid active", stats.unpaid_active],
-          ["Subscribers inside", stats.subscribers_inside],
-        ];
+        const items = dashboardCards(stats);
+        const lanesTitle = document.getElementById("dashboard-lanes-title");
+        if (lanesTitle) {
+          const kind = deploymentKind();
+          lanesTitle.textContent = kind === "lpr" || kind === "security" ? "Camera health" : "Lane status";
+        }
         cards.className = "statband";
         cards.innerHTML = items.map(([label, value]) =>
           `<div class="stat"><div class="k">${label}</div><div class="v">${value ?? 0}</div></div>`
@@ -2499,8 +3066,9 @@
               <p>Plate Recognition: <span class="chip ${chip(alpr)}">${alpr}</span></p>
               <p>Barrier: <span class="chip ${chip(barrier)}">${barrier}</span></p>
             </div>`;
-          }).join("") || `<div class="card card-b empty"><b>No lanes yet</b><p>Add gates and cameras to see lane status here.</p></div>`;
+          }).join("") || `<div class="card card-b empty-state"><b>No lanes yet</b><p>Add a camera to start live monitoring and plate recognition.</p></div>`;
         }
+        if (stats.currency) state.siteCurrency = stats.currency;
         const alerts = (stats.alerts && stats.alerts.length) ? stats.alerts.join(" · ") : "No hardware alerts.";
         el.className = (stats.alerts && stats.alerts.length) ? "notice" : "muted";
         el.textContent = alerts;
@@ -2569,6 +3137,12 @@
           lines.push(`${label} needs attention (${state}).`);
         }
       });
+      const pay = (details.domains && details.domains.payment) || {};
+      if (pay.active_mobile_provider && pay.active_mobile_provider !== "simulated") {
+        const prov = (pay.providers || {})[pay.active_mobile_provider] || {};
+        if (prov.available) lines.push(`Phone payments go through ${pay.active_mobile_provider} in ${prov.mode || "?"} mode. Money is only marked paid after the provider confirms it.`);
+        else lines.push(`Phone payments via ${pay.active_mobile_provider} are not available: ${prov.reason || "not configured"}. Cash and kiosk payments still work.`);
+      }
       if (lines.length === 1) lines.push("No extra warnings.");
       return lines;
     }
@@ -2624,6 +3198,12 @@
           ["HVX host", hvxLabel],
           ["ALPR mode", details.alpr_mode || "FASTALPR_ONLY"],
         ];
+        const pay = (details.domains && details.domains.payment) || {};
+        if (pay.active_mobile_provider) {
+          const prov = (pay.providers || {})[pay.active_mobile_provider] || {};
+          const mode = prov.mode ? ` ${prov.mode}` : "";
+          items.push(["Mobile pay", `${pay.active_mobile_provider}${mode}`]);
+        }
         const components = (modules && modules.components) || modules || {};
         Object.keys(components).forEach((key) => {
           if (key === "components" || key === "profile" || key === "enabled_modules") return;
@@ -2660,9 +3240,12 @@
       err.textContent = "";
       try {
         const rows = await api("/sessions");
-        document.getElementById("session-rows").innerHTML = rows.map((s) =>
-          `<tr data-id="${s.id}"><td>${s.plate || ""}</td><td>${s.parker_kind || "CASUAL"}</td><td>${s.status || ""}</td><td>${s.receipt_status || "—"}</td><td><code>${s.public_token || "—"}</code></td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${Number(s.amount_due || 0).toLocaleString()}</td><td>${Number(s.amount_paid || 0).toLocaleString()}</td></tr>`
-        ).join("") || `<tr><td colspan="8" class="muted">No sessions yet. Live plates create sessions automatically (even without a Gate). Assign each camera to a Gate to enable barriers.</td></tr>`;
+        document.getElementById("session-rows").innerHTML = rows.map((s) => {
+          const due = Number(s.amount_due || 0);
+          const paid = Number(s.amount_paid || 0);
+          const pay = due <= 0 && paid <= 0 ? (s.status || "OPEN") : (paid >= due && due > 0 ? "PAID" : (paid > 0 ? "PENDING" : "UNPAID"));
+          return `<tr data-id="${s.id}"><td><span class="plate">${s.plate || ""}</span></td><td>${s.parker_kind || "Casual"}</td><td>${paymentChip(pay)}</td><td>${s.receipt_status || "—"}</td><td><code>${s.public_token || "—"}</code></td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${moneyLabel(s.amount_due, s.currency)}</td><td>${moneyLabel(s.amount_paid, s.currency)}</td></tr>`;
+        }).join("") || `<tr><td colspan="8"><div class="empty-state"><b>No sessions yet.</b><p>Parking visits appear here after a vehicle is detected at an entry.</p></div></td></tr>`;
         document.querySelectorAll("#session-rows tr[data-id]").forEach((tr) => {
           tr.addEventListener("click", () => {
             document.querySelectorAll("#session-rows tr").forEach((row) => row.classList.remove("selected"));
@@ -2681,8 +3264,8 @@
       try {
         const rows = await api("/payments");
         document.getElementById("payment-rows").innerHTML = rows.map((p) =>
-          `<tr><td>${(p.confirmed_at || p.created_at || "").slice(0,19).replace("T"," ")}</td><td>${p.session_id || "—"}</td><td>${p.method || ""}</td><td>TZS ${Number(p.amount || 0).toLocaleString()}</td><td>${p.status || ""}</td><td>${p.provider_id || ""}</td></tr>`
-        ).join("") || `<tr><td colspan="6" class="muted">No payments yet.</td></tr>`;
+          `<tr><td>${(p.confirmed_at || p.created_at || "").slice(0,19).replace("T"," ")}</td><td>${p.session_id || "—"}</td><td>${methodLabel(p.method)}</td><td>${moneyLabel(p.amount, p.currency)}</td><td>${paymentChip(p.status)}</td><td class="tech-col">${p.provider_id || "—"}</td></tr>`
+        ).join("") || `<tr><td colspan="6"><div class="empty-state"><b>No payments yet.</b><p>Succeeded, pending, and failed payments will appear here.</p></div></td></tr>`;
       } catch (e) {
         err.textContent = e.message;
       }
@@ -2691,7 +3274,7 @@
     async function fillGateOptions(selected) {
       const select = document.querySelector("#camera-form [name=gate_id]");
       const gates = can("gates.view") ? await api("/gates") : [];
-      select.innerHTML = `<option value="">None</option>` + gates.map((g) =>
+      select.innerHTML = `<option value="">No gate — monitoring only</option>` + gates.map((g) =>
         `<option value="${g.id}" ${String(selected || "") === String(g.id) ? "selected" : ""}>${g.name}</option>`
       ).join("");
     }
@@ -2728,9 +3311,9 @@
       }
       const adapterHint = document.getElementById("camera-adapter-hint");
       if (adapterHint && state.platform && !state.platform.hvx_host_supported) {
-        adapterHint.textContent = "This OS has no HVX SDK host. Prefer rtsp/dahua/hikvision for IP cameras (FastALPR). HVX LAPR cameras need a Windows PC with the 32-bit host.";
+        adapterHint.textContent = "This computer cannot run the vendor camera host. Use Advanced only if a technician is connecting a generic camera.";
       } else if (adapterHint) {
-        adapterHint.textContent = "Leave Adapter on hvx for this site’s QY cameras. Pick rtsp/dahua/hikvision when the camera has no LAPR — Connect pulls HTTP/RTSP video and FastALPR reads plates.";
+        adapterHint.textContent = "Advanced holds vendor, stream, and controller details. Leave them closed unless a technician is commissioning the camera.";
       }
       document.getElementById("camera-dialog").showModal();
     }
@@ -2746,8 +3329,9 @@
           const tr = document.createElement("tr");
           tr.dataset.id = c.id;
           if (String(selectedCameraId) === String(c.id)) tr.classList.add("selected");
+          const [healthLabel, healthTone] = cameraHealth(c.status);
           const err = (c.last_error || "").slice(0, 80);
-          tr.innerHTML = `<td>${c.id}</td><td>${c.name}</td><td>${c.lane_name || c.gate_name || "—"}</td><td>${c.side || c.lane_direction || "—"}</td><td>${c.ip_address}</td><td>${c.controller_ip || "—"}</td><td>${c.display_ip || "—"}</td><td>${c.status}</td><td>${c.sdk_handle == null ? "—" : "handle=" + c.sdk_handle}</td><td class="muted">${err || "—"}</td><td class="row-actions"></td>`;
+          tr.innerHTML = `<td class="tech-col">${c.id}</td><td>${c.name}</td><td>${c.lane_name || c.gate_name || "—"}</td><td>${c.side || c.lane_direction || "—"}</td><td class="tech-col">${c.ip_address}</td><td class="tech-col">${c.controller_ip || "—"}</td><td class="tech-col">${c.display_ip || "—"}</td><td><span class="chip ${healthTone}">${healthLabel}</span></td><td class="tech-col">${c.sdk_handle == null ? "—" : "handle=" + c.sdk_handle}</td><td class="muted tech-col">${err || "—"}</td><td class="row-actions"></td>`;
           tr.addEventListener("click", (ev) => {
             if (ev.target.closest("button")) return;
             selectedCameraId = c.id;
@@ -2771,6 +3355,9 @@
           }
           body.appendChild(tr);
         });
+        if (!rows.length) {
+          body.innerHTML = `<tr><td colspan="11"><div class="empty-state"><b>No cameras configured.</b><p>Add a camera to start live monitoring and plate recognition.</p></div></td></tr>`;
+        }
         cameraRowsCache = rows;
         fillLiveLanes(rows);
         fillPaneSelects(rows);
@@ -3003,8 +3590,11 @@
         const body = (issued && issued.receipt) || "";
         const qrUrl = issued && (issued.qr_url || (issued.public_token ? `/p/${issued.public_token}/qr.png` : ""));
         const safe = (body || "").replace(/[&<>]/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[ch]));
-        const qrBlock = qrUrl
-          ? `<p style="margin:16px 0"><img src="${mediaUrl(qrUrl)}" alt="Payment QR" style="width:200px;height:200px;border:1px solid #ccc;padding:8px;background:#fff"></p><p class="muted">Scan to pay on your phone, or use this code at the kiosk.</p>`
+        const qrSrc = qrUrl
+          ? (qrUrl.startsWith("http") ? qrUrl : `${location.origin}${qrUrl}`)
+          : "";
+        const qrBlock = qrSrc
+          ? `<p style="margin:16px 0;text-align:center"><img src="${qrSrc}" alt="Payment QR" style="width:200px;height:200px;border:1px solid #ccc;padding:8px;background:#fff"></p><p class="muted">Scan this QR at the kiosk if the camera cannot read the plate.</p>`
           : "";
         out.classList.remove("hidden");
         out.innerHTML = `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${safe || "Receipt stored."}</pre>${qrBlock}`;
@@ -3326,7 +3916,10 @@
       }
     }
     document.getElementById("sdk-connect").addEventListener("click", () => cameraAction("/sdk/connect"));
-    document.getElementById("sdk-disconnect").addEventListener("click", () => cameraAction("/sdk/disconnect"));
+    document.getElementById("sdk-disconnect").addEventListener("click", () => {
+      if (!confirm("Disconnect this camera? Live video for it stops until someone connects it again.")) return;
+      cameraAction("/sdk/disconnect");
+    });
     document.getElementById("open-this-side").addEventListener("click", async () => {
       const error = document.getElementById("camera-error");
       error.textContent = "";

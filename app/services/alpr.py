@@ -182,8 +182,8 @@ def status() -> dict:
         "engine_id": "fastalpr",
         "detail": (
             "The camera snaps the JPEG. FastALPR detects the plate, crops it with padding, "
-            "then reads only that crop. Country "
-            f"{settings.alpr_country or 'Tanzania'} shapes the reading. "
+            "then reads only that crop. Country profile: "
+            f"{_country_name() or 'neutral'}. "
             "Replace the ONNX pack to retrain, or register another PlateEngine to change libraries."
             if installed
             else "FastALPR is not installed in this copy. Install the fast-alpr package and the ONNX model pack."
@@ -366,11 +366,17 @@ def _ocr_result_text(ocr) -> tuple[str, float]:
 
 
 def _country_name() -> str:
-    return str(getattr(settings, "alpr_country", "") or "").strip().lower()
+    explicit = str(getattr(settings, "alpr_country", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    validation = str(getattr(settings, "plate_validation", "") or "").strip().upper()
+    if validation == "TZ":
+        return "tanzania"
+    return ""
 
 
 def _apply_country_profile(text: str, confidence: float) -> tuple[str, float]:
-    """ParkWatch SetCountry: one country profile shapes the reading."""
+    """Apply a country profile only when the site selected one."""
     if _country_name() in {"tanzania", "tz"}:
         plate = _fix_tz_ocr_plate(text)
         return plate, _tz_plate_score(plate, confidence)
@@ -448,13 +454,18 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         if len(plate) < MIN_PLATE_CHARS:
             continue
         raw_conf = max(0.0, min(float(conf or 0), 1.0))
+        box = bbox_dict(bbox) or {}
+        box["image_width"] = int(bgr.shape[1])
+        box["image_height"] = int(bgr.shape[0])
+        left, top, right, bottom = _xy
+        box["crop"] = {"x1": int(left), "y1": int(top), "x2": int(right), "y2": int(bottom)}
         hits.append(
             PlateHit(
                 plate_raw=text,
                 plate_normalized=plate,
                 plate_confidence=raw_conf,
                 plate_crop_path=_save_crop_bgr(crop),
-                bbox=bbox_dict(bbox),
+                bbox=box,
             )
         )
     hits.sort(

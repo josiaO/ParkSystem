@@ -6,7 +6,6 @@ Live cameras and simulation share this path. HVX GPIO stays in gates.controller.
 
 from __future__ import annotations
 
-import secrets
 import time
 from datetime import datetime, timezone
 
@@ -17,12 +16,15 @@ from app.config import settings as app_settings
 from app.core.plate import normalize_plate
 from app.domain.gates import should_pulse_physical
 from app.infrastructure.payments.ledger import record_succeeded_payment
+from app.domain.site import DEFAULT_SITE_ID
 from app.models import Camera, Gate, ParkingSession, SiteSetting, utcnow
 from app.services.access import Entitlement, lookup_entitlement
 from app.services.decisions import record_access_decision, record_gate_command
 from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from app.services.gates import controller
 from app.services.led_udp import send_led_text
+from app.domain.receipt_engine import session_qr_payload
+from app.services.parking_sessions import _allocate_identity
 from app.services.receipts import (
     issue_receipt,
     policy_requires_taken,
@@ -37,6 +39,7 @@ DEFAULT_PARKING_SETTINGS = {
     "pay_prompt": "Pay {amount} {currency}",
     "printer_adapter": "simulated",
     "printer_name": "",
+    "payment_exit_grace_seconds": 15 * 60,
 }
 
 OPEN_STATUSES = {"WAITING_RECEIPT", "ACTIVE", "PAID", "OPEN"}
@@ -100,6 +103,7 @@ def session_dict(row: ParkingSession) -> dict:
         "public_token": token,
         "receipt_url": f"/p/{token}" if token else None,
         "qr_url": f"/p/{token}/qr.png" if token else None,
+        "qr_payload": session_qr_payload(token),
         "entry_time": row.entry_time.isoformat() if row.entry_time else None,
         "exit_time": row.exit_time.isoformat() if row.exit_time else None,
         "currency": row.currency,
@@ -112,23 +116,10 @@ def session_dict(row: ParkingSession) -> dict:
     }
     try:
         from sqlalchemy.orm import object_session
-        from app.services.captures import capture_dict, latest_for_camera
+        from app.services.captures import capture_dict, find_capture_for_session
         db = object_session(row)
-        if db is not None and row.camera_id:
-            cap = latest_for_camera(db, int(row.camera_id))
-            if cap and normalize_plate(cap.plate) == normalize_plate(row.plate):
-                info = capture_dict(cap)
-                body["snapshot_url"] = info.get("snapshot_url")
-                body["crop_url"] = info.get("crop_url")
-                body["plate_confidence"] = info.get("confidence")
-        elif db is not None and row.plate:
-            from sqlalchemy import select
-            from app.models import VehicleCapture
-            cap = db.scalar(
-                select(VehicleCapture)
-                .where(VehicleCapture.plate == normalize_plate(row.plate))
-                .order_by(VehicleCapture.id.desc())
-            )
+        if db is not None:
+            cap = find_capture_for_session(db, plate=row.plate, camera_id=row.camera_id)
             if cap:
                 info = capture_dict(cap)
                 body["snapshot_url"] = info.get("snapshot_url")
@@ -197,17 +188,21 @@ def create_entry(
         return existing
     if camera is None and gate is not None:
         camera = _side_camera(gate, side)
-    token = secrets.token_urlsafe(10)
+    token, human = _allocate_identity(db)
     tariff = ensure_car1_tariff(db)
     entitlement = entitlement or Entitlement(plate=plate)
+    site_id = getattr(gate, "site_id", None) or DEFAULT_SITE_ID
     row = ParkingSession(
+        site_id=site_id,
         plate=plate,
+        plate_raw=plate,
         gate_id=gate.id if gate else None,
         camera_id=camera.id if camera else None,
         lane_direction=(side or "ENTRY").upper(),
         status=status,
         receipt_status=receipt_status,
         public_token=token,
+        human_reference=human,
         simulated=bool(simulated),
         currency=(tariff.currency if tariff else "TZS"),
         parker_kind=entitlement.kind if entitlement.registered else "CASUAL",
@@ -434,6 +429,11 @@ def _finish_entry(
     started: float,
     outcome: str,
 ) -> dict:
+    token = row.public_token or ""
+    if token:
+        result["public_token"] = result.get("public_token") or token
+        result["qr_url"] = result.get("qr_url") or f"/p/{token}/qr.png"
+        result["qr_payload"] = result.get("qr_payload") or session_qr_payload(token)
     _attach_latency(result, started)
     record_access_decision(
         db,
@@ -588,4 +588,12 @@ def mark_paid(
         operator_id=operator_id,
         idempotency_key=f"session:{row.id}:settle",
     )
-    return recorded["session"]
+    cfg = parking_settings(db)
+    apply_from_ledger = recorded["session"]
+    from app.infrastructure.payments.ledger import apply_session_payment_state
+    apply_session_payment_state(
+        db, apply_from_ledger, grace_seconds=int(cfg.get("payment_exit_grace_seconds") or 15 * 60),
+    )
+    db.commit()
+    db.refresh(apply_from_ledger)
+    return apply_from_ledger

@@ -110,74 +110,14 @@ def get_db():
         db.close()
 
 
-def ensure_schema() -> None:
-    """create_all will not add columns to an existing SQLite file."""
-    from . import models as _models  # noqa: F401
+def ensure_schema() -> dict:
+    """Bring the live database to the newest Alembic revision.
 
-    Base.metadata.create_all(engine)
-    if not is_sqlite():
-        return
-    with engine.begin() as conn:
-        cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(cameras)")}
-        if "controller_ip" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN controller_ip VARCHAR(64) DEFAULT ''")
-        if "display_ip" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN display_ip VARCHAR(64) DEFAULT ''")
-        if "adapter_id" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN adapter_id VARCHAR(40) DEFAULT 'hvx'")
-        if "connection_mode" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN connection_mode VARCHAR(20) DEFAULT 'DIRECT'")
-        if "stream_profiles" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN stream_profiles JSON")
-        if "ffmpeg_profile" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN ffmpeg_profile VARCHAR(40) DEFAULT 'LOW_LATENCY_LAN'")
-        if "rtsp_transport" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN rtsp_transport VARCHAR(16) DEFAULT 'TCP'")
-        if "media_capabilities" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN media_capabilities JSON")
-        if "recognition_mode" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN recognition_mode VARCHAR(40) DEFAULT ''")
-        if "vendor" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN vendor VARCHAR(80) DEFAULT ''")
-        if "model_name" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN model_name VARCHAR(80) DEFAULT ''")
-        if "serial" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN serial VARCHAR(80) DEFAULT ''")
-        if "timezone" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN timezone VARCHAR(80) DEFAULT ''")
-        if "camera_type" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN camera_type VARCHAR(40) DEFAULT ''")
-        if "lane_id" not in cols:
-            conn.exec_driver_sql("ALTER TABLE cameras ADD COLUMN lane_id INTEGER")
-        gate_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(gates)")}
-        if gate_cols:
-            if "site_id" not in gate_cols:
-                conn.exec_driver_sql("ALTER TABLE gates ADD COLUMN site_id INTEGER")
-            if "zone_id" not in gate_cols:
-                conn.exec_driver_sql("ALTER TABLE gates ADD COLUMN zone_id INTEGER")
-        capture_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(vehicle_captures)")}
-        if capture_cols:
-            if "plate_country" not in capture_cols:
-                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_country VARCHAR(8) DEFAULT ''")
-            if "plate_region" not in capture_cols:
-                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_region VARCHAR(40) DEFAULT ''")
-            if "plate_type" not in capture_cols:
-                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN plate_type VARCHAR(40) DEFAULT ''")
-            if "source" not in capture_cols:
-                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN source VARCHAR(40) DEFAULT ''")
-            if "event_id" not in capture_cols:
-                conn.exec_driver_sql("ALTER TABLE vehicle_captures ADD COLUMN event_id VARCHAR(64) DEFAULT ''")
-        session_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(parking_sessions)")}
-        if session_cols:
-            if "public_token" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN public_token VARCHAR(64) DEFAULT ''")
-            if "receipt_status" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN receipt_status VARCHAR(20) DEFAULT ''")
-            if "simulated" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN simulated BOOLEAN DEFAULT 0")
-            if "parker_kind" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN parker_kind VARCHAR(40) DEFAULT 'CASUAL'")
-            if "access_plan_id" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN access_plan_id INTEGER")
-            if "vehicle_id" not in session_cols:
-                conn.exec_driver_sql("ALTER TABLE parking_sessions ADD COLUMN vehicle_id INTEGER")
+    Fresh files are created with ``create_all`` and stamped; pre-Alembic files
+    get the frozen legacy column fixups once, then Alembic takes over. Schema
+    changes are Alembic revisions under ``app/migrations/alembic/versions`` —
+    never ad-hoc ``ALTER TABLE`` here.
+    """
+    from .migrations.runner import upgrade_to_head
+
+    return upgrade_to_head(engine)

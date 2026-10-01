@@ -33,7 +33,18 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
     stay = stay_for(row)
     images = image_fields(db, row)
     payable = remaining > 0.0001
+    from app.services.mobile_payments import active_mobile_provider_id, external_provider_ids
+
+    mobile_provider = active_mobile_provider_id()
+    if mobile_provider in external_provider_ids():
+        pay_methods = ["MOBILE_MONEY", "KIOSK_CASH"]
+        pay_endpoint = "/api/public/payment-intents"
+    else:
+        pay_methods = ["MOBILE_SIMULATED", "MOBILE_MONEY", "KIOSK_CASH"]
+        pay_endpoint = f"/p/{row.public_token}/pay"
     return {
+        "mobile_provider": mobile_provider,
+        "pay_endpoint": pay_endpoint,
         "ok": True,
         "token": row.public_token,
         "session_id": row.id,
@@ -51,7 +62,7 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
         "pay_blocked_reason": "" if payable else "This vehicle does not have a fee to pay.",
         "receipt_url": f"/p/{row.public_token}",
         "qr_url": f"/p/{row.public_token}/qr.png",
-        "pay_methods": ["MOBILE_SIMULATED", "MOBILE_MONEY", "KIOSK_CASH"] if payable else [],
+        "pay_methods": pay_methods if payable else [],
         "session": sim_session_dict(row),
         **stay,
         **images,
