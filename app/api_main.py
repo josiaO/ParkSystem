@@ -1189,6 +1189,7 @@ async def _run_local_alpr(
     presence: bool = True,
     image_id: int = 0,
     force: bool = False,
+    plate_crop: bytes = b"",
 ) -> dict | None:
     jpeg = jpeg or b""
     if jpeg[:2] != b"\xff\xd8":
@@ -1209,7 +1210,8 @@ async def _run_local_alpr(
     _alpr_enter()
     try:
         return await _run_local_alpr_locked(
-            db, camera, jpeg, native=native, presence=presence, image_id=image_id, force=force,
+            db, camera, jpeg, native=native, presence=presence, image_id=image_id,
+            force=force, plate_crop=plate_crop,
         )
     except Exception as exc:
         from .services.health import note_worker_failure
@@ -1243,6 +1245,7 @@ async def _run_local_alpr_locked(
     presence: bool = True,
     image_id: int = 0,
     force: bool = False,
+    plate_crop: bytes = b"",
 ) -> dict | None:
     native = native or {}
     from .services.media_gateway import gateway
@@ -1251,7 +1254,17 @@ async def _run_local_alpr_locked(
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))
     started = time.perf_counter()
-    alpr = await asyncio.to_thread(recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}")
+    if plate_crop[:2] == b"\xff\xd8":
+        from .services.alpr import recognize_plate_crop_bytes
+        alpr = await asyncio.to_thread(
+            recognize_plate_crop_bytes,
+            plate_crop,
+            camera_label=f"cam-{camera.id}-{camera.ip_address}-native-crop",
+        )
+    else:
+        alpr = await asyncio.to_thread(
+            recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}",
+        )
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     remember_alpr(camera.id, alpr)
     local = local_from_fastalpr(alpr)
@@ -2408,7 +2421,7 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
                 await _run_local_alpr(
                     db, row, frame, native=native, presence=presence,
-                    image_id=image_id, force=False,
+                    image_id=image_id, force=False, plate_crop=crop,
                 )
         if image_id:
             _last_image_id[camera_id] = image_id
