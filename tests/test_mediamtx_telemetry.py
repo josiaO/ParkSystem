@@ -50,6 +50,22 @@ class PathPlanTests(unittest.TestCase):
         self.assertIn("EVIDENCE", live["roles"])
         self.assertEqual(len(plan), 2)
 
+    def test_generated_config_honors_camera_transport(self):
+        dest = ROOT / "data" / "test-mediamtx-transport.yml"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with patch.object(mediamtx, "config_path", return_value=dest):
+                mediamtx._sources[30] = {
+                    "uri": "rtsp://cam/only",
+                    "detect_uri": "rtsp://cam/only",
+                    "transport": "UDP",
+                }
+                mediamtx.write_config()
+            body = dest.read_text(encoding="utf-8")
+        finally:
+            dest.unlink(missing_ok=True)
+        self.assertIn("rtspTransport: udp", body)
+
     def test_generated_config_writes_one_path_per_distinct_upstream(self):
         dest = ROOT / "data" / "test-mediamtx-dedup.yml"
         dest.parent.mkdir(parents=True, exist_ok=True)
