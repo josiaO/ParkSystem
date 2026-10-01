@@ -175,11 +175,12 @@ async def start_mobile_payment(
     if remaining <= 0:
         db.commit()
         return {"ok": True, "already_paid": True, "intent": None}
-    pay_amount = to_decimal(amount) if amount not in (None, "") else remaining
+    # Public callers never own the amount. Recompute the exact outstanding
+    # balance at initiation time so request tampering cannot underpay a session.
+    # Keep the parameter only for backward API compatibility.
+    pay_amount = remaining
     if pay_amount <= 0:
         raise ValueError("Nothing to pay")
-    if pay_amount > remaining:
-        pay_amount = remaining
 
     # Idempotent create: a fresh pending push for the same session/provider is
     # returned instead of re-prompting the customer's phone.
