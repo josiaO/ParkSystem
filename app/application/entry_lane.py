@@ -369,6 +369,7 @@ class EntryLaneController:
             opened = await _pulse_gate(
                 db, gate, cameras, reason=f"entry {row.plate}", side="ENTRY",
                 led_text="WELCOME", session=row, automatic=True,
+                command_uuid=command_uuid,
             )
             if opened is not None and not opened.ok:
                 record_access_decision(
