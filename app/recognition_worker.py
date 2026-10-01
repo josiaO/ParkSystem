@@ -167,7 +167,7 @@ def _camera_rows() -> list[dict]:
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
                 "name": str(camera.name or ""),
                 "lane_id": camera.lane_id,
-                "site_id": camera.gate.site_id if camera.gate is not None else None,
+                "site_id": camera.site_id,
                 "plate_policy": site_policy(db),
                 "recognition_mode": camera_recognition_mode(camera),
             })
