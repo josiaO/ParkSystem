@@ -138,7 +138,7 @@ class Gate(Base):
     )
     zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id"), nullable=True)
     cameras: Mapped[list["Camera"]] = relationship(back_populates="gate")
-    sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate")
+    sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate", foreign_keys="ParkingSession.gate_id")
     lanes: Mapped[list["Lane"]] = relationship(back_populates="gate")
 
 
@@ -337,7 +337,7 @@ class ParkingSession(Base):
     closed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
-    gate: Mapped[Gate | None] = relationship(back_populates="sessions")
+    gate: Mapped[Gate | None] = relationship(back_populates="sessions", foreign_keys=[gate_id])
 
 
 class SiteSetting(Base):
