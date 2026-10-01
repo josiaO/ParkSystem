@@ -28,6 +28,19 @@ class PlateEngineTests(unittest.TestCase):
         self.assertEqual(alpr_mode(), LOCAL_ONLY)
         self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99))
 
+    def test_hybrid_mode_rereads_vehicle_event_even_with_strong_native_plate(self):
+        from types import SimpleNamespace
+        from app.services.ocr_policy import should_run_local
+
+        camera = SimpleNamespace(recognition_mode="HYBRID", adapter_id="hvx")
+        self.assertTrue(should_run_local(
+            native_plate="T123ABC",
+            native_confidence=0.99,
+            native_plates=True,
+            presence=True,
+            camera=camera,
+        ))
+
     def test_fastalpr_is_the_known_engine(self):
         self.assertEqual(active_engine_id(), "fastalpr")
         rows = {row["id"]: row for row in list_engines()}
