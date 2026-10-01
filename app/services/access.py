@@ -98,6 +98,7 @@ def lookup_entitlement(
     *,
     at: datetime | None = None,
     site_id: int = DEFAULT_SITE_ID,
+    strict: bool = False,
 ) -> Entitlement:
     plate = normalize_plate(plate)
     if not plate:
@@ -106,6 +107,11 @@ def lookup_entitlement(
         RegisteredVehicle.site_id == site_id,
         RegisteredVehicle.plate == plate,
     ))
+    if vehicle is None and strict:
+        # Automatic barrier authority must not be granted from a fuzzy plate
+        # guess. Recognition may reach a stable exact plate before calling us;
+        # otherwise the vehicle follows the normal casual/operator fallback.
+        return Entitlement(plate=plate)
     if vehicle is None:
         known = [
             row.plate
