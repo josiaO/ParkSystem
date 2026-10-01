@@ -87,12 +87,37 @@ class PlateFusionTests(unittest.TestCase):
         self.assertLess(seen["crop_w"], 640)
         self.assertGreaterEqual(seen["crop_w"], 300)
 
+    def test_native_plate_crop_can_skip_detector(self):
+        from io import BytesIO
+        from types import SimpleNamespace
+        from PIL import Image
+        from app.services import alpr as alpr_mod
+
+        buf = BytesIO()
+        Image.new("RGB", (180, 55), (220, 220, 220)).save(buf, format="JPEG")
+        seen = {}
+
+        class FakeOcr:
+            def predict(self, crop):
+                seen["shape"] = tuple(crop.shape[:2])
+                return SimpleNamespace(text="T285DQP____", confidence=[0.95] * 7)
+
+        fake_engine = SimpleNamespace(ocr=FakeOcr())
+        with patch.object(alpr_mod, "fastalpr_installed", return_value=True), \
+             patch.object(alpr_mod, "_load_engine", return_value=fake_engine):
+            result = alpr_mod.recognize_plate_crop_bytes(buf.getvalue(), camera_label="native")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pipeline"], "crop_ocr")
+        self.assertEqual(result["best"]["plate"], "T285DQP")
+        self.assertGreaterEqual(seen["shape"][1], 300)
+
     def test_clean_ocr_strips_fast_plate_padding(self):
         self.assertEqual(clean_ocr_text("T285DQP____"), "T285DQP")
         self.assertEqual(normalize_plate(clean_ocr_text("T_285_DQP")), "T285DQP")
         self.assertEqual(clean_ocr_text("T 349 DLG"), "T349DLG")
 
-    def test_decode_alpr_image_scales_small_photos(self):
+    def test_decode_alpr_image_does_not_upscale_entire_small_frame(self):
         from io import BytesIO
         from PIL import Image
         from app.services.alpr import decode_alpr_image
@@ -101,7 +126,9 @@ class PlateFusionTests(unittest.TestCase):
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=85)
         bgr = decode_alpr_image(buf.getvalue())
-        self.assertGreaterEqual(min(bgr.shape[0], bgr.shape[1]), 720)
+        # Detection handles its own input resize. SmartPark only enlarges the
+        # detected plate crop, avoiding wasted work on the entire vehicle frame.
+        self.assertEqual(tuple(bgr.shape[:2]), (240, 320))
         self.assertEqual(bgr.shape[2], 3)
 
     def test_normalize_strips_separators(self):

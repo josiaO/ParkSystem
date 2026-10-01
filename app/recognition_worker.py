@@ -143,9 +143,15 @@ def _software_camera(camera, db) -> bool:
     """
     from app.services.modules import is_enabled, load_config
     from app.services.ocr_policy import camera_recognition_mode
+    from app.infrastructure.hardware.cameras import adapter_has_native_plates
 
+    # Native-LPR cameras already deliver a vehicle-trigger JPEG/metadata event.
+    # Re-read that JPEG once in Site Service (ParkWatch pattern) instead of
+    # continuously decoding their RTSP stream in the worker. Generic cameras
+    # without event LPR keep the continuous DETECT worker.
     return (bool(camera.enabled) and is_enabled("recognition.alpr", db)
             and load_config(db).get("recognition_default") != "VIDEO_ONLY"
+            and not adapter_has_native_plates(camera)
             and camera_recognition_mode(camera) in WORKER_MODES)
 
 
@@ -167,7 +173,7 @@ def _camera_rows() -> list[dict]:
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
                 "name": str(camera.name or ""),
                 "lane_id": camera.lane_id,
-                "site_id": camera.gate.site_id if camera.gate is not None else None,
+                "site_id": camera.site_id,
                 "plate_policy": site_policy(db),
                 "recognition_mode": camera_recognition_mode(camera),
             })

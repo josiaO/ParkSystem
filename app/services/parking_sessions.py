@@ -110,11 +110,17 @@ def session_by_entry_event(db: Session, site_id: int, event_id: str) -> ParkingS
     )
 
 
-def active_for_plate(db: Session, plate: str, *, site_id: int = DEFAULT_SITE_ID) -> ParkingSession | None:
+def active_for_plate(
+    db: Session,
+    plate: str,
+    *,
+    site_id: int = DEFAULT_SITE_ID,
+    for_update: bool = False,
+) -> ParkingSession | None:
     plate = (plate or "").strip().upper()
     if not plate:
         return None
-    return db.scalar(
+    stmt = (
         select(ParkingSession)
         .where(
             ParkingSession.site_id == site_id,
@@ -123,6 +129,12 @@ def active_for_plate(db: Session, plate: str, *, site_id: int = DEFAULT_SITE_ID)
         )
         .order_by(ParkingSession.id.desc())
     )
+    if for_update:
+        # PostgreSQL production: serialize competing exit-lane claims for the
+        # same active session. SQLite ignores FOR UPDATE and remains suitable
+        # for local development/tests, not multi-lane production authority.
+        stmt = stmt.with_for_update()
+    return db.scalar(stmt)
 
 
 def start_entry(
@@ -161,6 +173,7 @@ def start_entry(
         plate_raw=(plate_raw or plate)[:32],
         plate_status="RESOLVED",
         gate_id=gate_id,
+        entry_gate_id=gate_id,
         camera_id=camera_id,
         entry_lane_id=lane_id,
         lane_direction="ENTRY",
@@ -267,9 +280,13 @@ def cancel_entry_attempt(db: Session, row: ParkingSession, *, policy: LanePolicy
 
 def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, policy: LanePolicy | None = None) -> ParkingSession:
     policy = policy or LanePolicy()
-    if command_uuid and row.open_command_uuid == command_uuid:
-        return row
     current = _current(row)
+    if (
+        command_uuid
+        and row.open_command_uuid == command_uuid
+        and current in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}
+    ):
+        return row
     if current in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}:
         return row
     if current == SESSION_CREATED and policy.receipt_required_before_open and (row.parker_kind or "CASUAL").upper() == "CASUAL":
@@ -339,13 +356,35 @@ def start_exit(
         )
         if by_exit is not None:
             return by_exit, _current(by_exit)
-    row = active_for_plate(db, plate, site_id=site_id)
+    row = active_for_plate(db, plate, site_id=site_id, for_update=True)
     if row is None:
         return None, ""
     if row.exit_event_id and event_id and row.exit_event_id == event_id:
         return row, _current(row)
-    if _current(row) == CLOSED:
+    current = _current(row)
+    if (
+        row.exit_event_id
+        and event_id
+        and row.exit_event_id != event_id
+        and current != DENIED_PAYMENT_REQUIRED
+    ):
+        # One event owns an in-flight exit attempt. A different event may only
+        # take over after a payment denial, when a new approach is expected.
+        return row, current
+    if current == CLOSED:
         return row, CLOSED
+
+    # Claim the session for this physical exit attempt before lifecycle commits
+    # release the row lock. This is the durable duplicate-suppression boundary.
+    row.exit_event_id = event_id or row.exit_event_id
+    row.exit_lane_id = lane_id if lane_id is not None else row.exit_lane_id
+    row.exit_camera_id = camera_id if camera_id is not None else row.exit_camera_id
+    if gate_id is not None:
+        row.exit_gate_id = gate_id
+    row.lane_direction = "EXIT"
+    db.commit()
+    db.refresh(row)
+
     if _current(row) == ACTIVE:
         row = advance(db, row, EXIT_VEHICLE_DETECTED, policy=policy)
     elif _current(row) not in {
@@ -353,14 +392,8 @@ def start_exit(
         AUTHORIZED, DENIED_PAYMENT_REQUIRED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED,
     }:
         raise InvalidTransition(f"cannot exit from {_current(row)}")
-    row.exit_event_id = event_id or row.exit_event_id
-    row.exit_lane_id = lane_id if lane_id is not None else row.exit_lane_id
-    row.exit_camera_id = camera_id if camera_id is not None else row.exit_camera_id
-    if gate_id is not None:
-        row.gate_id = gate_id
-    row.lane_direction = "EXIT"
-    db.commit()
-    db.refresh(row)
+    if _current(row) == DENIED_PAYMENT_REQUIRED:
+        row = advance(db, row, TARIFF_CALCULATED, policy=policy)
     if _current(row) == EXIT_VEHICLE_DETECTED:
         row = advance(db, row, SESSION_RESOLVED, policy=policy)
     if _current(row) == SESSION_RESOLVED:
@@ -383,16 +416,16 @@ def complete_authorized_exit(db: Session, row: ParkingSession, *, policy: LanePo
     if _current(row) == AUTHORIZED:
         row = advance(db, row, EXIT_GATE_OPEN_REQUESTED, policy=policy)
     if command_uuid:
-        if row.open_command_uuid == command_uuid and _current(row) in {CLOSED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED}:
+        if row.exit_open_command_uuid == command_uuid and _current(row) in {CLOSED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED}:
             return row
-        row.open_command_uuid = command_uuid
+        row.exit_open_command_uuid = command_uuid
         db.commit()
     if policy.passage_fallback() and _current(row) == EXIT_GATE_OPEN_REQUESTED:
+        # Commissioning fallback only: a successful OPEN command is treated as
+        # passage when no physical passage sensor is configured.
         return advance(db, row, CLOSED, policy=policy)
-    if _current(row) == EXIT_GATE_OPEN_REQUESTED:
-        row = advance(db, row, EXIT_VEHICLE_PASSED, policy=policy)
-    if _current(row) == EXIT_VEHICLE_PASSED:
-        return advance(db, row, CLOSED, policy=policy)
+    # With WAIT_FOR_PASSAGE, the session deliberately remains open until a
+    # loop/beam/sensor calls mark_vehicle_passed(side="EXIT").
     return row
 
 
@@ -406,6 +439,8 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "entry_lane_id": row.entry_lane_id,
         "exit_lane_id": row.exit_lane_id,
         "gate_id": row.gate_id,
+        "entry_gate_id": getattr(row, "entry_gate_id", None),
+        "exit_gate_id": getattr(row, "exit_gate_id", None),
         "camera_id": row.camera_id,
         "simulated": bool(row.simulated),
         "entry_event_id": row.entry_event_id,
@@ -418,4 +453,5 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "parker_kind": row.parker_kind,
         "receipt_status": row.receipt_status,
         "open_command_uuid": row.open_command_uuid,
+        "exit_open_command_uuid": getattr(row, "exit_open_command_uuid", ""),
     }
