@@ -109,7 +109,7 @@ class ExitLaneController:
                 "reason": "payment_grace",
             }
 
-        rules = load_active_rules(db, row.car_type or "Car1")
+        rules = load_active_rules(db, row.car_type or "Car1", site_id=row.site_id)
         quote = quote_stay(row.entry_time, at, rules)
         row.amount_due = quote.due_minor
         row.amount_paid = paid
