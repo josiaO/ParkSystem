@@ -247,6 +247,21 @@ class ExitLaneController:
                 "message": "Parking session disappeared while resolving exit.",
             }
 
+        if row.exit_event_id and event_id and row.exit_event_id != event_id and outcome in {
+            AUTHORIZED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED, CLOSED
+        }:
+            return {
+                "ok": True,
+                "action": "EXIT",
+                "reason": "exit_in_progress",
+                "pay_required": False,
+                "barrier_opened": outcome in {EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED, CLOSED},
+                "duplicate": True,
+                "session": snapshot(row),
+                "financial": financial,
+                "message": "Another exit event already owns this parking session.",
+            }
+
         if outcome == DENIED_PAYMENT_REQUIRED:
             record_access_decision(
                 db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
@@ -308,12 +323,17 @@ class ExitLaneController:
             }
 
         command_uuid = row.exit_open_command_uuid or uuid4().hex
+        if not row.exit_open_command_uuid:
+            row.exit_open_command_uuid = command_uuid
+            db.commit()
+            db.refresh(row)
         cameras = _cameras(gate, camera)
         if self.opener is None:
             from app.services.simulation import _pulse_gate
             opened = await _pulse_gate(
                 db, gate, cameras, reason=f"exit {row.plate}", side="EXIT",
                 led_text="THANKYOU", session=row, automatic=True,
+                command_uuid=command_uuid,
             )
         else:
             opened = await self.opener(
