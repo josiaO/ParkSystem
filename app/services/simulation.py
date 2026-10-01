@@ -272,13 +272,16 @@ async def handle_plate_event(
     source: str = "camera",
     camera: Camera | None = None,
 ) -> dict:
-    """Shared entry/exit path for live cameras and simulation.
+    """Simulation harness plus temporary legacy EXIT orchestration.
 
-    Gate is optional: plate-first parking still creates a ParkingSession when the
-    camera has not been assigned to a lane yet (barrier open is skipped).
+    Real ENTRY camera events are forbidden here and must use
+    app.application.entry_lane.EntryLaneController through live_parking.
+    Phase 6 will replace the remaining EXIT branch with ExitLaneController.
     """
     started = time.perf_counter()
     side = (side or "ENTRY").upper()
+    if side == "ENTRY" and not simulated:
+        raise RuntimeError("live ENTRY must use EntryLaneController, not simulation.handle_plate_event")
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
