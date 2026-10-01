@@ -1704,6 +1704,37 @@ def get_alpr_status(_: User = Depends(require("hardware.view"))):
     return body
 
 
+@app.get("/cameras/{camera_id}/commissioning/recognition")
+def camera_recognition_commissioning(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("hardware.view")),
+):
+    """Side-effect-free recognition/media diagnostics for one camera."""
+    from .services.recognition_commissioning import commissioning_snapshot
+
+    camera = get_camera_or_404(db, camera_id)
+    return commissioning_snapshot(db, camera)
+
+
+@app.post("/cameras/{camera_id}/commissioning/recognition/read")
+async def camera_recognition_commissioning_read(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("hardware.view")),
+):
+    """Run one software plate read without creating sessions or controlling gates."""
+    from .services.recognition_commissioning import diagnostic_read
+
+    camera = get_camera_or_404(db, camera_id)
+    result = await asyncio.to_thread(diagnostic_read, db, camera)
+    write_audit(
+        db, user, "camera.recognition_diagnostic", "camera", str(camera.id),
+        f"source={result.get('evidence_source')} plate={(result.get('best') or {}).get('plate') if isinstance(result.get('best'), dict) else ''}",
+    )
+    return result
+
+
 @app.get("/recognition/engine")
 def get_plate_engine(_: User = Depends(require("cameras.view"))):
     engine = active_engine()
