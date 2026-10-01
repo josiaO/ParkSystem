@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+import warnings
 
 revision = "0002_site_scoped_constraints"
 down_revision = "0001_baseline"
@@ -80,7 +81,9 @@ def _add_site_id(table: str) -> None:
 def _reflected_without_uniques(table: str) -> sa.Table:
     """copy_from table for SQLite batch mode with the global uniques stripped."""
     meta = sa.MetaData()
-    reflected = sa.Table(table, meta, autoload_with=op.get_bind())
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="SQL-parsed foreign key constraint")
+        reflected = sa.Table(table, meta, autoload_with=op.get_bind())
     for constraint in list(reflected.constraints):
         if isinstance(constraint, sa.UniqueConstraint):
             reflected.constraints.remove(constraint)

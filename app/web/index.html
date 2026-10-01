@@ -2164,7 +2164,11 @@
         parts.push(JSON.stringify(data, null, 2));
         out.textContent = parts.join("\n\n");
         const preview = document.getElementById("sim-preview");
-        const shown = (best && best.crop_url) || (data.alpr && data.alpr.annotated_url);
+        const shown = (best && best.crop_url)
+          || (data.session && data.session.crop_url)
+          || (data.capture && data.capture.crop_url)
+          || (data.alpr && data.alpr.annotated_url)
+          || (data.session && data.session.snapshot_url);
         if (shown) { preview.src = mediaUrl(shown); preview.style.display = "block"; }
       } catch (err) {
         error.textContent = err.message;
@@ -3586,8 +3590,11 @@
         const body = (issued && issued.receipt) || "";
         const qrUrl = issued && (issued.qr_url || (issued.public_token ? `/p/${issued.public_token}/qr.png` : ""));
         const safe = (body || "").replace(/[&<>]/g, (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[ch]));
-        const qrBlock = qrUrl
-          ? `<p style="margin:16px 0"><img src="${mediaUrl(qrUrl)}" alt="Payment QR" style="width:200px;height:200px;border:1px solid #ccc;padding:8px;background:#fff"></p><p class="muted">Scan to pay on your phone, or use this code at the kiosk.</p>`
+        const qrSrc = qrUrl
+          ? (qrUrl.startsWith("http") ? qrUrl : `${location.origin}${qrUrl}`)
+          : "";
+        const qrBlock = qrSrc
+          ? `<p style="margin:16px 0;text-align:center"><img src="${qrSrc}" alt="Payment QR" style="width:200px;height:200px;border:1px solid #ccc;padding:8px;background:#fff"></p><p class="muted">Scan this QR at the kiosk if the camera cannot read the plate.</p>`
           : "";
         out.classList.remove("hidden");
         out.innerHTML = `<pre style="margin:0;white-space:pre-wrap;word-break:break-word">${safe || "Receipt stored."}</pre>${qrBlock}`;

@@ -109,11 +109,12 @@ def ensure_roles(db: Session):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .services.logging_setup import configure_logging
-    from .services.runtime import mark_core_ready, set_process_name, set_startup_state
+    from .services.runtime import install_asyncio_exception_filter, mark_core_ready, set_process_name, set_startup_state
 
     configure_logging("site-service")
     set_process_name("SmartParkSiteService")
     set_startup_state("STARTING")
+    install_asyncio_exception_filter()
     ensure_schema()
     with SessionLocal() as db:
         ensure_roles(db)
@@ -2530,6 +2531,7 @@ async def _outbox_loop():
                                 box.ack(item["id"], processed_key=event_key)
                                 continue
                             jpeg = b""
+                            crop = b""
                             reference = str(recognized.get("image_ref") or "")
                             if reference.startswith("/media/"):
                                 pieces = reference.removeprefix("/media/").split("/")
@@ -2537,9 +2539,16 @@ async def _outbox_loop():
                                     evidence = media_path(*pieces)
                                     if evidence is not None:
                                         jpeg = evidence.read_bytes()
+                            crop_ref = str(recognized.get("plate_crop_ref") or "")
+                            if crop_ref.startswith("/media/"):
+                                pieces = crop_ref.removeprefix("/media/").split("/")
+                                if len(pieces) == 2:
+                                    evidence = media_path(*pieces)
+                                    if evidence is not None:
+                                        crop = evidence.read_bytes()
                             from .services import hybrid_fusion
                             if hybrid_fusion.routes_camera(camera, db):
-                                await hybrid_fusion.offer_local(db, camera, recognized, jpeg=jpeg)
+                                await hybrid_fusion.offer_local(db, camera, recognized, jpeg=jpeg, crop=crop)
                                 box.ack(item["id"], processed_key=event_key)
                                 continue
                             if adapter_has_native_plates(camera):
@@ -3215,25 +3224,41 @@ async def sim_capture(
         if (row.lane_direction or "").upper() == want:
             camera = row
             break
+    stored = None
     if camera is not None:
         box = best.get("bbox") if isinstance(best.get("bbox"), dict) else None
-        persist_event(
-            db, camera, jpeg=jpeg, crop=b"",
+        stored = persist_event(
+            db, camera, jpeg=jpeg, crop=_crop_from_alpr(alpr),
             capture={
                 "plate": plate,
-                "score": float(best.get("confidence") or 0) * 100,
+                "plate_raw": str(best.get("plate_raw") or plate),
+                "score": float(best.get("confidence") or 0),
                 "bbox": box,
+                "source": "fastalpr",
+                "plate_crop_path": best.get("plate_crop_path"),
                 "image_id": int(time.time() * 1000) % 2_000_000_000,
             },
         )
+        if stored is not None:
+            remember_last_car(camera.id, capture_dict(stored))
     try:
         result = await handle_plate_event(
-            db, plate=plate, gate=gate, side=side, simulated=True, alpr=alpr, source="fastalpr-upload",
+            db, plate=plate, gate=gate, side=side, simulated=True, alpr=alpr,
+            source="fastalpr-upload", camera=camera,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     write_audit(db, user, "sim.capture", "parking_session", str((result.get("session") or {}).get("id") or ""), f"{plate} {side}")
     db.commit()
+    if stored is not None:
+        info = capture_dict(stored)
+        session = dict(result.get("session") or {})
+        session["snapshot_url"] = session.get("snapshot_url") or info.get("snapshot_url")
+        session["crop_url"] = session.get("crop_url") or info.get("crop_url")
+        session["plate_confidence"] = session.get("plate_confidence") or info.get("confidence")
+        result["session"] = session
+        result["capture"] = info
+        result["last_car"] = info
     if not result.get("ok") and not result.get("pay_required"):
         raise HTTPException(409, result.get("message") or "Capture failed")
     return result
@@ -3738,8 +3763,9 @@ def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     path = Path(row.qr_path) if row and row.qr_path else None
     if path and path.exists():
         return FileResponse(path, media_type="image/png")
-    from app.services.receipts import _qr_png, public_receipt_url
-    png = _qr_png(public_receipt_url(token))
+    from app.domain.receipt_engine import session_qr_payload
+    from app.services.receipts import _qr_png, resolve_public_base_url
+    png = _qr_png(session_qr_payload(token, base_url=resolve_public_base_url(db)))
     if not png:
         raise HTTPException(404, "QR not available")
     return Response(content=png, media_type="image/png")

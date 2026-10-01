@@ -38,12 +38,20 @@ _lock = threading.Lock()
 _last: dict[str, Any] = {"mode": "", "at": None, "revision": None, "head": None, "legacy_fixups": []}
 
 
+def _ini_value(value: str) -> str:
+    """ConfigParser interpolates %. Windows sqlite URLs encode C: as C%3A."""
+    return str(value or "").replace("%", "%%")
+
+
 def alembic_config(engine: Engine | None = None) -> Config:
     cfg = Config()
-    cfg.set_main_option("script_location", str(SCRIPT_LOCATION))
+    cfg.set_main_option("script_location", _ini_value(str(SCRIPT_LOCATION)))
     cfg.set_main_option("version_path_separator", "os")
     if engine is not None:
-        cfg.set_main_option("sqlalchemy.url", str(engine.url.render_as_string(hide_password=False)))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            _ini_value(engine.url.render_as_string(hide_password=False)),
+        )
     return cfg
 
 

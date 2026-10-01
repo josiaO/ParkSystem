@@ -144,25 +144,66 @@ def _stop_thread(thread, wait_ms=3000):
         thread.wait(400)
 
 
-def show_printable_receipt(parent, body, path="", qr_url=""):
-    dlg=QDialog(parent)
-    dlg.setWindowTitle("Parking receipt")
-    dlg.setMinimumSize(420, 520)
-    layout=QVBoxLayout(dlg)
-    text=QPlainTextEdit(); text.setReadOnly(True); text.setPlainText(body or "")
-    layout.addWidget(text, 1)
+def _qr_png_from_sources(qr_url="", qr_payload=""):
+    """Load the ticket QR from the API, or draw it locally if that image is blocked."""
+    png = b""
     if qr_url:
         try:
             png = api.get_bytes(qr_url, timeout=8)
-            pix = QPixmap(); pix.loadFromData(png)
-            if not pix.isNull():
-                qr_label = QLabel(); qr_label.setAlignment(Qt.AlignCenter)
-                qr_label.setPixmap(pix.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                layout.addWidget(qr_label)
-                tip = QLabel("Scan to pay on your phone, or use the code at the kiosk.")
-                tip.setWordWrap(True); tip.setAlignment(Qt.AlignCenter); layout.addWidget(tip)
         except Exception:
-            pass
+            png = b""
+    if not png.startswith(b"\x89PNG"):
+        png = b""
+    if not png:
+        from app.infrastructure.hardware.printers import qr_png_bytes
+        payload = (qr_payload or "").strip()
+        if not payload and qr_url:
+            path = str(qr_url).split("?")[0]
+            if path.endswith("/qr.png"):
+                path = path[: -len("/qr.png")]
+            payload = f"{BASE}{path}" if path.startswith("/") else path
+        png = qr_png_bytes(payload)
+    return png if png.startswith(b"\x89PNG") else b""
+
+
+def _receipt_print_html(body, qr_png=b""):
+    from html import escape
+    import base64
+    safe = escape(body or "").replace("\n", "<br>\n")
+    qr = ""
+    if qr_png and qr_png.startswith(b"\x89PNG"):
+        uri = "data:image/png;base64," + base64.b64encode(qr_png).decode("ascii")
+        qr = (
+            '<p style="text-align:center;margin:16px 0">'
+            f'<img src="{uri}" width="200" height="200" alt="QR" '
+            'style="border:1px solid #ccc;padding:8px;background:#fff"></p>'
+            '<p style="text-align:center;font-size:12px">Scan this QR at the kiosk if the camera cannot read the plate.</p>'
+        )
+    return (
+        "<html><head><meta charset='utf-8'></head>"
+        "<body style='font:14px/1.45 ui-monospace,monospace;padding:16px;max-width:420px'>"
+        f"<div>{safe}</div>{qr}</body></html>"
+    )
+
+
+def show_printable_receipt(parent, body, path="", qr_url="", qr_payload=""):
+    dlg=QDialog(parent)
+    dlg.setWindowTitle("Parking receipt")
+    dlg.setMinimumSize(420, 640)
+    layout=QVBoxLayout(dlg)
+    text=QPlainTextEdit(); text.setReadOnly(True)
+    text.setPlainText(body or "Parking receipt")
+    layout.addWidget(text, 1)
+    qr_png=_qr_png_from_sources(qr_url, qr_payload)
+    if qr_png:
+        pix = QPixmap(); pix.loadFromData(qr_png)
+        if not pix.isNull():
+            qr_label = QLabel(); qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setMinimumHeight(220)
+            qr_label.setPixmap(pix.scaled(220, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            layout.addWidget(qr_label)
+            tip = QLabel("Scan this QR at the kiosk if the camera cannot read the plate.")
+            tip.setWordWrap(True); tip.setAlignment(Qt.AlignCenter); layout.addWidget(tip)
     if path:
         hint=QLabel(f"Printer-ready file: {path}"); hint.setWordWrap(True); layout.addWidget(hint)
     row=QHBoxLayout()
@@ -172,22 +213,23 @@ def show_printable_receipt(parent, body, path="", qr_url=""):
     layout.addLayout(row)
 
     def do_print():
+        html=_receipt_print_html(body, qr_png)
         try:
             from PySide6.QtPrintSupport import QPrintDialog, QPrinter
             printer=QPrinter()
             dialog=QPrintDialog(printer, dlg)
             if dialog.exec()==QDialog.DialogCode.Accepted:
-                doc=QTextDocument(); doc.setPlainText(body or "")
+                doc=QTextDocument(); doc.setHtml(html)
                 doc.print_(printer)
                 return
         except Exception:
             pass
         target=path
-        if not target:
+        if not target or not str(target).endswith(".html"):
             folder=os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"
-            target=os.path.join(folder, "smartpark-receipt.txt")
+            target=os.path.join(folder, "smartpark-receipt.html")
             with open(target, "w", encoding="utf-8") as fh:
-                fh.write(body or "")
+                fh.write(html)
         try:
             if os.name=="nt":
                 os.startfile(target, "print")
@@ -541,8 +583,14 @@ class CameraLivePane(QFrame):
             return
         self._snap_timer.stop()
         gen = self._live_gen
-        delay = self._mjpeg_retry_ms
-        self._mjpeg_retry_ms = min(8000, max(1000, delay * 2))
+        text=str(err or "").lower()
+        reset = any(token in text for token in ("10054", "forcibly closed", "connection reset", "connectionreset", "winerror"))
+        if reset:
+            delay = 250
+            self._mjpeg_retry_ms = 1000
+        else:
+            delay = self._mjpeg_retry_ms
+            self._mjpeg_retry_ms = min(8000, max(1000, delay * 2))
         self.status.setText("Reconnecting live view…")
         QTimer.singleShot(delay, lambda g=gen: self._retry_mjpeg(g))
     def _retry_mjpeg(self, gen):
@@ -1653,14 +1701,18 @@ class Sessions(QWidget):
         qr_url=(issued or {}).get("qr_url") or ""
         if not qr_url and (issued or {}).get("public_token"):
             qr_url=f"/p/{issued['public_token']}/qr.png"
+        qr_payload=(issued or {}).get("qr_payload") or (issued or {}).get("public_url") or ""
         if not body:
             try:
                 slip=api.get(f"/sessions/{s['id']}/receipt")
                 body=slip.get("body_text") or ""
                 path=(slip.get("payload") or {}).get("path") or path
+                qr_payload=qr_payload or slip.get("qr_payload") or ""
+                if not qr_url and slip.get("qr_url"):
+                    qr_url=slip.get("qr_url")
             except Exception:
                 pass
-        show_printable_receipt(self, body, path, qr_url=qr_url)
+        show_printable_receipt(self, body, path, qr_url=qr_url, qr_payload=qr_payload)
         self.refresh()
     def correct_plate(self):
         visit=self.visit or {}
@@ -2115,10 +2167,28 @@ class SimPage(QWidget):
         if best.get("plate"): parts.append(f"Recognition: {best.get('plate')} ({int(round((best.get('confidence') or 0)*100))}%)")
         parts.append(json.dumps({k:v for k,v in data.items() if k not in {"alpr","receipt"}}, indent=2, default=str))
         self.out.setPlainText("\n\n".join(parts))
-        crop=best.get("crop_url") or alpr.get("annotated_url")
+        crop=(
+            best.get("crop_url")
+            or sess.get("crop_url")
+            or (data.get("capture") or {}).get("crop_url")
+            or alpr.get("annotated_url")
+            or sess.get("snapshot_url")
+        )
         if crop:
             w=Worker(lambda url=crop: api.get_bytes(url, timeout=8))
             w.done.connect(lambda jpeg: self._pix(jpeg)); self._keep(w); w.start()
+        if str(data.get("action") or "").upper() == "ENTRY" and (data.get("receipt") or data.get("qr_url") or sess.get("public_token")):
+            qr_url=data.get("qr_url") or ""
+            token=sess.get("public_token") or data.get("public_token") or ""
+            if not qr_url and token:
+                qr_url=f"/p/{token}/qr.png"
+            show_printable_receipt(
+                self,
+                data.get("receipt") or "",
+                ((data.get("print") or {}).get("path") or ""),
+                qr_url=qr_url,
+                qr_payload=data.get("qr_payload") or data.get("public_url") or sess.get("qr_payload") or "",
+            )
     def _pix(self, jpeg):
         image=QImage.fromData(jpeg)
         if image.isNull(): return

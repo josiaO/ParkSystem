@@ -228,6 +228,18 @@ class ModuleRegistryTests(unittest.TestCase):
         self.assertEqual(self.client.get("/payments", headers=self.headers).status_code, 200)
         self.assertEqual(self.client.get("/p/no-token").status_code, 404)
 
+    def test_receipt_qr_png_is_not_gated_by_public_web_pay(self):
+        from app.api.module_routes import modules_for_route
+        self.assertEqual(modules_for_route("/p/tok/qr.png"), ("parking.sessions",))
+        self.assertEqual(modules_for_route("/p/tok/snapshot.jpg"), ("parking.sessions",))
+        self.assertEqual(modules_for_route("/p/tok"), ("payments.public_web",))
+        with self.Session() as db:
+            apply_profile(db, PROFILE_PARKING_LITE)
+        res = self.client.get("/p/tok/qr.png")
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.headers.get("content-type"), "image/png")
+        self.assertTrue(res.content.startswith(b"\x89PNG"))
+
     def test_lpr_capture_does_not_enter_parking_or_gate_flow(self):
         import asyncio
         from unittest.mock import AsyncMock, patch

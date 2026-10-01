@@ -66,27 +66,12 @@ def stay_for(row: ParkingSession, *, now: datetime | None = None) -> dict:
 
 def _capture_for_session(db: Session, row: ParkingSession) -> tuple[VehicleCapture | None, bool]:
     """Return the best photo and whether its plate matches the session plate."""
+    from app.services.captures import find_capture_for_session
+
     plate = normalize_plate(row.plate)
-    matched = None
-    if plate:
-        matched = db.scalar(
-            select(VehicleCapture)
-            .where(VehicleCapture.plate == plate)
-            .order_by(VehicleCapture.id.desc())
-        )
-    camera_latest = None
-    if row.camera_id:
-        camera_latest = db.scalar(
-            select(VehicleCapture)
-            .where(VehicleCapture.camera_id == row.camera_id)
-            .order_by(VehicleCapture.id.desc())
-        )
-    if matched is not None:
-        return matched, True
-    if camera_latest is not None:
-        same = bool(plate and normalize_plate(camera_latest.plate) == plate)
-        return camera_latest, same
-    return None, False
+    capture = find_capture_for_session(db, plate=plate, camera_id=row.camera_id)
+    matches = bool(capture and plate and normalize_plate(capture.plate) == plate)
+    return capture, matches
 
 
 def image_fields(db: Session, row: ParkingSession) -> dict:
