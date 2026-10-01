@@ -309,7 +309,27 @@ class EntryLaneController:
                 "source": source,
                 "message": "Gate command already applied.",
             }
-        command_uuid = command_uuid or row.open_command_uuid or uuid4().hex
+        existing_command = row.open_command_uuid or ""
+        command_uuid = command_uuid or existing_command or uuid4().hex
+        if existing_command and source != "gate_retry":
+            return {
+                "ok": True,
+                "action": "ENTRY",
+                "reason": "gate_command_in_progress",
+                "created_session": created,
+                "duplicate": True,
+                "barrier_opened": False,
+                "assistance_required": False,
+                "session": snapshot(row),
+                "entitlement": entitlement.__dict__,
+                "source": source,
+                "message": "An entry barrier command is already in progress.",
+                "open_command_uuid": existing_command,
+            }
+        if not row.open_command_uuid:
+            row.open_command_uuid = command_uuid
+            db.commit()
+            db.refresh(row)
         opened = None
         if gate is not None and self.opener is not None:
             cameras = _cameras(gate, camera)
@@ -321,7 +341,7 @@ class EntryLaneController:
                 db, gate=gate, session=row, reason=f"entry {row.plate}",
                 automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
                 ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
-                command_uuid=uuid4().hex,
+                command_uuid=command_uuid,
             )
             if not opened or not opened.ok:
                 record_access_decision(
