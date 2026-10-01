@@ -85,6 +85,7 @@ def source_config_for_camera(camera) -> dict[str, Any]:
         "evidence_uri": evidence_uri,
         "ip": camera.ip_address,
         "rtsp_url": live_uri,
+        "transport": str(getattr(camera, "rtsp_transport", None) or "TCP").upper(),
     }
 
 
