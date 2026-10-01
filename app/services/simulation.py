@@ -228,7 +228,7 @@ async def _pulse_gate(
 ):
     if not gate or not cameras:
         return None
-    dry_run = not should_pulse_physical(gate=gate, automatic=automatic)
+    dry_run = bool(session is not None and session.simulated) or not should_pulse_physical(gate=gate, automatic=automatic)
     started = time.perf_counter()
     opened = await controller().open(
         gate, cameras, reason, side=side,
