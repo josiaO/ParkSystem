@@ -1,10 +1,13 @@
-"""Open a numbered lane: camera GPIO + Board* TCP + LED UDP.
+"""Open a numbered lane through barrier actuators, with display as side effect.
 
-Each side has three actuators. Open tries all three that have an IP/handle:
+Barrier authority is deliberately narrower than "any I/O succeeded":
 
-- ``Net_GateSetup`` / ``Net_WriteGPIOState`` on the QY camera (live barrier relay)
-- Board* TCP I/O controller (not a camera)
-- IpAddr* LEDSender2010 UDP text
+- camera GPIO / vendor gate relay is a barrier actuator;
+- Board* TCP relay is a barrier actuator;
+- LED UDP is display-only and can never make a gate command successful.
+
+This prevents a healthy sign/display from being mistaken for a physically
+opened boom gate.
 """
 
 from __future__ import annotations
@@ -79,7 +82,7 @@ class PhysicalGateController(GateController):
 
         hvx = HVXHostClient()
         actuators: list[dict] = []
-        any_ok = False
+        barrier_ok = False
         for camera in rows:
             label = f"{gate.name} {side_label(camera.lane_direction)}"
             gpio = await _gpio_pulse(hvx, camera, dry_run=dry_run)
@@ -94,16 +97,28 @@ class PhysicalGateController(GateController):
                 "led": led.__dict__,
             }
             actuators.append(row)
-            if gpio.get("ok") or board.ok or led.ok:
-                any_ok = True
+            # Only devices capable of moving the boom count as gate success.
+            # LED/display delivery is useful telemetry, never authorization that
+            # the physical barrier opened.
+            if gpio.get("ok") or board.ok:
+                barrier_ok = True
 
         message = (
             f"{'dry-run ' if dry_run else ''}{action} lane {gate.name}"
             + (f" {wanted}" if wanted else "")
             + f": {reason}"
         )
-        if not any_ok:
-            return GateCommandResult(False, False, message + " — no actuator succeeded", _now(), actuators)
+        if not barrier_ok:
+            display_note = " (display updated)" if any(
+                bool((item.get("led") or {}).get("ok")) for item in actuators
+            ) else ""
+            return GateCommandResult(
+                False,
+                dry_run,
+                message + " — no barrier actuator succeeded" + display_note,
+                _now(),
+                actuators,
+            )
         return GateCommandResult(True, dry_run, message, _now(), actuators)
 
 
