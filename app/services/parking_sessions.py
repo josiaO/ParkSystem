@@ -366,20 +366,16 @@ def start_exit(
         row.exit_event_id
         and event_id
         and row.exit_event_id != event_id
-        and current in {AUTHORIZED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED, CLOSED}
+        and current != DENIED_PAYMENT_REQUIRED
     ):
-        # Another exit event already owns this session attempt. New camera
-        # frames must not produce a second barrier pulse.
+        # One event owns an in-flight exit attempt. A different event may only
+        # take over after a payment denial, when a new approach is expected.
         return row, current
     if current == CLOSED:
         return row, CLOSED
-    if _current(row) == ACTIVE:
-        row = advance(db, row, EXIT_VEHICLE_DETECTED, policy=policy)
-    elif _current(row) not in {
-        EXIT_VEHICLE_DETECTED, SESSION_RESOLVED, TARIFF_CALCULATED, AUTHORIZATION_DECISION,
-        AUTHORIZED, DENIED_PAYMENT_REQUIRED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED,
-    }:
-        raise InvalidTransition(f"cannot exit from {_current(row)}")
+
+    # Claim the session for this physical exit attempt before lifecycle commits
+    # release the row lock. This is the durable duplicate-suppression boundary.
     row.exit_event_id = event_id or row.exit_event_id
     row.exit_lane_id = lane_id if lane_id is not None else row.exit_lane_id
     row.exit_camera_id = camera_id if camera_id is not None else row.exit_camera_id
@@ -388,6 +384,14 @@ def start_exit(
     row.lane_direction = "EXIT"
     db.commit()
     db.refresh(row)
+
+    if _current(row) == ACTIVE:
+        row = advance(db, row, EXIT_VEHICLE_DETECTED, policy=policy)
+    elif _current(row) not in {
+        EXIT_VEHICLE_DETECTED, SESSION_RESOLVED, TARIFF_CALCULATED, AUTHORIZATION_DECISION,
+        AUTHORIZED, DENIED_PAYMENT_REQUIRED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED,
+    }:
+        raise InvalidTransition(f"cannot exit from {_current(row)}")
     if _current(row) == DENIED_PAYMENT_REQUIRED:
         row = advance(db, row, TARIFF_CALCULATED, policy=policy)
     if _current(row) == EXIT_VEHICLE_DETECTED:
