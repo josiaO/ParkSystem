@@ -280,8 +280,10 @@ async def handle_plate_event(
     """
     started = time.perf_counter()
     side = (side or "ENTRY").upper()
-    if side == "ENTRY" and not simulated:
-        raise RuntimeError("live ENTRY must use EntryLaneController, not simulation.handle_plate_event")
+    if not simulated:
+        raise RuntimeError(
+            f"live {side} must use the parking application controller, not simulation.handle_plate_event"
+        )
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
