@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # legacy instant path; flutterwave / clickpesa create PENDING intents that
     # only become SUCCEEDED after server-side verification.
     payments_mobile_provider: str = "simulated"
+    # Browser-triggered fake payments are for explicit development only. A real
+    # deployment must never let a public receipt URL mint SUCCEEDED ledger rows.
+    allow_public_simulated_payments: bool = False
     # ClickPesa has no sandbox. A live collection is refused unless BOTH flags
     # below are set explicitly by the operator (LIVE_PROVIDER_CONFIRMATION_REQUIRED).
     payments_live_provider_confirmation_required: bool = True
