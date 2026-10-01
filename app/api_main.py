@@ -2131,10 +2131,16 @@ async def correct_camera_plate(
     db.refresh(row)
     gate = db.get(Gate, camera.gate_id) if camera.gate_id else None
     side = (camera.lane_direction or "ENTRY").upper()
-    result = await handle_plate_event(
-        db, plate=chosen, gate=gate, side=side, simulated=False,
-        alpr=capture_dict(row), source="operator-correction", camera=camera,
-    )
+    if side == "ENTRY":
+        from .application.live_parking import handle_live_entry
+        result = await handle_live_entry(
+            db, camera=camera, capture=row, gate=gate, source="operator-correction",
+        )
+    else:
+        result = await handle_plate_event(
+            db, plate=chosen, gate=gate, side=side, simulated=False,
+            alpr=capture_dict(row), source="operator-correction", camera=camera,
+        )
     last = capture_dict(row)
     remember_last_car(camera.id, last)
     return {
@@ -2259,7 +2265,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
         return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
     new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
-    entitlement = lookup_entitlement(db, row.plate) if row and row.plate else None
+    entitlement = lookup_entitlement(db, row.plate, site_id=camera.site_id) if row and row.plate else None
     registered_auto = bool(
         entitlement and entitlement.registered and entitlement.auto_open
     )
@@ -2276,8 +2282,8 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 db.commit()
     needs_session = False
     if row and row.plate and side == "ENTRY":
-        from .services.simulation import _active_for_plate
-        needs_session = _active_for_plate(db, row.plate) is None
+        from .services.parking_sessions import active_for_plate
+        needs_session = active_for_plate(db, row.plate, site_id=camera.site_id) is None
     from .core.plate import apply_site_plate
     hold = bool((capture or {}).get("needs_review") or (capture or {}).get("pending_confirmation"))
     if row and row.plate:
@@ -2305,14 +2311,21 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
         if camera_events.seen(camera_id=camera.id, plate=row.plate, image_id=dedupe_id):
             return capture_dict(latest) if latest else None
         try:
-            ent = lookup_entitlement(db, row.plate)
-            event_plate = ent.plate if ent.registered else row.plate
-            result = await handle_plate_event(
-                db, plate=event_plate, gate=gate, side=side,
-                simulated=False, alpr=capture,
-                source=str((capture or {}).get("source") or "camera"),
-                camera=camera,
-            )
+            source_name = str((capture or {}).get("source") or "camera")
+            if side == "ENTRY":
+                from .application.live_parking import handle_live_entry
+                result = await handle_live_entry(
+                    db, camera=camera, capture=row, gate=gate, source=source_name,
+                )
+            else:
+                ent = lookup_entitlement(db, row.plate, site_id=camera.site_id)
+                event_plate = ent.plate if ent.registered else row.plate
+                result = await handle_plate_event(
+                    db, plate=event_plate, gate=gate, side=side,
+                    simulated=False, alpr=capture,
+                    source=source_name,
+                    camera=camera,
+                )
             if result.get("session") and latest:
                 session_id = (result["session"] or {}).get("id")
                 if session_id:
@@ -2337,6 +2350,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 "gate_id": gate.id if gate else None,
                 "side": side,
                 "camera_id": camera.id,
+                "capture_id": row.id,
             })
     return capture_dict(latest) if latest else None
 
@@ -2573,15 +2587,29 @@ async def _outbox_loop():
                         if gate is None and camera is None and not payload.get("plate"):
                             box.ack(item["id"])
                             continue
-                        await handle_plate_event(
-                            db,
-                            plate=str(payload.get("plate") or ""),
-                            gate=gate,
-                            side=str(payload.get("side") or "ENTRY"),
-                            simulated=False,
-                            source="outbox",
-                            camera=camera,
-                        )
+                        side = str(payload.get("side") or "ENTRY").upper()
+                        capture_id = int(payload.get("capture_id") or 0)
+                        if side == "ENTRY" and camera is not None and capture_id:
+                            capture_row = db.get(VehicleCapture, capture_id)
+                            if capture_row is None or capture_row.camera_id != camera.id:
+                                box.ack(item["id"])
+                                continue
+                            from .application.live_parking import handle_live_entry
+                            await handle_live_entry(
+                                db, camera=camera, capture=capture_row, gate=gate, source="outbox",
+                            )
+                        else:
+                            # EXIT remains on the legacy orchestrator until the
+                            # Phase-6 ExitLaneController replaces it.
+                            await handle_plate_event(
+                                db,
+                                plate=str(payload.get("plate") or ""),
+                                gate=gate,
+                                side=side,
+                                simulated=False,
+                                source="outbox",
+                                camera=camera,
+                            )
                     box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
                     box.note_failure()
