@@ -293,7 +293,11 @@ class ParkingSession(Base):
     plate: Mapped[str] = mapped_column(String(32), index=True)
     plate_raw: Mapped[str] = mapped_column(String(32), default="", server_default="")
     plate_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    # gate_id stays as the legacy/entry relationship for backwards compatibility.
+    # New code preserves both ends of a visit explicitly.
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
+    entry_gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True, index=True)
+    exit_gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True, index=True)
     camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True)
     entry_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
     exit_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
@@ -325,6 +329,7 @@ class ParkingSession(Base):
     exit_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     entry_image_ref: Mapped[str] = mapped_column(String(260), default="", server_default="")
     open_command_uuid: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    exit_open_command_uuid: Mapped[str] = mapped_column(String(64), default="", server_default="")
     simulated: Mapped[bool] = mapped_column(Boolean, default=False)
     parker_kind: Mapped[str] = mapped_column(String(40), default="CASUAL", index=True)
     access_plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
