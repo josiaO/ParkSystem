@@ -20,7 +20,7 @@ from .domain.site import DEFAULT_SITE_ID
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
-    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
+    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
@@ -3750,6 +3750,56 @@ async def kiosk_receipt_pay(
     write_audit(db, user, "payments.create", "parking_session", str(row.id), f"kiosk QR {row.plate}")
     return result
 
+
+
+
+@app.post("/exit/qr-scan")
+async def exit_qr_scan(
+    payload: ExitQrScanRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("gates.open")),
+):
+    """Authenticated QR fallback for an exit lane.
+
+    The same entry-receipt QR resolves the existing site session and enters the
+    same ExitLaneController used by plate recognition. This route never creates
+    a parallel exit/payment path.
+    """
+    from uuid import uuid4
+    from app.application.exit_lane import ExitLaneController
+    from app.application.entry_lane import policy_from_parking_settings
+
+    gate = db.get(Gate, int(payload.gate_id))
+    if gate is None or not gate.enabled:
+        raise HTTPException(404, "Exit gate not found or disabled")
+    camera = db.get(Camera, int(payload.camera_id)) if payload.camera_id else None
+    if camera is not None and camera.gate_id not in {None, gate.id}:
+        raise HTTPException(409, "Camera is assigned to a different gate")
+    site_id = int(payload.site_id or gate.site_id or DEFAULT_SITE_ID)
+    if int(gate.site_id) != site_id:
+        raise HTTPException(409, "Gate does not belong to the requested site")
+
+    out = await ExitLaneController().submit_qr(
+        db,
+        raw_scan=payload.raw_scan,
+        event_id=f"qr-{uuid4().hex}",
+        site_id=site_id,
+        gate=gate,
+        camera=camera,
+        lane_id=payload.lane_id or (camera.lane_id if camera else None),
+        policy=policy_from_parking_settings(parking_settings(db)),
+        source="operator-qr",
+    )
+    write_audit(
+        db, user, "exit.qr_scan", "parking_session",
+        str((out.get("session") or {}).get("id") or ""),
+        f"gate={gate.id} result={out.get('reason')}",
+    )
+    if not out.get("ok") and out.get("reason") in {"invalid_qr", "no_session"}:
+        raise HTTPException(404, out.get("message") or "No active session for that QR")
+    if not out.get("ok") and out.get("reason") in {"gate_unavailable", "gate_unassigned"}:
+        raise HTTPException(503, out.get("message") or "Exit barrier unavailable")
+    return out
 
 @app.get("/sessions/by-token/{token}")
 def session_by_token(token: str, db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use", "payments.create"))):
