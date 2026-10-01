@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AccessDecision, Gate, GateCommandRecord, ParkingSession
@@ -60,8 +61,12 @@ def record_gate_command(
     message: str = "",
     command_uuid: str | None = None,
 ) -> GateCommandRecord:
+    key = command_uuid or str(uuid.uuid4())
+    existing = db.scalar(select(GateCommandRecord).where(GateCommandRecord.command_uuid == key))
+    if existing is not None:
+        return existing
     row = GateCommandRecord(
-        command_uuid=command_uuid or str(uuid.uuid4()),
+        command_uuid=key,
         gate_id=gate.id if gate else None,
         session_id=session.id if session else None,
         reason=(reason or "")[:200],
