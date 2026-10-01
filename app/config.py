@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     alpr_mode: str = "FASTALPR_ONLY"
     alpr_engine: str = "fastalpr"
     live_idle_seconds: float = 20.0
-    live_sdk_interval_seconds: float = 0.025
-    snapshot_cache_seconds: float = 0.025
+    live_sdk_interval_seconds: float = 0.05
+    snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
     detect_fps: float = 5.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"

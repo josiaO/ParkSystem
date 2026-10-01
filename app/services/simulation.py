@@ -23,6 +23,7 @@ from app.services.decisions import record_access_decision, record_gate_command
 from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from app.services.gates import controller
 from app.services.led_udp import send_led_text
+from app.domain.receipt_engine import session_qr_payload
 from app.services.parking_sessions import _allocate_identity
 from app.services.receipts import (
     issue_receipt,
@@ -102,6 +103,7 @@ def session_dict(row: ParkingSession) -> dict:
         "public_token": token,
         "receipt_url": f"/p/{token}" if token else None,
         "qr_url": f"/p/{token}/qr.png" if token else None,
+        "qr_payload": session_qr_payload(token),
         "entry_time": row.entry_time.isoformat() if row.entry_time else None,
         "exit_time": row.exit_time.isoformat() if row.exit_time else None,
         "currency": row.currency,
@@ -114,23 +116,10 @@ def session_dict(row: ParkingSession) -> dict:
     }
     try:
         from sqlalchemy.orm import object_session
-        from app.services.captures import capture_dict, latest_for_camera
+        from app.services.captures import capture_dict, find_capture_for_session
         db = object_session(row)
-        if db is not None and row.camera_id:
-            cap = latest_for_camera(db, int(row.camera_id))
-            if cap and normalize_plate(cap.plate) == normalize_plate(row.plate):
-                info = capture_dict(cap)
-                body["snapshot_url"] = info.get("snapshot_url")
-                body["crop_url"] = info.get("crop_url")
-                body["plate_confidence"] = info.get("confidence")
-        elif db is not None and row.plate:
-            from sqlalchemy import select
-            from app.models import VehicleCapture
-            cap = db.scalar(
-                select(VehicleCapture)
-                .where(VehicleCapture.plate == normalize_plate(row.plate))
-                .order_by(VehicleCapture.id.desc())
-            )
+        if db is not None:
+            cap = find_capture_for_session(db, plate=row.plate, camera_id=row.camera_id)
             if cap:
                 info = capture_dict(cap)
                 body["snapshot_url"] = info.get("snapshot_url")
@@ -440,6 +429,11 @@ def _finish_entry(
     started: float,
     outcome: str,
 ) -> dict:
+    token = row.public_token or ""
+    if token:
+        result["public_token"] = result.get("public_token") or token
+        result["qr_url"] = result.get("qr_url") or f"/p/{token}/qr.png"
+        result["qr_payload"] = result.get("qr_payload") or session_qr_payload(token)
     _attach_latency(result, started)
     record_access_decision(
         db,

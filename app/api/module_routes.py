@@ -12,8 +12,12 @@ def modules_for_route(path: str) -> tuple[str, ...]:
     parts = path.strip("/").split("/")
     root = parts[0]
     if root == "p":
-        if parts[-1] == "kiosk-pay":
+        leaf = parts[-1] if parts else ""
+        if leaf == "kiosk-pay":
             return ("payments.kiosk",)
+        # Ticket QR and entry stills are parking identity, not the public pay website.
+        if leaf in {"qr.png", "snapshot.jpg", "crop.jpg"}:
+            return ("parking.sessions",)
         return ("payments.public_web",)
     if root == "api" and len(parts) >= 2:
         # Narrow public payment surface (see app/services/public_ingress.py).

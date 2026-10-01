@@ -150,8 +150,13 @@ async def offer_local(db, camera, recognized: dict, *, jpeg: bytes = b"", crop: 
     candidate = Candidate(SOURCE_LOCAL, str(payload["plate"]), payload["confidence"], time.monotonic(), payload,
                           consensus=bool(consensus.get("publish") or int(consensus.get("agreeing") or 0) >= 2))
     existing = _evidence.get(camera_id)
-    if jpeg[:2] == b"\xff\xd8" or existing is None:
+    if existing is None:
         _evidence[camera_id] = _Evidence(jpeg=jpeg or b"", crop=crop or b"")
+    else:
+        if jpeg[:2] == b"\xff\xd8" and existing.jpeg[:2] != b"\xff\xd8":
+            existing.jpeg = jpeg
+        if crop[:2] == b"\xff\xd8":
+            existing.crop = crop
     outcomes = _coordinator.offer(camera_id, candidate, now=time.monotonic(),
                                   counterpart_available=native_counterpart_available(camera))
     return [await _apply(camera, o, _evidence.get(camera_id) or _Evidence(), db) for o in outcomes]
