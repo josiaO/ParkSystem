@@ -386,3 +386,43 @@ GitHub Actions is currently failing before runner steps start (the reported job 
 8. Barrier relay failure does not close the session.
 9. Repeat for the other lanes.
 10. 8-hour, then 24-72-hour soak.
+
+
+---
+
+## Phase 7 — Recognition commissioning
+
+### Implementation status
+
+**SOFTWARE IMPLEMENTED / FIELD CALIBRATION PENDING**
+
+Added a technician-only recognition commissioning workspace and API:
+
+- `GET /cameras/{id}/commissioning/recognition`
+- `POST /cameras/{id}/commissioning/recognition/read`
+
+The diagnostic path is intentionally side-effect free: it does not create parking
+sessions, print receipts, alter payment state, or control barriers.
+
+Per camera it reports:
+
+- native-ALPR capability and recognition mode
+- event-driven versus continuous-DETECT strategy
+- native/local/fused plate readings
+- latest plate crop and vehicle evidence
+- plate pixel width and capture-quality band
+- OCR latency
+- live/detect FPS and frame age
+- codec, transport, reconnects and dropped frames
+- Recognition Worker ownership/heartbeat
+- current and recommended DETECT stream role
+- actionable commissioning warnings
+
+The explicit software-read button reuses the latest stored plate crop when
+available (OCR only, detector skipped), then falls back to the latest event
+snapshot or live cache. This operation is diagnostic and does not persist a new
+VehicleCapture.
+
+Field acceptance remains required for day/night, glare, rain, motorcycle and
+cross-gate conditions before recognition thresholds are treated as production
+calibration.
