@@ -152,15 +152,26 @@ def from_recognition_dict(recognition: dict[str, Any]) -> dict[str, Any]:
         site_id=recognition.get("site_id"),
         camera_id=recognition.get("camera_id"),
         lane_id=recognition.get("lane_id"),
-        plate_text_raw=recognition.get("raw_plate") or recognition.get("plate_text") or "",
-        plate_text_normalized=recognition.get("normalized_plate") or recognition.get("plate_text") or "",
+        plate_text_raw=recognition.get("raw_plate") or recognition.get("plate_raw") or recognition.get("plate_text") or "",
+        plate_text_normalized=recognition.get("normalized_plate") or recognition.get("plate_normalized") or recognition.get("plate_text") or "",
         country_code=recognition.get("plate_country"),
         region_code=recognition.get("plate_region"),
         confidence=float(recognition.get("confidence") or recognition.get("recognition_confidence") or 0),
-        recognition_provider=str(recognition.get("source") or "FASTALPR"),
+        recognition_provider=str(recognition.get("provider") or recognition.get("source") or "FASTALPR"),
         image_ref=recognition.get("image_ref"),
         plate_crop_ref=recognition.get("plate_crop_ref"),
+        validation_result=recognition.get("validation_result"),
+        model_version=recognition.get("model_version"),
+        bbox=recognition.get("bbox"),
+        needs_review=bool(recognition.get("needs_review")),
+        validation_ok=recognition.get("validation_ok"),
+        **{k: recognition[k] for k in ("consensus", "recognition_mode", "fusion_role", "frame_plate", "frame_confidence")
+           if k in recognition},
     )
     if recognition.get("event_id"):
         event["event_id"] = recognition["event_id"]
+        event["payload"]["event_id"] = recognition["event_id"]
+    if recognition.get("occurred_at"):
+        event["occurred_at"] = recognition["occurred_at"]
+        event["payload"]["occurred_at"] = recognition["occurred_at"]
     return event

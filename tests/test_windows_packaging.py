@@ -36,10 +36,25 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_windows_requirements_include_receipt_and_desktop_deps(self):
         req = (ROOT / "packaging" / "windows" / "requirements-windows.txt").read_text(encoding="utf-8")
-        for name in ("qrcode", "PySide6_Essentials", "fast-alpr", "opencv-python-headless", "pillow", "uvicorn"):
+        for name in (
+            "qrcode", "PySide6_Essentials", "fast-alpr", "opencv-python-headless",
+            "pillow", "uvicorn", "alembic", "mako", "markupsafe", "python-dotenv", "greenlet",
+        ):
             self.assertIn(name, req)
         pkgs = [line.split("#", 1)[0].strip().lower() for line in req.splitlines() if line.strip() and not line.strip().startswith("#")]
         self.assertTrue(all("watchfiles" not in line for line in pkgs))
+
+    def test_receipt_qr_is_parking_identity_on_windows_desktop(self):
+        routes = (ROOT / "app" / "api" / "module_routes.py").read_text(encoding="utf-8")
+        self.assertIn('leaf in {"qr.png", "snapshot.jpg", "crop.jpg"}', routes)
+        self.assertIn('return ("parking.sessions",)', routes)
+        desktop = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("def _qr_png_from_sources", desktop)
+        self.assertIn("os.startfile", desktop)
+        self.assertIn("show_printable_receipt", desktop)
+        self.assertTrue(
+            (ROOT / "app" / "migrations" / "alembic" / "versions" / "0005_receipt_qr_jobs.py").is_file()
+        )
 
     def test_kit_script_copies_host_and_vendor(self):
         kit = (ROOT / "packaging" / "make_windows_kit.sh").read_text(encoding="utf-8")
@@ -67,8 +82,21 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertTrue((payload / "app" / "services" / "access.py").is_file())
         self.assertTrue((payload / "app" / "services" / "receipts.py").is_file())
         self.assertTrue((payload / "app" / "infrastructure" / "hardware" / "printers.py").is_file())
-        self.assertIn("qrcode", (payload / "requirements-windows.txt").read_text(encoding="utf-8"))
+        req_payload = (payload / "requirements-windows.txt").read_text(encoding="utf-8")
+        self.assertIn("qrcode", req_payload)
+        self.assertIn("alembic", req_payload)
+        self.assertIn("mako", req_payload)
+        self.assertIn("python-dotenv", req_payload)
         self.assertIn("Vehicles", (payload / "app" / "desktop" / "main.py").read_text(encoding="utf-8"))
+        self.assertIn("_qr_png_from_sources", (payload / "app" / "desktop" / "main.py").read_text(encoding="utf-8"))
+        self.assertIn(
+            'leaf in {"qr.png", "snapshot.jpg", "crop.jpg"}',
+            (payload / "app" / "api" / "module_routes.py").read_text(encoding="utf-8"),
+        )
+        self.assertTrue(
+            (payload / "app" / "migrations" / "alembic" / "versions" / "0005_receipt_qr_jobs.py").is_file()
+        )
+        self.assertIn("_ini_value", (payload / "app" / "migrations" / "runner.py").read_text(encoding="utf-8"))
         self.assertIn("Capture snapshot", (payload / "app" / "web" / "index.html").read_text(encoding="utf-8"))
         self.assertTrue((payload / "tools" / "hvx_sdk_host" / "hvx_host.py").is_file())
         self.assertTrue((payload / "tools" / "hvx_sdk_host" / "run_hvx_host.bat").is_file())
@@ -76,6 +104,9 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertTrue(wheels, "USB wheels must include qrcode for receipt QR codes")
         names = [p.name for p in (payload / "wheels").glob("*.whl")]
         dists = [n.split("-", 1)[0].lower() for n in names]
+        dist_keys = {d.replace("_", "-") for d in dists}
+        for pkg in ("alembic", "mako", "markupsafe", "python-dotenv", "greenlet"):
+            self.assertIn(pkg, dist_keys, f"USB wheels must include {pkg} for --no-deps install")
         dupes = sorted({d for d in dists if dists.count(d) > 1})
         self.assertEqual(dupes, [], f"USB wheels must not ship two versions of the same package: {dupes}")
         self.assertEqual(len([n for n in names if n.lower().startswith("websockets-")]), 1)

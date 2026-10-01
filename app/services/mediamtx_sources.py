@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.rtsp_probe import vendor_candidates
-from app.services.stream_roles import ROLE_DETECT, ROLE_LIVE, ROLE_SUB, uri_for_role
+from app.services.stream_roles import ROLE_DETECT, ROLE_EVIDENCE, ROLE_LIVE, ROLE_SUB, uri_for_role
 
 
 def _pick_hvx_sub(candidates: list[str]) -> str:
@@ -33,23 +33,46 @@ def upstream_uris(
     stream_profiles: dict | None = None,
 ) -> tuple[str, str]:
     """Return (live_upstream, detect_upstream) RTSP URIs for MediaMTX path registration."""
+    live, detect, _evidence = upstream_role_uris(
+        ip=ip, username=username, password=password, rtsp_url=rtsp_url, stream_profiles=stream_profiles
+    )
+    return live, detect
+
+
+def upstream_role_uris(
+    *,
+    ip: str,
+    username: str,
+    password: str,
+    rtsp_url: str = "",
+    stream_profiles: dict | None = None,
+) -> tuple[str, str, str]:
+    """Return (live, detect, evidence) upstream RTSP URIs.
+
+    Roles resolving to the same URI are deduplicated later by
+    ``mediamtx.path_plan`` so the camera is pulled once per distinct stream.
+    Evidence is empty when no distinct MAIN stream is known; the caller then
+    reuses the live path for evidence snapshots.
+    """
     profiles = stream_profiles or {}
     explicit = str(rtsp_url or "").strip()
     if explicit.startswith("rtsp://"):
         live = uri_for_role(profiles, ROLE_LIVE, explicit) or explicit
         detect = uri_for_role(profiles, ROLE_DETECT, live) or live
-        return live, detect
+        evidence = uri_for_role(profiles, ROLE_EVIDENCE, "")
+        return live, detect, evidence
 
     candidates = vendor_candidates(ip, username, password, explicit)
     sub = _pick_hvx_sub(candidates)
     main = _pick_hvx_main(candidates)
     live = uri_for_role(profiles, ROLE_LIVE, sub or main)
     detect = uri_for_role(profiles, ROLE_DETECT, sub or live)
-    return live or sub or main, detect or sub or main
+    evidence = uri_for_role(profiles, ROLE_EVIDENCE, main if main and main != (live or sub) else "")
+    return live or sub or main, detect or sub or main, evidence
 
 
 def source_config_for_camera(camera) -> dict[str, Any]:
-    live_uri, detect_uri = upstream_uris(
+    live_uri, detect_uri, evidence_uri = upstream_role_uris(
         ip=camera.ip_address,
         username=camera.username,
         password=camera.password_secret,
@@ -59,6 +82,7 @@ def source_config_for_camera(camera) -> dict[str, Any]:
     return {
         "uri": live_uri,
         "detect_uri": detect_uri,
+        "evidence_uri": evidence_uri,
         "ip": camera.ip_address,
         "rtsp_url": live_uri,
     }

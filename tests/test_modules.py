@@ -208,6 +208,56 @@ class ModuleRegistryTests(unittest.TestCase):
         self.assertIn("navigation", me)
         self.assertIn("modules", me)
 
+    def test_disabled_feature_routes_are_unavailable_even_to_admin(self):
+        with self.Session() as db:
+            apply_profile(db, PROFILE_LPR_ONLY)
+        for path in ("/payments", "/sessions", "/gates", "/fees/tariff", "/vehicles", "/p/no-token", "/reports/payments.csv"):
+            response = self.client.get(path, headers=self.headers)
+            self.assertEqual(response.status_code, 404, path)
+            self.assertIn("Module not enabled", response.json()["detail"])
+        for path in ("/sessions/1/pay", "/sim/sessions/1/pay", "/payments/mobile-money/webhook"):
+            self.assertEqual(self.client.post(path, headers=self.headers, json={}).status_code, 404, path)
+        self.assertEqual(self.client.get("/cameras", headers=self.headers).status_code, 200)
+
+    def test_module_switch_takes_effect_without_restarting_api(self):
+        with self.Session() as db:
+            apply_profile(db, PROFILE_LPR_ONLY)
+        self.assertEqual(self.client.get("/payments", headers=self.headers).status_code, 404)
+        with self.Session() as db:
+            apply_profile(db, PROFILE_PARKING_LITE)
+        self.assertEqual(self.client.get("/payments", headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.get("/p/no-token").status_code, 404)
+
+    def test_receipt_qr_png_is_not_gated_by_public_web_pay(self):
+        from app.api.module_routes import modules_for_route
+        self.assertEqual(modules_for_route("/p/tok/qr.png"), ("parking.sessions",))
+        self.assertEqual(modules_for_route("/p/tok/snapshot.jpg"), ("parking.sessions",))
+        self.assertEqual(modules_for_route("/p/tok"), ("payments.public_web",))
+        with self.Session() as db:
+            apply_profile(db, PROFILE_PARKING_LITE)
+        res = self.client.get("/p/tok/qr.png")
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.headers.get("content-type"), "image/png")
+        self.assertTrue(res.content.startswith(b"\x89PNG"))
+
+    def test_lpr_capture_does_not_enter_parking_or_gate_flow(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.api_main import _persist_capture_event
+        from app.models import Camera, ParkingSession, VehicleCapture
+
+        with self.Session() as db:
+            apply_profile(db, PROFILE_LPR_ONLY)
+            camera = Camera(name="LPR only", ip_address="127.0.0.1", adapter_id="rtsp")
+            db.add(camera)
+            db.commit()
+            with patch("app.api_main.handle_plate_event", new_callable=AsyncMock) as handle:
+                event = asyncio.run(_persist_capture_event(db, camera, {"plate": "ABC123", "score": .95, "have_vehicle": True}, b"", b""))
+            self.assertEqual(event["plate"], "ABC123")
+            handle.assert_not_called()
+            self.assertEqual(db.query(ParkingSession).count(), 0)
+            self.assertEqual(db.query(VehicleCapture).count(), 1)
+
 
 class TopologyTests(unittest.TestCase):
     def setUp(self):

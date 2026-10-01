@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from app.db import Base
 from app.models import Camera
+from app.services.captures import persist_event
 from app.services.simulation import _active_for_plate, create_entry, handle_plate_event, session_dict
 
 
@@ -78,6 +79,28 @@ class GatelessSessionTests(unittest.TestCase):
                 self.assertIsNotNone(_active_for_plate(db, "T104EJW"))
 
         asyncio.run(run())
+
+    def test_session_dict_keeps_entry_photo_when_session_plate_was_corrected(self):
+        import shutil
+        import tempfile
+        from unittest.mock import PropertyMock, patch
+        from app.config import Settings
+
+        media = Path(tempfile.mkdtemp(prefix="smartpark-media-"))
+        try:
+            with patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=media):
+                with self.Session() as db:
+                    cam = db.scalar(select(Camera))
+                    persist_event(
+                        db, cam, jpeg=b"\xff\xd8\xff\xd9", crop=b"\xff\xd8\xff\xdb\xff\xd9",
+                        capture={"image_id": 3, "plate": "T285DQP", "score": 90, "have_vehicle": True},
+                    )
+                    row = create_entry(db, plate="T2850QP", gate=None, side="ENTRY", camera=cam, status="ACTIVE")
+                    body = session_dict(row)
+                    self.assertTrue(body.get("snapshot_url"))
+                    self.assertTrue(body.get("crop_url"))
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
 
 
 if __name__ == "__main__":

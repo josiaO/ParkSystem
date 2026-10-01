@@ -49,42 +49,72 @@ class PrinterAdapter(Protocol):
     async def print_receipt(self, document: ReceiptDocument) -> PrintResult: ...
 
 
-def store_slip_files(document: ReceiptDocument) -> str:
-    folder = settings.media_dir / "receipts"
-    folder.mkdir(parents=True, exist_ok=True)
-    stem = document.public_reference or document.plate or "receipt"
-    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:80] or "receipt"
-    path = folder / f"{stem}.txt"
-    path.write_text(document.body_text, encoding="utf-8")
-    qr_name = ""
-    if document.qr_png.startswith(b"\x89PNG"):
-        qr_path = folder / f"{stem}.png"
-        qr_path.write_bytes(document.qr_png)
-        qr_name = qr_path.name
-    # HTML slip so "Show / print" always includes a scannable QR, not text-only.
-    html_path = folder / f"{stem}.html"
-    token = document.public_reference or ""
-    qr_img = ""
-    if token:
-        # Prefer API route so HTML works when opened from /media/receipts/…
-        qr_img = f'<img class="qr" src="/p/{token}/qr.png" alt="QR">'
-    elif qr_name:
-        qr_img = f'<img class="qr" src="{qr_name}" alt="QR">'
+def _token_from_document(document: ReceiptDocument) -> str:
+    """Public session token encoded in the QR — not the short operator reference."""
+    text = (document.qr_payload or document.public_url or "").strip()
+    for marker in ("/s/", "/p/"):
+        if marker in text:
+            return text.rsplit(marker, 1)[-1].split("?")[0].strip("/")
+    return ""
+
+
+def _qr_data_uri(png: bytes) -> str:
+    if not png.startswith(b"\x89PNG"):
+        return ""
+    import base64
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+def receipt_html(document: ReceiptDocument) -> str:
+    """Printer-ready HTML slip with an embedded, scannable QR image."""
+    token = _token_from_document(document)
+    png = document.qr_png if document.qr_png.startswith(b"\x89PNG") else qr_png_bytes(
+        document.qr_payload or document.public_url or ""
+    )
+    uri = _qr_data_uri(png)
+    if uri:
+        qr_img = f'<p class="qr-wrap"><img class="qr" src="{uri}" alt="QR"></p>'
+    elif token:
+        qr_img = f'<p class="qr-wrap"><img class="qr" src="/p/{token}/qr.png" alt="QR"></p>'
+    else:
+        qr_img = ""
     safe_body = (
         (document.body_text or "")
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    html_path.write_text(
+    return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Parking receipt</title>"
         "<style>body{font:14px/1.45 ui-monospace,monospace;padding:16px;max-width:420px}"
-        "pre{white-space:pre-wrap;word-break:break-word}img.qr{width:200px;height:200px;margin:12px 0;"
-        "border:1px solid #ccc;padding:8px;background:#fff}</style></head><body>"
-        f"<pre>{safe_body}</pre>{qr_img}</body></html>",
-        encoding="utf-8",
+        "pre{white-space:pre-wrap;word-break:break-word}"
+        "p.qr-wrap{text-align:center;margin:16px 0}"
+        "img.qr{width:200px;height:200px;margin:0;border:1px solid #ccc;padding:8px;background:#fff}"
+        ".tip{text-align:center;color:#545E6C;font-size:12px}"
+        "</style></head><body>"
+        f"<pre>{safe_body}</pre>{qr_img}"
+        "<p class='tip'>Scan this QR at the kiosk if the camera cannot read the plate.</p>"
+        "</body></html>"
     )
-    return str(path)
+
+
+def store_slip_files(document: ReceiptDocument) -> str:
+    folder = settings.media_dir / "receipts"
+    folder.mkdir(parents=True, exist_ok=True)
+    token = _token_from_document(document)
+    stem = token or document.public_reference or document.plate or "receipt"
+    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:80] or "receipt"
+    path = folder / f"{stem}.txt"
+    path.write_text(document.body_text, encoding="utf-8")
+    png = document.qr_png if document.qr_png.startswith(b"\x89PNG") else qr_png_bytes(
+        document.qr_payload or document.public_url or ""
+    )
+    if png.startswith(b"\x89PNG"):
+        (folder / f"{stem}.png").write_bytes(png)
+        document.qr_png = png
+    html_path = folder / f"{stem}.html"
+    html_path.write_text(receipt_html(document), encoding="utf-8")
+    return str(html_path)
 
 
 def qr_png_bytes(payload: str) -> bytes:
@@ -106,9 +136,14 @@ def qr_png_bytes(payload: str) -> bytes:
         qr.add_data(payload)
         qr.make(fit=True)
         image = qr.make_image(fill_color="black", back_color="white")
+        if hasattr(image, "get_image"):
+            image = image.get_image()
+        if hasattr(image, "convert"):
+            image = image.convert("RGB")
         buf = BytesIO()
         image.save(buf, format="PNG")
-        return buf.getvalue()
+        png = buf.getvalue()
+        return png if png.startswith(b"\x89PNG") else b""
     except Exception:
         return b""
 
@@ -285,17 +320,20 @@ def render_a4_png(document: ReceiptDocument) -> bytes:
         f"Reference: {document.public_reference}",
         "",
         document.payment_instructions or "",
-        document.public_url or "",
     ):
         draw.text((80, y), line, fill=(23, 32, 51), font=body_font)
         y += 48
-    if document.qr_png.startswith(b"\x89PNG"):
+    png = document.qr_png if document.qr_png.startswith(b"\x89PNG") else qr_png_bytes(
+        document.qr_payload or document.public_url or ""
+    )
+    if png.startswith(b"\x89PNG"):
         try:
-            qr = Image.open(BytesIO(document.qr_png)).convert("RGB")
+            qr = Image.open(BytesIO(png)).convert("RGB")
             qr = qr.resize((360, 360))
             page.paste(qr, (80, min(y + 20, height - 420)))
         except Exception:
-            pass
+            if document.public_url:
+                draw.text((80, y + 20), document.public_url, fill=(23, 32, 51), font=body_font)
     buf = BytesIO()
     page.save(buf, format="PNG", optimize=True)
     return buf.getvalue()

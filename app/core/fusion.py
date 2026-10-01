@@ -81,6 +81,9 @@ def resolve_readings(
     ) -> FusionDecision:
         disagreed = bool(native and local and native != local)
         review = bool(needs_review)
+        if disagreed and chosen_mode not in NATIVE_MODES | LOCAL_MODES:
+            review = True
+            reason = f"{reason}; provider disagreement held for review"
         if plate and conf < min_auto:
             review = True
             if "low confidence" not in reason:

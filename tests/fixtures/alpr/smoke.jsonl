@@ -1,0 +1,3 @@
+{"id":"day","plate":"ABC123","bbox":{"x1":10,"y1":10,"x2":100,"y2":40},"camera_id":"cam-a","condition":"daylight","country":"neutral","profile":"neutral","gate_allowed":true,"dataset_kind":"synthetic-metrics-smoke"}
+{"id":"night","plate":"KAA123A","bbox":{"x1":10,"y1":10,"x2":100,"y2":40},"camera_id":"cam-b","condition":"night","country":"KE","profile":"neutral","gate_allowed":false,"dataset_kind":"synthetic-metrics-smoke"}
+{"id":"negative","plate":null,"camera_id":"cam-a","condition":"daylight","country":"neutral","profile":"neutral","gate_allowed":false,"dataset_kind":"synthetic-metrics-smoke"}

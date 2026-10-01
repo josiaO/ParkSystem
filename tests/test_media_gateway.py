@@ -257,6 +257,10 @@ class MediaApiTests(unittest.TestCase):
         self.assertEqual(body["flags"]["live_view_provider"], "DIRECT_LEGACY")
         self.assertEqual(body["rollback"]["live_view_provider"], ["DIRECT_LEGACY", "MEDIAMTX"])
         self.assertIn("mediamtx", body)
+        text = Path(__file__).resolve().parents[1].joinpath("app/services/media_gateway.py").read_text(encoding="utf-8")
+        http_fn = text.split("async def _http_stills", 1)[1].split("async def ", 1)[0]
+        self.assertIn("interval = 0.2", http_fn)
+        self.assertNotIn("live_sdk_interval_seconds", http_fn)
 
     def test_hidden_view_releases_viewers(self):
         spec = CameraLiveSpec(id=77, ip="127.0.0.1", username="a", password="b", rtsp_url="", sdk_handle=None)

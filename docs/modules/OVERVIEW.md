@@ -19,6 +19,17 @@ SmartPark Edge is a **modular monolith**: one codebase, many deployment shapes. 
 
 Navigation appears when: `module enabled AND user has permission`.
 
+Feature routes now use `app/api/module_routes.py` for module dependencies while
+retaining their existing RBAC checks and URLs. Disabled modules return 404 even
+for administrators. Profile changes take effect on the next request. Public
+payment pages require `payments.public_web`; token-based kiosk settlement
+requires `payments.kiosk`. Public-payment workflows therefore need PARKING_PRO
+or an explicitly configured custom/enterprise profile.
+
+LPR/security captures do not enter parking when `parking.sessions` is disabled.
+The recognition worker observes module enablement and camera mode. Full router
+extraction and supervision of all optional jobs remain pending engineering work.
+
 ## Deployment profiles
 
 Presets live in `app/domain/modules.py`: `LPR_ONLY`, `SECURITY`, `ACCESS_CONTROL`, `PARKING_LITE`, `PARKING_PRO`, `ENTERPRISE`, `CUSTOM`.

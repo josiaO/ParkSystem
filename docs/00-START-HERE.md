@@ -40,6 +40,10 @@ docs/
 | [03-SYSTEM-ARCHITECTURE.md](03-SYSTEM-ARCHITECTURE.md) | API, host, clients |
 | [04-DOMAIN-MODEL.md](04-DOMAIN-MODEL.md) | Entities |
 | [05-DATABASE-SCHEMA.md](05-DATABASE-SCHEMA.md) | SQLite / Postgres |
+| [DATABASE-MIGRATIONS.md](DATABASE-MIGRATIONS.md) | Alembic runner, site-scoped constraints |
+| [SECRETS-AND-REDACTION.md](SECRETS-AND-REDACTION.md) | SecretStore (`credentials_ref`), redaction surfaces |
+| [AI-REVIEW.md](AI-REVIEW.md) | Optional Gemini second opinion, off by default |
+| [engineering/CORE-PARKING-BUILD-STATUS.md](engineering/CORE-PARKING-BUILD-STATUS.md) | Sequential parking-engine phases |
 | [06-SESSION-STATE-MACHINE.md](06-SESSION-STATE-MACHINE.md) | Session statuses |
 | [07-HARDWARE-ADAPTER-ARCHITECTURE.md](07-HARDWARE-ADAPTER-ARCHITECTURE.md) | Adapters |
 | [08-HVX-CAMERA-INTEGRATION.md](08-HVX-CAMERA-INTEGRATION.md) | NetSDK path |

@@ -93,6 +93,12 @@ class QueueAndCircuitTests(unittest.TestCase):
         self.assertFalse(d.seen(camera_id=1, plate="T1", image_id=9))
         self.assertTrue(d.seen(camera_id=1, plate="T1", image_id=9))
 
+    def test_windows_connection_reset_is_benign(self):
+        from app.services.runtime import is_benign_disconnect
+        self.assertTrue(is_benign_disconnect(ConnectionResetError(10054, "forcibly closed")))
+        self.assertTrue(is_benign_disconnect(OSError(10054, "forcibly closed")))
+        self.assertFalse(is_benign_disconnect(RuntimeError("camera down")))
+
     def test_native_ocr_skips_fastalpr(self):
         with patch("app.services.ocr_policy.alpr_mode", return_value=NATIVE_ONLY):
             self.assertFalse(should_run_local(native_plate="T123ABC", native_confidence=0.9))

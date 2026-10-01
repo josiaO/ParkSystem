@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -139,19 +141,104 @@ class DurableOutbox:
         }
 
 
+class SQLiteOutbox:
+    """Process-safe durable queue. Acknowledgements delete only their own row.
+
+    The Site Service is the sole consumer; any process may enqueue events.
+    Legacy JSONL is imported once transactionally and retained for rollback.
+    """
+
+    PROCESSED_RETENTION_SECONDS = 7 * 24 * 3600.0
+
+    def __init__(self, path: Path, *, legacy_path: Path | None = None):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.acked = 0
+        self.failed = 0
+        self.duplicates = 0
+        with self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, ts REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # Business-event idempotency that survives a crash between "processed"
+            # and "acknowledged": the ack and the processed mark commit together.
+            db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY, ts REAL NOT NULL)")
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM metadata WHERE key = 'legacy_imported'").fetchone():
+                if legacy_path is not None and legacy_path.is_file():
+                    for line in legacy_path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        db.execute("INSERT OR IGNORE INTO events (id, kind, payload, ts) VALUES (?, ?, ?, ?)",
+                                   (row["id"], row["kind"], json.dumps(row["payload"]), float(row["ts"])))
+                db.execute("INSERT INTO metadata (key, value) VALUES ('legacy_imported', '1')")
+
+    @contextmanager
+    def _connect(self):
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def enqueue(self, kind: str, payload: dict) -> str:
+        item_id = uuid.uuid4().hex
+        with self._connect() as db:
+            db.execute("INSERT INTO events (id, kind, payload, ts) VALUES (?, ?, ?, ?)",
+                       (item_id, kind, json.dumps(payload, default=str), time.time()))
+        return item_id
+
+    def pending(self, limit: int = 50) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute("SELECT id, kind, payload, ts FROM events ORDER BY sequence LIMIT ?", (max(0, int(limit)),)).fetchall()
+        return [{"id": row[0], "kind": row[1], "payload": json.loads(row[2]), "ts": row[3]} for row in rows]
+
+    def ack(self, item_id: str, *, processed_key: str | None = None) -> None:
+        """Delete the row and, atomically, remember ``processed_key`` as done."""
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM events WHERE id = ?", (item_id,))
+            self.acked += cursor.rowcount
+            if processed_key:
+                now = time.time()
+                db.execute("INSERT OR REPLACE INTO processed (key, ts) VALUES (?, ?)", (str(processed_key), now))
+                db.execute("DELETE FROM processed WHERE ts < ?", (now - self.PROCESSED_RETENTION_SECONDS,))
+
+    def was_processed(self, key: str | None) -> bool:
+        if not key:
+            return False
+        with self._connect() as db:
+            hit = db.execute("SELECT 1 FROM processed WHERE key = ?", (str(key),)).fetchone()
+        if hit:
+            self.duplicates += 1
+        return bool(hit)
+
+    def note_failure(self) -> None:
+        self.failed += 1
+
+    def depth(self) -> int:
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    def snapshot(self) -> dict:
+        return {"name": "outbox", "backend": "sqlite", "depth": self.depth(),
+                "acked": self.acked, "failed": self.failed, "duplicates": self.duplicates, "path": str(self.path)}
+
+
 VIDEO_FRAMES = BoundedQueue("video-frames", maxsize=1, overflow="drop_oldest")
 AI_FRAMES = BoundedQueue("ai-frames", maxsize=1, overflow="drop_oldest")
 PARKING_EVENTS = BoundedQueue("parking-events", maxsize=200, overflow="reject")
 GATE_COMMANDS = BoundedQueue("gate-commands", maxsize=50, overflow="reject")
 
-_outbox: DurableOutbox | None = None
+_outbox: SQLiteOutbox | None = None
 
 
-def parking_outbox() -> DurableOutbox:
+def parking_outbox() -> SQLiteOutbox:
     global _outbox
     if _outbox is None:
         from app.config import settings
-        _outbox = DurableOutbox(settings.data_dir / "outbox" / "parking-events.jsonl")
+        folder = settings.data_dir / "outbox"
+        _outbox = SQLiteOutbox(folder / "parking-events.sqlite3", legacy_path=folder / "parking-events.jsonl")
     return _outbox
 
 

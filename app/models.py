@@ -3,15 +3,41 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, TypeDecorator
 
 from .db import Base
+from .domain.site import DEFAULT_SITE_ID
 
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def as_utc(dt: datetime | None) -> datetime | None:
+    """SQLite often returns naive datetimes; compare only in UTC."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+class AwareDateTime(TypeDecorator):
+    """Always return UTC-aware datetimes from SQLite."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def __init__(self) -> None:
+        super().__init__(timezone=True)
+
+    def process_bind_param(self, value, dialect):
+        return as_utc(value) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        return as_utc(value)
 
 
 class UserStatus(str, Enum):
@@ -45,7 +71,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(160), default="")
     password_hash: Mapped[str] = mapped_column(String(300))
     status: Mapped[str] = mapped_column(String(30), default=UserStatus.ACTIVE.value)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     roles: Mapped[list["UserRole"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
@@ -74,8 +100,8 @@ class AuthSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(AwareDateTime())
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class Site(Base):
@@ -101,12 +127,15 @@ class Zone(Base):
 
 class Gate(Base):
     __tablename__ = "gates"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_gates_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
     mode: Mapped[str] = mapped_column(String(30), default=GateMode.COMMISSIONING.value)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     physical_control_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id"), nullable=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
     zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id"), nullable=True)
     cameras: Mapped[list["Camera"]] = relationship(back_populates="gate")
     sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate")
@@ -128,12 +157,20 @@ class Lane(Base):
 
 class Camera(Base):
     __tablename__ = "cameras"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_cameras_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), index=True)
     ip_address: Mapped[str] = mapped_column(String(64), index=True)
     sdk_port: Mapped[int] = mapped_column(Integer, default=30000)
     username: Mapped[str] = mapped_column(String(120), default="admin")
-    password_secret: Mapped[str] = mapped_column(String(300), default="")  # local MVP; replace with OS secret store
+    # Legacy column. With an external SecretStore this holds "" and the real
+    # value lives behind ``credentials_ref``; use the ``password_secret``
+    # property, never the column directly.
+    _password_secret: Mapped[str] = mapped_column("password_secret", String(300), default="")
+    credentials_ref: Mapped[str] = mapped_column(String(120), default="", server_default="")
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
     lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
     lane_direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
@@ -149,7 +186,7 @@ class Camera(Base):
     status: Mapped[str] = mapped_column(String(30), default=CameraStatus.UNKNOWN.value)
     sdk_handle: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     recognition_mode: Mapped[str] = mapped_column(String(40), default="")
     vendor: Mapped[str] = mapped_column(String(80), default="")
@@ -157,7 +194,34 @@ class Camera(Base):
     serial: Mapped[str] = mapped_column(String(80), default="")
     timezone: Mapped[str] = mapped_column(String(80), default="")
     camera_type: Mapped[str] = mapped_column(String(40), default="")
+    # ONVIF capability snapshot from the last discovery: services, capabilities,
+    # snapshot URI, plate topics and whether Profile M event pulling is enabled.
+    onvif_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     gate: Mapped[Gate | None] = relationship(back_populates="cameras")
+
+    @property
+    def password_secret(self) -> str:
+        """Raw camera password for adapters. Resolved through the SecretStore when configured."""
+        from app.infrastructure.secrets import resolve_secret
+
+        return resolve_secret(self.credentials_ref, fallback=self._password_secret or "")
+
+    @password_secret.setter
+    def password_secret(self, value: str | None) -> None:
+        from app.infrastructure.secrets import SecretStoreError, store_secret, uses_external_store
+
+        value = value or ""
+        if uses_external_store():
+            try:
+                self.credentials_ref = store_secret(value, kind="camera", ref=self.credentials_ref or None)
+                self._password_secret = ""
+                return
+            except SecretStoreError:
+                pass  # fall back to the legacy column rather than losing the credential
+        self._password_secret = value
+
+    def has_password(self) -> bool:
+        return bool(self._password_secret) or bool(self.credentials_ref)
 
 
 class AuditLog(Base):
@@ -168,45 +232,106 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(80), default="")
     target_id: Mapped[str] = mapped_column(String(80), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class Tariff(Base):
     """Car1 tariff snapshot. Portable JSON so PostgreSQL can take over later."""
     __tablename__ = "tariffs"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_tariffs_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), index=True)
     car_type: Mapped[str] = mapped_column(String(40), default="Car1", index=True)
     currency: Mapped[str] = mapped_column(String(8), default="TZS")
     source: Mapped[str] = mapped_column(String(200), default="Car1")
     rules: Mapped[dict] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class ParkingSession(Base):
     __tablename__ = "parking_sessions"
+    __table_args__ = (
+        Index(
+            "uq_parking_sessions_site_entry_event",
+            "site_id",
+            "entry_event_id",
+            unique=True,
+            sqlite_where=text("entry_event_id != ''"),
+            postgresql_where=text("entry_event_id != ''"),
+        ),
+        Index(
+            "uq_parking_sessions_one_open_plate",
+            "site_id",
+            "plate",
+            unique=True,
+            sqlite_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
+            postgresql_where=text("status IN ('WAITING_RECEIPT','ACTIVE','PAID','OPEN')"),
+        ),
+        Index(
+            "uq_parking_sessions_public_token",
+            "public_token",
+            unique=True,
+            sqlite_where=text("public_token != ''"),
+            postgresql_where=text("public_token != ''"),
+        ),
+        Index(
+            "uq_parking_sessions_human_reference",
+            "human_reference",
+            unique=True,
+            sqlite_where=text("human_reference != ''"),
+            postgresql_where=text("human_reference != ''"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
     plate: Mapped[str] = mapped_column(String(32), index=True)
+    plate_raw: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    plate_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True)
     camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True)
+    entry_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
+    exit_lane_id: Mapped[int | None] = mapped_column(ForeignKey("lanes.id"), nullable=True)
+    exit_camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True)
     lane_direction: Mapped[str] = mapped_column(String(20), default="ENTRY")
     car_type: Mapped[str] = mapped_column(String(40), default="Car1")
     status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
-    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lifecycle: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    entry_time: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+    exit_time: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     currency: Mapped[str] = mapped_column(String(8), default="TZS")
     amount_due: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     amount_paid: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     breakdown: Mapped[list] = mapped_column(JSON, default=list)
     tariff_rules: Mapped[dict] = mapped_column(JSON, default=dict)
     public_token: Mapped[str] = mapped_column(String(64), default="", index=True)
+    human_reference: Mapped[str] = mapped_column(String(16), default="", server_default="")
     receipt_status: Mapped[str] = mapped_column(String(20), default="")
+    receipt_printed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    receipt_taken_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    print_job_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    print_job_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    print_retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
+    payment_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    paid_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    payment_exit_grace_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    entry_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    exit_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    entry_image_ref: Mapped[str] = mapped_column(String(260), default="", server_default="")
+    open_command_uuid: Mapped[str] = mapped_column(String(64), default="", server_default="")
     simulated: Mapped[bool] = mapped_column(Boolean, default=False)
     parker_kind: Mapped[str] = mapped_column(String(40), default="CASUAL", index=True)
     access_plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("registered_vehicles.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     gate: Mapped[Gate | None] = relationship(back_populates="sessions")
 
 
@@ -235,14 +360,20 @@ class VehicleCapture(Base):
     plate_type: Mapped[str] = mapped_column(String(40), default="")
     source: Mapped[str] = mapped_column(String(40), default="")
     event_id: Mapped[str] = mapped_column(String(64), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Optional cloud AI second opinion (supporting/conflicting/unreadable). Never the plate authority.
+    ai_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class AccessPlan(Base):
     """Season / VIP / staff policy. Registered plates use a plan, not RFID cards."""
     __tablename__ = "access_plans"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_access_plans_site_name"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80), unique=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), index=True)
     kind: Mapped[str] = mapped_column(String(40), default="MONTHLY", index=True)
     auto_open: Mapped[bool] = mapped_column(Boolean, default=True)
     print_receipt: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -254,15 +385,19 @@ class AccessPlan(Base):
 class RegisteredVehicle(Base):
     """Plate that may auto-open because it is on an access plan."""
     __tablename__ = "registered_vehicles"
+    __table_args__ = (UniqueConstraint("site_id", "plate", name="uq_registered_vehicles_site_plate"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    plate: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id"), nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True
+    )
+    plate: Mapped[str] = mapped_column(String(32), index=True)
     owner_name: Mapped[str] = mapped_column(String(160), default="")
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     plan: Mapped[AccessPlan | None] = relationship(back_populates="vehicles")
 
 
@@ -278,8 +413,11 @@ class Receipt(Base):
     qr_path: Mapped[str] = mapped_column(String(260), default="")
     printer_adapter: Mapped[str] = mapped_column(String(40), default="simulated")
     status: Mapped[str] = mapped_column(String(20), default="SIMULATED")
+    print_job_id: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    printer_error: Mapped[str] = mapped_column(String(240), default="", server_default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class AccessDecision(Base):
@@ -297,7 +435,7 @@ class AccessDecision(Base):
     barrier_opened: Mapped[bool] = mapped_column(Boolean, default=False)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class GateCommandRecord(Base):
@@ -313,7 +451,7 @@ class GateCommandRecord(Base):
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
     message: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class PaymentIntent(Base):
@@ -330,7 +468,7 @@ class PaymentIntent(Base):
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class PaymentTransaction(Base):
@@ -351,8 +489,8 @@ class PaymentTransaction(Base):
     provider_transaction_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 

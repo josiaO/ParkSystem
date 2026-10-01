@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import logging
 import time
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -15,19 +16,23 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
+from .domain.site import DEFAULT_SITE_ID
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
-    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
+    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
-    ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep,
+    ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
 )
 from .security import authenticate_user, create_session, current_user, oauth2_scheme, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
 from .infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
 from .infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
 from .services.alpr import status as alpr_status
+from .services.redaction import redact_text
+
+log = logging.getLogger("smartpark")
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
 from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event, should_persist_vehicle_capture
@@ -39,6 +44,7 @@ from .services.hvx_vendor import vendor_inventory
 from .services.camera_lpr import choose_overlay_box, local_from_fastalpr, native_from_sdk_capture
 from .services.ocr_policy import fusion_mode, should_run_local
 from .services.presence import coil_watch
+from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
     pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, snapshot_for_camera, start_idle_watch,
@@ -103,11 +109,12 @@ def ensure_roles(db: Session):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .services.logging_setup import configure_logging
-    from .services.runtime import mark_core_ready, set_process_name, set_startup_state
+    from .services.runtime import install_asyncio_exception_filter, mark_core_ready, set_process_name, set_startup_state
 
     configure_logging("site-service")
     set_process_name("SmartParkSiteService")
     set_startup_state("STARTING")
+    install_asyncio_exception_filter()
     ensure_schema()
     with SessionLocal() as db:
         ensure_roles(db)
@@ -120,26 +127,63 @@ async def lifespan(app: FastAPI):
         ensure_modules_initialized(db)
         ensure_default_site(db)
         sync_gate_lanes_from_cameras(db)
+        from .services.secrets_migration import migrate_plaintext_secrets
+
+        try:
+            migrate_plaintext_secrets(db)
+        except Exception as exc:  # a secret-store problem must not stop parking
+            log.warning("secrets migration skipped: %s", exc)
     mark_core_ready()
     start_idle_watch()
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
     # consumes its local control/stream endpoints and must not spawn a competing
     # sidecar process.
+    from .services import hybrid_fusion
+    hybrid_fusion.set_persist(_persist_capture_event)
     ingest = asyncio.create_task(_camera_event_loop(), name="camera-events")
     outbox = asyncio.create_task(_outbox_loop(), name="parking-outbox")
     hvx_watch = asyncio.create_task(_hvx_watch_loop(), name="hvx-watch")
+    fusion_flush = asyncio.create_task(_fusion_flush_loop(), name="hybrid-fusion-flush")
+    payments_reconcile = asyncio.create_task(_payments_reconcile_loop(), name="payments-reconcile")
+    from .services import onvif_runtime
+    onvif_runtime.set_persist(_onvif_capture)
+    onvif_events = asyncio.create_task(_onvif_events_loop(), name="onvif-events")
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch):
+        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events):
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, return_exceptions=True)
+        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, return_exceptions=True)
+        await onvif_runtime.shutdown()
         stop_live_pumps()
         # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+from .api.module_routes import ModuleRoute
+from .services.public_ingress import PublicIngressGuard
+app.router.route_class = ModuleRoute
+# Requests arriving via the public payments tunnel may only reach /p/*,
+# /api/public/* and /api/webhooks/*. No-op when no ingress host is configured.
+app.add_middleware(PublicIngressGuard)
+
+
+@app.exception_handler(HTTPException)
+async def _redacted_http_exception(request: Request, exc: HTTPException):
+    """Error bodies never carry RTSP passwords, provider keys or webhook hashes."""
+    from .services.redaction import redact_obj
+
+    return JSONResponse({"detail": redact_obj(exc.detail)}, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(Exception)
+async def _redacted_unhandled_exception(request: Request, exc: Exception):
+    """Unhandled errors log the redacted traceback and return a redacted message."""
+    from .services.redaction import redact_text
+
+    log.error("unhandled error on %s %s: %s", request.method, request.url.path, redact_text(repr(exc)), exc_info=exc)
+    return JSONResponse({"detail": redact_text(f"{type(exc).__name__}: {exc}")[:400]}, status_code=500)
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
@@ -206,6 +250,13 @@ def health_ready():
 def health_details(_: User = Depends(require("hardware.view"))):
     from .services.health import details
     return details()
+
+
+@app.get("/health/diagnostics")
+def health_diagnostics(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+    """Support bundle: health, schema, secrets backend, cameras. Always redacted."""
+    from .services.diagnostics import bundle
+    return bundle(db)
 
 
 @app.get("/auth/setup")
@@ -506,7 +557,10 @@ def camera_dict(c: Camera):
         plate_engine = "fastalpr"
     return {
         "id": c.id, "name": c.name, "ip_address": c.ip_address, "sdk_port": c.sdk_port,
+        "site_id": getattr(c, "site_id", None) or DEFAULT_SITE_ID,
         "username": c.username, "gate_id": c.gate_id, "gate_name": lane_name,
+        "credentials_ref": getattr(c, "credentials_ref", "") or "",
+        "password_configured": bool(c.has_password()) if hasattr(c, "has_password") else False,
         "lane_name": lane_name or "",
         "side": side_label(c.lane_direction),
         "lane_direction": c.lane_direction,
@@ -522,16 +576,41 @@ def camera_dict(c: Camera):
         "model_name": getattr(c, "model_name", None) or "",
         "serial": getattr(c, "serial", None) or "",
         "timezone": getattr(c, "timezone", None) or "",
-        "rtsp_url": c.rtsp_url, "status": c.status, "sdk_handle": c.sdk_handle,
+        # Embedded RTSP credentials never leave the API; PATCH accepts the masked
+        # form back unchanged (see update_camera).
+        "rtsp_url": redact_text(c.rtsp_url or ""), "status": c.status, "sdk_handle": c.sdk_handle,
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(getattr(c, "stream_profiles", None) or {}),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),
+        "onvif": _camera_onvif_brief(c),
         "media": _camera_media_brief(c.id),
         "operator": {
             "camera": "Online" if c.status in (CameraStatus.SDK_CONNECTED.value, CameraStatus.VIDEO_CONNECTED.value) else "Offline",
         },
         "last_error": c.last_error, "last_seen_at": c.last_seen_at, "enabled": c.enabled,
+    }
+
+
+def _camera_onvif_brief(c: Camera) -> dict:
+    """Public-safe ONVIF summary (no credentials in URIs)."""
+    profile = dict(getattr(c, "onvif_profile", None) or {})
+    if not profile:
+        return {}
+    caps = dict(profile.get("capabilities") or {})
+    from .services import onvif_runtime
+    return {
+        "media_version": profile.get("media_version") or 0,
+        "media2": bool(caps.get("media2")),
+        "events": bool(caps.get("events")),
+        "profile_m": bool(caps.get("profile_m")),
+        "plate_metadata": bool(caps.get("plate_metadata")),
+        "plate_topics": list(caps.get("plate_topics") or [])[:10],
+        "snapshot_uri": profile.get("snapshot_uri_redacted") or "",
+        "events_enabled": bool(profile.get("events_enabled")),
+        "events_url_present": bool(profile.get("events_url")),
+        "discovered_at": profile.get("discovered_at"),
+        "poller": onvif_runtime.stats_for(c.id),
     }
 
 
@@ -1096,29 +1175,9 @@ def _crop_from_alpr(alpr: dict | None) -> bytes:
 
 
 def _capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0, pending: bool = False) -> dict:
-    method = str(getattr(fused, "method", "") or "")
-    box = local.get("bbox") if method.startswith("LOCAL") else native.get("bbox")
-    if not isinstance(box, dict):
-        box = native.get("bbox") or local.get("bbox")
-    source = "fastalpr" if "LOCAL" in method else (native.get("source") or "camera")
-    fusion = fused.as_dict() if hasattr(fused, "as_dict") else {}
-    return {
-        "plate": fused.resolved_plate,
-        "plate_raw": local.get("plate_raw") or native.get("plate_raw") or fused.resolved_plate,
-        "score": fused.resolved_confidence,
-        "bbox": box,
-        "source": source,
-        "image_id": int(image_id or native.get("image_id") or 0),
-        "image_width": native.get("image_width") or 0,
-        "image_height": native.get("image_height") or 0,
-        "have_vehicle": native.get("have_vehicle"),
-        "snap_type": native.get("snap_type"),
-        "fusion": fusion,
-        "native_plate": fusion.get("native_plate") or native.get("plate") or "",
-        "local_plate": fusion.get("local_plate") or local.get("plate") or "",
-        "needs_review": bool(getattr(fused, "needs_review", False)),
-        "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
-    }
+    from .services.camera_lpr import capture_from_readings
+
+    return capture_from_readings(native, local, fused, image_id=image_id, pending=pending)
 
 
 async def _run_local_alpr(
@@ -1232,6 +1291,7 @@ async def _run_local_alpr_locked(
     from .services.presence import coil_watch
     allowed, reason = should_persist_vehicle_capture(
         capture, coil_occupied=coil_watch.occupied(camera.id),
+        plate_policy=site_policy(db).get("plate_validation", "NONE"),
     )
     if not allowed:
         alpr = dict(alpr or {})
@@ -1287,6 +1347,8 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
         data.pop("password", None)
     else:
         data["password_secret"] = data.pop("password")
+    if "rtsp_url" in data and data["rtsp_url"] and data["rtsp_url"] == redact_text(c.rtsp_url or ""):
+        data.pop("rtsp_url")  # masked value round-tripped from the edit form; keep the stored URL
     if "gate_id" in data and data["gate_id"] is not None:
         get_gate_or_404(db, data["gate_id"])
     if data.get("adapter_id"):
@@ -1318,8 +1380,15 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
 def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
     c = get_camera_or_404(db, camera_id)
     name = c.name
+    ref = getattr(c, "credentials_ref", "") or ""
     db.delete(c)
     db.commit()
+    if ref:
+        from .infrastructure.secrets import secret_store
+        try:
+            secret_store().delete(ref)
+        except Exception as exc:
+            log.warning("camera %s: could not delete stored credential %s: %s", camera_id, ref, exc)
     write_audit(db, user, "camera.delete", "camera", str(camera_id), f"Deleted {name}")
     return {"ok": True}
 
@@ -1425,19 +1494,35 @@ async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User 
     from app.infrastructure.media import registry as media_registry
     live_endpoint = await media_registry.get_live_endpoint(c.id, db)
     detect_endpoint = await media_registry.get_detect_endpoint(c.id, db)
+    evidence_endpoint = await media_registry.get_evidence_endpoint(c.id, db)
+    mediamtx_telemetry = (
+        media_registry.media_telemetry(c.id)
+        if media_registry.mediamtx_detect_active(c.id, db) or media_registry.mediamtx_live_active(c.id, db)
+        else None
+    )
+    warnings = profile_warnings(profiles, upstream_consumers=1 if health.get("pumping") else 0)
+    if mediamtx_telemetry:
+        compat = mediamtx_telemetry.get("webrtc") or {}
+        if compat.get("compatible") is False and compat.get("reason"):
+            warnings.append(str(compat["reason"]))
+        for role, row in (mediamtx_telemetry.get("roles") or {}).items():
+            lost = int(((row.get("rtp") or {}).get("packets_lost")) or 0)
+            if lost:
+                warnings.append(f"{role}: {lost} RTP packets lost")
     return {
         "camera": camera_dict(c),
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(profiles),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),
-        "warnings": profile_warnings(profiles, upstream_consumers=1 if health.get("pumping") else 0),
-        "media": health,
+        "warnings": warnings,
+        "media": {**health, "mediamtx": mediamtx_telemetry},
         "profiles": list_profiles(),
         "live_url": f"/cameras/{c.id}/live.mjpeg",
         "main_url": f"/cameras/{c.id}/live.mjpeg?role=MAIN",
         "live_endpoint": live_endpoint,
         "detect": detect_endpoint,
+        "evidence": evidence_endpoint,
     }
 
 
@@ -1478,12 +1563,70 @@ async def camera_onvif_discover(camera_id: int, db: Session = Depends(get_db), u
     c = get_camera_or_404(db, camera_id)
     from .services.stream_discover import discover_camera_streams
     from .services.stream_roles import merge_profiles
+    from .services.onvif_profile import apply_discovery
     found = await discover_camera_streams(c.ip_address, c.username, c.password_secret, c.rtsp_url or "")
     if found.get("stream_profiles"):
         c.stream_profiles = merge_profiles(c.stream_profiles, found["stream_profiles"])
-        db.commit()
+    apply_discovery(c, found.get("onvif") or {})
+    db.commit()
     write_audit(db, user, "camera.onvif_discover", "camera", str(c.id), found.get("source") or "")
-    return {"camera": camera_dict(c), **found}
+    from .services.stream_roles import public_profiles
+    public = {k: v for k, v in found.items() if k not in {"onvif", "discovered", "stream_profiles"}}
+    public["discovered"] = _strip_credential_uris(found.get("discovered") or [])
+    public["stream_profiles"] = public_profiles(found.get("stream_profiles") or {})
+    public["onvif"] = _public_onvif_discovery(found.get("onvif") or {})
+    return {"camera": camera_dict(c), **public}
+
+
+def _strip_credential_uris(rows: list) -> list:
+    return [{k: v for k, v in dict(row).items() if k not in {"uri", "url", "snapshot_uri"}} for row in rows]
+
+
+def _public_onvif_discovery(onvif: dict) -> dict:
+    """Discovery payload without credential-bearing URIs."""
+    out = {k: v for k, v in onvif.items() if k not in {"profiles", "snapshot_uri"}}
+    out["profiles"] = _strip_credential_uris(onvif.get("profiles") or [])
+    return out
+
+
+@app.patch("/cameras/{camera_id}/onvif/events")
+async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Enable/disable Profile M plate-event pulling for a camera that advertises it."""
+    c = get_camera_or_404(db, camera_id)
+    from .services.onvif_profile import set_events_enabled
+    try:
+        set_events_enabled(c, bool(payload.get("enabled")))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    db.commit()
+    write_audit(db, user, "camera.onvif_events", "camera", str(c.id), "on" if payload.get("enabled") else "off")
+    return camera_dict(c)
+
+
+@app.post("/cameras/{camera_id}/onvif/events/pull")
+async def camera_onvif_events_pull(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Hardware-lab diagnostic: one subscribe → pull → unsubscribe round trip."""
+    c = get_camera_or_404(db, camera_id)
+    profile = dict(c.onvif_profile or {})
+    events_url = str(profile.get("events_url") or "")
+    if not events_url:
+        raise HTTPException(409, "Camera did not advertise an ONVIF Events service; run ONVIF discovery first.")
+    from .services.onvif_events import ONVIFPullPoint, event_to_capture
+    from .services.onvif_discover import ONVIFError
+    pullpoint = ONVIFPullPoint(events_url, c.username or "", c.password_secret or "", timeout=6.0)
+    try:
+        await pullpoint.subscribe()
+        events = await pullpoint.pull(wait="PT3S", limit=20)
+    except ONVIFError as exc:
+        raise HTTPException(502, str(exc))
+    finally:
+        await pullpoint.unsubscribe()
+    write_audit(db, user, "camera.onvif_events_pull", "camera", str(c.id), f"{len(events)} messages")
+    return {
+        "ok": True,
+        "messages": len(events),
+        "events": [{**e, "capture": event_to_capture(e)} for e in events[:20]],
+    }
 
 
 @app.get("/media/gateway")
@@ -1495,13 +1638,22 @@ async def media_gateway_health(db: Session = Depends(get_db), _: User = Depends(
     from .services.flags import flags as migration_flags
     sessions = gateway.live_metrics()
     pids = gateway.child_pids()
+    mediamtx_health = mediamtx.health()
+    mediamtx_paths: dict = {}
+    if mediamtx_health.get("running"):
+        try:
+            from .services.mediamtx_telemetry import refresh as mediamtx_refresh
+            mediamtx_paths = dict(mediamtx_refresh().get("paths") or {})
+        except Exception as exc:
+            mediamtx_paths = {"error": str(exc)[:200]}
     return {
         "cameras": sessions,
         "child_pids": pids,
         "ffmpeg_profiles": list_profiles(),
         "decode": await detect_decode_path(),
         "local": {"sessions": sessions, "child_pids": pids},
-        "mediamtx": mediamtx.health(),
+        "mediamtx": mediamtx_health,
+        "mediamtx_paths": mediamtx_paths,
         "flags": migration_flags(db),
         "rollback": {
             "live_view_provider": ["DIRECT_LEGACY", "MEDIAMTX"],
@@ -1567,6 +1719,44 @@ def post_plate_correction(
         country=payload.country,
     )
     return {"ok": True, "correction": row, "training": training_status(engine_id=engine.id)}
+
+
+@app.get("/ai/health")
+def ai_health(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+    """Optional cloud AI reviewer: disabled by default, never a gate authority."""
+    from .services import ai_review
+    return ai_review.health(db)
+
+
+@app.get("/ai/reviews")
+def ai_recent_reviews(_: User = Depends(require("cameras.view"))):
+    from .services import ai_review
+    return {"items": ai_review.recent(), "stats": ai_review.stats()}
+
+
+@app.post("/ai/review/{capture_id}")
+async def ai_review_capture(capture_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    """Operator-requested second opinion on a stored capture. Stores the verdict; never edits the plate."""
+    from .services import ai_review
+    if not ai_review.enabled(db):
+        raise HTTPException(409, "AI review is disabled (SMARTPARK_AI_ENABLED=false)")
+    try:
+        review = await ai_review.review_capture(db, capture_id)
+    except LookupError:
+        raise HTTPException(404, "Capture not found")
+    write_audit(db, user, "ai.review", "capture", str(capture_id), f"AI verdict {review.verdict}")
+    return {"ok": review.verdict != "unavailable", "review": review.as_dict()}
+
+
+@app.post("/ai/incidents/summary")
+async def ai_incident_summary(payload: AIIncidentSummaryRequest, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+    from .services import ai_review
+    body = await ai_review.summarize_incident(
+        db, capture_ids=payload.capture_ids, plate=payload.plate, limit=payload.limit, question=payload.question or "",
+    )
+    if not body.get("ok") and body.get("reason") == "ai_disabled":
+        raise HTTPException(409, "AI review is disabled (SMARTPARK_AI_ENABLED=false)")
+    return body
 
 
 @app.post("/recognition/model-pack")
@@ -1794,13 +1984,13 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         capture = _capture_from_readings(native, local, fused, image_id=image_id)
         if native.get("have_vehicle"):
             capture["have_vehicle"] = True
-        allowed, reason = should_persist_vehicle_capture(capture, coil_occupied=coil_watch.occupied(c.id))
+        allowed, reason = should_persist_vehicle_capture(capture, coil_occupied=coil_watch.occupied(c.id), plate_policy=site_policy(db).get("plate_validation", "NONE"))
         if not allowed and native.get("have_vehicle"):
             capture = {
                 "plate": "", "image_id": image_id, "have_vehicle": True,
                 "score": 0, "source": native.get("source") or "camera",
             }
-            allowed, reason = should_persist_vehicle_capture(capture)
+            allowed, reason = should_persist_vehicle_capture(capture, plate_policy=site_policy(db).get("plate_validation", "NONE"))
         if not allowed:
             raise HTTPException(409, f"No vehicle in frame ({reason}). Snapshot not saved.")
         row = persist_event(db, c, jpeg=jpeg, crop=_crop_from_alpr(alpr), capture=capture)
@@ -2060,6 +2250,13 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     latest = row or previous
     if latest:
         remember_last_car(camera.id, capture_dict(latest))
+    if row is not None and row.id != previous_id:
+        # Optional cloud second opinion: background task, never on the gate path.
+        from .services import ai_review
+        ai_review.schedule_capture_review(capture_dict(row), crop=crop, jpeg=jpeg, db=db)
+    from .services.modules import is_enabled
+    if not is_enabled("parking.sessions", db):
+        return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
     new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
     entitlement = lookup_entitlement(db, row.plate) if row and row.plate else None
@@ -2084,7 +2281,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     from .core.plate import apply_site_plate
     hold = bool((capture or {}).get("needs_review") or (capture or {}).get("pending_confirmation"))
     if row and row.plate:
-        assessed = apply_site_plate(row.plate, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+        assessed = apply_site_plate(row.plate, validation=site_policy(db).get("plate_validation", "NONE"))
         if assessed.get("hold_for_operator"):
             hold = True
     if latest and hold:
@@ -2181,9 +2378,19 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             row = db.get(Camera, camera_id)
             if row is None:
                 return
+            from .services import hybrid_fusion
+            if presence and native.get("plate") and hybrid_fusion.routes_camera(row, db):
+                # HYBRID with a live Recognition Worker: the native reading is one
+                # candidate; the worker's FastALPR reading arrives via the outbox.
+                # The coordinator persists exactly one fused capture per vehicle.
+                await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
+                if image_id:
+                    _last_image_id[camera_id] = image_id
+                continue
             if presence:
                 await _persist_capture_event(db, row, capture, jpeg, crop)
-            if should_run_local(
+            from .recognition_worker import worker_owns_software_reads
+            if not worker_owns_software_reads(camera_id) and should_run_local(
                 native_plate=str(native.get("plate") or ""),
                 native_confidence=float(native.get("confidence") or 0),
                 presence=presence,
@@ -2238,6 +2445,9 @@ async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
 
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
     """FastALPR samples the detect buffer. It never sits in the live-view decode loop."""
+    from .recognition_worker import worker_owns_software_reads
+    if worker_owns_software_reads(camera_id):
+        return
     from .services.media_gateway import gateway
     watching = viewers_for(camera_id) > 0
     sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
@@ -2294,12 +2504,71 @@ async def _outbox_loop():
             box = parking_outbox()
             for item in box.pending(limit=20):
                 payload = item.get("payload") or {}
-                if item.get("kind") != "plate-event":
+                from .services.events import recognition_from_outbox
+                recognized = recognition_from_outbox(item)
+                if recognized is None and item.get("kind") != "plate-event":
+                    box.ack(item["id"])
+                    continue
+                # Durable idempotency: a crash after business processing but before
+                # ACK redelivers the row; the processed mark (same SQLite file,
+                # committed with the ACK) and the capture event_id (main DB) both
+                # stop it from creating a second capture/session.
+                event_key = str((recognized or {}).get("event_id") or payload.get("event_id") or "") or None
+                if event_key and box.was_processed(event_key):
                     box.ack(item["id"])
                     continue
                 try:
                     with short_session() as db:
+                        if recognized is not None:
+                            from .services.modules import is_enabled
+                            if not is_enabled("recognition.alpr", db):
+                                continue
+                            camera = db.get(Camera, int(recognized.get("camera_id") or 0)) if recognized.get("camera_id") else None
+                            if camera is None or not camera.enabled:
+                                box.ack(item["id"], processed_key=event_key)
+                                continue
+                            if event_key and db.scalar(select(VehicleCapture.id).where(VehicleCapture.event_id == event_key)) is not None:
+                                box.ack(item["id"], processed_key=event_key)
+                                continue
+                            jpeg = b""
+                            crop = b""
+                            reference = str(recognized.get("image_ref") or "")
+                            if reference.startswith("/media/"):
+                                pieces = reference.removeprefix("/media/").split("/")
+                                if len(pieces) == 2:
+                                    evidence = media_path(*pieces)
+                                    if evidence is not None:
+                                        jpeg = evidence.read_bytes()
+                            crop_ref = str(recognized.get("plate_crop_ref") or "")
+                            if crop_ref.startswith("/media/"):
+                                pieces = crop_ref.removeprefix("/media/").split("/")
+                                if len(pieces) == 2:
+                                    evidence = media_path(*pieces)
+                                    if evidence is not None:
+                                        crop = evidence.read_bytes()
+                            from .services import hybrid_fusion
+                            if hybrid_fusion.routes_camera(camera, db):
+                                await hybrid_fusion.offer_local(db, camera, recognized, jpeg=jpeg, crop=crop)
+                                box.ack(item["id"], processed_key=event_key)
+                                continue
+                            if adapter_has_native_plates(camera):
+                                from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+                                if camera_recognition_mode(camera) != LOCAL_ONLY:
+                                    # Native camera not fused by the worker path: the
+                                    # in-process native/fusion loop stays authoritative.
+                                    box.ack(item["id"], processed_key=event_key)
+                                    continue
+                            capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
+                                       "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
+                            await _persist_capture_event(db, camera, capture, jpeg, b"")
+                            box.ack(item["id"], processed_key=event_key)
+                            continue
                         gate = db.get(Gate, int(payload.get("gate_id") or 0)) if payload.get("gate_id") else None
+                        from .services.modules import is_enabled
+                        if not is_enabled("parking.sessions", db):
+                            # Keep pending business work for an explicit profile
+                            # re-enable rather than processing it while disabled.
+                            continue
                         camera = db.get(Camera, int(payload.get("camera_id") or 0)) if payload.get("camera_id") else None
                         if gate is None and camera is None and not payload.get("plate"):
                             box.ack(item["id"])
@@ -2313,7 +2582,7 @@ async def _outbox_loop():
                             source="outbox",
                             camera=camera,
                         )
-                    box.ack(item["id"])
+                    box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
                     box.note_failure()
                     note_worker_failure("outbox", str(exc))
@@ -2323,6 +2592,83 @@ async def _outbox_loop():
         except Exception:
             pass
         await asyncio.sleep(2.0)
+
+
+async def _fusion_flush_loop():
+    """Decide hybrid candidates whose counterpart never arrived (bounded wait)."""
+    from .services import hybrid_fusion
+    from .services.health import note_worker_failure
+
+    while True:
+        try:
+            await hybrid_fusion.flush(short_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("hybrid-fusion", str(exc))
+        await asyncio.sleep(0.5)
+
+
+async def _onvif_capture(camera_id: int, capture: dict, jpeg: bytes) -> None:
+    """Profile M plate metadata enters the same path as an HVX native read."""
+    from .services.dedup import camera_events
+    from .services import hybrid_fusion
+
+    plate = str(capture.get("plate") or "")
+    image_id = int(capture.get("image_id") or 0)
+    if camera_events.seen(camera_id=camera_id, plate=plate, image_id=image_id):
+        return
+    native = native_from_sdk_capture(capture)
+    if not native.get("plate"):
+        return
+    coil_watch.observe(camera_id, True, source="onvif-metadata")
+    with short_session() as db:
+        row = db.get(Camera, camera_id)
+        if row is None or not row.enabled:
+            return
+        if hybrid_fusion.routes_camera(row, db):
+            await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=b"", capture=capture)
+            return
+        await _persist_capture_event(db, row, capture, jpeg, b"")
+
+
+async def _onvif_events_loop():
+    """Keep one Profile M poller per ONVIF camera that advertises plate events."""
+    from .services import onvif_runtime
+    from .services.health import note_worker_failure
+
+    while True:
+        try:
+            await onvif_runtime.reconcile(short_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("onvif-events", str(exc))
+        await asyncio.sleep(5.0)
+
+
+async def _payments_reconcile_loop():
+    """Settle PENDING external intents whose webhook never arrived.
+
+    Runs only while payments.core is enabled and an external provider is the
+    active mobile provider; an LPR-only site never touches provider code.
+    """
+    from .services import mobile_payments
+    from .services.health import note_worker_failure
+    from .services.modules import is_enabled
+
+    while True:
+        delay = max(5.0, float(settings.payments_reconcile_seconds or 60.0))
+        try:
+            with short_session() as db:
+                enabled = is_enabled("payments.core", db)
+            if enabled and mobile_payments.active_mobile_provider_id() in mobile_payments.external_provider_ids():
+                await mobile_payments.reconcile_pending(SessionLocal)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            note_worker_failure("payments-reconcile", str(exc))
+        await asyncio.sleep(delay)
 
 
 async def _hvx_watch_loop():
@@ -2349,6 +2695,9 @@ async def _hvx_watch_loop():
 
 async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     """Periodic FastALPR for cameras that have no onboard plate engine."""
+    from .recognition_worker import worker_owns_software_reads
+    if worker_owns_software_reads(camera_id):
+        return
     if not _local_alpr_ready(camera_id):
         return
     from .services.media_gateway import gateway
@@ -2394,7 +2743,8 @@ async def _camera_event_loop():
     while True:
         try:
             with short_session() as db:
-                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all())
+                from .services.modules import is_enabled
+                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
                 hvx_specs = [
                     (int(c.id), int(c.sdk_handle))
                     for c in rows
@@ -2874,25 +3224,41 @@ async def sim_capture(
         if (row.lane_direction or "").upper() == want:
             camera = row
             break
+    stored = None
     if camera is not None:
         box = best.get("bbox") if isinstance(best.get("bbox"), dict) else None
-        persist_event(
-            db, camera, jpeg=jpeg, crop=b"",
+        stored = persist_event(
+            db, camera, jpeg=jpeg, crop=_crop_from_alpr(alpr),
             capture={
                 "plate": plate,
-                "score": float(best.get("confidence") or 0) * 100,
+                "plate_raw": str(best.get("plate_raw") or plate),
+                "score": float(best.get("confidence") or 0),
                 "bbox": box,
+                "source": "fastalpr",
+                "plate_crop_path": best.get("plate_crop_path"),
                 "image_id": int(time.time() * 1000) % 2_000_000_000,
             },
         )
+        if stored is not None:
+            remember_last_car(camera.id, capture_dict(stored))
     try:
         result = await handle_plate_event(
-            db, plate=plate, gate=gate, side=side, simulated=True, alpr=alpr, source="fastalpr-upload",
+            db, plate=plate, gate=gate, side=side, simulated=True, alpr=alpr,
+            source="fastalpr-upload", camera=camera,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     write_audit(db, user, "sim.capture", "parking_session", str((result.get("session") or {}).get("id") or ""), f"{plate} {side}")
     db.commit()
+    if stored is not None:
+        info = capture_dict(stored)
+        session = dict(result.get("session") or {})
+        session["snapshot_url"] = session.get("snapshot_url") or info.get("snapshot_url")
+        session["crop_url"] = session.get("crop_url") or info.get("crop_url")
+        session["plate_confidence"] = session.get("plate_confidence") or info.get("confidence")
+        result["session"] = session
+        result["capture"] = info
+        result["last_car"] = info
     if not result.get("ok") and not result.get("pay_required"):
         raise HTTPException(409, result.get("message") or "Capture failed")
     return result
@@ -3046,6 +3412,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "Receipt not found")
     data = public_session_payload(db, row)
+    external_pay = str(data.get("pay_endpoint") or "").startswith("/api/public/")
     remaining = float(data["amount_remaining"])
     paid = float(data["amount_paid"])
     due = float(data["amount_due"])
@@ -3094,6 +3461,8 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       <p class="muted">Paid {currency} {paid:,.0f} of {due:,.0f}.</p>
       <p class="muted">{image_note}</p>
       <p class="muted">Receipt code <code id="code">{token}</code></p>
+      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX"
+             class="{'' if external_pay else 'hidden'}" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #dfe5ef;border-radius:8px;margin-top:12px;font-size:16px;{'' if external_pay else 'display:none'}">
       <button class="btn" id="pay-mobile" {pay_disabled}>Pay on phone (mobile)</button>
       <a class="btn secondary" href="#kiosk">Pay at kiosk</a>
       <p id="msg" class="muted"></p>
@@ -3106,35 +3475,68 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     <p class="muted">Lost paper is OK — the plate is the identity. This page is the payment link encoded in the receipt QR.</p>
     <script>
       const token = {token!r};
+      const externalPay = {'true' if external_pay else 'false'};
       const payBtn = document.getElementById("pay-mobile");
+      const phoneInput = document.getElementById("phone");
       const msg = document.getElementById("msg");
+      let pendingSince = 0;
+      const statusUrl = externalPay
+        ? "/api/public/payment-status/" + encodeURIComponent(token)
+        : "/p/" + encodeURIComponent(token) + "/status";
       async function refresh() {{
-        const res = await fetch("/p/" + encodeURIComponent(token) + "/status");
+        const res = await fetch(statusUrl);
         if (!res.ok) return;
         const data = await res.json();
         document.getElementById("status").textContent = data.paid ? "PAID" : data.status;
         document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
         if (data.duration_label) document.getElementById("stay").textContent = data.duration_label;
-        payBtn.disabled = !data.payable;
+        const intent = data.intent || null;
+        const waiting = externalPay && intent && intent.status === "PENDING" && !data.paid;
+        payBtn.disabled = !data.payable || waiting;
         if (!data.payable) {{
           msg.textContent = data.pay_blocked_reason || (data.paid ? "Paid. You can leave when the exit camera reads your plate." : "Nothing to pay.");
           msg.className = data.paid ? "ok" : "muted";
+        }} else if (waiting) {{
+          msg.textContent = "Approve the payment prompt on your phone. This page updates when the provider confirms.";
+          msg.className = "muted";
+        }} else if (externalPay && intent && ["FAILED", "EXPIRED", "BLOCKED", "MISMATCH"].includes(intent.status) && pendingSince) {{
+          msg.textContent = intent.status === "MISMATCH"
+            ? "Payment needs staff review at the kiosk."
+            : ("Payment was not completed" + (intent.message ? " (" + intent.message + ")" : "") + ". Try again or pay at the kiosk.");
+          msg.className = "muted";
+          pendingSince = 0;
         }}
       }}
       payBtn.addEventListener("click", async () => {{
         payBtn.disabled = true;
-        msg.textContent = "Confirming payment…";
         msg.className = "muted";
         try {{
-          const res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
-            method: "POST",
-            headers: {{"Content-Type": "application/json"}},
-            body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
-          }});
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.detail || "Payment failed");
-          msg.textContent = data.already_paid ? "Already paid." : "Payment recorded.";
-          msg.className = "ok";
+          let res, data;
+          if (externalPay) {{
+            const phone = (phoneInput && phoneInput.value || "").trim();
+            if (!phone) throw new Error("Enter the mobile number that will pay.");
+            msg.textContent = "Sending payment prompt to your phone…";
+            res = await fetch("/api/public/payment-intents", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify({{token: token, phone: phone}}),
+            }});
+            data = await res.json();
+            if (!res.ok) throw new Error(data.detail || data.error || "Payment could not be started");
+            if (data.already_paid) {{ msg.textContent = "Already paid."; msg.className = "ok"; }}
+            else {{ pendingSince = Date.now(); msg.textContent = "Approve the prompt on your phone. Waiting for confirmation…"; }}
+          }} else {{
+            msg.textContent = "Confirming payment…";
+            res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
+              method: "POST",
+              headers: {{"Content-Type": "application/json"}},
+              body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
+            }});
+            data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Payment failed");
+            msg.textContent = data.already_paid ? "Already paid." : "Payment recorded.";
+            msg.className = "ok";
+          }}
           await refresh();
         }} catch (err) {{
           msg.textContent = err.message || String(err);
@@ -3142,7 +3544,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
           payBtn.disabled = false;
         }}
       }});
-      setInterval(refresh, 5000);
+      setInterval(refresh, externalPay ? 3000 : 5000);
     </script>
     </main></body></html>"""
     return HTMLResponse(html)
@@ -3173,6 +3575,12 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     method = (payload.method or "MOBILE_SIMULATED").strip().upper()
     if method in {"KIOSK_CASH", "CASH", "KIOSK"}:
         raise HTTPException(401, "Kiosk cash requires a signed-in operator. Open Sessions and pay there, or POST /p/{token}/kiosk-pay.")
+    from app.services import mobile_payments
+
+    if mobile_payments.active_mobile_provider_id() in mobile_payments.external_provider_ids():
+        # A real aggregator is configured: the instant simulated path must not
+        # be reachable from a browser. Money only moves via payment intents.
+        raise HTTPException(409, "Mobile payments use POST /api/public/payment-intents on this site.")
     try:
         result = await pay_public_session(db, row, method=method, amount=payload.amount)
     except ValueError as exc:
@@ -3180,6 +3588,84 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     except Exception as exc:
         raise HTTPException(502, str(exc))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Narrow public payment surface (tunnel-exposed). Everything else stays LAN.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/public/payment-intents")
+async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session = Depends(get_db)):
+    """Start a mobile-money collection for a receipt token.
+
+    Creates a PENDING PaymentIntent and asks the provider to push a USSD
+    prompt. Nothing is marked paid here; verification happens server-side.
+    """
+    from app.services import mobile_payments
+    from app.services.public_pay import session_by_public_token
+
+    row = session_by_public_token(db, payload.token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    provider_id = (payload.provider or "").strip().lower() or mobile_payments.active_mobile_provider_id()
+    if provider_id not in mobile_payments.external_provider_ids():
+        raise HTTPException(409, "No external mobile-money provider is active on this site.")
+    try:
+        result = await mobile_payments.start_mobile_payment(
+            db, row, phone=payload.phone, provider_id=provider_id, network=payload.network, amount=payload.amount,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result.get("ok"):
+        return JSONResponse(status_code=503, content={**result, "token": row.public_token})
+    return {**result, "token": row.public_token}
+
+
+@app.get("/api/public/payment-status/{token}")
+def public_payment_status(token: str, db: Session = Depends(get_db)):
+    """Read-only status for the phone page: session paid state + latest intent."""
+    from app.services import mobile_payments
+    from app.services.public_pay import public_session_payload, session_by_public_token
+
+    row = session_by_public_token(db, token)
+    if not row:
+        raise HTTPException(404, "Receipt not found")
+    body = public_session_payload(db, row)
+    latest = mobile_payments.latest_intent_for_session(db, row.id)
+    body["intent"] = mobile_payments.intent_dict(latest) if latest else None
+    body["mobile_provider"] = mobile_payments.active_mobile_provider_id()
+    return body
+
+
+@app.post("/api/webhooks/{provider_id}")
+async def payment_provider_webhook(provider_id: str, request: Request, db: Session = Depends(get_db)):
+    """Authenticated provider callback. Never opens a barrier; never trusts the body for money."""
+    from app.services import mobile_payments
+
+    if provider_id not in mobile_payments.external_provider_ids():
+        raise HTTPException(404, "Unknown provider")
+    raw = await request.body()
+    status, body = await mobile_payments.handle_webhook(
+        db, provider_id, raw_body=raw, headers={k.lower(): v for k, v in request.headers.items()},
+    )
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.get("/payments/health")
+def payments_health_ep(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view", "kiosk.use"))):
+    from app.services import mobile_payments
+    from app.services.public_ingress import describe as ingress_describe
+
+    return {**mobile_payments.payments_health(db), "public_ingress": ingress_describe()}
+
+
+@app.post("/payments/reconcile")
+async def payments_reconcile_ep(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "payments.create"))):
+    """Operator-triggered reconciliation (same code path as the background job)."""
+    from app.services import mobile_payments
+
+    return await mobile_payments.reconcile_pending(db=db)
 
 
 @app.post("/p/{token}/kiosk-pay")
@@ -3277,8 +3763,9 @@ def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     path = Path(row.qr_path) if row and row.qr_path else None
     if path and path.exists():
         return FileResponse(path, media_type="image/png")
-    from app.services.receipts import _qr_png, public_receipt_url
-    png = _qr_png(public_receipt_url(token))
+    from app.domain.receipt_engine import session_qr_payload
+    from app.services.receipts import _qr_png, resolve_public_base_url
+    png = _qr_png(session_qr_payload(token, base_url=resolve_public_base_url(db)))
     if not png:
         raise HTTPException(404, "QR not available")
     return Response(content=png, media_type="image/png")

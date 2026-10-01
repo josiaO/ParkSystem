@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.domain.receipt_engine import render_entry_receipt, session_qr_payload
 from app.infrastructure.hardware.printers import ReceiptDocument, printer_adapter, qr_png_bytes
 from app.models import Gate, ParkingSession, Receipt, utcnow
 
@@ -68,45 +69,41 @@ def _qr_png(payload: str) -> bytes:
     return qr_png_bytes(payload)
 
 
+def _base_from_public_url(public_url: str) -> str:
+    text = (public_url or "").strip().rstrip("/")
+    for marker in ("/p/", "/s/"):
+        if marker in text:
+            return text.rsplit(marker, 1)[0]
+    return text
+
+
 def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -> ReceiptDocument:
     when = (row.entry_time or utcnow()).strftime("%d %b %Y %H:%M")
-    gate_name = gate.name if gate else (row.lane_direction or "")
+    lane = gate.name if gate else (row.lane_direction or "")
     token = row.public_token or ""
-    site = settings.site_name or settings.app_name
-    lines = [
-        site,
-        "PARKING ENTRY",
-        "",
-        f"Plate: {row.plate}",
-        f"Entry: {when}",
-        f"Gate: {gate_name}",
-        f"Reference: {token}",
-        "",
-        "Scan the QR code to open the payment page on your phone,",
-        "or show this code at the kiosk.",
-        "",
-        "You can also pay at the kiosk.",
-        "Lost paper is OK — the plate is the identity.",
-    ]
-    if public_url:
-        lines.append(public_url)
-    if token:
-        lines.append(f"Code: {token}")
-    body = "\n".join(lines) + "\n"
-    qr_target = public_url or token
-    qr_png = _qr_png(qr_target)
-    return ReceiptDocument(
+    qr_payload = session_qr_payload(token, base_url=_base_from_public_url(public_url) or resolve_public_base_url())
+    content = render_entry_receipt(
         site_name=settings.site_name or settings.app_name,
         plate=row.plate,
         entry_time=when,
-        entry_gate=gate_name,
-        public_reference=token,
-        public_url=public_url,
-        payment_instructions="Scan the QR to pay on your phone, or scan it at the kiosk for cash.",
-        body_text=body,
-        qr_payload=qr_target,
-        qr_png=qr_png,
-        lines=lines,
+        entry_lane=lane,
+        human_reference=row.human_reference or "",
+        qr_payload=qr_payload,
+        tariff_rules=row.tariff_rules if isinstance(row.tariff_rules, dict) else None,
+        plate_status=row.plate_status,
+    )
+    return ReceiptDocument(
+        site_name=content.site_name,
+        plate=content.plate,
+        entry_time=content.entry_time,
+        entry_gate=content.entry_lane,
+        public_reference=content.human_reference,
+        public_url=content.qr_payload,
+        payment_instructions=content.free_period,
+        body_text=content.body_text,
+        qr_payload=content.qr_payload,
+        qr_png=_qr_png(content.qr_payload),
+        lines=content.lines,
     )
 
 

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.plate import correct_ocr_confusions, normalize_plate, plate_similarity
-from app.models import AccessPlan, RegisteredVehicle, utcnow
+from app.models import AccessPlan, RegisteredVehicle, as_utc, utcnow
 
 REGISTERED_FUZZY_MIN = 0.85
 
@@ -49,9 +49,12 @@ def ensure_access_plans(db: Session) -> list[AccessPlan]:
 
 
 def _in_window(vehicle: RegisteredVehicle, at: datetime) -> bool:
-    if vehicle.valid_from and vehicle.valid_from > at:
+    now_ts = (as_utc(at) or utcnow()).timestamp()
+    start = as_utc(vehicle.valid_from)
+    finish = as_utc(vehicle.valid_until)
+    if start is not None and start.timestamp() > now_ts:
         return False
-    if vehicle.valid_until and vehicle.valid_until < at:
+    if finish is not None and finish.timestamp() < now_ts:
         return False
     return True
 
@@ -90,7 +93,10 @@ def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -
             row.plate
             for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))).all()
         ]
-        fixed = correct_ocr_confusions(plate, known_plates=known)
+        from app.services.site_policy import site_policy
+
+        validation = str(site_policy(db).get("plate_validation") or "NONE")
+        fixed = correct_ocr_confusions(plate, known_plates=known, policy=validation)
         if fixed.get("plate") and fixed["plate"] != plate:
             vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == fixed["plate"]))
     if vehicle is None:
