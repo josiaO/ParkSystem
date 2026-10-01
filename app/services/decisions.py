@@ -64,6 +64,14 @@ def record_gate_command(
     key = command_uuid or str(uuid.uuid4())
     existing = db.scalar(select(GateCommandRecord).where(GateCommandRecord.command_uuid == key))
     if existing is not None:
+        # Same command UUID is one logical command. A retry may improve a
+        # previously failed/pending outcome, but it never creates a second row.
+        if bool(ok) and not existing.ok:
+            existing.ok = True
+            existing.message = message or existing.message
+            existing.dry_run = bool(dry_run)
+            db.commit()
+            db.refresh(existing)
         return existing
     row = GateCommandRecord(
         command_uuid=key,
