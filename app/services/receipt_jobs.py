@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.domain.parking_engine import LanePolicy, RECEIPT_PRESENTED, RECEIPT_PRINTING, RECEIPT_TAKEN
 from app.domain.receipt_engine import (
+    CAP_TAKEN_SENSOR,
     JOB_ASSISTANCE,
     JOB_FAILED,
     JOB_OVERRIDE,
@@ -146,10 +147,7 @@ async def print_entry_receipt(
     if first and policy.receipt_required_before_open:
         current = row.lifecycle or ""
         if current in {"SESSION_CREATED", ""}:
-            try:
-                advance(db, row, RECEIPT_PRINTING, policy=policy)
-            except Exception:
-                pass
+            advance(db, row, RECEIPT_PRINTING, policy=policy)
     document = _document_for(db, row)
     outcome = await printer.print_entry_receipt(document, job_id=row.print_job_id)
     _record_receipt(db, row, document, outcome, job_id=row.print_job_id)
@@ -172,10 +170,7 @@ async def print_entry_receipt(
     _set_job(row, JOB_PRESENTED)
     row.receipt_status = "PRINTED"
     row.receipt_printed_at = row.receipt_printed_at or utcnow()
-    try:
-        advance(db, row, RECEIPT_PRESENTED, policy=policy)
-    except Exception:
-        row.lifecycle = RECEIPT_PRESENTED
+    advance(db, row, RECEIPT_PRESENTED, policy=policy)
     db.commit()
     db.refresh(row)
     return {
@@ -196,10 +191,7 @@ async def mark_receipt_presented(db: Session, row: ParkingSession, *, policy: La
     _set_job(row, JOB_PRESENTED)
     row.receipt_status = "PRINTED"
     row.receipt_printed_at = row.receipt_printed_at or utcnow()
-    try:
-        advance(db, row, RECEIPT_PRESENTED, policy=policy or LanePolicy(receipt_required_before_open=True))
-    except Exception:
-        pass
+    advance(db, row, RECEIPT_PRESENTED, policy=policy or LanePolicy(receipt_required_before_open=True))
     db.commit()
     db.refresh(row)
     return row
@@ -211,17 +203,32 @@ async def mark_receipt_taken(
     *,
     printer=None,
     policy: LanePolicy | None = None,
+    sensor_confirmed: bool = False,
 ) -> ParkingSession:
+    """Persist TAKEN only from a proven sensor event or the explicit simulator.
+
+    Generic ESC/POS/Windows printers cannot prove that the driver physically
+    removed the ticket. A separate presenter/taken sensor can call this method
+    with sensor_confirmed=True after its hardware edge is verified.
+    """
     if _job_state(row) == JOB_TAKEN:
         return row
+
+    capabilities = frozenset(getattr(printer, "capabilities", frozenset())) if printer is not None else frozenset()
     if printer is not None and hasattr(printer, "simulate_taken"):
+        # Development-only adapter: emulate the same hardware event contract.
         printer.simulate_taken()
-        requires_sensor = bool((policy or LanePolicy(receipt_required_before_open=True)).receipt_required_before_open)
-        if requires_sensor:
-            try:
-                await printer.wait_until_taken(timeout_seconds=0.1)
-            except TimeoutError as exc:
-                raise InvalidPrintJob(str(exc)) from exc
+
+    if CAP_TAKEN_SENSOR in capabilities:
+        try:
+            await printer.wait_until_taken(timeout_seconds=0.1)
+        except TimeoutError as exc:
+            raise InvalidPrintJob(str(exc)) from exc
+    elif not sensor_confirmed:
+        raise InvalidPrintJob(
+            "receipt removal was not confirmed by a taken sensor; gate must remain closed"
+        )
+
     _set_job(row, JOB_TAKEN)
     row.receipt_status = "TAKEN"
     row.receipt_taken_at = row.receipt_taken_at or utcnow()
