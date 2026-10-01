@@ -362,6 +362,8 @@ def start_exit(
     row.lane_direction = "EXIT"
     db.commit()
     db.refresh(row)
+    if _current(row) == DENIED_PAYMENT_REQUIRED:
+        row = advance(db, row, TARIFF_CALCULATED, policy=policy)
     if _current(row) == EXIT_VEHICLE_DETECTED:
         row = advance(db, row, SESSION_RESOLVED, policy=policy)
     if _current(row) == SESSION_RESOLVED:
