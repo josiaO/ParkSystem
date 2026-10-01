@@ -161,6 +161,7 @@ def start_entry(
         plate_raw=(plate_raw or plate)[:32],
         plate_status="RESOLVED",
         gate_id=gate_id,
+        entry_gate_id=gate_id,
         camera_id=camera_id,
         entry_lane_id=lane_id,
         lane_direction="ENTRY",
@@ -357,7 +358,7 @@ def start_exit(
     row.exit_lane_id = lane_id if lane_id is not None else row.exit_lane_id
     row.exit_camera_id = camera_id if camera_id is not None else row.exit_camera_id
     if gate_id is not None:
-        row.gate_id = gate_id
+        row.exit_gate_id = gate_id
     row.lane_direction = "EXIT"
     db.commit()
     db.refresh(row)
@@ -383,9 +384,9 @@ def complete_authorized_exit(db: Session, row: ParkingSession, *, policy: LanePo
     if _current(row) == AUTHORIZED:
         row = advance(db, row, EXIT_GATE_OPEN_REQUESTED, policy=policy)
     if command_uuid:
-        if row.open_command_uuid == command_uuid and _current(row) in {CLOSED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED}:
+        if row.exit_open_command_uuid == command_uuid and _current(row) in {CLOSED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED}:
             return row
-        row.open_command_uuid = command_uuid
+        row.exit_open_command_uuid = command_uuid
         db.commit()
     if policy.passage_fallback() and _current(row) == EXIT_GATE_OPEN_REQUESTED:
         return advance(db, row, CLOSED, policy=policy)
@@ -406,6 +407,8 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "entry_lane_id": row.entry_lane_id,
         "exit_lane_id": row.exit_lane_id,
         "gate_id": row.gate_id,
+        "entry_gate_id": getattr(row, "entry_gate_id", None),
+        "exit_gate_id": getattr(row, "exit_gate_id", None),
         "camera_id": row.camera_id,
         "simulated": bool(row.simulated),
         "entry_event_id": row.entry_event_id,
@@ -418,4 +421,5 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "parker_kind": row.parker_kind,
         "receipt_status": row.receipt_status,
         "open_command_uuid": row.open_command_uuid,
+        "exit_open_command_uuid": getattr(row, "exit_open_command_uuid", ""),
     }
