@@ -84,3 +84,31 @@ async def handle_live_entry(
         simulated=False,
         source=source,
     )
+
+
+async def handle_live_exit(
+    db: Session,
+    *,
+    camera: Camera,
+    capture: VehicleCapture,
+    gate: Gate | None,
+    source: str = "camera",
+) -> dict:
+    """Route a persisted real-camera exit capture into ExitLaneController."""
+    from app.application.exit_lane import ExitLaneController
+
+    cfg = parking_settings(db)
+    policy = policy_from_parking_settings(cfg)
+    controller = ExitLaneController()
+    return await controller.submit_plate(
+        db,
+        plate=str(capture.plate or ""),
+        event_id=str(capture.event_id or f"capture-{capture.id}"),
+        site_id=int(camera.site_id),
+        gate=gate,
+        camera=camera,
+        lane_id=camera.lane_id,
+        policy=policy,
+        occupied=True,
+        source=source,
+    )
