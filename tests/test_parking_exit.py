@@ -201,6 +201,30 @@ class ExitLaneTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_second_exit_event_does_not_double_open(self):
+        async def run():
+            now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
+            opener = FakeOpener()
+            ctrl = ExitLaneController(opener=opener)
+            policy = LanePolicy(passage_sensing=PASSAGE_WAIT)
+            with self.Session() as db:
+                row = self._active(db, "T550EEE", now - timedelta(minutes=10))
+                first = await ctrl.submit_plate(
+                    db, plate=row.plate, event_id="exit-owner", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20,
+                    at=now, policy=policy,
+                )
+                self.assertTrue(first["barrier_opened"])
+                second = await ctrl.submit_plate(
+                    db, plate=row.plate, event_id="exit-other-frame", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20,
+                    at=now + timedelta(seconds=1), policy=policy,
+                )
+                self.assertTrue(second.get("duplicate"))
+                self.assertEqual(len(opener.calls), 1)
+
+        asyncio.run(run())
+
     def test_same_qr_is_exit_fallback(self):
         async def run():
             now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
