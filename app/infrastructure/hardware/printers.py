@@ -634,11 +634,11 @@ class EscPosPrinterAdapter:
         host = (settings.printer_escpos_host or "").strip()
         if not host:
             return PrintResult(
-                ok=True,
+                ok=False,
                 adapter_id=self.id,
-                status="READY",
-                message=f"Receipt stored at {path}. Set SMARTPARK_PRINTER_ESCPOS_HOST to send to paper.",
-                simulated=True,
+                status="NOT_CONFIGURED",
+                message=f"Receipt archived at {path}, but no ESC/POS host is configured.",
+                simulated=False,
                 path=path,
             )
         try:
@@ -657,11 +657,11 @@ class EscPosPrinterAdapter:
             )
         except Exception as exc:
             return PrintResult(
-                ok=True,
+                ok=False,
                 adapter_id=self.id,
-                status="READY",
-                message=f"Receipt stored at {path}; printer send failed: {exc}",
-                simulated=True,
+                status="FAILED",
+                message=f"Receipt archived at {path}; physical printer send failed: {exc}",
+                simulated=False,
                 path=path,
             )
 
@@ -692,11 +692,11 @@ class SystemPrinterAdapter:
         name = self.printer_name
         if not name:
             return PrintResult(
-                ok=True,
+                ok=False,
                 adapter_id=self.id,
-                status="READY",
-                message=f"Receipt stored at {path}. Select a thermal printer in Settings.",
-                simulated=True,
+                status="NOT_CONFIGURED",
+                message=f"Receipt archived at {path}, but no physical printer is selected.",
+                simulated=False,
                 path=path,
             )
         payload = escpos_bytes(document)
@@ -715,11 +715,11 @@ class SystemPrinterAdapter:
             )
         except Exception as exc:
             return PrintResult(
-                ok=True,
+                ok=False,
                 adapter_id=self.id,
-                status="READY",
-                message=f"Receipt stored at {path}; printer send failed: {exc}",
-                simulated=True,
+                status="FAILED",
+                message=f"Receipt archived at {path}; physical printer send failed: {exc}",
+                simulated=False,
                 path=path,
             )
 

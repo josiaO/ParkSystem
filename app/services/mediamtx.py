@@ -58,11 +58,14 @@ def path_plan(camera_id: int, source: dict[str, Any] | None = None) -> list[dict
     camera_id = int(camera_id)
     row = source if source is not None else (_sources.get(camera_id) or {})
     live, detect, evidence = _source_uris(row)
+    transport = str(row.get("transport") or "TCP").lower()
+    if transport not in {"tcp", "udp", "auto"}:
+        transport = "tcp"
     plan: list[dict[str, Any]] = [
-        {"name": live_path_name(camera_id), "uri": live, "roles": [ROLE_LIVE], "on_demand": False},
+        {"name": live_path_name(camera_id), "uri": live, "roles": [ROLE_LIVE], "on_demand": False, "transport": transport},
     ]
     if detect and detect != live:
-        plan.append({"name": detect_path_name(camera_id), "uri": detect, "roles": [ROLE_DETECT], "on_demand": False})
+        plan.append({"name": detect_path_name(camera_id), "uri": detect, "roles": [ROLE_DETECT], "on_demand": False, "transport": transport})
     else:
         plan[0]["roles"].append(ROLE_DETECT)
     if evidence:
@@ -70,7 +73,7 @@ def path_plan(camera_id: int, source: dict[str, Any] | None = None) -> list[dict
         if shared is not None:
             shared["roles"].append(ROLE_EVIDENCE)
         else:
-            plan.append({"name": evidence_path_name(camera_id), "uri": evidence, "roles": [ROLE_EVIDENCE], "on_demand": True})
+            plan.append({"name": evidence_path_name(camera_id), "uri": evidence, "roles": [ROLE_EVIDENCE], "on_demand": True, "transport": transport})
     return plan
 
 
@@ -141,7 +144,7 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
             if uri.startswith("rtsp://"):
                 lines.append(f"    source: {uri}")
                 lines.append(f"    sourceOnDemand: {'yes' if item['on_demand'] else 'no'}")
-                lines.append("    rtspTransport: tcp")
+                lines.append(f"    rtspTransport: {item.get('transport') or 'tcp'}")
             else:
                 lines.append("    source: publisher")
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -215,9 +218,12 @@ def stop() -> None:
         proc.kill()
 
 
-def _path_conf(uri: str, *, on_demand: bool = False) -> dict[str, Any]:
+def _path_conf(uri: str, *, on_demand: bool = False, transport: str = "tcp") -> dict[str, Any]:
+    chosen = str(transport or "tcp").lower()
+    if chosen not in {"tcp", "udp", "auto"}:
+        chosen = "tcp"
     if str(uri).startswith("rtsp://"):
-        return {"source": uri, "sourceOnDemand": bool(on_demand), "rtspTransport": "tcp"}
+        return {"source": uri, "sourceOnDemand": bool(on_demand), "rtspTransport": chosen}
     return {"source": "publisher"}
 
 
@@ -244,8 +250,8 @@ def _control_api(method: str, path: str, body: dict[str, Any] | None = None) -> 
         return None
 
 
-def _upsert_path(name: str, uri: str, *, on_demand: bool = False) -> int | None:
-    conf = _path_conf(uri, on_demand=on_demand)
+def _upsert_path(name: str, uri: str, *, on_demand: bool = False, transport: str = "tcp") -> int | None:
+    conf = _path_conf(uri, on_demand=on_demand, transport=transport)
     status = _control_api("POST", f"/v3/config/paths/add/{name}", conf)
     if status == 400:
         status = _control_api("POST", f"/v3/config/paths/replace/{name}", conf)
@@ -265,7 +271,11 @@ def sync_paths() -> bool:
     for camera_id, source in sorted(_sources.items()):
         planned = path_plan(camera_id, source)
         for item in planned:
-            status = _upsert_path(item["name"], item["uri"], on_demand=item["on_demand"])
+            status = _upsert_path(
+                item["name"], item["uri"],
+                on_demand=item["on_demand"],
+                transport=item.get("transport") or "tcp",
+            )
             if status is None or status >= 400:
                 ok = False
         # Roles that were split earlier but now share an upstream must not leave a

@@ -200,7 +200,7 @@ def _load_engine():
             models = ensure_alpr_model_cache()
             kwargs = {
                 "detector_model": DETECTOR_MODEL,
-                "detector_conf_thresh": 0.15,
+                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.18) or 0.18),
                 "ocr_device": "cpu",
                 "detector_providers": ["CPUExecutionProvider"],
                 "ocr_providers": ["CPUExecutionProvider"],
@@ -269,11 +269,9 @@ def decode_alpr_image(data: bytes):
     width, height = img.size
     min_side = min(width, height)
     max_side = max(width, height)
-    if min_side < 720:
-        scale = 720 / float(min_side)
-        img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
-        width, height = img.size
-        max_side = max(width, height)
+    # Do not enlarge the full vehicle frame. The detector resizes internally;
+    # upscaling the whole frame burns CPU without creating plate detail. Only the
+    # detected plate crop is enlarged before OCR.
     if max_side > 1920:
         scale = 1920 / float(max_side)
         img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
@@ -327,7 +325,7 @@ def _prepare_ocr_crop(crop_bgr):
         return crop_bgr
     h, w = crop_bgr.shape[:2]
     # OCR models like ~a few hundred px wide plates.
-    target_w = 320
+    target_w = int(getattr(settings, "alpr_ocr_target_width", 320) or 320)
     if w < target_w:
         scale = target_w / float(max(w, 1))
         crop_bgr = cv2.resize(
@@ -441,7 +439,11 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
         bbox = getattr(detection, "bounding_box", None)
         if bbox is None:
             continue
-        crop, _xy = _crop_bgr(bgr, bbox, pad_ratio=0.18)
+        crop, _xy = _crop_bgr(
+            bgr,
+            bbox,
+            pad_ratio=float(getattr(settings, "alpr_crop_padding_ratio", 0.18) or 0.18),
+        )
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
         ocr_input = _prepare_ocr_crop(crop)
@@ -501,6 +503,60 @@ def _hits_from_predict(rows, crop_source: str) -> list[PlateHit]:
             )
         )
     return hits
+
+
+def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop") -> dict:
+    """OCR a JPEG that is already a plate crop, skipping full-frame detection.
+
+    Native ALPR cameras often provide a plate JPEG alongside the vehicle image.
+    Re-reading that crop is the cheapest ParkWatch-style software verification:
+    camera event -> plate crop -> FastPlateOCR. Generic cameras still use the
+    detector-first path because they do not know the plate box.
+    """
+    started = time.monotonic()
+    if not jpeg or not fastalpr_installed():
+        return {"ok": False, "backend": "none", "plates": [], "detail": "plate crop unavailable"}
+    try:
+        bgr = decode_alpr_image(jpeg)
+        engine = _load_engine()
+        ocr_input = _prepare_ocr_crop(bgr)
+        ocr = engine.ocr.predict(ocr_input)
+        text, conf = _ocr_result_text(ocr)
+        plate, _rank = _apply_country_profile(text, conf)
+        if len(plate) < MIN_PLATE_CHARS:
+            return {
+                "ok": True, "backend": "fastalpr", "pipeline": "crop_ocr",
+                "plates": [], "best": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "detail": "no readable plate in crop",
+            }
+        hit = PlateHit(
+            plate_raw=text,
+            plate_normalized=plate,
+            plate_confidence=max(0.0, min(float(conf or 0), 1.0)),
+            plate_crop_path=_save_crop_bgr(bgr),
+            bbox=None,
+        )
+        return {
+            "ok": True,
+            "backend": "fastalpr",
+            "pipeline": "crop_ocr",
+            "plates": [hit.as_dict()],
+            "count": 1,
+            "best": hit.as_dict(),
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "detail": "plate crop OCR",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "backend": "fastalpr",
+            "pipeline": "crop_ocr",
+            "plates": [],
+            "best": None,
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "detail": str(exc),
+        }
 
 
 def recognize_bgr(bgr, *, crop_source: str) -> tuple[list[PlateHit], dict]:

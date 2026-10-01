@@ -87,6 +87,7 @@ class LanePolicy:
     """
 
     receipt_required_before_open: bool = False
+    print_receipt_on_entry: bool = False
     passage_sensing: str = PASSAGE_OPEN_COUNTS
     subscriber_skip_receipt: bool = True
 

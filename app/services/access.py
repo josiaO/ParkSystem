@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.plate import correct_ocr_confusions, normalize_plate, plate_similarity
+from app.domain.site import DEFAULT_SITE_ID
 from app.models import AccessPlan, RegisteredVehicle, as_utc, utcnow
 
 REGISTERED_FUZZY_MIN = 0.85
@@ -38,14 +39,18 @@ class Entitlement:
         return self.kind != "CASUAL" and self.vehicle_id is not None
 
 
-def ensure_access_plans(db: Session) -> list[AccessPlan]:
-    rows = list(db.scalars(select(AccessPlan).order_by(AccessPlan.id)).all())
+def ensure_access_plans(db: Session, *, site_id: int = DEFAULT_SITE_ID) -> list[AccessPlan]:
+    rows = list(db.scalars(
+        select(AccessPlan).where(AccessPlan.site_id == site_id).order_by(AccessPlan.id)
+    ).all())
     if rows:
         return rows
     for spec in DEFAULT_PLANS:
-        db.add(AccessPlan(**spec))
+        db.add(AccessPlan(site_id=site_id, **spec))
     db.commit()
-    return list(db.scalars(select(AccessPlan).order_by(AccessPlan.id)).all())
+    return list(db.scalars(
+        select(AccessPlan).where(AccessPlan.site_id == site_id).order_by(AccessPlan.id)
+    ).all())
 
 
 def _in_window(vehicle: RegisteredVehicle, at: datetime) -> bool:
@@ -65,12 +70,16 @@ def _fuzzy_match_vehicle(
     *,
     at: datetime | None = None,
     min_similarity: float = REGISTERED_FUZZY_MIN,
+    site_id: int = DEFAULT_SITE_ID,
 ) -> RegisteredVehicle | None:
     """Match OCR reads that are close to a saved plate (1–2 character edits)."""
     now = at or utcnow()
     best: RegisteredVehicle | None = None
     best_score = 0.0
-    for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))):
+    for row in db.scalars(select(RegisteredVehicle).where(
+        RegisteredVehicle.site_id == site_id,
+        RegisteredVehicle.enabled.is_(True),
+    )):
         if not _in_window(row, now):
             continue
         plan = row.plan
@@ -83,24 +92,45 @@ def _fuzzy_match_vehicle(
     return best
 
 
-def lookup_entitlement(db: Session, plate: str, *, at: datetime | None = None) -> Entitlement:
+def lookup_entitlement(
+    db: Session,
+    plate: str,
+    *,
+    at: datetime | None = None,
+    site_id: int = DEFAULT_SITE_ID,
+    strict: bool = False,
+) -> Entitlement:
     plate = normalize_plate(plate)
     if not plate:
         return Entitlement()
-    vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == plate))
+    vehicle = db.scalar(select(RegisteredVehicle).where(
+        RegisteredVehicle.site_id == site_id,
+        RegisteredVehicle.plate == plate,
+    ))
+    if vehicle is None and strict:
+        # Automatic barrier authority must not be granted from a fuzzy plate
+        # guess. Recognition may reach a stable exact plate before calling us;
+        # otherwise the vehicle follows the normal casual/operator fallback.
+        return Entitlement(plate=plate)
     if vehicle is None:
         known = [
             row.plate
-            for row in db.scalars(select(RegisteredVehicle).where(RegisteredVehicle.enabled.is_(True))).all()
+            for row in db.scalars(select(RegisteredVehicle).where(
+                RegisteredVehicle.site_id == site_id,
+                RegisteredVehicle.enabled.is_(True),
+            )).all()
         ]
         from app.services.site_policy import site_policy
 
         validation = str(site_policy(db).get("plate_validation") or "NONE")
         fixed = correct_ocr_confusions(plate, known_plates=known, policy=validation)
         if fixed.get("plate") and fixed["plate"] != plate:
-            vehicle = db.scalar(select(RegisteredVehicle).where(RegisteredVehicle.plate == fixed["plate"]))
+            vehicle = db.scalar(select(RegisteredVehicle).where(
+                RegisteredVehicle.site_id == site_id,
+                RegisteredVehicle.plate == fixed["plate"],
+            ))
     if vehicle is None:
-        vehicle = _fuzzy_match_vehicle(db, plate, at=at)
+        vehicle = _fuzzy_match_vehicle(db, plate, at=at, site_id=site_id)
     if vehicle is None or not vehicle.enabled:
         return Entitlement(plate=plate)
     now = at or utcnow()

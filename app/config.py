@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     alpr_timeout_seconds: float = 15.0
     alpr_country: str = ""
     alpr_csf: float = 0.918
+    alpr_detector_confidence: float = 0.18
+    alpr_crop_padding_ratio: float = 0.18
+    alpr_ocr_target_width: int = 320
     default_hvx_sdk_port: int = 30000
     bootstrap_username: str = "admin"
     bootstrap_password: str = ""
@@ -67,6 +70,9 @@ class Settings(BaseSettings):
     # legacy instant path; flutterwave / clickpesa create PENDING intents that
     # only become SUCCEEDED after server-side verification.
     payments_mobile_provider: str = "simulated"
+    # Browser-triggered fake payments are for explicit development only. A real
+    # deployment must never let a public receipt URL mint SUCCEEDED ledger rows.
+    allow_public_simulated_payments: bool = False
     # ClickPesa has no sandbox. A live collection is refused unless BOTH flags
     # below are set explicitly by the operator (LIVE_PROVIDER_CONFIRMATION_REQUIRED).
     payments_live_provider_confirmation_required: bool = True
@@ -162,6 +168,22 @@ class Settings(BaseSettings):
         if not 0.2 <= seconds <= 30.0:
             raise ValueError("SMARTPARK_RECOGNITION_CONSENSUS_WINDOW_SECONDS must be between 0.2 and 30")
         return seconds
+
+    @field_validator("alpr_detector_confidence", "alpr_crop_padding_ratio")
+    @classmethod
+    def _alpr_fraction(cls, value: float) -> float:
+        score = float(value)
+        if not 0.0 <= score <= 1.0:
+            raise ValueError("ALPR detector/crop ratios must be between 0 and 1")
+        return score
+
+    @field_validator("alpr_ocr_target_width")
+    @classmethod
+    def _alpr_crop_width(cls, value: int) -> int:
+        width = int(value)
+        if not 96 <= width <= 1024:
+            raise ValueError("SMARTPARK_ALPR_OCR_TARGET_WIDTH must be between 96 and 1024")
+        return width
 
     @field_validator("recognition_high_confidence", "recognition_medium_confidence")
     @classmethod

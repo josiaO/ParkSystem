@@ -91,7 +91,11 @@ class SimulatedKioskPrinter:
 class HardwareReceiptPrinter:
     """USB/LAN thermal wrap. Does not invent a taken sensor."""
 
-    capabilities = frozenset({CAP_CUTTER, CAP_PAPER_STATUS})
+    # Generic Windows/LAN ESC/POS paths can submit print jobs and cut, but
+    # they do not prove paper-present or receipt-taken state. Hardware with
+    # those sensors must provide a dedicated adapter instead of advertising
+    # capabilities it cannot query.
+    capabilities = frozenset({CAP_CUTTER})
 
     def __init__(self, adapter_id: str | None = None, printer_name: str | None = None) -> None:
         self._inner = printer_adapter(adapter_id, printer_name=printer_name)
@@ -112,12 +116,15 @@ class HardwareReceiptPrinter:
         health = await self._inner.health()
         printers = health.get("printers") or []
         offline = any(row.get("offline") for row in printers if isinstance(row, dict))
+        online = bool(health.get("ok", True)) and not offline
         return PrinterStatus(
-            online=bool(health.get("ok", True)) and not offline,
+            online=online,
+            # Unknown, not measured. Keep the compatibility field true while the
+            # capability set truthfully omits PAPER_STATUS.
             paper_ok=True,
             presented=False,
             taken=False,
-            error="" if health.get("ok", True) else str(health.get("note") or "offline"),
+            error="" if online else str(health.get("note") or "offline"),
             capabilities=self.capabilities,
         )
 
