@@ -232,9 +232,12 @@ class EntryLaneController:
         policy: LanePolicy | None = None,
         gate: Gate | None = None,
         camera: Camera | None = None,
+        sensor_confirmed: bool = False,
     ) -> dict[str, Any]:
         policy = policy or LanePolicy(receipt_required_before_open=True)
-        await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
+        await mark_receipt_taken(
+            db, row, printer=self._printer(), policy=policy, sensor_confirmed=sensor_confirmed,
+        )
         db.refresh(row)
         entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id)
         return await self._authorize_and_open(
