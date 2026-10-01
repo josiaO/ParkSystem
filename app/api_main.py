@@ -2137,9 +2137,9 @@ async def correct_camera_plate(
             db, camera=camera, capture=row, gate=gate, source="operator-correction",
         )
     else:
-        result = await handle_plate_event(
-            db, plate=chosen, gate=gate, side=side, simulated=False,
-            alpr=capture_dict(row), source="operator-correction", camera=camera,
+        from .application.live_parking import handle_live_exit
+        result = await handle_live_exit(
+            db, camera=camera, capture=row, gate=gate, source="operator-correction",
         )
     last = capture_dict(row)
     remember_last_car(camera.id, last)
@@ -2318,13 +2318,9 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                     db, camera=camera, capture=row, gate=gate, source=source_name,
                 )
             else:
-                ent = lookup_entitlement(db, row.plate, site_id=camera.site_id)
-                event_plate = ent.plate if ent.registered else row.plate
-                result = await handle_plate_event(
-                    db, plate=event_plate, gate=gate, side=side,
-                    simulated=False, alpr=capture,
-                    source=source_name,
-                    camera=camera,
+                from .application.live_parking import handle_live_exit
+                result = await handle_live_exit(
+                    db, camera=camera, capture=row, gate=gate, source=source_name,
                 )
             if result.get("session") and latest:
                 session_id = (result["session"] or {}).get("id")
@@ -2589,27 +2585,24 @@ async def _outbox_loop():
                             continue
                         side = str(payload.get("side") or "ENTRY").upper()
                         capture_id = int(payload.get("capture_id") or 0)
-                        if side == "ENTRY" and camera is not None and capture_id:
+                        if camera is not None and capture_id:
                             capture_row = db.get(VehicleCapture, capture_id)
                             if capture_row is None or capture_row.camera_id != camera.id:
                                 box.ack(item["id"])
                                 continue
-                            from .application.live_parking import handle_live_entry
-                            await handle_live_entry(
-                                db, camera=camera, capture=capture_row, gate=gate, source="outbox",
-                            )
+                            if side == "ENTRY":
+                                from .application.live_parking import handle_live_entry
+                                await handle_live_entry(
+                                    db, camera=camera, capture=capture_row, gate=gate, source="outbox",
+                                )
+                            else:
+                                from .application.live_parking import handle_live_exit
+                                await handle_live_exit(
+                                    db, camera=camera, capture=capture_row, gate=gate, source="outbox",
+                                )
                         else:
-                            # EXIT remains on the legacy orchestrator until the
-                            # Phase-6 ExitLaneController replaces it.
-                            await handle_plate_event(
-                                db,
-                                plate=str(payload.get("plate") or ""),
-                                gate=gate,
-                                side=side,
-                                simulated=False,
-                                source="outbox",
-                                camera=camera,
-                            )
+                            box.ack(item["id"])
+                            continue
                     box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
                     box.note_failure()
