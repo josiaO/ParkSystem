@@ -256,7 +256,7 @@ class EntryLaneController:
         command_uuid: str = "",
     ) -> dict[str, Any]:
         policy = policy or LanePolicy(receipt_required_before_open=True)
-        entitlement = lookup_entitlement(db, row.plate)
+        entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id)
         return await self._authorize_and_open(
             db, row, gate=gate or (db.get(Gate, row.gate_id) if row.gate_id else None),
             camera=camera, policy=policy, entitlement=entitlement, source="gate_retry",
