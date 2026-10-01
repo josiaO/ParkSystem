@@ -282,7 +282,7 @@ async def handle_plate_event(
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
-    entitlement = lookup_entitlement(db, plate)
+    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
     if entitlement.registered and entitlement.plate:
         plate = normalize_plate(entitlement.plate)
     if side == "EXIT":
@@ -482,7 +482,7 @@ def quote_session(db: Session, row: ParkingSession, *, at: datetime | None = Non
 
 async def handle_exit(db: Session, *, plate: str, gate: Gate | None, side: str, camera: Camera | None = None) -> dict:
     plate = normalize_plate(plate)
-    entitlement = lookup_entitlement(db, plate)
+    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
     row = _active_for_plate(db, plate)
     pulse_camera = camera or (_side_camera(gate, side) if gate else None)
     cameras = [pulse_camera] if pulse_camera else list((gate.cameras if gate else None) or [])
