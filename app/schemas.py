@@ -184,6 +184,14 @@ class PaymentConfirm(BaseModel):
     amount: float | None = None
 
 
+class ExitQrScanRequest(BaseModel):
+    raw_scan: str = Field(min_length=8, max_length=1024)
+    gate_id: int
+    camera_id: int | None = None
+    lane_id: int | None = None
+    site_id: int | None = None
+
+
 class PublicPaymentIntentRequest(BaseModel):
     """Public 'pay by phone' request. Amount is a string so money never passes through float."""
     token: str
