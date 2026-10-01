@@ -33,7 +33,27 @@ def camera_adapter_for(device: CameraLike | None = None, adapter_id: str | None 
 
 
 def adapter_has_native_plates(device: CameraLike | None = None, adapter_id: str | None = None) -> bool:
-    return camera_adapter_for(device, adapter_id).id == DEFAULT_CAMERA_ADAPTER
+    """Return whether the camera can originate plate metadata/events itself.
+
+    HVX/QY is native by adapter. Other vendors may expose native LPR through
+    persisted capability flags or ONVIF Profile M plate metadata; do not force
+    those cameras through continuous software OCR merely because they are not
+    HVX.
+    """
+    adapter = camera_adapter_for(device, adapter_id)
+    if adapter.id == DEFAULT_CAMERA_ADAPTER:
+        return True
+    if device is None:
+        return False
+    capabilities = {
+        str(item).upper()
+        for item in (getattr(device, "media_capabilities", None) or [])
+    }
+    if {"NATIVE_ALPR", "ONVIF_PLATE_METADATA"} & capabilities:
+        return True
+    profile = dict(getattr(device, "onvif_profile", None) or {})
+    caps = dict(profile.get("capabilities") or {})
+    return bool(caps.get("plate_metadata"))
 
 
 async def camera_live_sources(device: CameraLike) -> list[dict]:

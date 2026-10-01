@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.domain.site import DEFAULT_SITE_ID
 from app.models import Tariff
 
 # Car1 constants (seconds / integer amounts).
@@ -173,11 +174,11 @@ def default_tariff_payload() -> dict[str, Any]:
     }
 
 
-def ensure_car1_tariff(db: Session) -> Tariff:
-    row = db.scalar(select(Tariff).where(Tariff.name == "Car1"))
+def ensure_car1_tariff(db: Session, *, site_id: int = DEFAULT_SITE_ID) -> Tariff:
+    row = db.scalar(select(Tariff).where(Tariff.site_id == site_id, Tariff.name == "Car1"))
     payload = default_tariff_payload()
     if row is None:
-        row = Tariff(**payload)
+        row = Tariff(site_id=site_id, **payload)
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -278,11 +279,19 @@ def apply_tariff_editor(db: Session, updates: dict[str, Any]) -> Tariff:
     return row
 
 
-def load_active_rules(db: Session, car_type: str = "Car1") -> dict[str, Any]:
+def load_active_rules(db: Session, car_type: str = "Car1", *, site_id: int = DEFAULT_SITE_ID) -> dict[str, Any]:
     wanted = car_type or "Car1"
-    row = db.scalar(select(Tariff).where(Tariff.car_type == wanted, Tariff.active.is_(True)).order_by(Tariff.id.desc()))
+    row = db.scalar(select(Tariff).where(
+        Tariff.site_id == site_id,
+        Tariff.car_type == wanted,
+        Tariff.active.is_(True),
+    ).order_by(Tariff.id.desc()))
     if row is None and wanted != "Car1":
-        row = db.scalar(select(Tariff).where(Tariff.car_type == "Car1", Tariff.active.is_(True)).order_by(Tariff.id.desc()))
+        row = db.scalar(select(Tariff).where(
+            Tariff.site_id == site_id,
+            Tariff.car_type == "Car1",
+            Tariff.active.is_(True),
+        ).order_by(Tariff.id.desc()))
     if row and isinstance(row.rules, dict):
         rules = dict(CAR1_RULES)
         rules.update(row.rules)

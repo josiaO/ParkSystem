@@ -20,7 +20,7 @@ from .domain.site import DEFAULT_SITE_ID
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
-    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
+    LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
@@ -1189,6 +1189,7 @@ async def _run_local_alpr(
     presence: bool = True,
     image_id: int = 0,
     force: bool = False,
+    plate_crop: bytes = b"",
 ) -> dict | None:
     jpeg = jpeg or b""
     if jpeg[:2] != b"\xff\xd8":
@@ -1209,7 +1210,8 @@ async def _run_local_alpr(
     _alpr_enter()
     try:
         return await _run_local_alpr_locked(
-            db, camera, jpeg, native=native, presence=presence, image_id=image_id, force=force,
+            db, camera, jpeg, native=native, presence=presence, image_id=image_id,
+            force=force, plate_crop=plate_crop,
         )
     except Exception as exc:
         from .services.health import note_worker_failure
@@ -1243,6 +1245,7 @@ async def _run_local_alpr_locked(
     presence: bool = True,
     image_id: int = 0,
     force: bool = False,
+    plate_crop: bytes = b"",
 ) -> dict | None:
     native = native or {}
     from .services.media_gateway import gateway
@@ -1251,7 +1254,17 @@ async def _run_local_alpr_locked(
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))
     started = time.perf_counter()
-    alpr = await asyncio.to_thread(recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}")
+    if plate_crop[:2] == b"\xff\xd8":
+        from .services.alpr import recognize_plate_crop_bytes
+        alpr = await asyncio.to_thread(
+            recognize_plate_crop_bytes,
+            plate_crop,
+            camera_label=f"cam-{camera.id}-{camera.ip_address}-native-crop",
+        )
+    else:
+        alpr = await asyncio.to_thread(
+            recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}",
+        )
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     remember_alpr(camera.id, alpr)
     local = local_from_fastalpr(alpr)
@@ -1689,6 +1702,37 @@ def get_alpr_status(_: User = Depends(require("hardware.view"))):
     body = alpr_status()
     body["engines"] = list_engines()
     return body
+
+
+@app.get("/cameras/{camera_id}/commissioning/recognition")
+def camera_recognition_commissioning(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("hardware.view")),
+):
+    """Side-effect-free recognition/media diagnostics for one camera."""
+    from .services.recognition_commissioning import commissioning_snapshot
+
+    camera = get_camera_or_404(db, camera_id)
+    return commissioning_snapshot(db, camera)
+
+
+@app.post("/cameras/{camera_id}/commissioning/recognition/read")
+async def camera_recognition_commissioning_read(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("hardware.view")),
+):
+    """Run one software plate read without creating sessions or controlling gates."""
+    from .services.recognition_commissioning import diagnostic_read
+
+    camera = get_camera_or_404(db, camera_id)
+    result = await asyncio.to_thread(diagnostic_read, db, camera)
+    write_audit(
+        db, user, "camera.recognition_diagnostic", "camera", str(camera.id),
+        f"source={result.get('evidence_source')} plate={(result.get('best') or {}).get('plate') if isinstance(result.get('best'), dict) else ''}",
+    )
+    return result
 
 
 @app.get("/recognition/engine")
@@ -2131,10 +2175,16 @@ async def correct_camera_plate(
     db.refresh(row)
     gate = db.get(Gate, camera.gate_id) if camera.gate_id else None
     side = (camera.lane_direction or "ENTRY").upper()
-    result = await handle_plate_event(
-        db, plate=chosen, gate=gate, side=side, simulated=False,
-        alpr=capture_dict(row), source="operator-correction", camera=camera,
-    )
+    if side == "ENTRY":
+        from .application.live_parking import handle_live_entry
+        result = await handle_live_entry(
+            db, camera=camera, capture=row, gate=gate, source="operator-correction",
+        )
+    else:
+        from .application.live_parking import handle_live_exit
+        result = await handle_live_exit(
+            db, camera=camera, capture=row, gate=gate, source="operator-correction",
+        )
     last = capture_dict(row)
     remember_last_car(camera.id, last)
     return {
@@ -2259,7 +2309,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
         return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
     new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
-    entitlement = lookup_entitlement(db, row.plate) if row and row.plate else None
+    entitlement = lookup_entitlement(db, row.plate, site_id=camera.site_id) if row and row.plate else None
     registered_auto = bool(
         entitlement and entitlement.registered and entitlement.auto_open
     )
@@ -2276,8 +2326,8 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 db.commit()
     needs_session = False
     if row and row.plate and side == "ENTRY":
-        from .services.simulation import _active_for_plate
-        needs_session = _active_for_plate(db, row.plate) is None
+        from .services.parking_sessions import active_for_plate
+        needs_session = active_for_plate(db, row.plate, site_id=camera.site_id) is None
     from .core.plate import apply_site_plate
     hold = bool((capture or {}).get("needs_review") or (capture or {}).get("pending_confirmation"))
     if row and row.plate:
@@ -2305,14 +2355,17 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
         if camera_events.seen(camera_id=camera.id, plate=row.plate, image_id=dedupe_id):
             return capture_dict(latest) if latest else None
         try:
-            ent = lookup_entitlement(db, row.plate)
-            event_plate = ent.plate if ent.registered else row.plate
-            result = await handle_plate_event(
-                db, plate=event_plate, gate=gate, side=side,
-                simulated=False, alpr=capture,
-                source=str((capture or {}).get("source") or "camera"),
-                camera=camera,
-            )
+            source_name = str((capture or {}).get("source") or "camera")
+            if side == "ENTRY":
+                from .application.live_parking import handle_live_entry
+                result = await handle_live_entry(
+                    db, camera=camera, capture=row, gate=gate, source=source_name,
+                )
+            else:
+                from .application.live_parking import handle_live_exit
+                result = await handle_live_exit(
+                    db, camera=camera, capture=row, gate=gate, source=source_name,
+                )
             if result.get("session") and latest:
                 session_id = (result["session"] or {}).get("id")
                 if session_id:
@@ -2337,6 +2390,7 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 "gate_id": gate.id if gate else None,
                 "side": side,
                 "camera_id": camera.id,
+                "capture_id": row.id,
             })
     return capture_dict(latest) if latest else None
 
@@ -2398,7 +2452,7 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
                 await _run_local_alpr(
                     db, row, frame, native=native, presence=presence,
-                    image_id=image_id, force=False,
+                    image_id=image_id, force=False, plate_crop=crop,
                 )
         if image_id:
             _last_image_id[camera_id] = image_id
@@ -2573,15 +2627,26 @@ async def _outbox_loop():
                         if gate is None and camera is None and not payload.get("plate"):
                             box.ack(item["id"])
                             continue
-                        await handle_plate_event(
-                            db,
-                            plate=str(payload.get("plate") or ""),
-                            gate=gate,
-                            side=str(payload.get("side") or "ENTRY"),
-                            simulated=False,
-                            source="outbox",
-                            camera=camera,
-                        )
+                        side = str(payload.get("side") or "ENTRY").upper()
+                        capture_id = int(payload.get("capture_id") or 0)
+                        if camera is not None and capture_id:
+                            capture_row = db.get(VehicleCapture, capture_id)
+                            if capture_row is None or capture_row.camera_id != camera.id:
+                                box.ack(item["id"])
+                                continue
+                            if side == "ENTRY":
+                                from .application.live_parking import handle_live_entry
+                                await handle_live_entry(
+                                    db, camera=camera, capture=capture_row, gate=gate, source="outbox",
+                                )
+                            else:
+                                from .application.live_parking import handle_live_exit
+                                await handle_live_exit(
+                                    db, camera=camera, capture=capture_row, gate=gate, source="outbox",
+                                )
+                        else:
+                            box.ack(item["id"])
+                            continue
                     box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
                     box.note_failure()
@@ -3276,8 +3341,45 @@ async def sim_receipt_taken(session_id: int, db: Session = Depends(get_db), user
 
 
 @app.post("/sessions/{session_id}/receipt-taken")
-async def session_receipt_taken(session_id: int, db: Session = Depends(get_db), user: User = Depends(require_any("simulation.run", "gates.open"))):
-    return await sim_receipt_taken(session_id, db, user)
+async def session_receipt_taken(
+    session_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("gates.open")),
+):
+    """Confirm a real entry ticket removal through the authoritative controller.
+
+    Generic printers without a taken sensor fail closed. The simulation endpoint
+    remains separate and is never used as production receipt authority.
+    """
+    from app.application.entry_lane import EntryLaneController, policy_from_parking_settings
+    from app.domain.receipt_engine import InvalidPrintJob
+    from app.infrastructure.hardware.receipt_printers import receipt_printer_for
+
+    row = db.get(ParkingSession, session_id)
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    cfg = parking_settings(db)
+    controller = EntryLaneController(
+        printer=receipt_printer_for(
+            str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
+            str(cfg.get("printer_name") or settings.printer_name or ""),
+        )
+    )
+    gate = db.get(Gate, row.gate_id) if row.gate_id else None
+    camera = db.get(Camera, row.camera_id) if row.camera_id else None
+    try:
+        result = await controller.confirm_receipt_taken(
+            db,
+            row,
+            policy=policy_from_parking_settings(cfg),
+            gate=gate,
+            camera=camera,
+            sensor_confirmed=False,
+        )
+    except InvalidPrintJob as exc:
+        raise HTTPException(409, str(exc)) from exc
+    write_audit(db, user, "receipt.taken", "parking_session", str(row.id), "sensor-confirmed path")
+    return result
 
 
 @app.post("/sessions/{session_id}/correct-plate")
@@ -3692,6 +3794,56 @@ async def kiosk_receipt_pay(
     write_audit(db, user, "payments.create", "parking_session", str(row.id), f"kiosk QR {row.plate}")
     return result
 
+
+
+
+@app.post("/exit/qr-scan")
+async def exit_qr_scan(
+    payload: ExitQrScanRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("gates.open")),
+):
+    """Authenticated QR fallback for an exit lane.
+
+    The same entry-receipt QR resolves the existing site session and enters the
+    same ExitLaneController used by plate recognition. This route never creates
+    a parallel exit/payment path.
+    """
+    from uuid import uuid4
+    from app.application.exit_lane import ExitLaneController
+    from app.application.entry_lane import policy_from_parking_settings
+
+    gate = db.get(Gate, int(payload.gate_id))
+    if gate is None or not gate.enabled:
+        raise HTTPException(404, "Exit gate not found or disabled")
+    camera = db.get(Camera, int(payload.camera_id)) if payload.camera_id else None
+    if camera is not None and camera.gate_id not in {None, gate.id}:
+        raise HTTPException(409, "Camera is assigned to a different gate")
+    site_id = int(payload.site_id or gate.site_id or DEFAULT_SITE_ID)
+    if int(gate.site_id) != site_id:
+        raise HTTPException(409, "Gate does not belong to the requested site")
+
+    out = await ExitLaneController().submit_qr(
+        db,
+        raw_scan=payload.raw_scan,
+        event_id=f"qr-{uuid4().hex}",
+        site_id=site_id,
+        gate=gate,
+        camera=camera,
+        lane_id=payload.lane_id or (camera.lane_id if camera else None),
+        policy=policy_from_parking_settings(parking_settings(db)),
+        source="operator-qr",
+    )
+    write_audit(
+        db, user, "exit.qr_scan", "parking_session",
+        str((out.get("session") or {}).get("id") or ""),
+        f"gate={gate.id} result={out.get('reason')}",
+    )
+    if not out.get("ok") and out.get("reason") in {"invalid_qr", "no_session"}:
+        raise HTTPException(404, out.get("message") or "No active session for that QR")
+    if not out.get("ok") and out.get("reason") in {"gate_unavailable", "gate_unassigned"}:
+        raise HTTPException(503, out.get("message") or "Exit barrier unavailable")
+    return out
 
 @app.get("/sessions/by-token/{token}")
 def session_by_token(token: str, db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use", "payments.create"))):

@@ -326,3 +326,103 @@ Same as Phase 0–4. No live mobile-money provider calls in this phase (by desig
 ExitLaneController: plate (or QR fallback) → site-wide session → tariff → payment/grace → authorize or deny → idempotent OPEN → close. Unpaid stays closed. Lost ticket / QR fallback. Same site, different gates.
 
 Commit: `4cb63fe`.
+
+
+---
+
+## Phase 6 — Exit orchestration
+
+### Implementation status
+
+**SOFTWARE IMPLEMENTED / HARDWARE VERIFICATION PENDING**
+
+Implemented on branch `chatgpt/core-real-path-cleanup`:
+
+- `ExitLaneController` is now the authoritative live EXIT path.
+- Plate and receipt-QR fallback enter the same exit application service.
+- Site-wide session resolution supports entry at one gate and exit at another.
+- Exit pricing is refreshed from the session site's tariff.
+- A fully paid session inside `payment_exit_grace_until` keeps its settled quote during the configured drive-to-exit window.
+- Unpaid casual sessions remain closed to the barrier and return `DENIED_PAYMENT_REQUIRED`.
+- Subscribers/access-plan vehicles can exit without a casual parking fee.
+- Barrier failure keeps the parking session open.
+- `WAIT_FOR_PASSAGE` no longer closes a session on the OPEN command; a passage event must call `vehicle_passed`.
+- Entry and exit gate identity are stored separately (`entry_gate_id`, `exit_gate_id`).
+- Exit gate commands have their own idempotency field (`exit_open_command_uuid`).
+- Production database exit lookup uses `SELECT ... FOR UPDATE` semantics to serialize competing exit claims on PostgreSQL.
+- HID keyboard-wedge and bounded-timeout serial QR scanner adapters exist.
+- `/exit/qr-scan` is authenticated and routes the same receipt QR into `ExitLaneController`.
+- Real ENTRY and EXIT camera events are forbidden from the legacy simulation engine.
+- Simulation sessions are forced to dry-run gate I/O and cannot pulse a physical barrier.
+
+### Automated tests added
+
+`tests/test_parking_exit.py` covers:
+
+- free-period exit
+- unpaid denial
+- payment followed by re-evaluation
+- gate failure
+- passage-sensor close
+- same receipt QR fallback
+- subscriber exit
+- entry-gate / exit-gate audit identity
+
+`tests/test_safety_regressions.py` covers fail-closed barrier/printer behavior and site-scoped entitlement lookup.
+
+### CI
+
+GitHub Actions is currently failing before runner steps start (the reported job has no steps/runner), so this branch must not be merged on CI evidence alone. Run the full suite locally on the deployment/dev machine before merge.
+
+### Physical verification required before Phase 6 is GREEN
+
+1. One real entry lane with printer + receipt taken sensor.
+2. One real exit lane with plate recognition.
+3. Unpaid vehicle must remain blocked.
+4. Paid/free vehicle opens exactly once.
+5. QR fallback opens the same session, not a parallel session.
+6. Gate A entry -> Gate B exit.
+7. If passage sensor is configured, session closes only after actual passage.
+8. Barrier relay failure does not close the session.
+9. Repeat for the other lanes.
+10. 8-hour, then 24-72-hour soak.
+
+
+---
+
+## Phase 7 — Recognition commissioning
+
+### Implementation status
+
+**SOFTWARE IMPLEMENTED / FIELD CALIBRATION PENDING**
+
+Added a technician-only recognition commissioning workspace and API:
+
+- `GET /cameras/{id}/commissioning/recognition`
+- `POST /cameras/{id}/commissioning/recognition/read`
+
+The diagnostic path is intentionally side-effect free: it does not create parking
+sessions, print receipts, alter payment state, or control barriers.
+
+Per camera it reports:
+
+- native-ALPR capability and recognition mode
+- event-driven versus continuous-DETECT strategy
+- native/local/fused plate readings
+- latest plate crop and vehicle evidence
+- plate pixel width and capture-quality band
+- OCR latency
+- live/detect FPS and frame age
+- codec, transport, reconnects and dropped frames
+- Recognition Worker ownership/heartbeat
+- current and recommended DETECT stream role
+- actionable commissioning warnings
+
+The explicit software-read button reuses the latest stored plate crop when
+available (OCR only, detector skipped), then falls back to the latest event
+snapshot or live cache. This operation is diagnostic and does not persist a new
+VehicleCapture.
+
+Field acceptance remains required for day/night, glare, rain, motorcycle and
+cross-gate conditions before recognition thresholds are treated as production
+calibration.

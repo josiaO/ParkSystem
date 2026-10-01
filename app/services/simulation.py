@@ -225,10 +225,11 @@ async def _pulse_gate(
     led_text: str,
     session: ParkingSession | None = None,
     automatic: bool = True,
+    command_uuid: str = "",
 ):
     if not gate or not cameras:
         return None
-    dry_run = not should_pulse_physical(gate=gate, automatic=automatic)
+    dry_run = bool(session is not None and session.simulated) or not should_pulse_physical(gate=gate, automatic=automatic)
     started = time.perf_counter()
     opened = await controller().open(
         gate, cameras, reason, side=side,
@@ -252,6 +253,7 @@ async def _pulse_gate(
         dry_run=dry_run,
         ok=bool(opened and opened.ok),
         message=(opened.message if opened else "") or "",
+        command_uuid=command_uuid or None,
     )
     return opened
 
@@ -272,17 +274,22 @@ async def handle_plate_event(
     source: str = "camera",
     camera: Camera | None = None,
 ) -> dict:
-    """Shared entry/exit path for live cameras and simulation.
+    """Simulation harness plus temporary legacy EXIT orchestration.
 
-    Gate is optional: plate-first parking still creates a ParkingSession when the
-    camera has not been assigned to a lane yet (barrier open is skipped).
+    Real ENTRY camera events are forbidden here and must use
+    app.application.entry_lane.EntryLaneController through live_parking.
+    Phase 6 will replace the remaining EXIT branch with ExitLaneController.
     """
     started = time.perf_counter()
     side = (side or "ENTRY").upper()
+    if not simulated:
+        raise RuntimeError(
+            f"live {side} must use the parking application controller, not simulation.handle_plate_event"
+        )
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
-    entitlement = lookup_entitlement(db, plate)
+    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
     if entitlement.registered and entitlement.plate:
         plate = normalize_plate(entitlement.plate)
     if side == "EXIT":
@@ -482,7 +489,7 @@ def quote_session(db: Session, row: ParkingSession, *, at: datetime | None = Non
 
 async def handle_exit(db: Session, *, plate: str, gate: Gate | None, side: str, camera: Camera | None = None) -> dict:
     plate = normalize_plate(plate)
-    entitlement = lookup_entitlement(db, plate)
+    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
     row = _active_for_plate(db, plate)
     pulse_camera = camera or (_side_camera(gate, side) if gate else None)
     cameras = [pulse_camera] if pulse_camera else list((gate.cameras if gate else None) or [])

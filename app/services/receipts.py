@@ -142,8 +142,8 @@ async def issue_receipt(
         from app.infrastructure.hardware.printers import PrintResult, store_slip_files
         path = store_slip_files(document)
         printed = PrintResult(
-            ok=True, adapter_id=getattr(adapter, "id", "simulated"), status="READY",
-            message=f"Receipt stored at {path} ({exc})", simulated=True, path=path,
+            ok=False, adapter_id=getattr(adapter, "id", "simulated"), status="FAILED",
+            message=f"Receipt archived at {path}; printer failed: {exc}", simulated=False, path=path,
         )
     qr_path = ""
     if document.qr_png:

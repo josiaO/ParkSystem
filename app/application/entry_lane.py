@@ -33,7 +33,7 @@ from app.services.parking_sessions import (
     start_entry_from_recognition,
 )
 from app.services.receipt_jobs import mark_receipt_taken, print_entry_receipt
-from app.services.receipts import policy_requires_taken, resolve_receipt_policy
+from app.services.receipts import policy_requires_taken, policy_should_print, resolve_receipt_policy
 
 
 GateOpener = Callable[..., Awaitable[Any]]
@@ -41,8 +41,10 @@ GateOpener = Callable[..., Awaitable[Any]]
 
 def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     cfg = cfg or {}
+    resolved = resolve_receipt_policy(cfg)
     return LanePolicy(
-        receipt_required_before_open=policy_requires_taken(resolve_receipt_policy(cfg)),
+        receipt_required_before_open=policy_requires_taken(resolved),
+        print_receipt_on_entry=policy_should_print(resolved),
         subscriber_skip_receipt=True,
     )
 
@@ -114,7 +116,8 @@ class EntryLaneController:
             }
 
         plate = rec.plate_normalized
-        entitlement = lookup_entitlement(db, plate)
+        event_site_id = int(rec.site_id or (camera.site_id if camera is not None else 0) or (gate.site_id if gate is not None else 0) or 1)
+        entitlement = lookup_entitlement(db, plate, site_id=event_site_id, strict=True)
         if entitlement.registered and entitlement.plate:
             plate = entitlement.plate
         parker_kind = entitlement.kind if entitlement.registered else "CASUAL"
@@ -165,7 +168,9 @@ class EntryLaneController:
 
         need_receipt = bool(policy.receipt_required_before_open) and not subscriber
         skip_print = subscriber and not entitlement.print_receipt
-        should_print = (not skip_print) and (need_receipt or auto_take or entitlement.print_receipt)
+        should_print = (not skip_print) and (
+            policy.print_receipt_on_entry or need_receipt or auto_take or entitlement.print_receipt
+        )
         if should_print:
             printed = await print_entry_receipt(db, row, printer=self._printer(), policy=policy)
             db.refresh(row)
@@ -210,8 +215,9 @@ class EntryLaneController:
                     "source": source,
                     "message": "Receipt printed. Take the receipt to open the barrier.",
                 }
-            await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
-            db.refresh(row)
+            if need_receipt:
+                await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
+                db.refresh(row)
 
         return await self._authorize_and_open(
             db, row, gate=gate, camera=camera, policy=policy,
@@ -226,11 +232,14 @@ class EntryLaneController:
         policy: LanePolicy | None = None,
         gate: Gate | None = None,
         camera: Camera | None = None,
+        sensor_confirmed: bool = False,
     ) -> dict[str, Any]:
         policy = policy or LanePolicy(receipt_required_before_open=True)
-        await mark_receipt_taken(db, row, printer=self._printer(), policy=policy)
+        await mark_receipt_taken(
+            db, row, printer=self._printer(), policy=policy, sensor_confirmed=sensor_confirmed,
+        )
         db.refresh(row)
-        entitlement = lookup_entitlement(db, row.plate)
+        entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id, strict=True)
         return await self._authorize_and_open(
             db, row, gate=gate or (db.get(Gate, row.gate_id) if row.gate_id else None),
             camera=camera, policy=policy, entitlement=entitlement, source="receipt_taken", created=False,
@@ -247,7 +256,7 @@ class EntryLaneController:
         command_uuid: str = "",
     ) -> dict[str, Any]:
         policy = policy or LanePolicy(receipt_required_before_open=True)
-        entitlement = lookup_entitlement(db, row.plate)
+        entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id, strict=True)
         return await self._authorize_and_open(
             db, row, gate=gate or (db.get(Gate, row.gate_id) if row.gate_id else None),
             camera=camera, policy=policy, entitlement=entitlement, source="gate_retry",
@@ -300,7 +309,27 @@ class EntryLaneController:
                 "source": source,
                 "message": "Gate command already applied.",
             }
-        command_uuid = command_uuid or row.open_command_uuid or uuid4().hex
+        existing_command = row.open_command_uuid or ""
+        command_uuid = command_uuid or existing_command or uuid4().hex
+        if existing_command and source != "gate_retry":
+            return {
+                "ok": True,
+                "action": "ENTRY",
+                "reason": "gate_command_in_progress",
+                "created_session": created,
+                "duplicate": True,
+                "barrier_opened": False,
+                "assistance_required": False,
+                "session": snapshot(row),
+                "entitlement": entitlement.__dict__,
+                "source": source,
+                "message": "An entry barrier command is already in progress.",
+                "open_command_uuid": existing_command,
+            }
+        if not row.open_command_uuid:
+            row.open_command_uuid = command_uuid
+            db.commit()
+            db.refresh(row)
         opened = None
         if gate is not None and self.opener is not None:
             cameras = _cameras(gate, camera)
@@ -312,7 +341,7 @@ class EntryLaneController:
                 db, gate=gate, session=row, reason=f"entry {row.plate}",
                 automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
                 ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
-                command_uuid=uuid4().hex,
+                command_uuid=command_uuid,
             )
             if not opened or not opened.ok:
                 record_access_decision(
@@ -340,6 +369,7 @@ class EntryLaneController:
             opened = await _pulse_gate(
                 db, gate, cameras, reason=f"entry {row.plate}", side="ENTRY",
                 led_text="WELCOME", session=row, automatic=True,
+                command_uuid=command_uuid,
             )
             if opened is not None and not opened.ok:
                 record_access_decision(

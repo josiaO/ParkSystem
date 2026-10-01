@@ -72,10 +72,15 @@ def should_run_local(
     conf = float(native_confidence or 0)
     if mode == LOCAL_ONLY:
         return True
-    if native and conf >= VERIFY_MIN:
-        return False
+    if mode == NATIVE_WITH_LOCAL_VERIFY:
+        # ParkWatch-style event verification: when a vehicle-trigger JPEG is
+        # available, always run software OCR once and fuse it with native LPR.
+        # This is event-driven, not continuous video OCR.
+        return bool(presence)
     if mode == NATIVE_ONLY:
         return (not native) and bool(presence)
+    if native and conf >= VERIFY_MIN:
+        return False
     if not native:
         return True
     return conf < VERIFY_MIN
