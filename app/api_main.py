@@ -2332,8 +2332,6 @@ def list_gates(db: Session = Depends(get_db), _: User = Depends(require("gates.v
     return [gate_dict(g) for g in db.scalars(select(Gate).order_by(Gate.id)).all()]
 
 
-_last_image_id: dict[int, int] = {}
-
 
 async def _persist_capture_event(db: Session, camera: Camera, capture: dict | None, jpeg: bytes, crop: bytes) -> dict | None:
     previous = latest_for_camera(db, camera.id)
@@ -2462,8 +2460,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         from .services.dedup import camera_events
         if camera_events.seen(camera_id=camera_id, plate=plate, image_id=image_id):
             continue
-        if image_id and _last_image_id.get(camera_id) == image_id:
-            continue
         try:
             jpeg = await hvx.event_jpeg(handle, image_id=image_id or None)
             crop = await hvx.event_crop(handle, image_id=image_id or None)
@@ -2486,8 +2482,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 # candidate; the worker's FastALPR reading arrives via the outbox.
                 # The coordinator persists exactly one fused capture per vehicle.
                 await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
-                if image_id:
-                    _last_image_id[camera_id] = image_id
                 continue
             if presence:
                 await _persist_capture_event(db, row, capture, jpeg, crop)
@@ -2502,8 +2496,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                     db, row, frame, native=native, presence=presence,
                     image_id=image_id, force=False, plate_crop=crop,
                 )
-        if image_id:
-            _last_image_id[camera_id] = image_id
 
 
 async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
