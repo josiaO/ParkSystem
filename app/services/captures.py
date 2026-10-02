@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.plate import normalize_plate
-from app.models import Camera, VehicleCapture
+from app.models import Camera, VehicleCapture, as_utc, utcnow
 from app.services.camera_lpr import bbox_from_lp_box, native_from_sdk_capture
 
 
@@ -427,7 +427,13 @@ def persist_event(
             and latest.plate == (native.get("plate") or "")
             and latest.snapshot_path
         ):
-            return latest
+            created = as_utc(latest.created_at)
+            age = (utcnow() - created).total_seconds() if created is not None else 999999.0
+            # image_id=0 is a weak identity. Reuse it only for a burst of the
+            # same callback/frame, never forever; otherwise an old plate can
+            # become the camera's permanent "latest vehicle".
+            if 0 <= age <= 1.0:
+                return latest
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
     snapshot_path = _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg) if jpeg[:2] == b"\xff\xd8" else ""
     crop_path = _write_jpeg("crops", f"{stamp}-plate.jpg", plate_jpeg) if plate_jpeg[:2] == b"\xff\xd8" else ""
