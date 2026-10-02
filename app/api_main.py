@@ -2851,7 +2851,6 @@ async def _camera_event_loop():
     from .services.health import note_camera, note_worker_failure
     from .config import settings as cfg
 
-    hvx_breaker = breaker("hvx-host")
     poll = float(getattr(cfg, "camera_event_poll_seconds", 0.25) or 0.25)
     while True:
         try:
@@ -2871,14 +2870,18 @@ async def _camera_event_loop():
                 ]
             async def service_hvx(camera_id: int, handle: int) -> None:
                 started_one = time.perf_counter()
+                camera_breaker = breaker(f"hvx-camera-{camera_id}")
+                if not camera_breaker.allow():
+                    note_camera(camera_id, sdk_callback="circuit-open")
+                    return
                 try:
                     await _drain_camera_events(camera_id, handle)
                     await _poll_coil_and_read(camera_id, handle)
                     await _maybe_watch_local_alpr(camera_id, handle)
-                    hvx_breaker.success()
+                    camera_breaker.success()
                     note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
                 except Exception as exc:
-                    hvx_breaker.failure()
+                    camera_breaker.failure()
                     note_worker_failure("camera-events", str(exc))
                     note_camera(camera_id, sdk_callback="error")
                 finally:
@@ -2900,11 +2903,10 @@ async def _camera_event_loop():
             # several seconds and leave cars undetected. Service lanes
             # concurrently; the ALPR inference limit separately caps CPU work.
             jobs: list[asyncio.Task] = []
-            if hvx_breaker.allow():
-                jobs.extend(
-                    asyncio.create_task(service_hvx(camera_id, handle), name=f"hvx-event-{camera_id}")
-                    for camera_id, handle in hvx_specs
-                )
+            jobs.extend(
+                asyncio.create_task(service_hvx(camera_id, handle), name=f"hvx-event-{camera_id}")
+                for camera_id, handle in hvx_specs
+            )
             jobs.extend(
                 asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
                 for camera_id in ipcam_ids
