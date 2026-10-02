@@ -65,6 +65,9 @@ class PathPlanTests(unittest.TestCase):
         finally:
             dest.unlink(missing_ok=True)
         self.assertIn("rtspTransport: udp", body)
+        self.assertIn("webrtcAddress: :8889", body)
+        self.assertIn("webrtcLocalUDPAddress: :8189", body)
+        self.assertIn("webrtcIPsFromInterfaces: yes", body)
 
     def test_generated_config_writes_one_path_per_distinct_upstream(self):
         dest = ROOT / "data" / "test-mediamtx-dedup.yml"
@@ -288,6 +291,12 @@ class BrowserLiveViewTests(unittest.TestCase):
         self.assertNotIn("snapshot.jpg", webrtc_branch)
         self.assertIn("clearInterval(snapshotTimers[slot])", webrtc_branch)
         self.assertIn("refreshPlates(slot);\n          return;", webrtc_branch)
+
+    def test_live_failure_never_reintroduces_snapshot_polling(self):
+        self.assertNotIn("function startSnapshotLoop", self.html)
+        live_fn = self.html.split("function startMjpegLive(")[1].split("\n    }\n")[0]
+        self.assertNotIn("snapshot.jpg", live_fn)
+        self.assertIn("Reconnecting live stream", live_fn)
 
     def test_states_are_displayed(self):
         for label in ("LIVE (WebRTC", "DEGRADED", "OFFLINE"):
