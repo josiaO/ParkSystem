@@ -1942,10 +1942,29 @@ def _camera_live_spec(camera_id: int) -> CameraLiveSpec:
 
 
 @app.get("/cameras/{camera_id}/live/endpoint")
-async def camera_live_endpoint(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+async def camera_live_endpoint(
+    camera_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("cameras.view")),
+):
     get_camera_or_404(db, camera_id)
     from app.infrastructure.media import registry as media_registry
-    return await media_registry.get_live_endpoint(camera_id, db)
+    endpoint = await media_registry.get_live_endpoint(camera_id, db)
+    if endpoint.get("provider") == "MEDIAMTX" and endpoint.get("transport") == "WEBRTC":
+        # MediaMTX's internal endpoint is localhost because Site Service and the
+        # recognition worker are local. The browser must connect to the same LAN
+        # host it used to reach SmartPark.
+        host = request.url.hostname or "127.0.0.1"
+        display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        path = str(endpoint.get("mediamtx_path") or f"cam{int(camera_id)}")
+        endpoint = {
+            **endpoint,
+            "webrtc": f"http://{display_host}:8889/{path}",
+            "whep": f"http://{display_host}:8889/{path}/whep",
+            "browser_host": host,
+        }
+    return endpoint
 
 
 _snapshot_status_checked: set[int] = set()
