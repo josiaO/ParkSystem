@@ -1618,41 +1618,6 @@
       els.img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
     }
 
-    function startSnapshotLoop(slot, id) {
-      if (snapshotTimers[slot]) clearInterval(snapshotTimers[slot]);
-      const els = paneEls(slot);
-      const tick = () => {
-        if (liveFetchBusy[slot] || els.img.dataset.cameraId !== String(id)) return;
-        liveFetchBusy[slot] = true;
-        fetch(mediaUrl(`/cameras/${id}/snapshot.jpg`) + "&t=" + Date.now(), { cache: "no-store" })
-          .then((res) => {
-            if (!res.ok) throw new Error(res.status === 409 ? "Waiting for live video" : res.statusText);
-            const seq = Number(res.headers.get("X-Frame-Seq") || 0);
-            if (seq && seq === liveFrameSeq[slot]) return null;
-            if (seq) liveFrameSeq[slot] = seq;
-            return res.blob();
-          })
-          .then((blob) => {
-            if (!blob || els.img.dataset.cameraId !== String(id)) return;
-            const url = URL.createObjectURL(blob);
-            const prev = liveObjectUrls[slot];
-            liveObjectUrls[slot] = url;
-            els.img.onload = () => {
-              if (prev) URL.revokeObjectURL(prev);
-              if (els.status) els.status.textContent = "Live";
-              drawLiveOverlay(slot);
-            };
-            els.img.src = url;
-          })
-          .catch((err) => {
-            if (els.status && els.img.dataset.cameraId === String(id)) els.status.textContent = err.message || "Waiting for live video";
-          })
-          .finally(() => { liveFetchBusy[slot] = false; });
-      };
-      tick();
-      snapshotTimers[slot] = setInterval(tick, 120);
-    }
-
     async function startLiveSlot(slot, camera, force = false) {
       const els = paneEls(slot);
       if (els.camera && camera) els.camera.value = String(camera.id);
