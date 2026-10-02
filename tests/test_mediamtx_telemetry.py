@@ -68,6 +68,8 @@ class PathPlanTests(unittest.TestCase):
         self.assertIn("webrtcAddress: :8889", body)
         self.assertIn("webrtcLocalUDPAddress: :8189", body)
         self.assertIn("webrtcIPsFromInterfaces: yes", body)
+        self.assertIn("webrtcAllowOrigin: '*'", body)
+        self.assertNotIn("webrtcAllowOrigins:", body)
 
     def test_generated_config_writes_one_path_per_distinct_upstream(self):
         dest = ROOT / "data" / "test-mediamtx-dedup.yml"
