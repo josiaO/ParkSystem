@@ -122,12 +122,14 @@ class ConsensusTrack:
     similarity: float = 0.7
     min_share: float = 0.6
     max_reads: int = 12
+    absence_reset_seconds: float = 0.6
     readings: list = field(default_factory=list)
     published_plate: str = ""
     published_at: float = 0.0
     published_visit: float = -1.0
     visit_started_at: float = -1.0
     last_read_at: float | None = None
+    absence_since: float | None = None
     # Compatibility fields read by older callers/tests.
     last_plate: str = ""
     streak: int = 0
@@ -141,13 +143,22 @@ class ConsensusTrack:
         from app.core.plate import plate_similarity
 
         plate = normalize_plate(plate)
-        if self.last_read_at is None or now - self.last_read_at > self.window_seconds or now < self.last_read_at:
-            self._new_visit(now)
-        self.last_read_at = now
         if not plate:
+            if self.absence_since is None or now < self.absence_since:
+                self.absence_since = now
+            if now - self.absence_since >= float(self.absence_reset_seconds):
+                # A clear lane separates visits. Release the publication hold so
+                # the same registration may legitimately arrive again later.
+                self.release()
+                self._new_visit(now)
+            self.last_read_at = now
             self.last_plate = ""
             self.streak = 0
             return TrackDecision(False, reason="empty read")
+        self.absence_since = None
+        if self.last_read_at is None or now - self.last_read_at > self.window_seconds or now < self.last_read_at:
+            self._new_visit(now)
+        self.last_read_at = now
         self.streak = self.streak + 1 if plate == self.last_plate else 1
         self.last_plate = plate
         self.readings.append(Reading(plate, max(0.0, min(1.0, float(confidence or 0.0))), now))
