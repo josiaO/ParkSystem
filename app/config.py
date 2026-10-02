@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     live_sdk_interval_seconds: float = 0.05
     snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
+    stream_read_timeout_seconds: float = 3.0
     detect_fps: float = 5.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
