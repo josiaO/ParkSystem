@@ -316,6 +316,7 @@ class HVXSDK:
                 jpeg = crop
         row = {
             "image_id": int(image_id),
+            "captured_at_epoch": time.time(),
             "plate": plate or None,
             "score": score,
             "plate_box": box,
