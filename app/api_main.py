@@ -47,7 +47,8 @@ from .services.presence import coil_watch
 from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
-    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, snapshot_for_camera, start_idle_watch,
+    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, fresh_alpr, fresh_last_car, snapshot_for_camera, start_idle_watch,
+    watch_live,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
 from .services.http_snapshot import grab_http_snapshot
@@ -706,7 +707,12 @@ def persist_video(db: Session, camera: Camera, url: str | None = None) -> None:
 
 
 async def _native_capture_for_camera(camera: Camera) -> dict:
-    """Best-effort QY capture callback plate. Missing SDK host is not a plate."""
+    """Return only a *fresh* native capture callback plate.
+
+    The vendor host keeps its last callback for diagnostics. That cached value
+    must never become a permanent plate in the operator UI or be fused into a
+    later vehicle. New host versions stamp callbacks with captured_at_epoch.
+    """
     if camera.sdk_handle is None:
         return native_from_sdk_capture(None)
     try:
@@ -714,6 +720,16 @@ async def _native_capture_for_camera(camera: Camera) -> dict:
     except Exception:
         return native_from_sdk_capture(None)
     capture = state.get("last_capture") if isinstance(state, dict) else None
+    if not isinstance(capture, dict):
+        return native_from_sdk_capture(None)
+    try:
+        captured_at = float(capture.get("captured_at_epoch") or 0)
+    except (TypeError, ValueError):
+        captured_at = 0.0
+    # Hosts upgraded from older builds have no timestamp. Treat their state()
+    # value as diagnostic-only; live event ingestion still comes from drain_events().
+    if captured_at <= 0 or (time.time() - captured_at) > float(settings.live_plate_fresh_seconds):
+        return native_from_sdk_capture(None)
     return native_from_sdk_capture(capture)
 
 
@@ -1083,6 +1099,9 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
 
 def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session | None = None) -> dict:
     from .services.flags import native_alpr_enabled
+    state = get_state(camera.id)
+    if alpr is state.alpr:
+        alpr = fresh_alpr(camera.id)
     if not native_alpr_enabled():
         native = {**(native or {}), "plate": "", "confidence": 0.0}
     local = local_from_fastalpr(alpr)
@@ -1094,13 +1113,20 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         mode=fusion_mode(camera),
     )
     overlay = choose_overlay_box(native, local)
-    live = get_state(camera.id)
-    last = live.last_car or None
+    live = state
+    last = fresh_last_car(camera.id)
     if not last and db is not None:
+        # Historical captures belong on Detections. Only promote a DB row into
+        # the live lane if it is still within the live freshness window.
         row = latest_for_camera(db, camera.id)
-        last = capture_dict(row) if row else None
-        if last:
-            remember_last_car(camera.id, last)
+        if row is not None and row.created_at is not None:
+            created = row.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - created).total_seconds()
+            if 0 <= age <= float(settings.live_plate_fresh_seconds):
+                last = capture_dict(row)
+                remember_last_car(camera.id, last)
     return {
         "camera": camera_dict(camera),
         "native": native,
@@ -1110,6 +1136,7 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "resolved_plate": fused.resolved_plate,
         "overlay": overlay,
         "last_car": last,
+        "clear_last_car": last is None,
         "live": bool(live.jpeg[:2] == b"\xff\xd8"),
         "live_source": live.source,
         "live_fps": live.fps,
@@ -1222,7 +1249,9 @@ async def _run_local_alpr(
 
 
 def _alpr_busy() -> bool:
-    return int(_alpr_inflight["n"]) > 0
+    # CPU ONNX Runtime can execute more than one Run concurrently. Bound it so
+    # a slow OCR on one lane does not make every other camera skip verification.
+    return int(_alpr_inflight["n"]) >= int(getattr(settings, "recognition_max_concurrency", 2) or 2)
 
 
 def _alpr_enter() -> None:
@@ -1918,10 +1947,29 @@ def _camera_live_spec(camera_id: int) -> CameraLiveSpec:
 
 
 @app.get("/cameras/{camera_id}/live/endpoint")
-async def camera_live_endpoint(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+async def camera_live_endpoint(
+    camera_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require("cameras.view")),
+):
     get_camera_or_404(db, camera_id)
     from app.infrastructure.media import registry as media_registry
-    return await media_registry.get_live_endpoint(camera_id, db)
+    endpoint = await media_registry.get_live_endpoint(camera_id, db)
+    if endpoint.get("provider") == "MEDIAMTX" and endpoint.get("transport") == "WEBRTC":
+        # MediaMTX's internal endpoint is localhost because Site Service and the
+        # recognition worker are local. The browser must connect to the same LAN
+        # host it used to reach SmartPark.
+        host = request.url.hostname or "127.0.0.1"
+        display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        path = str(endpoint.get("mediamtx_path") or f"cam{int(camera_id)}")
+        endpoint = {
+            **endpoint,
+            "webrtc": f"http://{display_host}:8889/{path}",
+            "whep": f"http://{display_host}:8889/{path}/whep",
+            "browser_host": host,
+        }
+    return endpoint
 
 
 _snapshot_status_checked: set[int] = set()
@@ -1991,7 +2039,7 @@ async def camera_snapshot(camera_id: int, _: User = Depends(require_media("camer
 @app.post("/cameras/{camera_id}/live/watch")
 def watch_camera_live(camera_id: int, _: User = Depends(require_media("cameras.view"))):
     spec = _camera_live_spec(camera_id)
-    acquire_live(spec)
+    watch_live(spec)
     return {"ok": True, "camera_id": camera_id, "viewers": viewers_for(camera_id)}
 
 
@@ -2107,7 +2155,7 @@ async def camera_preview(
     if not live:
         grabbed = await live_snapshot(c)
         live = bool(grabbed.get("ok"))
-    alpr = get_state(c.id).alpr or None
+    alpr = fresh_alpr(c.id)
     native = await _native_capture_for_camera(c)
     if live and grabbed.get("jpeg") and should_run_local(
         native_plate=str(native.get("plate") or ""),
@@ -2143,7 +2191,7 @@ async def camera_preview(
 async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     c = get_camera_or_404(db, camera_id)
     native = await _native_capture_for_camera(c)
-    return _plate_payload(c, native, get_state(c.id).alpr or None, db)
+    return _plate_payload(c, native, fresh_alpr(c.id), db)
 
 
 @app.post("/cameras/{camera_id}/plate-corrections")
@@ -2284,8 +2332,6 @@ def list_gates(db: Session = Depends(get_db), _: User = Depends(require("gates.v
     return [gate_dict(g) for g in db.scalars(select(Gate).order_by(Gate.id)).all()]
 
 
-_last_image_id: dict[int, int] = {}
-
 
 async def _persist_capture_event(db: Session, camera: Camera, capture: dict | None, jpeg: bytes, crop: bytes) -> dict | None:
     previous = latest_for_camera(db, camera.id)
@@ -2414,8 +2460,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         from .services.dedup import camera_events
         if camera_events.seen(camera_id=camera_id, plate=plate, image_id=image_id):
             continue
-        if image_id and _last_image_id.get(camera_id) == image_id:
-            continue
         try:
             jpeg = await hvx.event_jpeg(handle, image_id=image_id or None)
             crop = await hvx.event_crop(handle, image_id=image_id or None)
@@ -2438,8 +2482,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 # candidate; the worker's FastALPR reading arrives via the outbox.
                 # The coordinator persists exactly one fused capture per vehicle.
                 await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
-                if image_id:
-                    _last_image_id[camera_id] = image_id
                 continue
             if presence:
                 await _persist_capture_event(db, row, capture, jpeg, crop)
@@ -2454,8 +2496,6 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                     db, row, frame, native=native, presence=presence,
                     image_id=image_id, force=False, plate_crop=crop,
                 )
-        if image_id:
-            _last_image_id[camera_id] = image_id
 
 
 async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
@@ -2803,7 +2843,6 @@ async def _camera_event_loop():
     from .services.health import note_camera, note_worker_failure
     from .config import settings as cfg
 
-    hvx_breaker = breaker("hvx-host")
     poll = float(getattr(cfg, "camera_event_poll_seconds", 0.25) or 0.25)
     while True:
         try:
@@ -2821,31 +2860,51 @@ async def _camera_event_loop():
                         CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
                     }
                 ]
-            started = time.perf_counter()
-            if hvx_breaker.allow():
-                for camera_id, handle in hvx_specs:
-                    try:
-                        await _drain_camera_events(camera_id, handle)
-                        await _poll_coil_and_read(camera_id, handle)
-                        await _maybe_watch_local_alpr(camera_id, handle)
-                        hvx_breaker.success()
-                        note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
-                    except Exception as exc:
-                        hvx_breaker.failure()
-                        note_worker_failure("camera-events", str(exc))
-                        note_camera(camera_id, sdk_callback="error")
-            for camera_id in ipcam_ids:
+            async def service_hvx(camera_id: int, handle: int) -> None:
+                started_one = time.perf_counter()
+                camera_breaker = breaker(f"hvx-camera-{camera_id}")
+                if not camera_breaker.allow():
+                    note_camera(camera_id, sdk_callback="circuit-open")
+                    return
+                try:
+                    await _drain_camera_events(camera_id, handle)
+                    await _poll_coil_and_read(camera_id, handle)
+                    await _maybe_watch_local_alpr(camera_id, handle)
+                    camera_breaker.success()
+                    note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
+                except Exception as exc:
+                    camera_breaker.failure()
+                    note_worker_failure("camera-events", str(exc))
+                    note_camera(camera_id, sdk_callback="error")
+                finally:
+                    note_camera(camera_id, event_latency_ms=int((time.perf_counter() - started_one) * 1000))
+
+            async def service_ipcam(camera_id: int) -> None:
+                started_one = time.perf_counter()
                 try:
                     await _maybe_local_ipcam_alpr(camera_id)
                     note_camera(camera_id, sdk_callback="local-alpr", last_event_at=time.time())
                 except Exception as exc:
                     note_worker_failure("camera-events", str(exc))
                     note_camera(camera_id, sdk_callback="error")
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            for camera_id, _handle in hvx_specs:
-                note_camera(camera_id, event_latency_ms=latency_ms)
-            for camera_id in ipcam_ids:
-                note_camera(camera_id, event_latency_ms=latency_ms)
+                finally:
+                    note_camera(camera_id, event_latency_ms=int((time.perf_counter() - started_one) * 1000))
+
+            # Cameras are independent failure domains. Draining them serially
+            # meant one slow OCR/HTTP call could delay every other gate by
+            # several seconds and leave cars undetected. Service lanes
+            # concurrently; the ALPR inference limit separately caps CPU work.
+            jobs: list[asyncio.Task] = []
+            jobs.extend(
+                asyncio.create_task(service_hvx(camera_id, handle), name=f"hvx-event-{camera_id}")
+                for camera_id, handle in hvx_specs
+            )
+            jobs.extend(
+                asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
+                for camera_id in ipcam_ids
+            )
+            if jobs:
+                await asyncio.gather(*jobs, return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

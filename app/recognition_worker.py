@@ -190,7 +190,12 @@ def _write_health(body: dict) -> None:
     temporary.replace(path)
 
 
-async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inference_lock: asyncio.Lock | None = None) -> None:
+async def _infer_camera(
+    camera: dict,
+    stop: asyncio.Event,
+    stats: dict,
+    inference_limiter: asyncio.Semaphore | None = None,
+) -> None:
     from app.infrastructure.recognition import recognition_provider_for
     from app.services.media_gateway import LocalMediaGateway
     from app.infrastructure.media.registry import get_detect_endpoint
@@ -212,6 +217,7 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
     track = PlateTrack(
         window_seconds=rec_policy.consensus_window_seconds,
         hold_seconds=rec_policy.hold_seconds,
+        absence_reset_seconds=rec_policy.absence_reset_seconds,
         min_reads=rec_policy.min_reads,
         min_agreeing=rec_policy.min_agreeing,
         min_share=rec_policy.min_share,
@@ -219,7 +225,7 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
     )
     frames = LatestFrameBuffer(f"worker-{camera_id}", maxsize=1)
     ready = asyncio.Event()
-    inference_lock = inference_lock or asyncio.Lock()
+    inference_limiter = inference_limiter or asyncio.Semaphore(1)
     interval = 1.0 / settings.detect_fps
     backoff = 1.0
 
@@ -228,7 +234,12 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
         while not stop.is_set():
             stream = None
             try:
-                stream = decoder.ffmpeg_jpeg_stream(url, scale=960, transport="TCP")
+                stream = decoder.ffmpeg_jpeg_stream(
+                    url,
+                    scale=960,
+                    output_fps=float(settings.detect_fps),
+                    transport="TCP",
+                )
                 async for jpeg in stream:
                     if stop.is_set():
                         break
@@ -260,7 +271,7 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
                 await asyncio.wait_for(ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-            async with inference_lock:
+            async with inference_limiter:
                 ready.clear()
                 sample = frames.take()
                 if sample is None or sample.jpeg[:2] != b"\xff\xd8":
@@ -337,19 +348,34 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
 async def _loop() -> None:
     from app.db import SessionLocal
     from app.services.flags import flags
+    from app.config import settings
 
     tasks: dict[int, tuple[asyncio.Event, asyncio.Task, dict]] = {}
     configurations: dict[int, dict] = {}
-    inference_lock = asyncio.Lock()
+    # CPUExecutionProvider sessions support concurrent Run() calls. Bound the
+    # parallelism so one slow camera cannot block every other lane while also
+    # avoiding CPU oversubscription.
+    inference_limiter = asyncio.Semaphore(int(settings.recognition_max_concurrency))
     try:
         while True:
             with SessionLocal() as db:
                 enabled = bool(flags(db).get("fastalpr_new_pipeline_enabled"))
             wanted = _camera_rows() if enabled else []
             wanted_by_id = {int(row["id"]): row for row in wanted}
+            now_wall = time.time()
             for camera_id in list(tasks):
                 stop, task, stats = tasks[camera_id]
-                if camera_id not in wanted_by_id or configurations[camera_id] != wanted_by_id[camera_id] or task.done():
+                last_frame = float(stats.get("last_frame_at") or 0)
+                last_infer = float(stats.get("last_inference_at") or 0)
+                started_at = float(stats.get("started_at") or now_wall)
+                fresh_frames = last_frame > 0 and (now_wall - last_frame) <= max(
+                    float(settings.stale_stream_seconds) * 2.0, 2.0
+                )
+                inference_stalled = (
+                    fresh_frames
+                    and (now_wall - (last_infer or started_at)) > float(settings.recognition_worker_stall_seconds)
+                )
+                if camera_id not in wanted_by_id or configurations[camera_id] != wanted_by_id[camera_id] or task.done() or inference_stalled:
                     tasks.pop(camera_id)
                     configurations.pop(camera_id)
                     stop.set()
@@ -359,11 +385,16 @@ async def _loop() -> None:
                 if camera_id in tasks:
                     continue
                 stop = asyncio.Event()
-                stats = {"camera_id": camera_id, "state": "STARTING", "published": 0}
+                stats = {
+                    "camera_id": camera_id,
+                    "state": "STARTING",
+                    "published": 0,
+                    "started_at": time.time(),
+                }
                 configurations[camera_id] = row
                 tasks[camera_id] = (
                     stop,
-                    asyncio.create_task(_infer_camera(row, stop, stats, inference_lock), name=f"worker-cam-{camera_id}"),
+                    asyncio.create_task(_infer_camera(row, stop, stats, inference_limiter), name=f"worker-cam-{camera_id}"),
                     stats,
                 )
             _write_health({"enabled": enabled, "cameras": [tasks[cid][2] for cid in sorted(tasks)]})

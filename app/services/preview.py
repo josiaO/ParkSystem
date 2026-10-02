@@ -28,6 +28,8 @@ __all__ = [
     "acquire_detect",
     "acquire_live",
     "ffmpeg_jpeg_stream",
+    "fresh_alpr",
+    "fresh_last_car",
     "get_state",
     "live_metrics",
     "media_path",
@@ -50,6 +52,7 @@ __all__ = [
     "take_latest_jpeg",
     "touch_live",
     "viewers_for",
+    "watch_live",
 ]
 
 
@@ -60,7 +63,9 @@ class PreviewState:
     url_redacted: str = ""
     captured_at: float = 0.0
     alpr: dict = field(default_factory=dict)
+    alpr_at: float = 0.0
     last_car: dict = field(default_factory=dict)
+    last_car_at: float = 0.0
     seq: int = 0
     source: str = ""
     disk_at: float = 0.0
@@ -136,12 +141,59 @@ def remember_frame(
 
 
 def remember_alpr(camera_id: int, result: dict) -> None:
-    get_state(camera_id).alpr = result
+    row = get_state(camera_id)
+    row.alpr = result or {}
+    row.alpr_at = time.monotonic() if result else 0.0
+
+
+def fresh_alpr(camera_id: int, *, max_age_seconds: float | None = None) -> dict | None:
+    row = get_state(camera_id)
+    if not row.alpr or row.alpr_at <= 0:
+        return None
+    from app.config import settings
+    max_age = float(
+        max_age_seconds
+        if max_age_seconds is not None
+        else getattr(settings, "live_plate_fresh_seconds", 4.0)
+    )
+    if time.monotonic() - row.alpr_at > max_age:
+        row.alpr = {}
+        row.alpr_at = 0.0
+        return None
+    return row.alpr
 
 
 def remember_last_car(camera_id: int, payload: dict | None) -> None:
+    row = get_state(camera_id)
     if payload:
-        get_state(camera_id).last_car = payload
+        row.last_car = payload
+        row.last_car_at = time.monotonic()
+    else:
+        row.last_car = {}
+        row.last_car_at = 0.0
+
+
+def fresh_last_car(camera_id: int, *, max_age_seconds: float | None = None) -> dict | None:
+    """Return the latest vehicle only while it is recent enough for live UI.
+
+    Historical captures remain in the database/detections page. The live lane
+    must clear an old plate after the vehicle has left instead of presenting it
+    as if it still belongs to the next car.
+    """
+    row = get_state(camera_id)
+    if not row.last_car or row.last_car_at <= 0:
+        return None
+    from app.config import settings
+    max_age = float(
+        max_age_seconds
+        if max_age_seconds is not None
+        else getattr(settings, "live_plate_fresh_seconds", 4.0)
+    )
+    if time.monotonic() - row.last_car_at > max_age:
+        row.last_car = {}
+        row.last_car_at = 0.0
+        return None
+    return row.last_car
 
 
 def media_path(kind: str, name: str):
@@ -348,7 +400,28 @@ def touch_live(spec: CameraLiveSpec) -> None:
     start_live_pump(spec)
 
 
+def watch_live(spec: CameraLiveSpec) -> None:
+    """Register an operator viewer without necessarily decoding JPEGs server-side.
+
+    Browser WebRTC reads MediaMTX directly. Starting an FFmpeg->MJPEG decoder
+    for that same viewer wastes CPU and can starve ALPR. Legacy/direct viewers
+    still need the existing producer.
+    """
+    _viewers[spec.id] = viewers_for(spec.id) + 1
+    _last_view[spec.id] = time.monotonic()
+    from app.infrastructure.media.registry import mediamtx_live_active
+    from app.services.flags import flags
+    if mediamtx_live_active(spec.id) and bool(flags().get("webrtc_live_enabled")):
+        return
+    if mediamtx_live_active(spec.id):
+        from app.services.mediamtx_live import ensure_live_consumer
+        ensure_live_consumer(spec)
+        return
+    touch_live(spec)
+
+
 def acquire_live(spec: CameraLiveSpec) -> None:
+    """Acquire a JPEG/MJPEG viewer; unlike WebRTC this needs a local decoder."""
     _viewers[spec.id] = viewers_for(spec.id) + 1
     _last_view[spec.id] = time.monotonic()
     from app.infrastructure.media.registry import mediamtx_live_active
