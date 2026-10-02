@@ -51,6 +51,7 @@ __all__ = [
     "take_latest_jpeg",
     "touch_live",
     "viewers_for",
+    "watch_live",
 ]
 
 
@@ -378,7 +379,28 @@ def touch_live(spec: CameraLiveSpec) -> None:
     start_live_pump(spec)
 
 
+def watch_live(spec: CameraLiveSpec) -> None:
+    """Register an operator viewer without necessarily decoding JPEGs server-side.
+
+    Browser WebRTC reads MediaMTX directly. Starting an FFmpeg->MJPEG decoder
+    for that same viewer wastes CPU and can starve ALPR. Legacy/direct viewers
+    still need the existing producer.
+    """
+    _viewers[spec.id] = viewers_for(spec.id) + 1
+    _last_view[spec.id] = time.monotonic()
+    from app.infrastructure.media.registry import mediamtx_live_active
+    from app.services.flags import flags
+    if mediamtx_live_active(spec.id) and bool(flags().get("webrtc_live_enabled")):
+        return
+    if mediamtx_live_active(spec.id):
+        from app.services.mediamtx_live import ensure_live_consumer
+        ensure_live_consumer(spec)
+        return
+    touch_live(spec)
+
+
 def acquire_live(spec: CameraLiveSpec) -> None:
+    """Acquire a JPEG/MJPEG viewer; unlike WebRTC this needs a local decoder."""
     _viewers[spec.id] = viewers_for(spec.id) + 1
     _last_view[spec.id] = time.monotonic()
     from app.infrastructure.media.registry import mediamtx_live_active
