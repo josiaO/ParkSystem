@@ -710,7 +710,10 @@ class LocalMediaGateway:
         buf = b""
         try:
             while True:
-                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=8)
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(65536),
+                    timeout=float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0),
+                )
                 if not chunk:
                     err = b""
                     if proc.stderr:
