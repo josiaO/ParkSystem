@@ -28,6 +28,7 @@ __all__ = [
     "acquire_detect",
     "acquire_live",
     "ffmpeg_jpeg_stream",
+    "fresh_alpr",
     "fresh_last_car",
     "get_state",
     "live_metrics",
@@ -62,6 +63,7 @@ class PreviewState:
     url_redacted: str = ""
     captured_at: float = 0.0
     alpr: dict = field(default_factory=dict)
+    alpr_at: float = 0.0
     last_car: dict = field(default_factory=dict)
     last_car_at: float = 0.0
     seq: int = 0
@@ -139,7 +141,26 @@ def remember_frame(
 
 
 def remember_alpr(camera_id: int, result: dict) -> None:
-    get_state(camera_id).alpr = result
+    row = get_state(camera_id)
+    row.alpr = result or {}
+    row.alpr_at = time.monotonic() if result else 0.0
+
+
+def fresh_alpr(camera_id: int, *, max_age_seconds: float | None = None) -> dict | None:
+    row = get_state(camera_id)
+    if not row.alpr or row.alpr_at <= 0:
+        return None
+    from app.config import settings
+    max_age = float(
+        max_age_seconds
+        if max_age_seconds is not None
+        else getattr(settings, "live_plate_fresh_seconds", 4.0)
+    )
+    if time.monotonic() - row.alpr_at > max_age:
+        row.alpr = {}
+        row.alpr_at = 0.0
+        return None
+    return row.alpr
 
 
 def remember_last_car(camera_id: int, payload: dict | None) -> None:
