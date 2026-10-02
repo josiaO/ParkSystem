@@ -228,7 +228,12 @@ async def _infer_camera(camera: dict, stop: asyncio.Event, stats: dict, inferenc
         while not stop.is_set():
             stream = None
             try:
-                stream = decoder.ffmpeg_jpeg_stream(url, scale=960, transport="TCP")
+                stream = decoder.ffmpeg_jpeg_stream(
+                    url,
+                    scale=960,
+                    output_fps=float(settings.detect_fps),
+                    transport="TCP",
+                )
                 async for jpeg in stream:
                     if stop.is_set():
                         break
