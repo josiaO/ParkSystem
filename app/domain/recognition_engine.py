@@ -58,6 +58,7 @@ class RecognitionPolicy:
     medium_min: float = 0.75
     consensus_window_seconds: float = 2.0
     hold_seconds: float = 20.0
+    absence_reset_seconds: float = 0.6
     min_reads: int = 2
     min_agreeing: int = 2
     min_share: float = 0.6
@@ -93,6 +94,9 @@ def policy_from_settings() -> RecognitionPolicy:
         medium_min=float(getattr(settings, "recognition_medium_confidence", 0.75) or 0.75),
         consensus_window_seconds=float(
             getattr(settings, "recognition_consensus_window_seconds", 2.0) or 2.0
+        ),
+        absence_reset_seconds=float(
+            getattr(settings, "recognition_absence_reset_seconds", 0.6) or 0.6
         ),
         plate_normalization=str(getattr(settings, "plate_normalization", "ALNUM_UPPER") or "ALNUM_UPPER"),
         plate_validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"),
@@ -130,6 +134,7 @@ def _new_track(policy: RecognitionPolicy) -> ConsensusTrack:
     return ConsensusTrack(
         window_seconds=float(policy.consensus_window_seconds),
         hold_seconds=float(policy.hold_seconds),
+        absence_reset_seconds=float(policy.absence_reset_seconds),
         min_reads=int(policy.min_reads),
         min_agreeing=int(policy.min_agreeing),
         min_share=float(policy.min_share),

@@ -9,6 +9,7 @@ per watched camera reads ``cam{id}``; the detect consumer separately reads
 from __future__ import annotations
 
 import asyncio
+from app.config import settings
 from typing import TYPE_CHECKING
 
 from app.services.media_gateway import gateway
@@ -42,6 +43,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             stream = gateway.ffmpeg_jpeg_stream(
                 local_url,
                 scale=960,
+                output_fps=float(getattr(settings, "live_mjpeg_fps", 10.0) or 10.0),
                 transport="TCP",
                 session=row,
             )

@@ -43,7 +43,9 @@ from app.domain.parking_engine import (
 from app.domain.receipt_engine import new_human_reference, new_public_token
 from app.domain.recognition import NormalizedRecognitionEvent
 from app.domain.site import DEFAULT_SITE_ID
-from app.models import ParkingSession, utcnow
+from app.core.plate import plate_similarity
+from app.config import settings
+from app.models import ParkingSession, as_utc, utcnow
 
 
 def _policy(**over) -> LanePolicy:
@@ -137,6 +139,61 @@ def active_for_plate(
     return db.scalar(stmt)
 
 
+def recent_similar_entry(
+    db: Session,
+    plate: str,
+    *,
+    site_id: int,
+    camera_id: int | None,
+    lane_id: int | None,
+) -> ParkingSession | None:
+    """Collapse near-identical OCR reads from the same physical approach.
+
+    Exact duplicate protection is enforced by database indexes. This extra
+    guard handles the practical OCR case where one vehicle is read as
+    T285DQP and, a moment later, T285DOP before it has left the entry lane.
+    It is deliberately short-lived and lane/camera scoped so two legitimate
+    similar registrations elsewhere are never merged.
+    """
+    if camera_id is None and lane_id is None:
+        return None
+    now = utcnow()
+    window = float(getattr(settings, "entry_dedupe_seconds", 3.0) or 3.0)
+    threshold = float(getattr(settings, "entry_dedupe_similarity", 0.85) or 0.85)
+    stmt = (
+        select(ParkingSession)
+        .where(
+            ParkingSession.site_id == int(site_id),
+            ParkingSession.status.in_(tuple(OPEN_STORED)),
+        )
+        .order_by(ParkingSession.id.desc())
+        .limit(20)
+    )
+    # PostgreSQL serializes competing entry claims; SQLite development still
+    # relies on the unique exact-plate/event indexes.
+    try:
+        if db.get_bind().dialect.name != "sqlite":
+            stmt = stmt.with_for_update()
+    except Exception:
+        pass
+    for row in db.scalars(stmt).all():
+        same_approach = (
+            (camera_id is not None and row.camera_id == camera_id)
+            or (lane_id is not None and row.entry_lane_id == lane_id)
+        )
+        if not same_approach:
+            continue
+        created = as_utc(row.created_at)
+        if created is None:
+            continue
+        age = (now - created).total_seconds()
+        if age < 0 or age > window:
+            continue
+        if plate_similarity(row.plate, plate) >= threshold:
+            return row
+    return None
+
+
 def start_entry(
     db: Session,
     *,
@@ -166,6 +223,15 @@ def start_entry(
     open_row = active_for_plate(db, plate, site_id=site_id)
     if open_row is not None:
         return open_row, False
+    near_duplicate = recent_similar_entry(
+        db,
+        plate,
+        site_id=site_id,
+        camera_id=camera_id,
+        lane_id=lane_id,
+    )
+    if near_duplicate is not None:
+        return near_duplicate, False
     token, human = _allocate_identity(db)
     row = ParkingSession(
         site_id=site_id,

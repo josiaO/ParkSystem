@@ -89,8 +89,9 @@ Write-Host "Background tasks:"
 Write-Host "  SmartPark Site Service   (API + camera events, port 8760)"
 Write-Host "  SmartPark HVX Host       (32-bit NetSDK, port 8765)"
 if (Test-Path $MediaMtx) {
-    Write-Host "  SmartPark Media Service  (MediaMTX sidecar; idle until SMARTPARK_MEDIA_GATEWAY_ENABLED=true)"
+    Write-Host "  SmartPark Media Service  (MediaMTX realtime gateway when enabled by effective site flags)"
 }
 Write-Host "Desktop is only a client. Parking continues if the UI is closed."
-Write-Host "MediaMTX: off by default. After soak, run Enable-MediaMTX.ps1 from the install/USB folder."
+Write-Host "Fresh installs prefer MediaMTX/WebRTC when the bundled binary is available; upgraded sites keep their stored rollout flags."
+Write-Host "To promote an upgraded site explicitly, run Enable-MediaMTX.ps1 -LiveView."
 Write-Host "Recovery: Windows restarts each task up to 3 times, 1 minute apart."

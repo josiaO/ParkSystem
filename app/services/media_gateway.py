@@ -615,6 +615,7 @@ class LocalMediaGateway:
                         profile=profile_name,
                         transport=transport,
                         scale=720 if role != ROLE_MAIN else None,
+                        output_fps=(float(settings.live_mjpeg_fps) if role != ROLE_MAIN else None),
                         session=row,
                     )
                     try:
@@ -677,6 +678,7 @@ class LocalMediaGateway:
         profile: str = DEFAULT_PROFILE,
         transport: str = "TCP",
         scale: int | None = 960,
+        output_fps: float | None = None,
         session: StreamSession | None = None,
     ):
         """Keep one ffmpeg process open so live view is a real stream, not one still per spawn."""
@@ -689,11 +691,15 @@ class LocalMediaGateway:
             *profile_args(profile, transport=transport),
             "-i", url,
             "-an", "-vsync", "0", "-flush_packets", "1",
-            "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "8",
         ]
+        filters: list[str] = []
+        if output_fps:
+            filters.append(f"fps={max(1.0, min(float(output_fps), 30.0)):g}")
         if scale:
-            cmd.extend(["-vf", f"scale={int(scale)}:-2"])
-        cmd.append("pipe:1")
+            filters.append(f"scale={int(scale)}:-2")
+        if filters:
+            cmd.extend(["-vf", ",".join(filters)])
+        cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "8", "pipe:1"])
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=512 * 1024,
@@ -704,7 +710,10 @@ class LocalMediaGateway:
         buf = b""
         try:
             while True:
-                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=8)
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(65536),
+                    timeout=float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0),
+                )
                 if not chunk:
                     err = b""
                     if proc.stderr:

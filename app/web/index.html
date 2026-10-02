@@ -977,7 +977,7 @@
         <div class="toolbar">
           <label>Lane <select id="sim-gate"></select></label>
         </div>
-        <label>Number plate <input id="sim-plate" placeholder="T453ETH" style="max-width:220px"></label>
+        <label>Number plate <input id="sim-plate" placeholder="Enter a test plate" style="max-width:220px"></label>
         <div class="toolbar">
           <button type="button" id="sim-plate-entry">Enter plate as ENTRY</button>
           <button class="secondary" type="button" id="sim-plate-exit">Enter plate as EXIT</button>
@@ -1689,47 +1689,18 @@
         drawLiveOverlay(slot);
       };
       els.img.onerror = () => {
-        if (els.img.dataset.cameraId === String(id)) {
-          if (els.status) els.status.textContent = "Reconnecting…";
-          startSnapshotLoop(slot, id);
-        }
+        if (els.img.dataset.cameraId !== String(id)) return;
+        if (els.status) els.status.textContent = "Reconnecting live stream…";
+        if (snapshotTimers[slot]) clearTimeout(snapshotTimers[slot]);
+        // Retry the persistent MJPEG stream. Never switch to 120 ms snapshot
+        // polling: that restarts/loads decoders and is exactly the backlog path
+        // that made live video progressively slow.
+        snapshotTimers[slot] = setTimeout(() => {
+          snapshotTimers[slot] = null;
+          if (els.img.dataset.cameraId === String(id)) startMjpegLive(slot, id);
+        }, 1000);
       };
       els.img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
-    }
-
-    function startSnapshotLoop(slot, id) {
-      if (snapshotTimers[slot]) clearInterval(snapshotTimers[slot]);
-      const els = paneEls(slot);
-      const tick = () => {
-        if (liveFetchBusy[slot] || els.img.dataset.cameraId !== String(id)) return;
-        liveFetchBusy[slot] = true;
-        fetch(mediaUrl(`/cameras/${id}/snapshot.jpg`) + "&t=" + Date.now(), { cache: "no-store" })
-          .then((res) => {
-            if (!res.ok) throw new Error(res.status === 409 ? "Waiting for live video" : res.statusText);
-            const seq = Number(res.headers.get("X-Frame-Seq") || 0);
-            if (seq && seq === liveFrameSeq[slot]) return null;
-            if (seq) liveFrameSeq[slot] = seq;
-            return res.blob();
-          })
-          .then((blob) => {
-            if (!blob || els.img.dataset.cameraId !== String(id)) return;
-            const url = URL.createObjectURL(blob);
-            const prev = liveObjectUrls[slot];
-            liveObjectUrls[slot] = url;
-            els.img.onload = () => {
-              if (prev) URL.revokeObjectURL(prev);
-              if (els.status) els.status.textContent = "Live";
-              drawLiveOverlay(slot);
-            };
-            els.img.src = url;
-          })
-          .catch((err) => {
-            if (els.status && els.img.dataset.cameraId === String(id)) els.status.textContent = err.message || "Waiting for live video";
-          })
-          .finally(() => { liveFetchBusy[slot] = false; });
-      };
-      tick();
-      snapshotTimers[slot] = setInterval(tick, 120);
     }
 
     async function startLiveSlot(slot, camera, force = false) {
@@ -2038,6 +2009,10 @@
 
     function renderSlotCar(slot, data) {
       const els = paneEls(slot);
+      if (data && data.clear_last_car) {
+        liveLastCars[slot] = null;
+        liveOverlays[slot] = null;
+      }
       const last = (data && (data.last_car || data.capture)) || {};
       if (last.snapshot_url || last.crop_url || last.plate) liveLastCars[slot] = last;
       const shown = liveLastCars[slot] || last;

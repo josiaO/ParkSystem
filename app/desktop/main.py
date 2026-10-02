@@ -702,6 +702,9 @@ class CameraLivePane(QFrame):
         w.done.connect(self._show_alpr); w.failed.connect(lambda e: self.status.setText(e)); w.finished.connect(lambda: setattr(self,"_alpr_busy",False)); self._keep(w); w.start()
     def _show_alpr(self, data):
         payload=data if isinstance(data, dict) else {}
+        if payload.get("clear_last_car"):
+            self._held_car=None
+            self._last_overlay=None
         last=payload.get("last_car") or payload.get("capture") or {}
         if last.get("snapshot_url") or last.get("crop_url") or last.get("plate"):
             self._held_car=last
