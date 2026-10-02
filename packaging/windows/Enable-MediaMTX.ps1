@@ -84,6 +84,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "Could not persist realtime migration flags."
 }
 
+if ($LiveView) {
+    # WebRTC signaling (TCP 8889) and ICE media (UDP 8189) must be reachable
+    # from operator PCs. Restrict the rules to Private networks + LocalSubnet.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        $rules = @(
+            @{ Name = "SmartPark MediaMTX WebRTC"; Protocol = "TCP"; Port = 8889 },
+            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 }
+        )
+        foreach ($rule in $rules) {
+            if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
+                New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -Profile Private -RemoteAddress LocalSubnet | Out-Null
+                Write-Host ("Opened {0}/{1} to LocalSubnet on Private networks." -f $rule.Protocol, $rule.Port)
+            }
+        }
+    } else {
+        Write-Warning "Run this script once as Administrator if operator PCs cannot reach TCP 8889 / UDP 8189. SmartPark does not open Public-network firewall rules."
+    }
+}
+
 foreach ($task in @("SmartPark Media Service", "SmartPark Site Service")) {
     try {
         Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
