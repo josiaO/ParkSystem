@@ -37,11 +37,19 @@ class Settings(BaseSettings):
     live_sdk_interval_seconds: float = 0.05
     snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
+    stream_read_timeout_seconds: float = 3.0
     detect_fps: float = 5.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
-    local_alpr_cooldown_seconds: float = 2.0
+    local_alpr_cooldown_seconds: float = 0.5
+    recognition_max_concurrency: int = 2
+    recognition_absence_reset_seconds: float = 0.6
+    recognition_worker_stall_seconds: float = 5.0
+    live_plate_fresh_seconds: float = 4.0
+    live_mjpeg_fps: float = 10.0
+    entry_dedupe_seconds: float = 2.0
+    entry_dedupe_similarity: float = 0.85
     coil_gpio_index: int = 1
     coil_active_value: int = 1
     coil_poll_indexes: str = "1,2,3,4,5,6,7"
@@ -129,13 +137,16 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     printer_width_dots: int = 384
     printer_qr_mode: str = "auto"
-    media_gateway_enabled: bool = False
+    # Realtime default: MediaMTX is preferred when installed. Registry code
+    # automatically falls back to the legacy direct path when the sidecar is
+    # unavailable, so fresh installs get WebRTC without losing compatibility.
+    media_gateway_enabled: bool = True
     media_gateway_camera_ids: str = ""
-    fastalpr_new_pipeline_enabled: bool = False
-    webrtc_live_enabled: bool = False
+    fastalpr_new_pipeline_enabled: bool = True
+    webrtc_live_enabled: bool = True
     native_alpr_enabled: bool = True
-    live_view_provider: str = "DIRECT_LEGACY"
-    recognition_pipeline: str = "FASTALPR_LEGACY"
+    live_view_provider: str = "MEDIAMTX"
+    recognition_pipeline: str = "FASTALPR_NEW"
     site_timezone: str = "UTC"
     site_locale: str = "en"
     site_language: str = "en"
@@ -153,13 +164,42 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid SMARTPARK port {port}; expected 1-65535")
         return port
 
-    @field_validator("detect_fps")
+    @field_validator("detect_fps", "live_mjpeg_fps")
     @classmethod
-    def _detect_fps_range(cls, value: float) -> float:
+    def _video_fps_range(cls, value: float) -> float:
         fps = float(value)
         if not 1.0 <= fps <= 30.0:
-            raise ValueError("SMARTPARK_DETECT_FPS must be between 1 and 30")
+            raise ValueError("SmartPark video FPS values must be between 1 and 30")
         return fps
+
+    @field_validator("recognition_max_concurrency")
+    @classmethod
+    def _recognition_concurrency(cls, value: int) -> int:
+        workers = int(value)
+        if not 1 <= workers <= 8:
+            raise ValueError("SMARTPARK_RECOGNITION_MAX_CONCURRENCY must be between 1 and 8")
+        return workers
+
+    @field_validator(
+        "recognition_absence_reset_seconds",
+        "recognition_worker_stall_seconds",
+        "live_plate_fresh_seconds",
+        "entry_dedupe_seconds",
+    )
+    @classmethod
+    def _positive_runtime_seconds(cls, value: float) -> float:
+        seconds = float(value)
+        if seconds <= 0:
+            raise ValueError("SmartPark runtime timing values must be greater than 0")
+        return seconds
+
+    @field_validator("entry_dedupe_similarity")
+    @classmethod
+    def _dedupe_similarity(cls, value: float) -> float:
+        score = float(value)
+        if not 0.5 <= score <= 1.0:
+            raise ValueError("SMARTPARK_ENTRY_DEDUPE_SIMILARITY must be between 0.5 and 1")
+        return score
 
     @field_validator("recognition_consensus_window_seconds")
     @classmethod

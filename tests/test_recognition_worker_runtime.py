@@ -118,6 +118,15 @@ class CameraSelectionTests(unittest.TestCase):
         self.assertTrue(note_reading(track, "ABC123", 30.2))
         self.assertFalse(note_reading(track, "ABC123", 30.4))
 
+    def test_clear_lane_releases_published_plate_for_next_visit(self):
+        track = PlateTrack(absence_reset_seconds=0.5)
+        self.assertFalse(note_reading(track, "ABC123", 0.0))
+        self.assertTrue(note_reading(track, "ABC123", 0.2))
+        self.assertFalse(note_reading(track, "", 0.3))
+        self.assertFalse(note_reading(track, "", 0.9))
+        self.assertFalse(note_reading(track, "ABC123", 1.0))
+        self.assertTrue(note_reading(track, "ABC123", 1.2))
+
     def test_continuously_visible_plate_does_not_republish_after_hold(self):
         track = PlateTrack()
         self.assertFalse(note_reading(track, "ABC123", 0))
