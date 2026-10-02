@@ -47,7 +47,7 @@ from .services.presence import coil_watch
 from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
-    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, fresh_last_car, snapshot_for_camera, start_idle_watch,
+    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, fresh_alpr, fresh_last_car, snapshot_for_camera, start_idle_watch,
     watch_live,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
@@ -1099,6 +1099,9 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
 
 def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session | None = None) -> dict:
     from .services.flags import native_alpr_enabled
+    state = get_state(camera.id)
+    if alpr is state.alpr:
+        alpr = fresh_alpr(camera.id)
     if not native_alpr_enabled():
         native = {**(native or {}), "plate": "", "confidence": 0.0}
     local = local_from_fastalpr(alpr)
@@ -1110,7 +1113,7 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         mode=fusion_mode(camera),
     )
     overlay = choose_overlay_box(native, local)
-    live = get_state(camera.id)
+    live = state
     last = fresh_last_car(camera.id)
     if not last and db is not None:
         # Historical captures belong on Detections. Only promote a DB row into
@@ -2150,7 +2153,7 @@ async def camera_preview(
     if not live:
         grabbed = await live_snapshot(c)
         live = bool(grabbed.get("ok"))
-    alpr = get_state(c.id).alpr or None
+    alpr = fresh_alpr(c.id)
     native = await _native_capture_for_camera(c)
     if live and grabbed.get("jpeg") and should_run_local(
         native_plate=str(native.get("plate") or ""),
@@ -2186,7 +2189,7 @@ async def camera_preview(
 async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     c = get_camera_or_404(db, camera_id)
     native = await _native_capture_for_camera(c)
-    return _plate_payload(c, native, get_state(c.id).alpr or None, db)
+    return _plate_payload(c, native, fresh_alpr(c.id), db)
 
 
 @app.post("/cameras/{camera_id}/plate-corrections")
