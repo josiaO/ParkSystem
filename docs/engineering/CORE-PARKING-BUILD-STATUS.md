@@ -426,3 +426,77 @@ VehicleCapture.
 Field acceptance remains required for day/night, glare, rain, motorcycle and
 cross-gate conditions before recognition thresholds are treated as production
 calibration.
+
+
+---
+
+## Phase 8 — Realtime stability after field test
+
+### Trigger
+
+A real site test reported five release-blocking faults:
+
+1. live video still lagged;
+2. one camera could stop recognizing;
+3. detection could remain stuck on an old plate for several passing vehicles;
+4. an old/fixed-looking plate remained visible when the lane was empty;
+5. one physical entry could be represented by more than one session.
+
+### Root causes found in source
+
+- HVX camera servicing was serial, so one slow OCR/network call delayed every other lane.
+- RecognitionWorker used one global inference lock for every camera.
+- native `last_capture`, live `last_car`, and cached FastALPR results had no freshness boundary.
+- browser/desktop retained the previous plate until another plate replaced it.
+- browser MJPEG failure could re-enter rapid snapshot polling.
+- WebRTC signaling was localhost-only, making remote operator PCs fall back.
+- WebRTC watchers also started an unnecessary server-side JPEG decoder.
+- MediaService read migration defaults without the persisted SiteSetting overrides.
+- vendor image-id suppression could remain across camera reconnect/reset.
+- `image_id=0` capture reuse had no age bound.
+- session idempotency covered exact event/plate duplicates but not a very short same-lane OCR confusion variant.
+- generated WebRTC config initially used the newer MediaMTX CORS key while the repo pins v1.11.3.
+
+### Fixes implemented
+
+- per-camera concurrent event servicing;
+- per-camera HVX circuit breakers;
+- bounded recognition inference concurrency (default 2);
+- stalled recognition-camera watchdog/restart;
+- no-plate gap releases temporal recognition hold;
+- timestamped HVX callbacks and stale native-capture rejection;
+- live current-vehicle and FastALPR freshness expiry;
+- browser/desktop explicit stale-plate clear;
+- removed rapid snapshot live fallback;
+- WebRTC browser watcher no longer launches hidden FFmpeg/MJPEG decode;
+- WebRTC signaling bound to LAN TCP 8889, ICE media to UDP 8189;
+- browser endpoint rewritten to the SmartPark server host instead of localhost;
+- MediaService now reads persisted migration flags from the database;
+- MediaMTX source registration is idempotent;
+- FFmpeg live/detect output FPS is bounded before Python consumes frames;
+- stalled decoder read timeout reduced to 3 seconds;
+- permanent vendor `_last_image_id` suppression removed;
+- `image_id=0` capture reuse limited to a one-second duplicate burst;
+- exact open-session/event DB constraints retained;
+- short same-camera/lane similar-plate entry guard added;
+- fresh installs prefer MediaMTX/WebRTC + new recognition pipeline with legacy fallback if unavailable;
+- Windows promotion script now persists rollout flags and can open LAN-only WebRTC firewall rules;
+- MediaMTX config aligned to the pinned v1.11.3 `webrtcAllowOrigin` syntax.
+
+### New regression coverage
+
+- stale native callback is not a current plate;
+- stale last-car/FastALPR UI state expires;
+- clear lane releases recognition publication hold;
+- near-identical OCR from the same immediate entry approach reuses one session;
+- generated MediaMTX config exposes LAN WebRTC correctly;
+- browser live failures cannot reintroduce snapshot polling.
+
+### Validation gate
+
+Software changes are committed, but field success is **not yet claimed**.
+
+Run `docs/engineering/NEXT-REALTIME-STABILITY-CODEX.md` against the branch and then
+repeat the physical one-lane/all-camera soak. Measured live latency, per-camera
+recognition continuity, and database duplicate-session counts must be recorded before
+this phase can be GREEN.
