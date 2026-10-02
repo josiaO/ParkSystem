@@ -47,7 +47,7 @@ from .services.presence import coil_watch
 from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
-    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, snapshot_for_camera, start_idle_watch,
+    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, fresh_last_car, snapshot_for_camera, start_idle_watch,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
 from .services.http_snapshot import grab_http_snapshot
@@ -1110,12 +1110,19 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
     )
     overlay = choose_overlay_box(native, local)
     live = get_state(camera.id)
-    last = live.last_car or None
+    last = fresh_last_car(camera.id)
     if not last and db is not None:
+        # Historical captures belong on Detections. Only promote a DB row into
+        # the live lane if it is still within the live freshness window.
         row = latest_for_camera(db, camera.id)
-        last = capture_dict(row) if row else None
-        if last:
-            remember_last_car(camera.id, last)
+        if row is not None and row.created_at is not None:
+            created = row.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - created).total_seconds()
+            if 0 <= age <= float(settings.live_plate_fresh_seconds):
+                last = capture_dict(row)
+                remember_last_car(camera.id, last)
     return {
         "camera": camera_dict(camera),
         "native": native,
@@ -1125,6 +1132,7 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "resolved_plate": fused.resolved_plate,
         "overlay": overlay,
         "last_car": last,
+        "clear_last_car": last is None,
         "live": bool(live.jpeg[:2] == b"\xff\xd8"),
         "live_source": live.source,
         "live_fps": live.fps,
