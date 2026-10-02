@@ -48,6 +48,7 @@ from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
     pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, fresh_last_car, snapshot_for_camera, start_idle_watch,
+    watch_live,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
 from .services.http_snapshot import grab_http_snapshot
@@ -2014,7 +2015,7 @@ async def camera_snapshot(camera_id: int, _: User = Depends(require_media("camer
 @app.post("/cameras/{camera_id}/live/watch")
 def watch_camera_live(camera_id: int, _: User = Depends(require_media("cameras.view"))):
     spec = _camera_live_spec(camera_id)
-    acquire_live(spec)
+    watch_live(spec)
     return {"ok": True, "camera_id": camera_id, "viewers": viewers_for(camera_id)}
 
 
