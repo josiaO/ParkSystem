@@ -24,6 +24,11 @@ rsync -a --delete \
 cp "$ROOT/tools/hvx_sdk_host/hvx_host.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/hvx_sdk.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/run_hvx_host.bat" "$OUT/payload/tools/hvx_sdk_host/"
+if [[ -f "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" ]]; then
+  cp "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
+elif [[ -f "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/hvx_bindings.json" ]]; then
+  cp "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
+fi
 cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
 shopt -s nullglob
@@ -55,10 +60,12 @@ if [[ -f "$ROOT/vendor/mediamtx/LICENSE" ]]; then
   cp "$ROOT/vendor/mediamtx/LICENSE" "$OUT/payload/vendor/mediamtx/LICENSE"
 fi
 if [[ ! -f "$OUT/payload/vendor/mediamtx/mediamtx.exe" ]]; then
-  echo "WARNING: mediamtx.exe missing from Windows kit. Media sidecar will not start."
+  echo "ERROR: mediamtx.exe missing from Windows kit."
+  exit 1
 fi
 if [[ ! -f "$OUT/payload/vendor/NetSDK.dll" ]]; then
-  echo "WARNING: OcxConfig/NetSDK.dll was not copied. SDK login will fail until it is in payload/vendor."
+  echo "ERROR: OcxConfig/NetSDK.dll was not copied. SDK login will fail."
+  exit 1
 fi
 
 download "$PY64_URL" "$CACHE/python-${PY_VER}-embed-amd64.zip"
@@ -145,7 +152,7 @@ import sys
 from packaging.version import InvalidVersion, Version
 
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-skip = ("pyside6-", "pyside6_addons-")
+skip = ("pyside6-", "pyside6_addons-", "watchfiles-")
 best: dict[str, tuple[Version, Path]] = {}
 for path in src.glob("*.whl"):
     name = path.name
@@ -157,6 +164,8 @@ for path in src.glob("*.whl"):
         parsed = Version(ver)
     except InvalidVersion:
         parsed = Version("0")
+    if key == "websockets" and parsed >= Version("17.1"):
+        continue
     prev = best.get(key)
     if prev is None or parsed > prev[0]:
         best[key] = (parsed, path)
@@ -180,6 +189,9 @@ cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
 cp "$ROOT/docs-site/i18n.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
+
+echo "Verifying offline payload (wheels, NetSDK, models, Python)..."
+python3 "$ROOT/packaging/verify_windows_kit.py" "$OUT/payload"
 
 ZIP="$ROOT/dist/SmartParkEdge-USB.zip"
 mkdir -p "$ROOT/dist"

@@ -296,7 +296,7 @@ def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, p
         current = _current(row)
     subscriber = (row.parker_kind or "CASUAL").upper() not in {"CASUAL", ""}
     skip_receipt = (not policy.receipt_required_before_open) or (subscriber and policy.subscriber_skip_receipt)
-    if current == SESSION_CREATED and skip_receipt:
+    if skip_receipt and current in {SESSION_CREATED, RECEIPT_PRINTING, RECEIPT_PRESENTED}:
         row = advance(db, row, ENTRY_AUTHORIZED, policy=policy)
         current = _current(row)
     if current != ENTRY_AUTHORIZED:
@@ -416,14 +416,21 @@ def complete_authorized_exit(db: Session, row: ParkingSession, *, policy: LanePo
     if _current(row) == AUTHORIZED:
         row = advance(db, row, EXIT_GATE_OPEN_REQUESTED, policy=policy)
     if command_uuid:
-        if row.exit_open_command_uuid == command_uuid and _current(row) in {CLOSED, EXIT_GATE_OPEN_REQUESTED, EXIT_VEHICLE_PASSED}:
+        uuid_match = row.exit_open_command_uuid == command_uuid
+        lifecycle_now = _current(row)
+        # Same command already finished (closed or vehicle passed). Do not skip
+        # EXIT_GATE_OPEN_REQUESTED — passage_fallback still needs to close.
+        early = uuid_match and lifecycle_now in {CLOSED, EXIT_VEHICLE_PASSED}
+        if early:
             return row
-        row.exit_open_command_uuid = command_uuid
-        db.commit()
+        if not row.exit_open_command_uuid:
+            row.exit_open_command_uuid = command_uuid
+            db.commit()
     if policy.passage_fallback() and _current(row) == EXIT_GATE_OPEN_REQUESTED:
         # Commissioning fallback only: a successful OPEN command is treated as
         # passage when no physical passage sensor is configured.
-        return advance(db, row, CLOSED, policy=policy)
+        row = advance(db, row, CLOSED, policy=policy)
+        return row
     # With WAIT_FOR_PASSAGE, the session deliberately remains open until a
     # loop/beam/sensor calls mark_vehicle_passed(side="EXIT").
     return row

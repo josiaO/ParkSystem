@@ -144,7 +144,7 @@ async def print_entry_receipt(
     if _job_state(row) != JOB_PRINTING:
         _set_job(row, JOB_PRINTING)
     row.receipt_status = "PRINTING"
-    if first and policy.receipt_required_before_open:
+    if first:
         current = row.lifecycle or ""
         if current in {"SESSION_CREATED", ""}:
             advance(db, row, RECEIPT_PRINTING, policy=policy)
