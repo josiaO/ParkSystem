@@ -42,6 +42,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             stream = gateway.ffmpeg_jpeg_stream(
                 local_url,
                 scale=960,
+                output_fps=ai_fps,
                 transport="TCP",
                 session=row,
             )
