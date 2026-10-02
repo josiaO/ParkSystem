@@ -706,7 +706,12 @@ def persist_video(db: Session, camera: Camera, url: str | None = None) -> None:
 
 
 async def _native_capture_for_camera(camera: Camera) -> dict:
-    """Best-effort QY capture callback plate. Missing SDK host is not a plate."""
+    """Return only a *fresh* native capture callback plate.
+
+    The vendor host keeps its last callback for diagnostics. That cached value
+    must never become a permanent plate in the operator UI or be fused into a
+    later vehicle. New host versions stamp callbacks with captured_at_epoch.
+    """
     if camera.sdk_handle is None:
         return native_from_sdk_capture(None)
     try:
@@ -714,6 +719,16 @@ async def _native_capture_for_camera(camera: Camera) -> dict:
     except Exception:
         return native_from_sdk_capture(None)
     capture = state.get("last_capture") if isinstance(state, dict) else None
+    if not isinstance(capture, dict):
+        return native_from_sdk_capture(None)
+    try:
+        captured_at = float(capture.get("captured_at_epoch") or 0)
+    except (TypeError, ValueError):
+        captured_at = 0.0
+    # Hosts upgraded from older builds have no timestamp. Treat their state()
+    # value as diagnostic-only; live event ingestion still comes from drain_events().
+    if captured_at <= 0 or (time.time() - captured_at) > float(settings.live_plate_fresh_seconds):
+        return native_from_sdk_capture(None)
     return native_from_sdk_capture(capture)
 
 
