@@ -7,7 +7,7 @@ import time
 import traceback
 import httpx
 from PySide6.QtCore import QDate, Qt, QSize, QThread, QTime, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap, QTextDocument
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
@@ -19,6 +19,10 @@ from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 from .api import api, BASE
 from .desk import ReportsPage, health_sentences
 from .theme import DARK, LIGHT
+
+
+def action_label(name: str, shortcut: str) -> str:
+    return f"{name} ({shortcut})"
 
 
 def available_screen():
@@ -421,6 +425,7 @@ class ClickLabel(QLabel):
 
 class CameraLivePane(QFrame):
     """One live camera: video on top, last-car stills and plate details below."""
+    armed=Signal(object)
     def __init__(self, slot_title="Camera"):
         super().__init__()
         self.setObjectName("card")
@@ -431,6 +436,7 @@ class CameraLivePane(QFrame):
         self.picker=QComboBox()
         self.picker.addItem("Choose camera…", None)
         self.picker.currentIndexChanged.connect(self._picked)
+        self.picker.activated.connect(lambda *_: self.armed.emit(self))
         l.addWidget(self.picker)
         self.video=ClickLabel("Click to choose a camera.")
         self.video.setObjectName("video")
@@ -438,7 +444,7 @@ class CameraLivePane(QFrame):
         self.video.setMinimumHeight(280)
         self.video.setMaximumHeight(480)
         self.video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video.clicked.connect(self.picker.showPopup)
+        self.video.clicked.connect(self._on_video)
         l.addWidget(self.video, 3)
         self.status=QLabel("Click this view or the list to choose a camera.")
         self.status.setWordWrap(True)
@@ -469,8 +475,19 @@ class CameraLivePane(QFrame):
         self.decision=QLabel("")
         self.decision.setWordWrap(True)
         l.addWidget(self.decision)
-        self.open_btn=QPushButton("Manual open"); self.open_btn.clicked.connect(self.open_this_side)
-        l.addWidget(self.open_btn)
+        self.target_chip=QLabel("")
+        self.target_chip.setWordWrap(True)
+        l.addWidget(self.target_chip)
+        self.open_btn=QPushButton(action_label("Manual open", "F8"))
+        self.open_btn.setToolTip("Open this barrier (F8)")
+        self.open_btn.clicked.connect(self.open_this_side)
+        self.close_btn=QPushButton(action_label("Manual close", "F9"))
+        self.close_btn.setToolTip("Close this barrier (F9)")
+        self.close_btn.clicked.connect(self.close_this_side)
+        barrier_row=QHBoxLayout()
+        barrier_row.addWidget(self.open_btn)
+        barrier_row.addWidget(self.close_btn)
+        l.addLayout(barrier_row)
         self.correct_btn=QPushButton("Correct plate")
         self.correct_btn.clicked.connect(self.correct_plate)
         l.addWidget(self.correct_btn)
@@ -492,6 +509,12 @@ class CameraLivePane(QFrame):
         self._pending_live=b""
         self._held_car=None
         self._watching=None
+    def _on_video(self):
+        self.armed.emit(self)
+        self.picker.showPopup()
+    def mousePressEvent(self, event):
+        self.armed.emit(self)
+        super().mousePressEvent(event)
     def fill_cameras(self, rows):
         self._all=list(rows or [])
         current=self.camera_id()
@@ -508,6 +531,7 @@ class CameraLivePane(QFrame):
         cid=self.picker.currentData()
         cam=next((c for c in self._all if c.get("id")==cid), None)
         self.set_camera(cam)
+        self.armed.emit(self)
     def _sync_picker(self):
         cid=self.camera_id()
         self.picker.blockSignals(True)
@@ -739,14 +763,21 @@ class CameraLivePane(QFrame):
             w=Worker(lambda: api.get_bytes(crop, timeout=8))
             w.done.connect(lambda jpeg: self._set_pixmap(self.crop, jpeg)); self._keep(w); w.start()
     def open_this_side(self):
+        self.command_barrier("open")
+    def close_this_side(self):
+        self.command_barrier("close")
+    def command_barrier(self, action="open"):
         cam=self.camera
+        verb="close" if action=="close" else "open"
+        title="Close this side" if verb=="close" else "Open this side"
         if not cam:
-            QMessageBox.information(self,"Open this side","No camera on this side."); return
+            QMessageBox.information(self,title,"No camera on this side."); return
         side=cam.get("side") or cam.get("lane_direction") or "this side"
-        if QMessageBox.question(self,"Open this side",f"Pulse only {cam.get('name') or side} — not the other side of this lane?")!=QMessageBox.Yes: return
-        reason,ok=QInputDialog.getText(self,"Open this side","Reason", text="manual open")
+        prompt=f"{'Close' if verb=='close' else 'Pulse'} only {cam.get('name') or side} — not the other side of this lane?"
+        if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
+        reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
 
     def correct_plate(self):
@@ -992,13 +1023,20 @@ class Cameras(QWidget):
         lane_row.addWidget(self.lane, 1)
         fill_lane=QPushButton("Fill both from lane"); fill_lane.clicked.connect(lambda: self._start_pair(True))
         lane_row.addWidget(fill_lane)
-        refresh_live=QPushButton("Refresh live"); refresh_live.clicked.connect(lambda: self._start_pair(False))
+        refresh_live=QPushButton(action_label("Refresh live", "F5")); refresh_live.clicked.connect(lambda: self._start_pair(False))
         lane_row.addWidget(refresh_live)
         live_l.addLayout(lane_row)
         self.live_grid=QGridLayout()
         self.pane_a=CameraLivePane("Left")
         self.pane_b=CameraLivePane("Right")
         self.extra_panes=[]
+        self._armed_pane=None
+        self.pane_a.armed.connect(self.arm_pane)
+        self.pane_b.armed.connect(self.arm_pane)
+        for i in range(1, 10):
+            sc=QShortcut(QKeySequence(str(i)), live)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda n=i: self.arm_visible(n))
         self.live_grid.addWidget(self.pane_a, 0, 0)
         self.live_grid.addWidget(self.pane_b, 0, 1)
         live_host=QWidget(); live_host.setLayout(self.live_grid)
@@ -1007,14 +1045,14 @@ class Cameras(QWidget):
 
         ips=QWidget(); ips_l=QVBoxLayout(ips)
         tools=QHBoxLayout()
-        add=QPushButton("Add Camera"); add.clicked.connect(self.add_camera); add.setVisible(api.can("cameras.manage"))
+        add=QPushButton(action_label("Add Camera", "Ctrl+N")); add.clicked.connect(self.add_camera); add.setVisible(api.can("cameras.manage")); add.setToolTip("Add Camera (Ctrl+N)")
         seed=QPushButton("Add site cameras"); seed.clicked.connect(self.seed_site); seed.setVisible(api.can("cameras.manage"))
         discover=QPushButton("Discover"); discover.clicked.connect(self.discover)
         onboard=QPushButton("Onboard wizard"); onboard.clicked.connect(self.onboard); onboard.setVisible(api.can("cameras.manage"))
         connect_all=QPushButton("Connect all"); connect_all.clicked.connect(self.connect_all)
-        edit=QPushButton("Edit"); edit.clicked.connect(self.edit_camera); edit.setVisible(api.can("cameras.manage"))
-        delete=QPushButton("Delete"); delete.clicked.connect(self.delete_camera); delete.setVisible(api.can("cameras.manage"))
-        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_camera); edit.setVisible(api.can("cameras.manage")); edit.setToolTip("Edit (Ctrl+E)")
+        delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_camera); delete.setVisible(api.can("cameras.manage")); delete.setToolTip("Delete (Del)")
+        refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
         for w in (add, seed, discover, onboard, connect_all, edit, delete, refresh): tools.addWidget(w)
         tools.addStretch(); ips_l.addLayout(tools)
         ips_hint=QLabel("Cameras on this site. Add one to start live monitoring and plate recognition.")
@@ -1035,9 +1073,10 @@ class Cameras(QWidget):
         self.onvif_btn=QPushButton("Discover Streams"); self.onvif_btn.clicked.connect(self.onvif_discover); self.onvif_btn.setVisible(tech)
         self.alpr_btn=QPushButton("Test Recognition"); self.alpr_btn.clicked.connect(self.fastalpr); self.alpr_btn.setVisible(tech)
         self.disconnect_btn=QPushButton("Disconnect camera"); self.disconnect_btn.clicked.connect(self.sdk_disconnect); self.disconnect_btn.setVisible(tech)
-        self.open_side_btn=QPushButton("Manual open"); self.open_side_btn.clicked.connect(self.open_this_side)
+        self.open_side_btn=QPushButton(action_label("Manual open", "F8")); self.open_side_btn.clicked.connect(self.open_this_side); self.open_side_btn.setToolTip("Open this barrier (F8)")
+        self.close_side_btn=QPushButton(action_label("Manual close", "F9")); self.close_side_btn.clicked.connect(self.close_this_side); self.close_side_btn.setToolTip("Close this barrier (F9)")
         self.snap_btn=QPushButton("Capture snapshot"); self.snap_btn.clicked.connect(self.capture_snapshot)
-        for w in (self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.snap_btn, self.disconnect_btn, self.open_side_btn):
+        for w in (self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.snap_btn, self.disconnect_btn, self.open_side_btn, self.close_side_btn):
             actions.addWidget(w)
         actions.addStretch(); ips_l.addLayout(actions)
         if not tech:
@@ -1199,13 +1238,20 @@ class Cameras(QWidget):
     def fastalpr(self): self._run(lambda cid: api.post(f"/cameras/{cid}/alpr/recognize", timeout=30),"FastALPR")
     def capture_snapshot(self): self._run(lambda cid: api.post(f"/cameras/{cid}/snapshot/capture", timeout=12),"Snapshot")
     def open_this_side(self):
+        self.command_barrier("open")
+    def close_this_side(self):
+        self.command_barrier("close")
+    def command_barrier(self, action="open"):
         cam=self.selected_camera()
-        if not cam: QMessageBox.information(self,"Open this side","Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first."); return
+        verb="close" if action=="close" else "open"
+        title="Close this side" if verb=="close" else "Open this side"
+        if not cam: QMessageBox.information(self,title,"Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first."); return
         side=cam.get("side") or cam.get("lane_direction") or "this side"
-        if QMessageBox.question(self,"Open this side",f"Pulse only {cam.get('name') or side} — not the other side of this lane?")!=QMessageBox.Yes: return
-        reason,ok=QInputDialog.getText(self,"Open this side","Reason", text="manual open")
+        prompt=f"{'Close' if verb=='close' else 'Pulse'} only {cam.get('name') or side} — not the other side of this lane?"
+        if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
+        reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
     def _keep(self, worker):
         self._workers.append(worker)
@@ -1240,6 +1286,7 @@ class Cameras(QWidget):
         needed=max(0, len(self.rows) - 2) if mode == 2 else 0
         while len(self.extra_panes) < needed:
             pane=CameraLivePane(f"Camera {len(self.extra_panes)+3}")
+            pane.armed.connect(self.arm_pane)
             self.extra_panes.append(pane)
             index=len(self.extra_panes) + 1
             self.live_grid.addWidget(pane, index // 2, index % 2)
@@ -1248,6 +1295,31 @@ class Cameras(QWidget):
             pane.setVisible(show)
             if not show:
                 pane.stop_live()
+    def arm_pane(self, pane):
+        self._armed_pane=pane
+        for p in self._all_panes():
+            if p is pane:
+                p.setStyleSheet("CameraLivePane { border: 2px solid #0E7C72; }")
+                p.target_chip.setText("F8 / F9 pulse this camera only")
+            else:
+                p.setStyleSheet("")
+                p.target_chip.setText("")
+    def arm_visible(self, n):
+        panes=[p for p in self._all_panes() if p.isVisible()]
+        if not (1 <= n <= len(panes)):
+            return
+        self.arm_pane(panes[n-1])
+    def shortcut_pane(self):
+        def usable(pane):
+            return pane is not None and pane.isVisible() and pane.camera
+        if usable(self._armed_pane):
+            return self._armed_pane
+        w=QApplication.focusWidget()
+        for candidate in self._all_panes():
+            if usable(candidate) and w is not None and (candidate is w or candidate.isAncestorOf(w)):
+                self.arm_pane(candidate)
+                return candidate
+        return None
     def _on_tab(self, index):
         if index==0:
             self._start_pair(False)
@@ -1387,16 +1459,21 @@ class Gates(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Gates"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane. GPIO + Board TCP + LED UDP.")
+        note=QLabel("Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane. Select a lane, press 1 for entry or 2 for exit, then F8 / F9.")
         note.setWordWrap(True); l.addWidget(note)
         self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["ID","Lane","Mode","Enabled","Sides (camera / controller / display)","Action"])
         configure_table(self.table); l.addWidget(self.table, 1)
+        self.shortcut_hint=QLabel("Select a lane, then 1 = entry, 2 = exit. F8 / F9 pulse that side only.")
+        self.shortcut_hint.setWordWrap(True); l.addWidget(self.shortcut_hint)
+        self._armed_side=None
         row=QHBoxLayout()
-        add=QPushButton("Add Gate"); add.clicked.connect(self.add_gate); add.setVisible(api.can("gates.manage"))
-        edit=QPushButton("Edit"); edit.clicked.connect(self.edit_gate); edit.setVisible(api.can("gates.manage"))
-        delete=QPushButton("Delete"); delete.clicked.connect(self.delete_gate); delete.setVisible(api.can("gates.manage"))
+        add=QPushButton(action_label("Add Gate", "Ctrl+N")); add.clicked.connect(self.add_gate); add.setVisible(api.can("gates.manage")); add.setToolTip("Add Gate (Ctrl+N)")
+        edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_gate); edit.setVisible(api.can("gates.manage")); edit.setToolTip("Edit (Ctrl+E)")
+        delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_gate); delete.setVisible(api.can("gates.manage")); delete.setToolTip("Delete (Del)")
         led=QPushButton("LED text"); led.clicked.connect(self.write_led); led.setVisible(api.can("gates.open"))
         row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(led); row.addStretch(); l.addLayout(row); self.rows=[]; self.refresh()
+        sc1=QShortcut(QKeySequence("1"), self); sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc1.activated.connect(lambda: self.arm_side("ENTRY"))
+        sc2=QShortcut(QKeySequence("2"), self); sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc2.activated.connect(lambda: self.arm_side("EXIT"))
     def refresh(self):
         try: rows=api.get("/gates")
         except Exception: rows=[]
@@ -1417,13 +1494,41 @@ class Gates(QWidget):
                     continue
                 seen.add(side)
                 b=QPushButton("Open entry" if side=="ENTRY" else "Open exit")
-                b.clicked.connect(lambda _,gid=g["id"],s=side: self.open_gate(gid,s))
+                b.clicked.connect(lambda _,gid=g["id"],s=side: self._open_and_arm(gid,s,"open"))
                 hl.addWidget(b)
+                cbtn=QPushButton("Close entry" if side=="ENTRY" else "Close exit")
+                cbtn.clicked.connect(lambda _,gid=g["id"],s=side: self._open_and_arm(gid,s,"close"))
+                hl.addWidget(cbtn)
             self.table.setCellWidget(r,5,cell)
     def selected_gate(self):
         row=self.table.currentRow()
         if row<0 or row>=len(self.rows): return None
         return self.rows[row]
+    def arm_side(self, side):
+        self._armed_side=side
+        gate=self.selected_gate()
+        name=(gate or {}).get("name") or "this lane"
+        label="entry" if side=="ENTRY" else "exit"
+        self.shortcut_hint.setText(f"{name} {label} is armed. F8 opens it, F9 closes it.")
+    def shortcut_side(self):
+        gate=self.selected_gate()
+        if not gate:
+            return None, None
+        sides=[]
+        seen=set()
+        for cam in (gate.get("cameras") or []):
+            s=(cam.get("lane_direction") or cam.get("side") or "").upper()
+            if s in {"ENTRY","EXIT"} and s not in seen:
+                seen.add(s); sides.append(s)
+        if self._armed_side in sides:
+            return gate, self._armed_side
+        if len(sides)==1:
+            return gate, sides[0]
+        return gate, None
+    def _open_and_arm(self, gid, side, action):
+        self._armed_side=side
+        self.arm_side(side)
+        self.command_gate(gid, side, action)
     def add_gate(self):
         d=GateDialog()
         if d.exec():
@@ -1443,11 +1548,16 @@ class Gates(QWidget):
         try: api.delete(f"/gates/{gate['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete gate",str(e))
     def open_gate(self,gid,side):
+        self.command_gate(gid, side, "open")
+    def command_gate(self,gid,side,action="open"):
+        verb="close" if action=="close" else "open"
         label="entry" if side=="ENTRY" else "exit"
-        if QMessageBox.question(self,"Open this side",f"Pulse only this lane's {label} barrier (not the other side)?")!=QMessageBox.Yes: return
-        reason,ok=QInputDialog.getText(self,"Open this side","Reason", text="manual open")
+        title=f"{'Close' if verb=='close' else 'Open'} this side"
+        prompt=f"{'Close' if verb=='close' else 'Pulse'} only this lane's {label} barrier (not the other side)?"
+        if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
+        reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/gates/{gid}/open",{"reason":reason,"side":side}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(api.post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
     def write_led(self):
         gate=self.selected_gate()
@@ -1469,10 +1579,10 @@ class Users(QWidget):
         self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(["ID","Username","Name","Status","Roles"])
         configure_table(self.table); l.addWidget(self.table, 1)
         row=QHBoxLayout()
-        add=QPushButton("Add User"); add.clicked.connect(self.add_user); add.setVisible(api.can("users.manage"))
-        edit=QPushButton("Edit"); edit.clicked.connect(self.edit_user); edit.setVisible(api.can("users.manage"))
-        delete=QPushButton("Delete"); delete.clicked.connect(self.delete_user); delete.setVisible(api.can("users.manage"))
-        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        add=QPushButton(action_label("Add User", "Ctrl+N")); add.clicked.connect(self.add_user); add.setVisible(api.can("users.manage")); add.setToolTip("Add User (Ctrl+N)")
+        edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_user); edit.setVisible(api.can("users.manage")); edit.setToolTip("Edit (Ctrl+E)")
+        delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_user); delete.setVisible(api.can("users.manage")); delete.setToolTip("Delete (Del)")
+        refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
         row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(refresh); row.addStretch(); l.addLayout(row); self.rows=[]; self.refresh()
     def refresh(self):
         try: rows=api.get("/users")
@@ -1812,12 +1922,12 @@ class Vehicles(QWidget):
         l.addWidget(self.bulk)
         row=QHBoxLayout()
         manage=api.can("subscribers.manage")
-        add=QPushButton("Register plate"); add.clicked.connect(self.add); add.setVisible(manage)
+        add=QPushButton(action_label("Register plate", "Ctrl+N")); add.clicked.connect(self.add); add.setVisible(manage); add.setToolTip("Register plate (Ctrl+N)")
         bulk=QPushButton("Register these plates"); bulk.clicked.connect(self.add_bulk); bulk.setVisible(manage)
-        edit=QPushButton("Edit"); edit.clicked.connect(self.edit); edit.setVisible(manage)
-        delete=QPushButton("Delete"); delete.clicked.connect(self.delete); delete.setVisible(manage)
-        delete_many=QPushButton("Delete selected"); delete_many.clicked.connect(self.delete_selected); delete_many.setVisible(manage)
-        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit); edit.setVisible(manage); edit.setToolTip("Edit (Ctrl+E)")
+        delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete); delete.setVisible(manage); delete.setToolTip("Delete (Del)")
+        delete_many=QPushButton(action_label("Delete selected", "Del")); delete_many.clicked.connect(self.delete_selected); delete_many.setVisible(manage); delete_many.setToolTip("Delete selected (Del)")
+        refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
         row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
         self.rows=[]; self.refresh()
     def refresh(self):
@@ -2767,6 +2877,7 @@ class MainWindow(QMainWindow):
         self.apply_theme("Light")
         self.statusBar().showMessage("SmartPark Edge")
         self.setMinimumSize(960, 640)
+        self._install_shortcuts()
         # Do not setGeometry() to the full screen rect. On Windows the frame is
         # taller than the client area, Qt retries, and the window grows forever.
     def closeEvent(self, event):
@@ -2793,6 +2904,102 @@ class MainWindow(QMainWindow):
             old.deleteLater()
             self.pages[index]=page
         self.stack.setCurrentIndex(index)
+    def _current_page(self):
+        idx=self.stack.currentIndex()
+        if 0<=idx<len(self.pages):
+            return self.pages[idx]
+        return None
+    def _text_editing(self):
+        w=QApplication.focusWidget()
+        return isinstance(w, (QLineEdit, QPlainTextEdit, QSpinBox, QDateEdit, QTimeEdit))
+    def _install_shortcuts(self):
+        def add_act(title, keys, slot, tip=""):
+            act=QAction(title, self)
+            seqs=keys if isinstance(keys, (list, tuple)) else [keys]
+            act.setShortcuts([QKeySequence(k) for k in seqs])
+            act.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            if tip:
+                act.setStatusTip(tip)
+            act.triggered.connect(slot)
+            self.addAction(act)
+            return act
+        menu=self.menuBar().addMenu("&Actions")
+        menu.addAction(add_act("Add", "Ctrl+N", self._shortcut_add, "Add camera, gate, vehicle, or user"))
+        menu.addAction(add_act("Edit", "Ctrl+E", self._shortcut_edit, "Edit the selected row"))
+        menu.addAction(add_act("Delete", ["Delete", "Ctrl+Backspace"], self._shortcut_delete, "Delete the selected row"))
+        menu.addSeparator()
+        menu.addAction(add_act("Open gate", "F8", lambda: self._shortcut_barrier("open"), "Open the selected barrier"))
+        menu.addAction(add_act("Close gate", "F9", lambda: self._shortcut_barrier("close"), "Close the selected barrier"))
+        menu.addAction(add_act("Refresh", ["F5", "Ctrl+R"], self._shortcut_refresh, "Reload this page"))
+        menu.addSeparator()
+        menu.addAction(add_act("Keyboard shortcuts", ["F1", "Ctrl+/"], self._shortcut_help))
+    def _call_page(self, names):
+        page=self._current_page()
+        if page is None:
+            return False
+        for name in names:
+            fn=getattr(page, name, None)
+            if callable(fn):
+                fn()
+                return True
+        return False
+    def _shortcut_add(self):
+        if self._text_editing():
+            return
+        if not self._call_page(("add_camera", "add_gate", "add_user", "add")):
+            QMessageBox.information(self, "Add", "Open Cameras, Gates, Vehicles, or Users to add.")
+    def _shortcut_edit(self):
+        if self._text_editing():
+            return
+        if not self._call_page(("edit_camera", "edit_gate", "edit_user", "edit")):
+            QMessageBox.information(self, "Edit", "Select a row on Cameras, Gates, Vehicles, or Users.")
+    def _shortcut_delete(self):
+        if self._text_editing():
+            return
+        if not self._call_page(("delete_selected", "delete_camera", "delete_gate", "delete_user", "delete")):
+            QMessageBox.information(self, "Delete", "Select a row on Cameras, Gates, Vehicles, or Users.")
+    def _shortcut_refresh(self):
+        if self._text_editing():
+            return
+        self._call_page(("refresh",))
+    def _shortcut_barrier(self, action):
+        if self._text_editing():
+            return
+        page=self._current_page()
+        if isinstance(page, Cameras):
+            if page._live_visible():
+                pane=page.shortcut_pane()
+                if pane is None:
+                    QMessageBox.information(self, "Barrier", "Click a live camera first, or press 1 / 2. F8 and F9 pulse that side only — never both.")
+                    return
+                pane.command_barrier(action)
+                return
+            page.command_barrier(action)
+            return
+        if isinstance(page, Gates):
+            gate, side=page.shortcut_side()
+            if not gate:
+                QMessageBox.information(self, "Barrier", "Select a gate row first.")
+                return
+            if not side:
+                QMessageBox.information(self, "Barrier", "This lane has two sides. Press 1 for entry or 2 for exit, then F8 / F9.")
+                return
+            page.command_gate(gate["id"], side, action)
+            return
+        QMessageBox.information(self, "Barrier", "Open Live Gates or Gates, then select one side.")
+    def _shortcut_help(self):
+        QMessageBox.information(
+            self,
+            "Keyboard shortcuts",
+            "Ctrl+N    Add camera, gate, vehicle, or user\n"
+            "Ctrl+E    Edit the selected row\n"
+            "Delete    Delete the selected row\n"
+            "F5        Refresh this page\n"
+            "F8        Open only the highlighted camera or armed gate side\n"
+            "F9        Close only the highlighted camera or armed gate side\n"
+            "1 / 2     Select live camera 1 or 2, or gate entry / exit\n"
+            "F1        This help",
+        )
     def apply_theme(self,name): QApplication.instance().setStyleSheet(DARK if name=="Dark" else LIGHT)
 
 

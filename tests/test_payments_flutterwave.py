@@ -40,7 +40,7 @@ from app.models import ParkingSession, PaymentIntent, PaymentTransaction, Role, 
 from app.security import hash_password
 from app.services import mobile_payments
 
-SECRET_KEY = "test-secret-key"
+SECRET_KEY = "FLWSECK_TEST-test-secret-key"
 SECRET_HASH = "test-secret-hash"
 
 

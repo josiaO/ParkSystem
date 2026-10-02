@@ -2,6 +2,23 @@
 
 Shared behavior: each page has a title and a one-line purpose. Primary actions sit in the page toolbar. Loading copy is inline. Errors say what failed and what to do next. Empty tables are not blank.
 
+## Keyboard shortcuts
+
+Same keys in the web UI and the desktop Actions menu. The key is printed on the button (and on the desktop Actions menu), so operators do not have to guess. They follow the current page and do not run while typing or while a dialog is open. F1 opens the full list.
+
+| Key | Action |
+| --- | --- |
+| Ctrl+N (⌘N) | Add camera, gate, vehicle, or user |
+| Ctrl+E | Edit the selected row |
+| Delete | Delete the selected row |
+| F5 | Refresh this page (not a full browser reload) |
+| F8 | Open **only** the highlighted live camera, selected Devices row, or armed gate side (1 = entry, 2 = exit). Never both sides. |
+| F9 | Close that same armed side |
+| 1–9 | Arm that live camera. On Gates, 1 = entry and 2 = exit |
+| F1 | Shortcut help |
+
+Close uses the existing `/cameras/{id}/barrier/open` and `/gates/{id}/open` endpoints with `action: "close"`. GPIO remains a pulse; board TCP close is used when a controller is configured.
+
 ## Dashboard
 
 - Purpose: site status for the signed-in deployment.
@@ -16,7 +33,7 @@ Shared behavior: each page has a title and a one-line purpose. Primary actions s
 
 - Purpose: watch lanes for a shift.
 - Primary actions: layout 1 / 2 / All, refresh.
-- Each card: name, online chip, video, plate, confidence, check-plate or plate-read, camera / video / recognition / last detection, snapshot, plate crop, manual open, correct plate.
+- Each card: name, online chip, video, plate, confidence, check-plate or plate-read, camera / video / recognition / last detection, snapshot, plate crop, manual open, manual close, correct plate.
 - Operators do not see frame age, codec, or stream URL.
 - Degraded: “No video” chip and a short recovery sentence.
 - Empty camera: “Choose a camera to start live video.”

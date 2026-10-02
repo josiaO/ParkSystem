@@ -33,7 +33,7 @@ Sign in as an operator, then as an admin or developer (`hardware.view`).
 - [ ] Add Camera asks for address, username, and password first.
 - [ ] Advanced is closed by default and still saves SDK port and adapter.
 - [ ] Empty device list explains how to add a camera.
-- [ ] Delete camera asks for confirmation.
+- [ ] Add, edit, delete, refresh, open, and close buttons show the shortcut on the control. F1 opens the full list. Ctrl+N adds on Cameras / Gates / Vehicles / Users. Delete removes the selected row. F8 / F9 open and close the selected barrier without a full page reload.
 
 ## Live
 
