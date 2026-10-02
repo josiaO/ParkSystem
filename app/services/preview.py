@@ -28,6 +28,7 @@ __all__ = [
     "acquire_detect",
     "acquire_live",
     "ffmpeg_jpeg_stream",
+    "fresh_last_car",
     "get_state",
     "live_metrics",
     "media_path",
@@ -61,6 +62,7 @@ class PreviewState:
     captured_at: float = 0.0
     alpr: dict = field(default_factory=dict)
     last_car: dict = field(default_factory=dict)
+    last_car_at: float = 0.0
     seq: int = 0
     source: str = ""
     disk_at: float = 0.0
@@ -140,8 +142,36 @@ def remember_alpr(camera_id: int, result: dict) -> None:
 
 
 def remember_last_car(camera_id: int, payload: dict | None) -> None:
+    row = get_state(camera_id)
     if payload:
-        get_state(camera_id).last_car = payload
+        row.last_car = payload
+        row.last_car_at = time.monotonic()
+    else:
+        row.last_car = {}
+        row.last_car_at = 0.0
+
+
+def fresh_last_car(camera_id: int, *, max_age_seconds: float | None = None) -> dict | None:
+    """Return the latest vehicle only while it is recent enough for live UI.
+
+    Historical captures remain in the database/detections page. The live lane
+    must clear an old plate after the vehicle has left instead of presenting it
+    as if it still belongs to the next car.
+    """
+    row = get_state(camera_id)
+    if not row.last_car or row.last_car_at <= 0:
+        return None
+    from app.config import settings
+    max_age = float(
+        max_age_seconds
+        if max_age_seconds is not None
+        else getattr(settings, "live_plate_fresh_seconds", 4.0)
+    )
+    if time.monotonic() - row.last_car_at > max_age:
+        row.last_car = {}
+        row.last_car_at = 0.0
+        return None
+    return row.last_car
 
 
 def media_path(kind: str, name: str):
