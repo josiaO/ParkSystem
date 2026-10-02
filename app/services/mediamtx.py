@@ -294,7 +294,11 @@ def sync_paths() -> bool:
 
 
 def register_source(camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
-    _sources[int(camera_id)] = dict(source)
+    camera_id = int(camera_id)
+    incoming = dict(source)
+    if _sources.get(camera_id) == incoming:
+        return live_endpoint(camera_id)
+    _sources[camera_id] = incoming
     write_config()
     if running():
         sync_paths()
