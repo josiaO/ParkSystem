@@ -172,6 +172,20 @@ class EntryOrchestrationTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_near_duplicate_ocr_on_same_lane_one_session(self):
+        async def _run():
+            ctrl = self._ctrl()
+            with self.Session() as db:
+                gate = db.get(Gate, 1)
+                cam = db.get(Camera, 100)
+                a = await ctrl.submit(db, _event("T285DQP", "near-1"), gate=gate, camera=cam, policy=self.policy)
+                b = await ctrl.submit(db, _event("T285DOP", "near-2"), gate=gate, camera=cam, policy=self.policy)
+                self.assertEqual(a["session"]["id"], b["session"]["id"])
+                self.assertTrue(b["duplicate"])
+                self.assertEqual(db.scalar(select(func.count()).select_from(ParkingSession)), 1)
+
+        asyncio.run(_run())
+
     def test_receipt_printer_failure_does_not_open(self):
         async def _run():
             opener = FakeOpener()
