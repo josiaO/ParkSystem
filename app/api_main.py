@@ -1249,7 +1249,9 @@ async def _run_local_alpr(
 
 
 def _alpr_busy() -> bool:
-    return int(_alpr_inflight["n"]) > 0
+    # CPU ONNX Runtime can execute more than one Run concurrently. Bound it so
+    # a slow OCR on one lane does not make every other camera skip verification.
+    return int(_alpr_inflight["n"]) >= int(getattr(settings, "recognition_max_concurrency", 2) or 2)
 
 
 def _alpr_enter() -> None:
@@ -2867,31 +2869,48 @@ async def _camera_event_loop():
                         CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
                     }
                 ]
-            started = time.perf_counter()
-            if hvx_breaker.allow():
-                for camera_id, handle in hvx_specs:
-                    try:
-                        await _drain_camera_events(camera_id, handle)
-                        await _poll_coil_and_read(camera_id, handle)
-                        await _maybe_watch_local_alpr(camera_id, handle)
-                        hvx_breaker.success()
-                        note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
-                    except Exception as exc:
-                        hvx_breaker.failure()
-                        note_worker_failure("camera-events", str(exc))
-                        note_camera(camera_id, sdk_callback="error")
-            for camera_id in ipcam_ids:
+            async def service_hvx(camera_id: int, handle: int) -> None:
+                started_one = time.perf_counter()
+                try:
+                    await _drain_camera_events(camera_id, handle)
+                    await _poll_coil_and_read(camera_id, handle)
+                    await _maybe_watch_local_alpr(camera_id, handle)
+                    hvx_breaker.success()
+                    note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
+                except Exception as exc:
+                    hvx_breaker.failure()
+                    note_worker_failure("camera-events", str(exc))
+                    note_camera(camera_id, sdk_callback="error")
+                finally:
+                    note_camera(camera_id, event_latency_ms=int((time.perf_counter() - started_one) * 1000))
+
+            async def service_ipcam(camera_id: int) -> None:
+                started_one = time.perf_counter()
                 try:
                     await _maybe_local_ipcam_alpr(camera_id)
                     note_camera(camera_id, sdk_callback="local-alpr", last_event_at=time.time())
                 except Exception as exc:
                     note_worker_failure("camera-events", str(exc))
                     note_camera(camera_id, sdk_callback="error")
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            for camera_id, _handle in hvx_specs:
-                note_camera(camera_id, event_latency_ms=latency_ms)
-            for camera_id in ipcam_ids:
-                note_camera(camera_id, event_latency_ms=latency_ms)
+                finally:
+                    note_camera(camera_id, event_latency_ms=int((time.perf_counter() - started_one) * 1000))
+
+            # Cameras are independent failure domains. Draining them serially
+            # meant one slow OCR/HTTP call could delay every other gate by
+            # several seconds and leave cars undetected. Service lanes
+            # concurrently; the ALPR inference limit separately caps CPU work.
+            jobs: list[asyncio.Task] = []
+            if hvx_breaker.allow():
+                jobs.extend(
+                    asyncio.create_task(service_hvx(camera_id, handle), name=f"hvx-event-{camera_id}")
+                    for camera_id, handle in hvx_specs
+                )
+            jobs.extend(
+                asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
+                for camera_id in ipcam_ids
+            )
+            if jobs:
+                await asyncio.gather(*jobs, return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
