@@ -25,12 +25,14 @@ def upgrade() -> None:
         return
     cols = _columns("parking_sessions")
     additions = (
-        ("entry_gate_id", sa.Column("entry_gate_id", sa.Integer(), sa.ForeignKey("gates.id"), nullable=True)),
-        ("exit_gate_id", sa.Column("exit_gate_id", sa.Integer(), sa.ForeignKey("gates.id"), nullable=True)),
+        ("entry_gate_id", sa.Column("entry_gate_id", sa.Integer(), nullable=True)),
+        ("exit_gate_id", sa.Column("exit_gate_id", sa.Integer(), nullable=True)),
         ("exit_open_command_uuid", sa.Column("exit_open_command_uuid", sa.String(64), nullable=False, server_default="")),
     )
     for name, col in additions:
         if name not in cols:
+            # SQLite cannot ALTER TABLE to add a ForeignKey constraint. Keep the
+            # columns as integers; models still declare the relationship.
             op.add_column("parking_sessions", col)
 
     op.execute(sa.text(

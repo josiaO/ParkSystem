@@ -66,7 +66,6 @@ The site must keep running if one camera dies, the UI is closed, or FastALPR is 
 - Invent a mobile payment from a browser “success” page
 - Require PostgreSQL, Edge Agents, or ONVIF for the current site
 - Emulate a vendor **SoftDog** USB license dongle (if the SDK needs one, plug it into the PC that runs the 32-bit host)
-- Run the PySide desktop on Linux/macOS
 
 ## Windows install (full HVX site)
 

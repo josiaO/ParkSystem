@@ -141,6 +141,28 @@ class AlembicRunnerTests(unittest.TestCase):
         self.assertNotIn("credentials_ref", [c for cols in legacy.LEGACY_TABLES.values() for c, _ in cols])
         self.assertNotIn("site_id", [c for c, _ in legacy.LEGACY_TABLES["cameras"]])
 
+    def test_sqlite_upgrade_from_0005_adds_exit_lane_columns(self):
+        """Existing site DBs sit at 0005; 0006 must not use SQLite ALTER FK."""
+        engine = self._engine("from0005.db")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "CREATE TABLE parking_sessions ("
+                "id INTEGER PRIMARY KEY, plate VARCHAR(32), status VARCHAR(20), "
+                "gate_id INTEGER, site_id INTEGER DEFAULT 1)"
+            )
+            conn.exec_driver_sql("CREATE TABLE cameras (id INTEGER PRIMARY KEY, name VARCHAR(120))")
+            conn.exec_driver_sql("CREATE TABLE gates (id INTEGER PRIMARY KEY, name VARCHAR(80))")
+            conn.exec_driver_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, username VARCHAR(80))")
+            conn.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+            conn.exec_driver_sql("INSERT INTO alembic_version (version_num) VALUES ('0005_receipt_qr_jobs')")
+        summary = upgrade_to_head(engine)
+        self.assertEqual(summary["mode"], "upgrade")
+        self.assertEqual(current_revision(engine), head_revision())
+        cols = {c["name"] for c in inspect(engine).get_columns("parking_sessions")}
+        self.assertIn("entry_gate_id", cols)
+        self.assertIn("exit_gate_id", cols)
+        self.assertIn("exit_open_command_uuid", cols)
+
 
 class SiteScopedModelTests(unittest.TestCase):
     def setUp(self):

@@ -56,6 +56,38 @@ class ProductUiTests(unittest.TestCase):
         self.assertIn("Accept any format", HTML)
         self.assertIn("isTechnician()", HTML)
 
+    def test_operator_keyboard_shortcuts(self):
+        self.assertIn('id="shortcuts-dialog"', HTML)
+        self.assertIn('id="open-shortcuts"', HTML)
+        self.assertIn('id="close-this-side"', HTML)
+        self.assertIn('data-role="close-side"', HTML)
+        self.assertIn("function liveCameraForSlot(", HTML)
+        self.assertIn("function liveSlotFromFocus(", HTML)
+        self.assertIn("markLiveShortcutTarget(slot)", HTML)
+        self.assertIn("never both", HTML)
+        self.assertIn("F8 / F9 this camera", HTML)
+        self.assertIn("data-role=\"shortcut-target\"", HTML)
+        self.assertIn("function shortcutBarrier(", HTML)
+        self.assertIn("function setActionCaption(", HTML)
+        self.assertIn("Add Camera <kbd>Ctrl+N</kbd>", HTML)
+        self.assertIn("Manual open <kbd>F8</kbd>", HTML)
+        self.assertIn("Manual close <kbd>F9</kbd>", HTML)
+        self.assertIn("Delete selected <kbd>Del</kbd>", HTML)
+        self.assertIn('action: verb', HTML)
+        self.assertIn("Ctrl+N", HTML)
+        self.assertIn("F8", HTML)
+        self.assertIn("F9", HTML)
+        desktop = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("def _install_shortcuts(self):", desktop)
+        self.assertIn('"Ctrl+N"', desktop)
+        self.assertIn('"F8"', desktop)
+        self.assertIn('"F9"', desktop)
+        self.assertIn("def action_label(name: str, shortcut: str) -> str:", desktop)
+        self.assertIn("def shortcut_pane(self):", desktop)
+        self.assertIn("never both", desktop)
+        self.assertIn("Manual close", desktop)
+        self.assertIn('"action":verb', desktop)
+
     def test_ui_docs_exist(self):
         for name in (
             "UI-ARCHITECTURE.md",

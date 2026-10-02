@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.api_main import app, ensure_roles
-from app.config import Settings
+from app.config import Settings, settings
 from app.db import Base, engine_kwargs, get_db, set_session_factory
 from app.models import ParkingSession, Role, User, UserRole
 from app.security import hash_password
@@ -284,7 +284,8 @@ class SimulationTests(unittest.TestCase):
             row.amount_due = 1000
             row.amount_paid = 0
             db.commit()
-        paid = self.client.post(f"/p/{token}/pay", json={"method": "MOBILE_SIMULATED"})
+        with patch.object(settings, "allow_public_simulated_payments", True):
+            paid = self.client.post(f"/p/{token}/pay", json={"method": "MOBILE_SIMULATED"})
         self.assertEqual(paid.status_code, 200, paid.text)
         self.assertTrue(paid.json()["paid"])
         lookup = self.client.get(f"/sessions/by-token/{token}", headers=self.headers)
@@ -364,18 +365,26 @@ class SimulationTests(unittest.TestCase):
         self.assertIn("does not use the cameras", res.json()["detail"].lower())
 
     def test_camera_plate_event_print_and_open(self):
-        from app.models import Gate
-        from app.services.simulation import handle_plate_event
+        from app.models import Camera, Gate
+        from app.services.captures import persist_event
+        from app.application.live_parking import handle_live_entry
         import asyncio
-        gate, _ = self._lane()
+        gate, entry = self._lane()
         mock_ctrl = MagicMock()
         mock_ctrl.open = AsyncMock(return_value=OPENED)
         with self.Session() as db:
             row = db.get(Gate, gate["id"])
+            cam = db.get(Camera, entry["id"])
+            stored = persist_event(
+                db, cam, jpeg=b"\xff\xd8\xff\xd9", crop=b"",
+                capture={"image_id": 99, "plate": "T999XYZ", "score": 90, "have_vehicle": True},
+            )
+            self.assertIsNotNone(stored)
             with patch("app.services.simulation.controller", return_value=mock_ctrl):
-                result = asyncio.run(handle_plate_event(
-                    db, plate="T999XYZ", gate=row, side="ENTRY", simulated=False, source="camera",
+                result = asyncio.run(handle_live_entry(
+                    db, camera=cam, capture=stored, gate=row, source="camera",
                 ))
+        self.assertTrue(result.get("ok"))
         self.assertTrue(result["barrier_opened"])
         self.assertEqual(result["session"]["status"], "ACTIVE")
         self.assertFalse(result["session"]["simulated"])

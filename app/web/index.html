@@ -327,6 +327,11 @@
     .live-pane img[data-role="video"]:not([src]) { display: none; }
     .live-pane canvas[data-role="overlay"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
     .live-pane .live-title { display: flex; flex-direction: column; gap: 6px; }
+    .live-pane.shortcut-target .live-card {
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    .live-pane [data-role="shortcut-target"] { display: none; }
+    .live-pane.shortcut-target [data-role="shortcut-target"] { display: inline-flex; }
     .live-pane .live-frame { cursor: pointer; }
     .car-stills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
     .car-stills img { width: 100%; height: 92px; object-fit: contain; background: #070B10; border-radius: 6px; display: block; }
@@ -403,6 +408,21 @@
     dialog .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 700; }
     dialog .card label { display: block; font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
     dialog .toolbar { justify-content: flex-end; margin-top: 14px; }
+    kbd {
+      font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px;
+      padding: 1px 6px; background: var(--bg);
+    }
+    button kbd {
+      font-size: 10px; font-weight: 700; margin-left: 2px; padding: 0 5px; height: 16px;
+      display: inline-flex; align-items: center; pointer-events: none; background: transparent;
+      border-color: color-mix(in srgb, currentColor 45%, transparent); opacity: .9;
+    }
+    .row-actions button kbd { font-size: 9.5px; height: 14px; padding: 0 4px; }
+    .icobtn.with-key { width: auto; padding: 0 8px; gap: 6px; }
+    #shortcuts-dialog .card { width: min(460px, 90vw); }
+    #shortcuts-dialog table { width: 100%; }
+    #shortcuts-dialog td:first-child { width: 44%; white-space: nowrap; }
 
     /* Toasts */
     #toast-root {
@@ -455,6 +475,7 @@
         <span class="healthchip c-mut" id="hdr-health"><span class="dot"></span><span id="hdr-health-label">Checking</span></span>
       </div>
       <div class="hdr-r">
+        <button type="button" class="icobtn with-key" id="open-shortcuts" title="Keyboard shortcuts (F1)" aria-label="Keyboard shortcuts">?<kbd>F1</kbd></button>
         <button type="button" class="icobtn" id="theme-toggle-app" title="Toggle theme" aria-label="Toggle theme">◐</button>
         <div class="userbtn" title="Signed-in operator">
           <span class="avatar" id="user-avatar">SP</span>
@@ -528,7 +549,8 @@
             </div>
             <label>Lane preset <select id="live-lane"></select></label>
             <button class="secondary" type="button" id="apply-lane">Fill both from lane</button>
-            <button class="secondary" type="button" id="refresh-live">Refresh live</button>
+            <button class="secondary" type="button" id="refresh-live">Refresh live <kbd>F5</kbd></button>
+            <span class="muted" id="live-shortcut-hint">Click a camera or press 1 / 2. F8 and F9 pulse that side only — never both.</span>
           </div>
           <div class="dual-live">
             <div class="live-pane" data-slot="0">
@@ -538,6 +560,7 @@
                     <select data-role="camera" aria-label="Left camera"></select>
                   </label>
                   <span class="chip c-mut" data-role="online">Waiting</span>
+                  <span class="chip c-acc" data-role="shortcut-target">F8 / F9 this camera</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
                   <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
@@ -570,7 +593,8 @@
                   </div>
                 </div>
                 <div class="pane-actions">
-                  <button class="secondary" type="button" data-role="open-side">Manual open</button>
+                  <button class="secondary" type="button" data-role="open-side">Manual open <kbd>F8</kbd></button>
+                  <button class="secondary" type="button" data-role="close-side">Manual close <kbd>F9</kbd></button>
                   <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
                   <p class="muted" data-role="hold"></p>
                 </div>
@@ -583,6 +607,7 @@
                     <select data-role="camera" aria-label="Right camera"></select>
                   </label>
                   <span class="chip c-mut" data-role="online">Waiting</span>
+                  <span class="chip c-acc" data-role="shortcut-target">F8 / F9 this camera</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
                   <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
@@ -615,7 +640,8 @@
                   </div>
                 </div>
                 <div class="pane-actions">
-                  <button class="secondary" type="button" data-role="open-side">Manual open</button>
+                  <button class="secondary" type="button" data-role="open-side">Manual open <kbd>F8</kbd></button>
+                  <button class="secondary" type="button" data-role="close-side">Manual close <kbd>F9</kbd></button>
                   <button class="secondary" type="button" data-role="correct-plate">Correct plate</button>
                   <p class="muted" data-role="hold"></p>
                 </div>
@@ -625,20 +651,21 @@
         </div>
         <div id="cameras-sub-ips" class="hidden">
         <div class="toolbar">
-          <button type="button" id="add-camera">Add Camera</button>
+          <button type="button" id="add-camera">Add Camera <kbd>Ctrl+N</kbd></button>
           <button class="secondary" type="button" id="onboard-camera">Onboard wizard</button>
           <button class="secondary" type="button" id="discover-cameras">Discover</button>
           <button class="secondary" type="button" id="add-ip-cameras">Add IP cameras &amp; connect</button>
           <button class="secondary" type="button" id="seed-site">Add site cameras</button>
           <button class="secondary" type="button" id="connect-all">Connect all</button>
-          <button class="secondary" type="button" id="refresh-cameras">Refresh</button>
+          <button class="secondary" type="button" id="refresh-cameras">Refresh <kbd>F5</kbd></button>
           <button class="secondary tech-only" type="button" id="sdk-connect">Connect</button>
           <button class="secondary tech-only" type="button" id="rtsp-probe">Test Video</button>
           <button class="secondary tech-only" type="button" id="onvif-discover">Discover Streams</button>
           <button class="secondary tech-only" type="button" id="fastalpr">Test Recognition</button>
           <button class="secondary" type="button" id="capture-snapshot">Capture snapshot</button>
           <button class="secondary danger tech-only" type="button" id="sdk-disconnect">Disconnect camera</button>
-          <button class="secondary" type="button" id="open-this-side">Manual open</button>
+          <button class="secondary" type="button" id="open-this-side">Manual open <kbd>F8</kbd></button>
+          <button class="secondary" type="button" id="close-this-side">Manual close <kbd>F9</kbd></button>
         </div>
         <table>
           <thead>
@@ -666,11 +693,12 @@
       </div>
 
       <div id="page-gates" class="hidden">
-        <div class="notice">Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane.</div>
+        <div class="notice">Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane. Select a lane, press 1 for entry or 2 for exit, then F8 / F9.</div>
         <div class="toolbar">
-          <button type="button" id="add-gate">Add Gate</button>
-          <button class="secondary" type="button" id="refresh-gates">Refresh</button>
+          <button type="button" id="add-gate">Add Gate <kbd>Ctrl+N</kbd></button>
+          <button class="secondary" type="button" id="refresh-gates">Refresh <kbd>F5</kbd></button>
           <button class="secondary" type="button" id="led-text">LED text</button>
+          <span class="muted" id="gate-shortcut-hint">Select a lane, then 1 = entry, 2 = exit. F8 / F9 pulse that side only.</span>
         </div>
         <table>
           <thead>
@@ -687,7 +715,7 @@
           <label style="display:flex;gap:8px;align-items:center;margin:0">Plate
             <input id="detect-filter" placeholder="Search plate" style="min-width:180px" autocomplete="off">
           </label>
-          <button class="secondary" type="button" id="refresh-detections">Refresh</button>
+          <button class="secondary" type="button" id="refresh-detections">Refresh <kbd>F5</kbd></button>
         </div>
         <div class="tblwrap" style="overflow:auto">
           <table>
@@ -741,7 +769,7 @@
           <button class="secondary" type="button" id="scan-receipt-camera">Scan with camera</button>
           <button type="button" id="pay-session">Record kiosk payment</button>
           <button class="secondary" type="button" id="print-session-receipt">Show / print receipt</button>
-          <button class="secondary" type="button" id="refresh-sessions">Refresh</button>
+          <button class="secondary" type="button" id="refresh-sessions">Refresh <kbd>F5</kbd></button>
         </div>
         <div id="kiosk-card" class="card hidden" style="margin:12px 0;padding:14px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -789,7 +817,7 @@
       <div id="page-payments" class="hidden">
         <p class="muted">Kiosk and mobile payments share one ledger. Browser success is not paid.</p>
         <div class="toolbar">
-          <button class="secondary" type="button" id="refresh-payments">Refresh</button>
+          <button class="secondary" type="button" id="refresh-payments">Refresh <kbd>F5</kbd></button>
         </div>
         <table>
           <thead>
@@ -803,9 +831,9 @@
       <div id="page-vehicles" class="hidden">
         <p class="muted">Registered vehicles and access plans. A matching plate can be allowed through when gate access is enabled.</p>
         <div class="toolbar">
-          <button type="button" id="add-vehicle">Register plate</button>
-          <button class="secondary" type="button" id="refresh-vehicles">Refresh</button>
-          <button class="secondary" type="button" id="delete-vehicles">Delete selected</button>
+          <button type="button" id="add-vehicle">Register plate <kbd>Ctrl+N</kbd></button>
+          <button class="secondary" type="button" id="refresh-vehicles">Refresh <kbd>F5</kbd></button>
+          <button class="secondary" type="button" id="delete-vehicles">Delete selected <kbd>Del</kbd></button>
         </div>
         <label>Register many (one plate per line: plate, owner, start date, end date)
           <textarea id="vehicle-bulk" rows="4" placeholder="T111AAA, Jane, 2026-09-01, 2026-10-01"></textarea>
@@ -838,7 +866,7 @@
         </form>
         <div class="toolbar">
           <button type="button" id="save-tariff">Save tariff</button>
-          <button class="secondary" type="button" id="refresh-tariff">Reload</button>
+          <button class="secondary" type="button" id="refresh-tariff">Reload <kbd>F5</kbd></button>
         </div>
         <p class="muted">Try a stay to see the fee before you save a change.</p>
         <div class="fee-grid">
@@ -899,8 +927,8 @@
       <div id="page-users" class="hidden">
         <p class="muted">Create, update, and disable operator accounts. The last Admin cannot be removed.</p>
         <div class="toolbar">
-          <button type="button" id="add-user">Add User</button>
-          <button class="secondary" type="button" id="refresh-users">Refresh</button>
+          <button type="button" id="add-user">Add User <kbd>Ctrl+N</kbd></button>
+          <button class="secondary" type="button" id="refresh-users">Refresh <kbd>F5</kbd></button>
         </div>
         <table>
           <thead>
@@ -1224,6 +1252,28 @@
     </form>
   </dialog>
 
+  <dialog id="shortcuts-dialog">
+    <form class="card" method="dialog">
+      <h2>Keyboard shortcuts</h2>
+      <p class="muted">Keys follow the page you are on. Use Cmd instead of Ctrl on Mac. They do not run while you are typing or a dialog is open.</p>
+      <table>
+        <tbody>
+          <tr><td><kbd>Ctrl+N</kbd></td><td>Add camera, gate, vehicle, or user</td></tr>
+          <tr><td><kbd>Ctrl+E</kbd></td><td>Edit the selected row</td></tr>
+          <tr><td><kbd>Del</kbd></td><td>Delete the selected row</td></tr>
+          <tr><td><kbd>F5</kbd></td><td>Refresh this page</td></tr>
+          <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Select that live camera, or on Gates 1 = entry and 2 = exit</td></tr>
+          <tr><td><kbd>F8</kbd></td><td>Open only the highlighted camera or armed gate side</td></tr>
+          <tr><td><kbd>F9</kbd></td><td>Close only the highlighted camera or armed gate side</td></tr>
+          <tr><td><kbd>F1</kbd></td><td>This help</td></tr>
+        </tbody>
+      </table>
+      <div class="toolbar">
+        <button type="submit" id="shortcuts-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     const state = {
       token: sessionStorage.getItem("smartpark_token") || "",
@@ -1232,6 +1282,33 @@
       platform: null,
     };
     let selectedCameraId = null;
+    let selectedGateId = null;
+    let selectedUserId = null;
+    let focusedLiveSlot = null;
+    let selectedGateSide = null;
+
+    function isMacUi() {
+      return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+    }
+    function shortcutText(combo) {
+      const raw = String(combo || "");
+      return isMacUi() ? raw.replace(/^Ctrl\+/i, "⌘") : raw;
+    }
+    function shortcutKbd(combo) {
+      const kbd = document.createElement("kbd");
+      kbd.textContent = shortcutText(combo);
+      return kbd;
+    }
+    function setActionCaption(el, caption, combo) {
+      if (!el) return;
+      el.textContent = caption;
+      if (combo) el.appendChild(shortcutKbd(combo));
+    }
+    function localizeShortcutKeys() {
+      document.querySelectorAll("kbd").forEach((kbd) => {
+        kbd.textContent = shortcutText(kbd.textContent);
+      });
+    }
 
     const loginView = document.getElementById("login-view");
     const appView = document.getElementById("app-view");
@@ -1252,6 +1329,7 @@
       applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
     }
     applyTheme(lsGet("smartpark_theme") || "light");
+    localizeShortcutKeys();
 
     function toast(msg, tone) {
       const root = document.getElementById("toast-root");
@@ -1461,10 +1539,16 @@
       const slot = Number(pane.dataset.slot);
       const sel = pane.querySelector('[data-role="camera"]');
       const pick = pane.querySelector('[data-role="pick"]');
-      if (sel) sel.addEventListener("change", () => startLiveSlot(slot, cameraFromSelect(slot), true));
+      if (sel) sel.addEventListener("change", () => {
+        startLiveSlot(slot, cameraFromSelect(slot), true);
+        markLiveShortcutTarget(slot);
+      });
       if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
       const openBtn = pane.querySelector('[data-role="open-side"]');
-      if (openBtn) openBtn.addEventListener("click", () => openPaneSide(slot));
+      if (openBtn) openBtn.addEventListener("click", () => openPaneSide(slot, "open"));
+      const closeBtn = pane.querySelector('[data-role="close-side"]');
+      if (closeBtn) closeBtn.addEventListener("click", () => openPaneSide(slot, "close"));
+      pane.addEventListener("pointerdown", () => { markLiveShortcutTarget(slot); });
       const correctBtn = pane.querySelector('[data-role="correct-plate"]');
       if (correctBtn) correctBtn.addEventListener("click", () => correctPanePlate(slot));
     }
@@ -1502,6 +1586,7 @@
     }
 
     function openCameraPicker(slot) {
+      markLiveShortcutTarget(slot);
       const sel = paneEls(slot).camera;
       if (!sel) return;
       sel.focus();
@@ -1769,18 +1854,59 @@
       }
     }
 
-    async function openPaneSide(slot) {
-      const cam = liveCameras[slot];
+    async function commandCameraBarrier(cameraId, action, errorEl) {
+      const error = errorEl || document.getElementById("camera-error");
+      const verb = action === "close" ? "close" : "open";
+      if (error) error.textContent = "";
+      if (!cameraId) {
+        const msg = "Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first.";
+        if (error) error.textContent = msg;
+        else toast(msg, "warn");
+        return;
+      }
+      const reason = prompt("Reason", `manual ${verb}`);
+      if (!reason) return;
+      const confirmMsg = verb === "close"
+        ? "Close only this camera's barrier (not the other side of the lane)?"
+        : "Pulse only this camera's barrier (not the other side of the lane)?";
+      if (!confirm(confirmMsg)) return;
+      try {
+        alert(JSON.stringify(await api(`/cameras/${cameraId}/barrier/open`, {
+          method: "POST",
+          body: JSON.stringify({ reason, action: verb }),
+        })));
+      } catch (err) {
+        if (error) error.textContent = err.message;
+        else toast(err.message, "dgr");
+      }
+    }
+
+    async function commandGateBarrier(gateId, side, action) {
+      const error = document.getElementById("gate-error");
+      const verb = action === "close" ? "close" : "open";
+      if (error) error.textContent = "";
+      const reason = prompt("Reason", `manual ${verb}`);
+      if (!reason) return;
+      const label = String(side || "ENTRY").toLowerCase();
+      const confirmMsg = verb === "close"
+        ? `Close only this lane's ${label} barrier (not the other side)?`
+        : `Pulse only this lane's ${label} barrier (not the other side)?`;
+      if (!confirm(confirmMsg)) return;
+      try {
+        alert(JSON.stringify(await api(`/gates/${gateId}/open`, {
+          method: "POST",
+          body: JSON.stringify({ reason, side: side || "ENTRY", action: verb }),
+        })));
+      } catch (err) {
+        if (error) error.textContent = err.message;
+      }
+    }
+
+    async function openPaneSide(slot, action) {
+      const cam = liveCameras[slot] || cameraFromSelect(slot);
       const error = document.getElementById("camera-error");
       if (!cam) { error.textContent = "No camera on this view."; return; }
-      const reason = prompt("Reason");
-      if (!reason) return;
-      if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
-      try {
-        alert(JSON.stringify(await api(`/cameras/${cam.id}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
-      } catch (err) {
-        error.textContent = err.message;
-      }
+      await commandCameraBarrier(cam.id, action || "open", error);
     }
 
     async function correctPanePlate(slot) {
@@ -2227,8 +2353,8 @@
             <td>${(v.valid_from || "—").toString().slice(0, 10)}</td>
             <td>${(v.valid_until || "—").toString().slice(0, 10)}</td>
             <td class="row-actions">
-              ${can("subscribers.manage") ? `<button type="button" data-edit-vehicle="${v.id}">Edit</button>
-              <button class="danger" type="button" data-del-vehicle="${v.id}">Delete</button>` : ""}
+              ${can("subscribers.manage") ? `<button type="button" data-edit-vehicle="${v.id}">Edit <kbd>${shortcutText("Ctrl+E")}</kbd></button>
+              <button class="danger" type="button" data-del-vehicle="${v.id}">Delete <kbd>Del</kbd></button>` : ""}
             </td>
           </tr>`).join("") || `<tr><td colspan="9"><div class="empty-state"><b>No registered vehicles yet.</b><p>Add a vehicle so known plates can be allowed through.</p></div></td></tr>`;
       } catch (err) {
@@ -2897,9 +3023,233 @@
     if (openKioskBtn) openKioskBtn.addEventListener("click", enterKiosk);
     const exitKioskBtn = document.getElementById("kiosk-exit");
     if (exitKioskBtn) exitKioskBtn.addEventListener("click", exitKiosk);
+    function currentPageName() {
+      const on = document.querySelector("nav button[data-page].active");
+      return (on && on.dataset.page) || "";
+    }
+    function isTypingTarget(el) {
+      if (!el) return false;
+      const tag = (el.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      return Boolean(el.isContentEditable);
+    }
+    function clickToolbar(id) {
+      const el = document.getElementById(id);
+      if (!el || el.disabled || el.style.display === "none" || el.hidden) return false;
+      el.click();
+      return true;
+    }
+    function showShortcutHelp() {
+      const dlg = document.getElementById("shortcuts-dialog");
+      if (dlg && typeof dlg.showModal === "function") dlg.showModal();
+    }
+    function shortcutAdd() {
+      const page = currentPageName();
+      if (page === "cameras" && clickToolbar("add-camera")) return;
+      if (page === "gates" && clickToolbar("add-gate")) return;
+      if (page === "users" && clickToolbar("add-user")) return;
+      if (page === "vehicles" && clickToolbar("add-vehicle")) return;
+      toast("Open Cameras, Gates, Vehicles, or Users to add.", "info");
+    }
+    function shortcutEdit() {
+      const page = currentPageName();
+      const map = { cameras: "#camera-rows", gates: "#gate-rows", users: "#user-rows" };
+      if (map[page]) {
+        const btn = document.querySelector(`${map[page]} tr.selected [data-role="edit"]`);
+        if (btn) { btn.click(); return; }
+        toast("Select a row to edit.", "warn");
+        return;
+      }
+      if (page === "vehicles") {
+        const checked = document.querySelector("[data-vehicle-check]:checked");
+        const row = checked && checked.closest("tr");
+        const btn = row && row.querySelector("[data-edit-vehicle]");
+        if (btn) { btn.click(); return; }
+        toast("Select a vehicle to edit.", "warn");
+      }
+    }
+    function shortcutDelete() {
+      const page = currentPageName();
+      if (page === "vehicles") {
+        clickToolbar("delete-vehicles");
+        return;
+      }
+      const map = { cameras: "#camera-rows", gates: "#gate-rows", users: "#user-rows" };
+      if (map[page]) {
+        const btn = document.querySelector(`${map[page]} tr.selected [data-role="delete"]`);
+        if (btn) { btn.click(); return; }
+        toast("Select a row to delete.", "warn");
+      }
+    }
+    function shortcutRefresh() {
+      const page = currentPageName();
+      if (page === "cameras") {
+        if (liveTabVisible() && clickToolbar("refresh-live")) return;
+        clickToolbar("refresh-cameras");
+        return;
+      }
+      const ids = {
+        gates: "refresh-gates", vehicles: "refresh-vehicles", users: "refresh-users",
+        detections: "refresh-detections", sessions: "refresh-sessions", payments: "refresh-payments",
+        fees: "refresh-tariff",
+      };
+      if (ids[page] && clickToolbar(ids[page])) return;
+      if (page === "dashboard") loadDashboard();
+      if (page === "health") loadHealth();
+    }
+    function liveCameraForSlot(slot) {
+      if (slot == null || slot < 0 || Number.isNaN(slot)) return null;
+      return liveCameras[slot] || cameraFromSelect(slot) || null;
+    }
+    function liveSlotFromFocus() {
+      const el = document.activeElement;
+      const pane = el && el.closest && el.closest(".live-pane");
+      return pane ? Number(pane.dataset.slot) : null;
+    }
+    function liveCameraSlotForShortcut() {
+      const highlighted = document.querySelector(".live-pane.shortcut-target");
+      const slots = [
+        liveSlotFromFocus(),
+        focusedLiveSlot,
+        highlighted ? Number(highlighted.dataset.slot) : null,
+      ];
+      for (const slot of slots) {
+        if (liveCameraForSlot(slot)) return slot;
+      }
+      return -1;
+    }
+    function markLiveShortcutTarget(slot) {
+      focusedLiveSlot = slot;
+      document.querySelectorAll(".live-pane").forEach((pane) => {
+        pane.classList.toggle("shortcut-target", Number(pane.dataset.slot) === slot);
+      });
+      const hint = document.getElementById("live-shortcut-hint");
+      const cam = liveCameraForSlot(slot);
+      if (hint) {
+        hint.textContent = cam
+          ? `F8 / F9 pulse ${cam.name || "this camera"} only — not the other side.`
+          : "That view has no camera yet. Choose a camera, then F8 / F9 pulse only this side.";
+      }
+    }
+    function updateGateShortcutHint() {
+      const el = document.getElementById("gate-shortcut-hint");
+      if (!el) return;
+      const tr = document.querySelector("#gate-rows tr.selected");
+      const lane = tr && tr.children[1] ? tr.children[1].textContent.trim() : "";
+      const side = selectedGateSide === "EXIT" ? "exit" : selectedGateSide === "ENTRY" ? "entry" : "";
+      if (!tr) el.textContent = "Select a lane, then 1 = entry, 2 = exit. F8 / F9 pulse that side only.";
+      else if (!side) el.textContent = `${lane}: press 1 for entry or 2 for exit, then F8 / F9.`;
+      else el.textContent = `${lane} ${side} is armed. F8 opens it, F9 closes it.`;
+    }
+    function shortcutArmDigit(n) {
+      const page = currentPageName();
+      if (page === "cameras" && liveTabVisible()) {
+        const panes = [...document.querySelectorAll(".live-pane")].filter((p) => !p.hidden && p.offsetParent !== null);
+        const pane = panes[n - 1];
+        if (!pane) { toast(`No camera ${n} on this layout.`, "warn"); return true; }
+        markLiveShortcutTarget(Number(pane.dataset.slot));
+        const cam = liveCameraForSlot(Number(pane.dataset.slot));
+        toast(cam ? `F8 / F9 will pulse ${cam.name || "this camera"} only.` : "That view has no camera yet.", "info");
+        return true;
+      }
+      if (page === "gates") {
+        if (n !== 1 && n !== 2) return false;
+        selectedGateSide = n === 1 ? "ENTRY" : "EXIT";
+        updateGateShortcutHint();
+        toast(n === 1 ? "Entry armed. F8 / F9 pulse entry only." : "Exit armed. F8 / F9 pulse exit only.", "info");
+        return true;
+      }
+      return false;
+    }
+    function shortcutBarrier(action) {
+      const page = currentPageName();
+      if (page === "cameras" && liveTabVisible()) {
+        const slot = liveCameraSlotForShortcut();
+        if (slot < 0) {
+          toast("Click a live camera first, or press 1 / 2. F8 and F9 pulse that side only — never both.", "warn");
+          return;
+        }
+        openPaneSide(slot, action);
+        return;
+      }
+      if (page === "cameras") {
+        if (!selectedCameraId) {
+          toast("Select a camera row first. F8 / F9 pulse that camera only.", "warn");
+          return;
+        }
+        commandCameraBarrier(selectedCameraId, action);
+        return;
+      }
+      if (page === "gates") {
+        const tr = document.querySelector("#gate-rows tr.selected");
+        if (!tr || !tr.dataset.gateId) { toast("Select a gate row first.", "warn"); return; }
+        const sides = (tr.dataset.sides || "").split(",").filter(Boolean);
+        let side = selectedGateSide && sides.includes(selectedGateSide) ? selectedGateSide : null;
+        if (!side && sides.length === 1) side = sides[0];
+        if (!side) {
+          toast("This lane has two sides. Press 1 for entry or 2 for exit, then F8 / F9.", "warn");
+          return;
+        }
+        commandGateBarrier(Number(tr.dataset.gateId), side, action);
+        return;
+      }
+      toast("Open Live Gates or Gates, then select one side.", "warn");
+    }
+    const openShortcutsBtn = document.getElementById("open-shortcuts");
+    if (openShortcutsBtn) openShortcutsBtn.addEventListener("click", showShortcutHelp);
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || document.querySelector("dialog[open]")) return;
-      if (document.body.classList.contains("kiosk-mode")) exitKiosk();
+      if (e.key === "Escape" && !document.querySelector("dialog[open]") && document.body.classList.contains("kiosk-mode")) {
+        exitKiosk();
+        return;
+      }
+      if (appView.classList.contains("hidden") || document.body.classList.contains("kiosk-mode")) return;
+      if (document.querySelector("dialog[open]")) return;
+      const barrierKey = e.key === "F8" || e.key === "F9";
+      const inLivePane = e.target && e.target.closest && e.target.closest(".live-pane");
+      if (isTypingTarget(e.target) && !barrierKey && e.key !== "F1" && !(inLivePane && /^[1-9]$/.test(e.key))) return;
+      if (inLivePane && (e.type === "keydown") && (e.target.tagName === "SELECT" || e.target.closest(".live-pane"))) {
+        const slot = Number(e.target.closest(".live-pane").dataset.slot);
+        if (!Number.isNaN(slot)) markLiveShortcutTarget(slot);
+      }
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === "F1" || (mod && (e.key === "/" || e.key === "?"))) {
+        e.preventDefault();
+        showShortcutHelp();
+        return;
+      }
+      if (e.key === "F5" || (mod && e.key.toLowerCase() === "r" && !e.shiftKey && !e.altKey)) {
+        e.preventDefault();
+        shortcutRefresh();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "n" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        shortcutAdd();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "e" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        shortcutEdit();
+        return;
+      }
+      if (e.key === "Delete" || (mod && e.key === "Backspace")) {
+        e.preventDefault();
+        shortcutDelete();
+        return;
+      }
+      if (!mod && !e.altKey && /^[1-9]$/.test(e.key)) {
+        if (shortcutArmDigit(Number(e.key))) e.preventDefault();
+        return;
+      }
+      if (e.key === "F8") {
+        e.preventDefault();
+        shortcutBarrier("open");
+        return;
+      }
+      if (e.key === "F9") {
+        e.preventDefault();
+        shortcutBarrier("close");
+      }
     });
     const refreshDetections = document.getElementById("refresh-detections");
     if (refreshDetections) refreshDetections.addEventListener("click", loadDetections);
@@ -3356,11 +3706,13 @@
           if (can("cameras.manage")) {
             const edit = document.createElement("button");
             edit.className = "secondary";
-            edit.textContent = "Edit";
+            edit.dataset.role = "edit";
+            setActionCaption(edit, "Edit", "Ctrl+E");
             edit.addEventListener("click", () => openCameraDialog(c));
             const del = document.createElement("button");
             del.className = "danger";
-            del.textContent = "Delete";
+            del.dataset.role = "delete";
+            setActionCaption(del, "Delete", "Del");
             del.addEventListener("click", async () => {
               if (!confirm(`Delete camera ${c.name}?`)) return;
               try { await api(`/cameras/${c.id}`, { method: "DELETE" }); loadCameras(); }
@@ -3398,8 +3750,12 @@
       const slot = Number(pane.dataset.slot);
       const sel = pane.querySelector('[data-role="camera"]');
       const pick = pane.querySelector('[data-role="pick"]');
-      if (sel) sel.addEventListener("change", () => startLiveSlot(slot, cameraFromSelect(slot), true));
+      if (sel) sel.addEventListener("change", () => {
+        startLiveSlot(slot, cameraFromSelect(slot), true);
+        markLiveShortcutTarget(slot);
+      });
       if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
+      pane.addEventListener("pointerdown", () => { markLiveShortcutTarget(slot); });
     });
     document.getElementById("cameras-subnav").addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-sub]");
@@ -3407,20 +3763,15 @@
       showCameraSub(btn.dataset.sub);
     });
     document.querySelectorAll(".live-pane [data-role='open-side']").forEach((btn) => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         const pane = btn.closest(".live-pane");
-        const slot = Number(pane.dataset.slot);
-        const cam = liveCameras[slot];
-        const error = document.getElementById("camera-error");
-        if (!cam) { error.textContent = "No camera on this side."; return; }
-        const reason = prompt("Reason");
-        if (!reason) return;
-        if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
-        try {
-          alert(JSON.stringify(await api(`/cameras/${cam.id}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
-        } catch (err) {
-          error.textContent = err.message;
-        }
+        openPaneSide(Number(pane.dataset.slot), "open");
+      });
+    });
+    document.querySelectorAll(".live-pane [data-role='close-side']").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const pane = btn.closest(".live-pane");
+        openPaneSide(Number(pane.dataset.slot), "close");
       });
     });
     document.querySelectorAll(".live-pane [data-role='correct-plate']").forEach((btn) => {
@@ -3935,18 +4286,11 @@
       if (!confirm("Disconnect this camera? Live video for it stops until someone connects it again.")) return;
       cameraAction("/sdk/disconnect");
     });
-    document.getElementById("open-this-side").addEventListener("click", async () => {
-      const error = document.getElementById("camera-error");
-      error.textContent = "";
-      if (!selectedCameraId) { error.textContent = "Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first."; return; }
-      const reason = prompt("Reason");
-      if (!reason) return;
-      if (!confirm("Pulse only this camera's barrier (not the other side of the lane)?")) return;
-      try {
-        alert(JSON.stringify(await api(`/cameras/${selectedCameraId}/barrier/open`, { method: "POST", body: JSON.stringify({ reason }) })));
-      } catch (err) {
-        error.textContent = err.message;
-      }
+    document.getElementById("open-this-side").addEventListener("click", () => {
+      commandCameraBarrier(selectedCameraId, "open");
+    });
+    document.getElementById("close-this-side").addEventListener("click", () => {
+      commandCameraBarrier(selectedCameraId, "close");
     });
     document.getElementById("rtsp-probe").addEventListener("click", () => cameraAction("/rtsp/probe"));
     document.getElementById("onvif-discover").addEventListener("click", () => cameraAction("/onvif/discover"));
@@ -4147,27 +4491,47 @@
               sides.push(side);
             }
           });
+          tr.dataset.gateId = String(g.id);
+          tr.dataset.sides = sides.join(",");
+          if (String(selectedGateId) === String(g.id)) tr.classList.add("selected");
+          tr.addEventListener("click", (ev) => {
+            if (ev.target.closest("button")) return;
+            selectedGateId = g.id;
+            selectedGateSide = null;
+            loadGates();
+          });
           sides.forEach((side) => {
             const btn = document.createElement("button");
             btn.className = "secondary";
-            btn.textContent = side === "ENTRY" ? "Open entry" : "Open exit";
-            btn.addEventListener("click", async () => {
-              const reason = prompt("Reason");
-              if (!reason) return;
-              if (!confirm(`Pulse only this lane's ${side.toLowerCase()} barrier (not the other side)?`)) return;
-              try { alert(JSON.stringify(await api(`/gates/${g.id}/open`, { method: "POST", body: JSON.stringify({ reason, side }) }))); }
-              catch (err) { error.textContent = err.message; }
+            setActionCaption(btn, side === "ENTRY" ? "Open entry" : "Open exit");
+            btn.addEventListener("click", () => {
+              selectedGateId = g.id;
+              selectedGateSide = side;
+              updateGateShortcutHint();
+              commandGateBarrier(g.id, side, "open");
             });
             actions.appendChild(btn);
+            const closeBtn = document.createElement("button");
+            closeBtn.className = "secondary";
+            setActionCaption(closeBtn, side === "ENTRY" ? "Close entry" : "Close exit");
+            closeBtn.addEventListener("click", () => {
+              selectedGateId = g.id;
+              selectedGateSide = side;
+              updateGateShortcutHint();
+              commandGateBarrier(g.id, side, "close");
+            });
+            actions.appendChild(closeBtn);
           });
           if (can("gates.manage")) {
             const edit = document.createElement("button");
             edit.className = "secondary";
-            edit.textContent = "Edit";
+            edit.dataset.role = "edit";
+            setActionCaption(edit, "Edit", "Ctrl+E");
             edit.addEventListener("click", () => openGateDialog(g));
             const del = document.createElement("button");
             del.className = "danger";
-            del.textContent = "Delete";
+            del.dataset.role = "delete";
+            setActionCaption(del, "Delete", "Del");
             del.addEventListener("click", async () => {
               if (!confirm(`Delete gate ${g.name}? Linked cameras will be unassigned.`)) return;
               try { await api(`/gates/${g.id}`, { method: "DELETE" }); loadGates(); }
@@ -4177,6 +4541,7 @@
           }
           body.appendChild(tr);
         });
+        updateGateShortcutHint();
       } catch (err) {
         error.textContent = err.message;
       }
@@ -4257,16 +4622,25 @@
         body.innerHTML = "";
         rows.forEach((u) => {
           const tr = document.createElement("tr");
+          tr.dataset.userId = String(u.id);
+          if (String(selectedUserId) === String(u.id)) tr.classList.add("selected");
           tr.innerHTML = `<td>${u.id}</td><td>${u.username}</td><td>${u.full_name || "—"}</td><td>${u.status}</td><td>${u.roles.join(", ")}</td><td class="row-actions"></td>`;
+          tr.addEventListener("click", (ev) => {
+            if (ev.target.closest("button")) return;
+            selectedUserId = u.id;
+            loadUsers();
+          });
           const actions = tr.querySelector(".row-actions");
           if (can("users.manage")) {
             const edit = document.createElement("button");
             edit.className = "secondary";
-            edit.textContent = "Edit";
+            edit.dataset.role = "edit";
+            setActionCaption(edit, "Edit", "Ctrl+E");
             edit.addEventListener("click", () => openUserDialog(u));
             const del = document.createElement("button");
             del.className = "danger";
-            del.textContent = "Delete";
+            del.dataset.role = "delete";
+            setActionCaption(del, "Delete", "Del");
             del.addEventListener("click", async () => {
               if (!confirm(`Delete user ${u.username}?`)) return;
               try { await api(`/users/${u.id}`, { method: "DELETE" }); loadUsers(); }

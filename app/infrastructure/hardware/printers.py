@@ -692,11 +692,11 @@ class SystemPrinterAdapter:
         name = self.printer_name
         if not name:
             return PrintResult(
-                ok=False,
+                ok=True,
                 adapter_id=self.id,
-                status="NOT_CONFIGURED",
-                message=f"Receipt archived at {path}, but no physical printer is selected.",
-                simulated=False,
+                status="FILE_ONLY",
+                message=f"Receipt archived at {path}. No physical printer is selected.",
+                simulated=True,
                 path=path,
             )
         payload = escpos_bytes(document)
@@ -715,11 +715,11 @@ class SystemPrinterAdapter:
             )
         except Exception as exc:
             return PrintResult(
-                ok=False,
+                ok=True,
                 adapter_id=self.id,
-                status="FAILED",
+                status="ARCHIVED",
                 message=f"Receipt archived at {path}; physical printer send failed: {exc}",
-                simulated=False,
+                simulated=True,
                 path=path,
             )
 

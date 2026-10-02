@@ -63,6 +63,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("Install-SmartPark.ps1", kit)
         self.assertIn("Install-SmartParkServices.ps1", kit)
         self.assertIn("run_hvx_host.bat", kit)
+        self.assertIn("hvx_bindings.json", kit)
+        self.assertIn("verify_windows_kit.py", kit)
 
     def test_installer_runs_background_services_script(self):
         installer = (ROOT / "packaging" / "windows" / "Install-SmartPark.ps1").read_text(encoding="utf-8")
@@ -100,13 +102,35 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("Capture snapshot", (payload / "app" / "web" / "index.html").read_text(encoding="utf-8"))
         self.assertTrue((payload / "tools" / "hvx_sdk_host" / "hvx_host.py").is_file())
         self.assertTrue((payload / "tools" / "hvx_sdk_host" / "run_hvx_host.bat").is_file())
+        self.assertTrue((payload / "tools" / "hvx_sdk_host" / "hvx_bindings.json").is_file())
         wheels = list((payload / "wheels").glob("*qrcode*.whl"))
         self.assertTrue(wheels, "USB wheels must include qrcode for receipt QR codes")
         names = [p.name for p in (payload / "wheels").glob("*.whl")]
         dists = [n.split("-", 1)[0].lower() for n in names]
         dist_keys = {d.replace("_", "-") for d in dists}
-        for pkg in ("alembic", "mako", "markupsafe", "python-dotenv", "greenlet"):
+        for pkg in (
+            "alembic", "mako", "markupsafe", "python-dotenv", "greenlet",
+            "fastapi", "uvicorn", "onnxruntime", "fast-alpr", "pyside6-essentials",
+            "starlette", "pydantic", "opentelemetry-api", "opencv-python-headless",
+        ):
             self.assertIn(pkg, dist_keys, f"USB wheels must include {pkg} for --no-deps install")
+        self.assertNotIn("watchfiles", dist_keys)
+        self.assertNotIn("pyside6", dist_keys)
         dupes = sorted({d for d in dists if dists.count(d) > 1})
         self.assertEqual(dupes, [], f"USB wheels must not ship two versions of the same package: {dupes}")
         self.assertEqual(len([n for n in names if n.lower().startswith("websockets-")]), 1)
+
+    def test_usb_payload_has_runtime_binaries_and_complete_wheels(self):
+        import importlib.util
+
+        verifier = ROOT / "packaging" / "verify_windows_kit.py"
+        spec = importlib.util.spec_from_file_location("verify_windows_kit", verifier)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        payload = ROOT / "dist" / "SmartParkEdge-Install" / "payload"
+        self.assertTrue(payload.is_dir(), "Rebuild the USB kit with ./packaging/make_windows_kit.sh")
+        errors = mod.verify_payload(payload)
+        self.assertEqual(errors, [], "\n".join(errors))
