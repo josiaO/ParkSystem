@@ -137,13 +137,16 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     printer_width_dots: int = 384
     printer_qr_mode: str = "auto"
-    media_gateway_enabled: bool = False
+    # Realtime default: MediaMTX is preferred when installed. Registry code
+    # automatically falls back to the legacy direct path when the sidecar is
+    # unavailable, so fresh installs get WebRTC without losing compatibility.
+    media_gateway_enabled: bool = True
     media_gateway_camera_ids: str = ""
-    fastalpr_new_pipeline_enabled: bool = False
-    webrtc_live_enabled: bool = False
+    fastalpr_new_pipeline_enabled: bool = True
+    webrtc_live_enabled: bool = True
     native_alpr_enabled: bool = True
-    live_view_provider: str = "DIRECT_LEGACY"
-    recognition_pipeline: str = "FASTALPR_LEGACY"
+    live_view_provider: str = "MEDIAMTX"
+    recognition_pipeline: str = "FASTALPR_NEW"
     site_timezone: str = "UTC"
     site_locale: str = "en"
     site_language: str = "en"
