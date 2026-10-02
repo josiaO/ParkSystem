@@ -42,6 +42,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             stream = gateway.ffmpeg_jpeg_stream(
                 local_url,
                 scale=960,
+                output_fps=float(getattr(__import__("app.config", fromlist=["settings"]).settings, "live_mjpeg_fps", 10.0) or 10.0),
                 transport="TCP",
                 session=row,
             )
