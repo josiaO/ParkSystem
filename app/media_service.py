@@ -6,6 +6,20 @@ import sys
 import time
 
 
+def _effective_flags() -> dict:
+    """Read migration flags from the authoritative site database.
+
+    The UI stores rollout flags in SiteSetting. Reading flags() without a DB
+    silently ignores those overrides and previously left MediaMTX disabled even
+    after an operator enabled it.
+    """
+    from app.db import SessionLocal
+    from app.services.flags import flags
+
+    with SessionLocal() as db:
+        return flags(db)
+
+
 def _sync_cameras_from_db() -> list[dict]:
     from app.db import SessionLocal
     from app.models import Camera
@@ -37,15 +51,14 @@ def main() -> int:
     if not acquire_instance_lock("media-service"):
         print("SmartPark Media Service is already running.", file=sys.stderr)
         return 0
-    from app.services.flags import flags
     from app.services import mediamtx
 
-    cfg = flags()
+    cfg = _effective_flags()
     if not cfg.get("media_gateway_enabled"):
         print("media_gateway_enabled is off. MediaMTX sidecar not started. LocalMediaGateway remains authoritative.")
         while True:
             time.sleep(30)
-            cfg = flags()
+            cfg = _effective_flags()
             if cfg.get("media_gateway_enabled") and mediamtx.available():
                 break
     if mediamtx.available():
@@ -56,8 +69,13 @@ def main() -> int:
     try:
         while True:
             time.sleep(5)
-            if flags().get("media_gateway_enabled") and mediamtx.available() and not mediamtx.running():
+            cfg = _effective_flags()
+            if cfg.get("media_gateway_enabled") and mediamtx.available() and not mediamtx.running():
                 mediamtx.start()
+                _sync_cameras_from_db()
+            elif cfg.get("media_gateway_enabled") and mediamtx.running():
+                # Keep camera path registration converged after onboarding or a
+                # stream-profile edit without restarting the service.
                 _sync_cameras_from_db()
     except KeyboardInterrupt:
         mediamtx.stop()
