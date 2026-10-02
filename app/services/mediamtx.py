@@ -131,7 +131,9 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
         "webrtcAddress: :8889",
         "webrtcLocalUDPAddress: :8189",
         "webrtcIPsFromInterfaces: yes",
-        "webrtcAllowOrigins: ['*']",
+        # v1.11.x uses the singular key. Keep this aligned with the pinned
+        # MediaMTX binary in scripts/install_mediamtx.sh.
+        "webrtcAllowOrigin: '*'",
         "hlsAddress: 127.0.0.1:8888",
         "api: yes",
         "apiAddress: 127.0.0.1:9997",
