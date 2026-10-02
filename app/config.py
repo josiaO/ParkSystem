@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
     live_mjpeg_fps: float = 10.0
-    entry_dedupe_seconds: float = 3.0
+    entry_dedupe_seconds: float = 2.0
     entry_dedupe_similarity: float = 0.85
     coil_gpio_index: int = 1
     coil_active_value: int = 1
