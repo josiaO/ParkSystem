@@ -195,6 +195,10 @@ def evaluate_preflight(
             PASS if connected else FAIL,
             f"{len(connected)}/{len(rows)} SDK_CONNECTED or VIDEO_CONNECTED",
         ))
+    elif not login_ok:
+        blocked = "not checked because sign-in failed"
+        checks.append(_check("P4", "Cameras configured", FAIL, blocked))
+        checks.append(_check("P5", "Cameras connected", FAIL, blocked))
     else:
         checks.append(_check("P4", "Cameras configured", FAIL, "Add site cameras then Connect all"))
         checks.append(_check("P5", "Cameras connected", FAIL, "no cameras"))
@@ -202,6 +206,8 @@ def evaluate_preflight(
     rt_cams = (realtime or {}).get("cameras") if isinstance(realtime, dict) else None
     if rt_cams:
         checks.append(_check("P6", "Realtime diagnostics", PASS, f"{len(rt_cams)} realtime rows"))
+    elif not login_ok:
+        checks.append(_check("P6", "Realtime diagnostics", FAIL, "not checked because sign-in failed"))
     else:
         checks.append(_check("P6", "Realtime diagnostics", FAIL, "GET /health/realtime returned no cameras"))
 
@@ -442,6 +448,39 @@ def _default_report_dir() -> Path:
     return path
 
 
+def password_candidates(explicit: str = "") -> list[str]:
+    """Passwords to try, without printing them. The install file comes first."""
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        value = (value or "").strip()
+        if value and value not in found:
+            found.append(value)
+
+    add(explicit)
+    add(os.environ.get("SMARTPARK_PASSWORD", ""))
+    add(os.environ.get("SMARTPARK_BOOTSTRAP_PASSWORD", ""))
+    bases: list[Path] = []
+    programdata = os.environ.get("PROGRAMDATA")
+    if programdata:
+        bases.append(Path(programdata) / "SmartParkEdge")
+    bases.append(Path.home() / "SmartParkEdge")
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        bases.append(Path(xdg) / "smartpark-edge")
+    bases.append(Path.home() / ".local" / "share" / "smartpark-edge")
+    for base in bases:
+        path = base / "bootstrap_password.txt"
+        try:
+            if path.is_file():
+                add(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    add("SmartPark1!")
+    add("admin")
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PASS/FAIL soak while cars use the live cameras.")
     parser.add_argument("--url", default="http://127.0.0.1:8760")
@@ -455,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
 
     started = datetime.now(timezone.utc).isoformat()
     windows = sys.platform.startswith("win")
-    passwords = [args.password] if args.password else ["SmartPark1!", "admin"]
+    passwords = password_candidates(args.password)
 
     live = ready = None
     try:

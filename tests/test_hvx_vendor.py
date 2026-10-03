@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.services.hvx_vendor import pe_image_info, resolve_vendor_dir, vendor_inventory
 from app.services.rtsp_probe import vendor_candidates
@@ -94,6 +95,38 @@ class VendorPackageTests(unittest.TestCase):
         self.assertEqual(hvx_sdk.T_DCImageSnap._fields_[0][0], "uiImageId")
         self.assertEqual(hvx_sdk.T_ControlGate._fields_[0][0], "ucState")
         self.assertEqual(hvx_sdk.GATE_STATE_OPEN, 1)
+
+    def test_jpg_drain_keeps_newest_and_reports_backlog(self):
+        import hvx_sdk
+        sdk = hvx_sdk.HVXSDK.__new__(hvx_sdk.HVXSDK)
+        queued = [b"\xff\xd8" + bytes([i]) for i in range(10)]
+        sdk._get_jpg_buffer = lambda handle: queued.pop(0) if queued else b""
+        latest, backlog = sdk._latest_jpg_buffer(3)
+        self.assertEqual(latest, b"\xff\xd8" + bytes([7]))
+        self.assertTrue(backlog)
+        self.assertEqual(len(queued), 2)
+        latest, backlog = sdk._latest_jpg_buffer(3)
+        self.assertEqual(latest, b"\xff\xd8" + bytes([9]))
+        self.assertFalse(backlog)
+        self.assertEqual(queued, [])
+
+    def test_live_jpeg_poll_is_not_written_to_stdout(self):
+        import io
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_host
+        handler = hvx_host.Handler.__new__(hvx_host.Handler)
+        handler.path = "/live-jpeg/2"
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            handler.log_message("GET %s", "/live-jpeg/2")
+        self.assertEqual(buf.getvalue(), "")
+        handler.path = "/info"
+        with patch("sys.stdout", buf):
+            handler.log_message("%s", "host-info")
+        self.assertIn("host-info", buf.getvalue())
 
     def test_vendor_candidates_use_configured_credentials(self):
         xs = vendor_candidates("192.168.1.49", "admin", "secret")
