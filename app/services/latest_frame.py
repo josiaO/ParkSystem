@@ -18,6 +18,7 @@ class FrameSample:
     url: str = ""
     decode_at: float = 0.0
     source_ts: float | None = None
+    camera_id: int = 0
 
     def age_ms(self, now: float | None = None) -> float:
         stamp = self.received_at or 0.0
@@ -41,7 +42,15 @@ class LatestFrameBuffer:
     def __post_init__(self) -> None:
         self.maxsize = max(1, min(int(self.maxsize or 1), 3))
 
-    def put(self, jpeg: bytes, *, source: str = "", url: str = "", source_ts: float | None = None) -> FrameSample:
+    def put(
+        self,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        source_ts: float | None = None,
+        camera_id: int = 0,
+    ) -> FrameSample:
         now = time.monotonic()
         with self._lock:
             self.received += 1
@@ -54,6 +63,7 @@ class LatestFrameBuffer:
                 url=url,
                 decode_at=now,
                 source_ts=source_ts,
+                camera_id=int(camera_id or 0),
             )
             self._items.append(sample)
             while len(self._items) > self.maxsize:

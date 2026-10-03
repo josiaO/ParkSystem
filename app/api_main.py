@@ -313,6 +313,10 @@ async def health_realtime(db: Session = Depends(get_db), _: User = Depends(requi
             "inference_ms_p95": rec.get("inference_ms_p95"),
             "inference_ms_max": rec.get("inference_ms_max"),
             "reconnects": int(media.get("reconnects") or extra.get("reconnect_count") or 0),
+            "frozen": bool(media.get("frozen")),
+            "duplicate_frames": int(media.get("duplicate_frames") or 0),
+            "frames_changed": int(media.get("frames_changed") or 0),
+            "queue_depth": int(media.get("queue_depth") or 0),
         })
     return {
         "cameras": rows,
@@ -703,23 +707,29 @@ def _camera_media_brief(camera_id: int) -> dict:
     from .services.media_gateway import gateway
     row = gateway.session(camera_id)
     if row is None:
-        return {"connection_state": "DISCONNECTED", "viewers": viewers_for(camera_id)}
-    live = row.live.latest()
-    detect = row.detect.latest()
-    pumping = row.producer is not None and not row.producer.done()
-    from .services.stream_roles import profile_warnings
+        return {"connection_state": "DISCONNECTED", "viewers": viewers_for(camera_id), "frozen": False}
+    health = gateway.health_sync(camera_id)
     return {
-        "connection_state": row.state if pumping or row.state != "DISCONNECTED" else "DISCONNECTED",
+        "connection_state": health.get("connection_state") or "DISCONNECTED",
         "viewers": viewers_for(camera_id),
-        "live_frame_age_ms": live.age_ms() if live else None,
-        "ai_frame_age_ms": detect.age_ms() if detect else None,
-        "fps": row.live_fps,
-        "ai_fps": row.ai_fps,
-        "codec": row.codec,
-        "transport": row.transport,
-        "ffmpeg_profile": row.ffmpeg_profile,
-        "reconnects": row.reconnects,
-        "warnings": profile_warnings(row.spec.stream_profiles, upstream_consumers=1 if pumping else 0),
+        "live_frame_age_ms": health.get("live_frame_age_ms"),
+        "ai_frame_age_ms": health.get("ai_frame_age_ms"),
+        "detect_frame_age_ms": health.get("detect_frame_age_ms"),
+        "fps": health.get("fps") or 0,
+        "ai_fps": health.get("ai_processed_fps") or 0,
+        "codec": health.get("codec") or "",
+        "transport": health.get("transport") or "",
+        "ffmpeg_profile": health.get("ffmpeg_profile") or "",
+        "reconnects": health.get("reconnects") or 0,
+        "warnings": list(health.get("warnings") or []),
+        "frozen": bool(health.get("frozen")),
+        "duplicate_frames": int(health.get("duplicate_frames") or 0),
+        "frames_changed": int(health.get("frames_changed") or 0),
+        "frames_received": int(health.get("frames_received") or 0),
+        "queue_depth": health.get("queue_depth") or 0,
+        "detect_queue_depth": health.get("detect_queue_depth") or 0,
+        "decoder_restarts": int(health.get("decoder_restarts") or 0),
+        "source_fps": health.get("source_fps") or 0,
     }
 
 

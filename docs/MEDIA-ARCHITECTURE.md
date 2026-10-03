@@ -37,6 +37,24 @@ Default live view provider is `DIRECT_LEGACY` (LocalMediaGateway). Set `live_vie
 
 `MAIN`, `SUB`, `LIVE`, `DETECT`, `EVIDENCE` are stored per camera in `stream_profiles`. Roles are resolved to upstream URIs by `mediamtx_sources.upstream_role_uris`; `mediamtx.path_plan` then creates one MediaMTX path per *distinct* URI so a single-stream camera is pulled once. LIVE/DETECT paths are never on demand; EVIDENCE is on demand. The registry exposes `get_live_endpoint`, `get_detect_endpoint`, `get_evidence_endpoint` and `media_telemetry`; nothing outside `app/infrastructure/media/registry.py` chooses between MediaMTX and legacy.
 
+## Freshness
+
+`LocalMediaGateway` keeps one `CameraMediaSession` per camera. LIVE and DETECT buffers hold one frame. A repeated JPEG updates `last_received_at` only. `last_fresh_frame_at` and `live_frame_age_ms` move when the picture bytes change, so a stuck image does not look healthy. An HVX host that keeps returning that same cached JPEG stays connected; the pump restarts only when the host stops sending bytes, or when an RTSP decoder repeats one frame. Other cameras are left running. The host drains `Net_GetJpgBuffer` until the queue is empty before it sleeps, so a deep JPEG queue is not left several seconds behind.
+
+Application code asks `app.infrastructure.media.MediaService` for `latest_live_frame`, `latest_detect_frame`, `evidence_frame`, and `health`. The HVX host, FFmpeg, and MediaMTX stay behind that object.
+
+## HVX source
+
+Moving HVX/QY video is `Net_StartVideo` + `Net_GetJpgBuffer` on the 32-bit host. MediaMTX is not registered for those cameras, because a second RTSP client stacks the camera. Generic RTSP cameras can still use MediaMTX. `DIRECT_LEGACY` remains the rollback live view.
+
+Frame age and FPS are separate. On the parking PC, after Install-SmartPark.bat, double-click `Run-CameraLab.bat` in the install folder. That watches every camera for 15 minutes while SmartPark is already open. One camera for 10 minutes:
+
+```text
+powershell -ExecutionPolicy Bypass -File .\Run-CameraLab.ps1 -Camera 1 -Duration 600
+```
+
+The lab only reads Site Service media health. It does not create a parking session, receipt, gate command, or payment. The log is `%ProgramData%\SmartParkEdge\logs\camera_lab_*.txt`. Component 1 is field-complete only after the physical cameras run that test.
+
 ## Failure behavior
 
 MediaMTX missing or crashed → live view stays on LocalMediaGateway; HVX native plates and gates stay up.
