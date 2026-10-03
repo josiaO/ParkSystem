@@ -18,7 +18,12 @@ from pathlib import Path
 
 from app.config import settings
 from app.core.consensus import detect_coverage
-from app.core.plate import normalize_plate
+from app.core.plate import (
+    assess_plate,
+    is_empty_scene_ocr,
+    normalize_plate,
+    plate_shape_score,
+)
 from app.services.camera_lpr import camera_contract
 
 _lock = threading.Lock()
@@ -200,7 +205,7 @@ def _load_engine():
             models = ensure_alpr_model_cache()
             kwargs = {
                 "detector_model": DETECTOR_MODEL,
-                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.18) or 0.18),
+                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
                 "ocr_device": "cpu",
                 "detector_providers": ["CPUExecutionProvider"],
                 "ocr_providers": ["CPUExecutionProvider"],
@@ -244,7 +249,11 @@ def _crop_path(image_path: str, bbox) -> str | None:
         return None
 
 
-MIN_PLATE_CHARS = 4
+MIN_PLATE_CHARS = 5
+MIN_PLATE_ASPECT = 1.35
+MAX_PLATE_ASPECT = 8.0
+MIN_PLATE_WIDTH_PX = 24
+MIN_PLATE_HEIGHT_PX = 8
 
 
 def clean_ocr_text(text: str | None) -> str:
@@ -374,25 +383,32 @@ def _country_name() -> str:
 
 
 def _apply_country_profile(text: str, confidence: float) -> tuple[str, float]:
-    """Apply a country profile only when the site selected one."""
+    """Apply a country profile only when the site selected one.
+
+    Reported confidence is always the raw OCR score. Tanzania shape matching
+    is a sort tie-break only — never add 0.35 so a 30% read becomes 65%.
+    """
+    raw = max(0.0, min(float(confidence or 0), 1.0))
     if _country_name() in {"tanzania", "tz"}:
         plate = _fix_tz_ocr_plate(text)
-        return plate, _tz_plate_score(plate, confidence)
+        return plate, raw
     plate = normalize_plate(clean_ocr_text(text))
-    return plate, float(confidence or 0)
+    return plate, raw
+
+
+def _tz_plate_rank(plate: str) -> int:
+    """Prefer classic TZ T###XXX plates when ranking equal-confidence hits."""
+    p = normalize_plate(plate)
+    if re.fullmatch(r"T\d{3}[A-Z]{3}", p):
+        return 2
+    if re.fullmatch(r"T\d{3}[A-Z]{2,3}", p):
+        return 1
+    return 0
 
 
 def _tz_plate_score(plate: str, confidence: float) -> float:
-    """Boost plates that look like Tanzania T###XXX / T###XX format."""
-    p = normalize_plate(plate)
-    score = float(confidence or 0)
-    if re.fullmatch(r"T\d{3}[A-Z]{3}", p):
-        return score + 0.35
-    if re.fullmatch(r"T\d{3}[A-Z]{2,3}", p):
-        return score + 0.2
-    if p.startswith("T") and 6 <= len(p) <= 8:
-        return score + 0.05
-    return score
+    """Deprecated sort helper. Returns raw confidence; does not invent a score."""
+    return max(0.0, min(float(confidence or 0), 1.0))
 
 
 def _fix_tz_ocr_plate(text: str) -> str:
@@ -426,18 +442,145 @@ def _fix_tz_ocr_plate(text: str) -> str:
     return normalize_plate(plate)
 
 
-def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
-    """Detect on the full frame, then OCR only the padded plate crop.
+def parse_detect_roi(value: str | None = None) -> tuple[float, float, float, float] | None:
+    raw = str(value if value is not None else getattr(settings, "alpr_detect_roi", "") or "").strip()
+    if raw.lower() in {"", "off", "none", "full"}:
+        return None
+    try:
+        parts = [float(item) for item in raw.replace(";", ",").split(",") if item.strip()]
+    except ValueError:
+        return None
+    if len(parts) != 4:
+        return None
+    x1, y1, x2, y2 = parts
+    if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+        return None
+    if (x2 - x1) < 0.4 or (y2 - y1) < 0.4:
+        return None
+    return x1, y1, x2, y2
+
+
+def _roi_crop(bgr):
+    """Crop to the ParkWatch-style recognition zone. Returns (view, x_off, y_off)."""
+    roi = parse_detect_roi()
+    if roi is None or bgr is None or getattr(bgr, "size", 0) == 0:
+        return bgr, 0, 0
+    height, width = bgr.shape[:2]
+    left = max(0, min(width - 1, int(width * roi[0])))
+    top = max(0, min(height - 1, int(height * roi[1])))
+    right = max(left + 1, min(width, int(width * roi[2])))
+    bottom = max(top + 1, min(height, int(height * roi[3])))
+    if right - left < 32 or bottom - top < 32:
+        return bgr, 0, 0
+    return bgr[top:bottom, left:right], left, top
+
+
+def _shift_detections(detections, dx: int, dy: int):
+    if not detections or (not dx and not dy):
+        return list(detections or [])
+    from types import SimpleNamespace
+
+    shifted = []
+    for detection in detections:
+        bbox = getattr(detection, "bounding_box", None)
+        if bbox is None:
+            shifted.append(detection)
+            continue
+        box = SimpleNamespace(
+            x1=int(getattr(bbox, "x1", 0)) + dx,
+            y1=int(getattr(bbox, "y1", 0)) + dy,
+            x2=int(getattr(bbox, "x2", 0)) + dx,
+            y2=int(getattr(bbox, "y2", 0)) + dy,
+        )
+        shifted.append(
+            SimpleNamespace(
+                bounding_box=box,
+                confidence=_detection_score(detection),
+            )
+        )
+    return shifted
+
+
+def _detection_score(detection) -> float:
+    for name in ("confidence", "conf", "score"):
+        value = getattr(detection, name, None)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 1.0
+
+
+def _bbox_size(bbox) -> tuple[int, int]:
+    try:
+        width = int(getattr(bbox, "x2")) - int(getattr(bbox, "x1"))
+        height = int(getattr(bbox, "y2")) - int(getattr(bbox, "y1"))
+    except Exception:
+        return 0, 0
+    return width, height
+
+
+def plate_box_ok(bbox, image_width: int, image_height: int) -> bool:
+    """Reject sky/sign boxes that are not plate-shaped. ParkWatch uses a recognition zone."""
+    width, height = _bbox_size(bbox)
+    if width < MIN_PLATE_WIDTH_PX or height < MIN_PLATE_HEIGHT_PX:
+        return False
+    if image_width >= 80 and width < max(MIN_PLATE_WIDTH_PX, int(image_width * 0.018)):
+        return False
+    if image_width >= 80 and width > int(image_width * 0.85):
+        return False
+    if image_height >= 80 and height > int(image_height * 0.55):
+        return False
+    aspect = width / float(height)
+    return MIN_PLATE_ASPECT <= aspect <= MAX_PLATE_ASPECT
+
+
+def accept_ocr_plate(text: str, confidence: float, *, bbox=None, image_size: tuple[int, int] | None = None) -> bool:
+    """Do not invent a plate from an empty scene or a non-plate crop."""
+    plate = normalize_plate(clean_ocr_text(text))
+    if len(plate) < MIN_PLATE_CHARS:
+        return False
+    if is_empty_scene_ocr(plate, confidence=confidence):
+        return False
+    assessed = assess_plate(plate, str(getattr(settings, "plate_validation", "") or "NONE"), confidence=confidence)
+    if not assessed.get("likely"):
+        return False
+    floor = float(getattr(settings, "alpr_min_ocr_confidence", 0.40) or 0.40)
+    if plate_shape_score(plate) >= 2:
+        floor = min(floor, float(getattr(settings, "alpr_min_ocr_confidence_shaped", 0.28) or 0.28))
+    if float(confidence or 0) < floor:
+        return False
+    if bbox is not None and image_size:
+        if not plate_box_ok(bbox, image_size[0], image_size[1]):
+            return False
+    return True
+
+
+def _predict_crop_then_ocr(engine, bgr, *, save_crops: bool = False) -> list[PlateHit]:
+    """Detect on the given frame, then OCR only the padded plate crop.
 
     FastALPR's stock predict() already crops, but with zero padding. We pad,
     upscale, and enhance the crop so OCR reads the plate — not the car body.
     Prefer Tanzania-shaped plates when several candidates appear.
     """
     detections = engine.detector.predict(bgr)
+    return _hits_from_detections(engine, bgr, detections, save_crops=save_crops)
+
+
+def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) -> list[PlateHit]:
     hits: list[PlateHit] = []
+    image_w = int(bgr.shape[1])
+    image_h = int(bgr.shape[0])
+    min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     for detection in detections or []:
         bbox = getattr(detection, "bounding_box", None)
         if bbox is None:
+            continue
+        if _detection_score(detection) < min_det:
+            continue
+        if not plate_box_ok(bbox, image_w, image_h):
             continue
         crop, _xy = _crop_bgr(
             bgr,
@@ -453,12 +596,12 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
             continue
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
-        if len(plate) < MIN_PLATE_CHARS:
-            continue
         raw_conf = max(0.0, min(float(conf or 0), 1.0))
+        if not accept_ocr_plate(plate, raw_conf, bbox=bbox, image_size=(image_w, image_h)):
+            continue
         box = bbox_dict(bbox) or {}
-        box["image_width"] = int(bgr.shape[1])
-        box["image_height"] = int(bgr.shape[0])
+        box["image_width"] = image_w
+        box["image_height"] = image_h
         left, top, right, bottom = _xy
         box["crop"] = {"x1": int(left), "y1": int(top), "x2": int(right), "y2": int(bottom)}
         hits.append(
@@ -466,12 +609,12 @@ def _predict_crop_then_ocr(engine, bgr) -> list[PlateHit]:
                 plate_raw=text,
                 plate_normalized=plate,
                 plate_confidence=raw_conf,
-                plate_crop_path=_save_crop_bgr(crop),
+                plate_crop_path=_save_crop_bgr(crop) if save_crops else None,
                 bbox=box,
             )
         )
     hits.sort(
-        key=lambda h: _apply_country_profile(h.plate_raw or h.plate_normalized, h.plate_confidence)[1],
+        key=lambda h: (_tz_plate_rank(h.plate_normalized), h.plate_confidence),
         reverse=True,
     )
     return hits
@@ -484,21 +627,22 @@ def _hits_from_predict(rows, crop_source: str) -> list[PlateHit]:
         ocr = getattr(row, "ocr", None)
         text = clean_ocr_text(getattr(ocr, "text", None) or getattr(row, "text", None))
         plate = normalize_plate(text)
-        if len(plate) < MIN_PLATE_CHARS:
-            continue
         conf = getattr(ocr, "confidence", None)
         if conf is None:
             conf = getattr(row, "confidence", None)
         if isinstance(conf, (list, tuple)):
             conf = float(statistics.mean(conf)) if conf else 0.0
+        raw_conf = float(conf or 0)
+        if not accept_ocr_plate(plate, raw_conf):
+            continue
         det = getattr(row, "detection", None)
         bbox = getattr(det, "bounding_box", None) if det is not None else None
         hits.append(
             PlateHit(
                 plate_raw=text,
                 plate_normalized=plate,
-                plate_confidence=float(conf or 0),
-                plate_crop_path=_crop_path(crop_source, bbox),
+                plate_confidence=raw_conf,
+                plate_crop_path=_crop_path(crop_source, bbox) if crop_source else None,
                 bbox=bbox_dict(bbox),
             )
         )
@@ -523,7 +667,8 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         ocr = engine.ocr.predict(ocr_input)
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
-        if len(plate) < MIN_PLATE_CHARS:
+        raw_conf = max(0.0, min(float(conf or 0), 1.0))
+        if not accept_ocr_plate(plate, raw_conf):
             return {
                 "ok": True, "backend": "fastalpr", "pipeline": "crop_ocr",
                 "plates": [], "best": None,
@@ -533,7 +678,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         hit = PlateHit(
             plate_raw=text,
             plate_normalized=plate,
-            plate_confidence=max(0.0, min(float(conf or 0), 1.0)),
+            plate_confidence=raw_conf,
             plate_crop_path=_save_crop_bgr(bgr),
             bbox=None,
         )
@@ -559,7 +704,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         }
 
 
-def recognize_bgr(bgr, *, crop_source: str) -> tuple[list[PlateHit], dict]:
+def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False) -> tuple[list[PlateHit], dict]:
     started = time.monotonic()
     if not fastalpr_installed():
         return [], {
@@ -571,20 +716,60 @@ def recognize_bgr(bgr, *, crop_source: str) -> tuple[list[PlateHit], dict]:
     try:
         engine = _load_engine()
         last_error = None
-        # Detect on the natural frame first; CLAHE only as a second detect pass.
-        variants = [bgr]
+        detections = []
+        plate_shaped = []
+        try:
+            if hasattr(engine, "detector") and hasattr(engine, "ocr"):
+                view, dx, dy = _roi_crop(bgr)
+                detections = _shift_detections(engine.detector.predict(view), dx, dy)
+                image_size = (int(bgr.shape[1]), int(bgr.shape[0]))
+                plate_shaped = [
+                    item for item in detections
+                    if getattr(item, "bounding_box", None) is not None
+                    and plate_box_ok(item.bounding_box, image_size[0], image_size[1])
+                ]
+                hits = _hits_from_detections(engine, bgr, plate_shaped, save_crops=save_crops)
+            else:
+                hits = _hits_from_predict(engine.predict(bgr), crop_source)
+                detections = hits
+                plate_shaped = hits
+        except Exception as exc:
+            last_error = str(exc)
+            hits = []
+            detections = []
+            plate_shaped = []
+        if hits:
+            return hits, {
+                "backend": "fastalpr",
+                "ok": True,
+                "pipeline": "detect_crop_ocr",
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "count": len(hits),
+            }
+        # ParkWatch filters 无车牌. A second full-frame CLAHE detect on empty
+        # asphalt doubles CPU and is how ZC ghosts appear. Only retry when the
+        # detector already found a plate-shaped box (glare / dirty plate).
+        if not plate_shaped:
+            return [], {
+                "backend": "fastalpr",
+                "ok": True,
+                "pipeline": "detect_crop_ocr",
+                "error": last_error,
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "count": 0,
+            }
         boosted = _boost_contrast(bgr)
         if boosted is not None:
-            variants.append(boosted)
-        for variant in variants:
             try:
                 if hasattr(engine, "detector") and hasattr(engine, "ocr"):
-                    hits = _predict_crop_then_ocr(engine, variant)
+                    view, dx, dy = _roi_crop(boosted)
+                    retry = _shift_detections(engine.detector.predict(view), dx, dy)
+                    hits = _hits_from_detections(engine, boosted, retry, save_crops=save_crops)
                 else:
-                    hits = _hits_from_predict(engine.predict(variant), crop_source)
+                    hits = _hits_from_predict(engine.predict(boosted), crop_source)
             except Exception as exc:
                 last_error = str(exc)
-                continue
+                hits = []
             if hits:
                 return hits, {
                     "backend": "fastalpr",
@@ -622,11 +807,11 @@ def recognize_file(image_path: str) -> tuple[list[PlateHit], dict]:
     return recognize_bgr(bgr, crop_source=str(source))
 
 
-def recognize_bytes(jpeg: bytes, *, camera_label: str = "frame") -> dict:
+def recognize_bytes(jpeg: bytes, *, camera_label: str = "frame", save_evidence: bool | None = None) -> dict:
     """Run FastALPR on a camera frame or simulation upload. Never invents plates.
 
     Continuous lane OCR must not write a unique JPEG per frame (that filled disks).
-    Decode in memory; keep only a single rotating debug frame when a plate is found.
+    Decode in memory. Debug frames are off unless explicitly requested.
     """
     if not jpeg:
         return {"ok": False, "backend": "none", "plates": [], "detail": "empty frame"}
@@ -646,12 +831,13 @@ def recognize_bytes(jpeg: bytes, *, camera_label: str = "frame") -> dict:
             "plates": [],
             "detail": "could not decode that photo",
         }
-    hits, meta = recognize_bgr(bgr, crop_source="")
+    persist = bool(save_evidence if save_evidence is not None else getattr(settings, "alpr_save_debug_frames", False))
+    hits, meta = recognize_bgr(bgr, crop_source="", save_crops=persist)
     plates = [hit.as_dict() for hit in hits]
     best = max(hits, key=lambda h: h.plate_confidence) if hits else None
     annotated = None
     image_rel = ""
-    if hits:
+    if hits and persist:
         # One rotating debug file per camera label — never uuid-per-frame.
         folder = settings.media_dir / "alpr"
         folder.mkdir(parents=True, exist_ok=True)

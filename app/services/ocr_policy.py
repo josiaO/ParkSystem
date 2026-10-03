@@ -53,6 +53,15 @@ def fusion_mode(camera=None) -> str:
     return "HYBRID"
 
 
+def software_ocr_enabled(camera=None) -> bool:
+    """ParkWatch InALPR/OutALPR: the PC reads the camera JPEG in FastALPR.
+
+    QY/HVX cameras still supply video and optional native callbacks. They are
+    not the plate engine unless the lane is explicitly ``NATIVE_ONLY``.
+    """
+    return camera_recognition_mode(camera) != NATIVE_ONLY
+
+
 def should_run_local(
     *,
     native_plate: str = "",
@@ -71,7 +80,9 @@ def should_run_local(
     native = str(native_plate or "").strip()
     conf = float(native_confidence or 0)
     if mode == LOCAL_ONLY:
-        return True
+        # Generic IP (native_plates=False) already returned True above.
+        # HVX FASTALPR_ONLY reads the capture/coil JPEG, not every idle frame.
+        return bool(presence)
     if mode == NATIVE_WITH_LOCAL_VERIFY:
         # ParkWatch-style event verification: when a vehicle-trigger JPEG is
         # available, always run software OCR once and fuse it with native LPR.

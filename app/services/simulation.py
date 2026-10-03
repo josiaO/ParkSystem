@@ -92,6 +92,7 @@ def session_dict(row: ParkingSession) -> dict:
         "plate": row.plate,
         "gate_id": row.gate_id,
         "camera_id": row.camera_id,
+        "visit_id": getattr(row, "visit_id", "") or "",
         "lane_direction": row.lane_direction,
         "car_type": row.car_type,
         "status": row.status,

@@ -56,6 +56,7 @@ def event_from_capture(camera: Camera, row: VehicleCapture, *, source: str = "ca
         accepted=bool(row.plate) and not needs_review and klass != CONF_LOW,
         mode=str(camera.recognition_mode or settings.alpr_mode or "FASTALPR_ONLY"),
         presence=True,
+        visit_id=str(getattr(row, "visit_id", "") or box.get("visit_id") or ""),
     )
 
 

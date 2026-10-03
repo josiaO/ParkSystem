@@ -285,6 +285,15 @@ class ParkingSession(Base):
             sqlite_where=text("human_reference != ''"),
             postgresql_where=text("human_reference != ''"),
         ),
+        Index(
+            "uq_parking_sessions_site_camera_visit",
+            "site_id",
+            "camera_id",
+            "visit_id",
+            unique=True,
+            sqlite_where=text("visit_id != '' AND camera_id IS NOT NULL"),
+            postgresql_where=text("visit_id != '' AND camera_id IS NOT NULL"),
+        ),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     site_id: Mapped[int] = mapped_column(
@@ -326,6 +335,7 @@ class ParkingSession(Base):
     paid_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     payment_exit_grace_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     entry_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    visit_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     exit_event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
     entry_image_ref: Mapped[str] = mapped_column(String(260), default="", server_default="")
     open_command_uuid: Mapped[str] = mapped_column(String(64), default="", server_default="")
@@ -338,6 +348,27 @@ class ParkingSession(Base):
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     gate: Mapped[Gate | None] = relationship(back_populates="sessions", foreign_keys=[gate_id])
+
+
+class ParkingEntryClaim(Base):
+    """Transactional idempotency for one physical camera visit.
+
+    Two concurrent entry submissions for the same ``visit_id`` both attempt
+    this insert; only one row can exist. The loser reuses ``session_id``.
+    """
+
+    __tablename__ = "parking_entry_claims"
+    __table_args__ = (
+        UniqueConstraint("site_id", "camera_id", "visit_id", name="uq_parking_entry_claims_visit"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_SITE_ID, server_default=str(DEFAULT_SITE_ID), index=True)
+    camera_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    visit_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    plate: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    event_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    session_id: Mapped[int | None] = mapped_column(ForeignKey("parking_sessions.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
 class SiteSetting(Base):
@@ -365,6 +396,7 @@ class VehicleCapture(Base):
     plate_type: Mapped[str] = mapped_column(String(40), default="")
     source: Mapped[str] = mapped_column(String(40), default="")
     event_id: Mapped[str] = mapped_column(String(64), default="")
+    visit_id: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
     # Optional cloud AI second opinion (supporting/conflicting/unreadable). Never the plate authority.
     ai_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)

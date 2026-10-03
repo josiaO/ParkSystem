@@ -14,6 +14,40 @@ from app.services import mediamtx
 from app.services.flags import flags, media_mtx_for_camera
 from app.services.media_gateway import gateway
 
+LIVE_PROVIDER_WEBRTC = "MEDIAMTX_WEBRTC"
+LIVE_PROVIDER_DIRECT_MJPEG = "DIRECT_MJPEG"
+LIVE_PROVIDER_SNAPSHOT = "SNAPSHOT"
+LIVE_PROVIDER_OFFLINE = "OFFLINE"
+
+
+def live_provider_label(endpoint: dict[str, Any] | None) -> str:
+    """Operator-visible transport. Configuration is not proof of WebRTC."""
+    if not isinstance(endpoint, dict):
+        return LIVE_PROVIDER_OFFLINE
+    transport = str(endpoint.get("transport") or "").upper()
+    provider = str(endpoint.get("provider") or "").upper()
+    state = str(endpoint.get("state") or "").upper()
+    negotiated = str(endpoint.get("viewer_transport") or "").upper()
+    if negotiated in {LIVE_PROVIDER_WEBRTC, "WEBRTC"}:
+        return LIVE_PROVIDER_WEBRTC
+    if negotiated in {LIVE_PROVIDER_DIRECT_MJPEG, "MJPEG"}:
+        return LIVE_PROVIDER_DIRECT_MJPEG
+    if negotiated in {LIVE_PROVIDER_SNAPSHOT, "SNAPSHOT"}:
+        return LIVE_PROVIDER_SNAPSHOT
+    if negotiated in {LIVE_PROVIDER_OFFLINE, "OFFLINE"}:
+        return LIVE_PROVIDER_OFFLINE
+    if state in {"OFFLINE", "DISCONNECTED"} and transport not in {"WEBRTC", "MJPEG"}:
+        return LIVE_PROVIDER_OFFLINE
+    if provider == LIVE_VIEW_MEDIAMTX and transport == "WEBRTC":
+        return LIVE_PROVIDER_WEBRTC
+    if transport == "SNAPSHOT" or "snapshot" in str(endpoint.get("path") or "").lower():
+        return LIVE_PROVIDER_SNAPSHOT
+    if transport == "MJPEG" or provider == LIVE_VIEW_DIRECT_LEGACY:
+        return LIVE_PROVIDER_DIRECT_MJPEG
+    if not transport and not provider:
+        return LIVE_PROVIDER_OFFLINE
+    return LIVE_PROVIDER_DIRECT_MJPEG
+
 
 def _migration_flags(db=None) -> dict[str, Any]:
     return flags(db)
@@ -78,7 +112,7 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
         if not _migration_flags(db).get("webrtc_live_enabled"):
             endpoint = await gateway.get_live_endpoint(camera_id)
             return {**endpoint, "provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id,
-                    "transport": "MJPEG", "state": "LIVE"}
+                    "transport": "MJPEG", "live_provider": LIVE_PROVIDER_DIRECT_MJPEG, "state": "LIVE"}
         endpoint = mediamtx.live_endpoint(camera_id)
         telemetry = media_telemetry(camera_id)
         compat = dict(telemetry.get("webrtc") or {})
@@ -91,6 +125,7 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
                 "provider": LIVE_VIEW_MEDIAMTX,
                 "camera_id": camera_id,
                 "transport": "MJPEG",
+                "live_provider": LIVE_PROVIDER_DIRECT_MJPEG,
                 "state": "DEGRADED",
                 "codec": telemetry.get("codec") or "",
                 "reason": compat.get("reason") or "codec not supported by browser WebRTC",
@@ -101,6 +136,7 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
             "camera_id": camera_id,
             **endpoint,
             "transport": "WEBRTC",
+            "live_provider": LIVE_PROVIDER_WEBRTC,
             "state": telemetry.get("state") or "LIVE",
             "codec": telemetry.get("codec") or "",
             "webrtc_compatible": compat.get("compatible"),
@@ -113,6 +149,7 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
         "provider": LIVE_VIEW_DIRECT_LEGACY,
         "camera_id": camera_id,
         **endpoint,
+        "live_provider": LIVE_PROVIDER_DIRECT_MJPEG if endpoint else LIVE_PROVIDER_OFFLINE,
         "mediamtx_selected": (
             str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX
             and _camera_enabled(camera_id, db)

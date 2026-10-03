@@ -4,7 +4,7 @@
 
 SmartPark **does not** use OpenCV for live video, SDK login, or gate pulses.
 
-It is an **optional helper for FastALPR only**: `app/services/alpr.py` `_boost_contrast()` runs CLAHE on a JPEG if `cv2` imports. Native camera plates never go through OpenCV.
+It is an **optional helper for FastALPR only**: `app/services/alpr.py` `_boost_contrast()` runs CLAHE on the plate crop, and on a second detect only when a plate-shaped box already failed OCR. Empty lanes do not get a full-frame CLAHE retry. Native camera plates never go through OpenCV.
 
 | | With OpenCV | Without OpenCV |
 |---|---|---|

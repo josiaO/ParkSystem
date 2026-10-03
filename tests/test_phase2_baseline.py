@@ -134,6 +134,44 @@ class DesktopMediaMTXTests(unittest.TestCase):
         self.assertIn("10054", fail)
         self.assertIn("250", fail)
 
+    def test_desktop_mjpeg_reads_error_body_without_response_text(self):
+        from types import SimpleNamespace
+        from app.desktop.api import stream_http_error
+
+        text = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        run = text.split("class MjpegStream", 1)[1].split("class ", 1)[0]
+        self.assertIn("stream_http_error", run)
+        self.assertNotIn("response.text", run)
+
+        class StreamError(Exception):
+            pass
+
+        class FakeResponse:
+            status_code = 409
+
+            def read(self):
+                return b'{"detail":"No live video yet. Connect the camera, then wait a second."}'
+
+            @property
+            def text(self):
+                raise StreamError(
+                    "Attempted to access streaming response content, without having called 'read()'."
+                )
+
+        message = stream_http_error(FakeResponse())
+        self.assertIn("409", message)
+        self.assertIn("No live video yet", message)
+
+    def test_hvx_desktop_live_uses_sdk_jpeg_not_mediamtx_ffmpeg(self):
+        spec = CameraLiveSpec(id=9, ip="127.0.0.1", username="a", password="b", rtsp_url="", sdk_handle=1)
+        with patch("app.infrastructure.media.registry.mediamtx_live_active", return_value=True), \
+             patch("app.services.mediamtx_live.ensure_live_consumer") as live, \
+             patch("app.services.preview.gateway.ensure_producer") as prod, \
+             patch("app.services.preview.start_idle_watch"):
+            acquire_live(spec)
+        prod.assert_called()
+        live.assert_not_called()
+
 
 class PlatePolicyTests(unittest.TestCase):
     def test_default_policy_does_not_apply_tanzania_positions(self):
@@ -165,11 +203,11 @@ class RecognitionWorkerTests(unittest.TestCase):
 
     def test_two_agreeing_reads_publish_once(self):
         track = PlateTrack()
-        self.assertFalse(note_reading(track, "KAA123A", 10.0))
-        self.assertTrue(note_reading(track, "KAA123A", 10.2))
-        self.assertFalse(note_reading(track, "KAA123A", 12.0))
-        self.assertFalse(note_reading(track, "KAA123A", 40.0))
-        self.assertTrue(note_reading(track, "KAA123A", 40.2))
+        self.assertFalse(note_reading(track, "KAA123A", 10.0, confidence=0.8))
+        self.assertTrue(note_reading(track, "KAA123A", 10.2, confidence=0.8))
+        self.assertFalse(note_reading(track, "KAA123A", 12.0, confidence=0.8))
+        self.assertFalse(note_reading(track, "KAA123A", 40.0, confidence=0.8))
+        self.assertTrue(note_reading(track, "KAA123A", 40.2, confidence=0.8))
 
     def test_outbox_unwraps_plate_recognized(self):
         item = {

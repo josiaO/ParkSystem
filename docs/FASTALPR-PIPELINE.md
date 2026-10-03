@@ -14,7 +14,8 @@ Vendor-independent OCR on JPEG frames. It is a **consumer** of the DETECT buffer
 ## Rules
 
 - Load the ONNX models once, warm once, reuse.
-- Pipeline: **detect plate → padded crop → OCR on crop only** (`detect_crop_ocr`). Never OCR the full car JPEG.
+- Pipeline: **lane ROI → detect plate-shaped box → padded crop → OCR on crop only** (`detect_crop_ocr`). Never OCR the full car JPEG. Never OCR sky, signs, or bollards.
+- Empty scenes do not run a second CLAHE detect pass. `ZC…` and other FastALPR empty-lane hallucinations are dropped before presence or parking see them.
 - Latest-frame queue size 1–3 (`LatestFrameBuffer`).
 - If inference is slower than the source, drop stale frames.
 - Default authority is the Site Service camera-event loop (`FASTALPR_LEGACY`).
@@ -51,8 +52,8 @@ Reads within 2 s of each other form one *visit*. Every read votes for each
 candidate text it resembles (`plate_similarity` ≥ 0.7), weighted by OCR
 confidence and similarity, so `T285DOP` supports `T285DQP` instead of splitting
 the vote. Publication requires ≥ 2 reads, ≥ 2 identical reads for the winner and
-≥ 60 % of the weight; the consensus confidence is the mean of the identical
-reads. A plate is published once per visit, never while continuously visible,
+≥ 60 % of the weight, or one read ≥ 0.92. The consensus confidence is the mean
+of the identical reads. A plate is published once per visit, never while continuously visible,
 and not again within the 20 s hold. The published event carries `consensus`
 (`reads`, `agreeing`, `share`, `candidates`) plus the raw `frame_plate` /
 `frame_confidence`; a failed durable publish releases the hold so the next

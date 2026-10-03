@@ -5,8 +5,11 @@ This kit is the SmartPark Edge Windows install.
 Copy this whole folder onto a USB stick. On the parking PC:
 
   1. Open the USB folder
-  2. Double-click  Install-SmartPark.bat
-  3. Open the Desktop shortcut  SmartPark Edge
+  2. If this PC already ran SmartPark, wipe data first (not only close the window):
+       double-click  Wipe-SmartPark.bat
+     Type YES. That deletes the database, media, logs, FastALPR cache, and the old app.
+  3. Double-click  Install-SmartPark.bat
+  4. Open the Desktop shortcut  SmartPark Edge
 
 The installer copies the app, then sets user environment variables
 (SMARTPARK_HOME, PATH for Python/Qt/SDK DLLs, QT_PLUGIN_PATH).
@@ -64,8 +67,41 @@ another program still owns the camera callback.
 
 FastALPR (local JPEG OCR) is bundled in this kit, including ONNX models, so it
 does not need internet on the parking PC.
+
+Field acceptance (run while cars pass)
+--------------------------------------
+After Connect all, double-click  Run-FieldAcceptanceTest.bat
+or:
+
+  powershell -ExecutionPolicy Bypass -File Run-FieldAcceptanceTest.ps1 -Minutes 8 -ExpectedCars 6
+
+Leave it running for 8 minutes and send cars through all four lanes. It writes
+PASS/FAIL to %ProgramData%\SmartParkEdge\logs\field_acceptance_*.txt
+
+Expected PASS:
+  Site Service live, DB ready, login, cameras SDK_CONNECTED
+  pending queue <= 1, live not OFFLINE, FastALPR/native reads increase
+  one stalled camera does not freeze the others
+  empty lane does not keep a plate
+  one visit does not create two ParkingSessions
+
 If reinstall fails because a file is in use, the installer now stops
 the previous SmartPark process and retries.
+
+Wipe ALL site data before a clean install (database, media, logs, FastALPR
+cache, scheduled tasks, and the installed app). Stopping the Desktop is not
+enough. From this USB folder, or from the install folder after install:
+
+  double-click  Wipe-SmartPark.bat
+
+or:
+
+  powershell -ExecutionPolicy Bypass -File .\Wipe-SmartPark.ps1
+
+Type YES. Then run Install-SmartPark.bat. To keep the program files and only
+delete SQLite/media/cache:
+
+  powershell -ExecutionPolicy Bypass -File .\Wipe-SmartPark.ps1 -KeepApp -Force
 
 Requires 64-bit Windows 10 or 11. The kit includes both 64-bit SmartPark and a
 32-bit camera SDK helper (NetSDK needs 32-bit Python). This is normal — you do

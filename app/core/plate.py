@@ -15,7 +15,12 @@ _DENYLIST = frozenset({
     "STATION", "POLICE", "TAXI", "STOP", "ENTRY", "EXIT", "OPEN", "CLOSE",
     "DANGER", "PARKING", "WELCOME", "THANKYOU", "THANK", "PLEASE", "SLOW",
     "SPEED", "CAMERA", "SMARTPARK", "DAHUA", "HIKVISION",
+    "NOPLATE", "NOPLAT", "NOPLATEY",
 })
+# FastALPR's global OCR and Chinese-configured QY cameras invent these on
+# empty lanes (bollards, barrier arms, glare). Not a country denylist.
+_EMPTY_SCENE_PREFIXES = ("ZC", "ZH", "ZJ", "ZL")
+_EMPTY_SCENE_EXACT = frozenset({"ZC", "ZH", "ZJ", "ZL", "NOPLATE", "NOPLAT", "NOPLATEY"})
 # OCR pairs seen on Tanzanian plates (digit/letter lookalikes).
 _CONFUSION_PAIRS = (("O", "0"), ("I", "1"), ("B", "8"), ("S", "5"))
 
@@ -137,7 +142,30 @@ def _force_tz_positions(plate: str) -> str:
     return "T" + "".join(body)
 
 
-def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
+def is_empty_scene_ocr(value: str | None, *, confidence: float = 0.0) -> bool:
+    """True when OCR looks like an empty-lane hallucination, not a vehicle plate.
+
+    ParkWatch OcxConfig filters 无车牌 (no vehicle). FastALPR's CCT-global model
+    and a QY camera left on 全国 Chinese plate types commonly emit ``ZC…`` on
+    bollards and empty asphalt. A real registration that happens to start with
+    those letters still passes when it matches a known plate shape or is a
+    high-confidence mixed alphanumeric read.
+    """
+    plate = normalize_plate(value)
+    if not plate:
+        return False
+    if plate in _EMPTY_SCENE_EXACT:
+        return True
+    if any(plate.startswith(prefix) for prefix in _EMPTY_SCENE_PREFIXES):
+        # A real ZA-style plate can start with ZC (e.g. ZC12GP). FastALPR
+        # empty-lane reads never match a country shape.
+        if _TZ_STANDARD_RE.match(plate) or _KE_RE.match(plate) or _ZA_RE.match(plate):
+            return False
+        return True
+    return False
+
+
+def assess_plate(value: str | None, policy: str = "NONE", *, confidence: float = 0.0) -> dict[str, Any]:
     """Flag garbage OCR as unlikely without changing the site validation default (NONE)."""
     chosen = (policy or "NONE").upper()
     normalised = normalize_plate(value)
@@ -148,6 +176,8 @@ def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
         likely, flag = False, "EMPTY"
     elif normalised in _DENYLIST:
         likely, flag = False, "DENYLIST"
+    elif is_empty_scene_ocr(normalised, confidence=confidence):
+        likely, flag = False, "EMPTY_SCENE_OCR"
     elif chosen not in {"", "NONE", "CUSTOM"} and not checked["ok"]:
         likely, flag = False, "UNLIKELY_PATTERN"
     elif chosen in {"", "NONE", "CUSTOM"} and not 5 <= len(normalised) <= 12:
@@ -160,11 +190,17 @@ def assess_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
     }
 
 
-def apply_site_plate(raw: str | None, *, normalization: str = "ALNUM_UPPER", validation: str = "NONE") -> dict[str, Any]:
+def apply_site_plate(
+    raw: str | None,
+    *,
+    normalization: str = "ALNUM_UPPER",
+    validation: str = "NONE",
+    confidence: float = 0.0,
+) -> dict[str, Any]:
     normalised = normalize_plate(raw, normalization)
     corrected = correct_ocr_confusions(normalised, policy=validation)
     chosen = corrected.get("plate") or normalised
-    checked = assess_plate(chosen, validation)
+    checked = assess_plate(chosen, validation, confidence=confidence)
     return {
         "raw_plate": str(raw or "").strip(),
         "normalized_plate": chosen,

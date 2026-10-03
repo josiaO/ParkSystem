@@ -47,6 +47,7 @@ def empty_vehicle_event(**overrides: Any) -> dict[str, Any]:
         "recognition_confidence": 0.0,
         "validation_result": "NONE",
         "bbox": None,
+        "visit_id": "",
     }
     body.update(overrides)
     if "provider" not in overrides and body.get("source"):
@@ -98,6 +99,7 @@ class NormalizedRecognitionEvent:
     presence: bool | None = None
     consensus: dict[str, Any] | None = None
     fusion: dict[str, Any] | None = None
+    visit_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         body = asdict(self)
@@ -128,6 +130,7 @@ class NormalizedRecognitionEvent:
             "occurred_at": self.occurred_at,
             "provider": self.provider,
             "confidence": self.confidence,
+            "visit_id": self.visit_id or "",
         }
 
     @classmethod
@@ -162,4 +165,5 @@ class NormalizedRecognitionEvent:
             presence=payload.get("presence"),
             consensus=payload.get("consensus") if isinstance(payload.get("consensus"), dict) else None,
             fusion=payload.get("fusion") if isinstance(payload.get("fusion"), dict) else None,
+            visit_id=str(payload.get("visit_id") or data.get("visit_id") or ""),
         )

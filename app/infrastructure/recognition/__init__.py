@@ -46,15 +46,17 @@ def normalize_event(
         plate_raw or plate,
         normalization=str(policy.get("plate_normalization") or "ALNUM_UPPER"),
         validation=str(policy.get("plate_validation") or "NONE"),
+        confidence=float(confidence or 0),
     )
+    accepted_plate = applied["normalized_plate"] if applied.get("likely") else ""
     body = empty_vehicle_event(
         event_id=uuid.uuid4().hex,
         camera_id=camera_id,
         site_id=site_id,
         lane_id=lane_id,
         occurred_at=occurred_at or datetime.now(timezone.utc).isoformat(),
-        vehicle_detected=bool(applied["normalized_plate"]),
-        plate_text=applied["normalized_plate"],
+        vehicle_detected=bool(accepted_plate),
+        plate_text=accepted_plate,
         plate_country=policy.get("country_code"),
         plate_region=policy.get("region_code"),
         confidence=float(confidence or 0),
@@ -64,12 +66,12 @@ def normalize_event(
         provider=source,
         raw_plate=applied["raw_plate"],
         plate_raw=applied["raw_plate"],
-        normalized_plate=applied["normalized_plate"],
-        plate_normalized=applied["normalized_plate"],
+        normalized_plate=accepted_plate,
+        plate_normalized=accepted_plate,
         recognition_confidence=float(confidence or 0),
         validation_result=applied["validation_result"],
-        validation_ok=applied["validation_ok"],
-        needs_review=applied["hold_for_operator"],
+        validation_ok=bool(accepted_plate) and applied["validation_ok"],
+        needs_review=applied["hold_for_operator"] and not accepted_plate,
     )
     if extra:
         body.update(extra)

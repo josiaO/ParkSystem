@@ -535,7 +535,7 @@
       </div>
 
       <div id="page-cameras" class="hidden">
-        <div class="notice">Show 1 camera, 2 cameras, or every camera. A camera that is not on this screen still reads plates and fills its lane. Leaving this page only stops the picture, not recognition.</div>
+        <div class="notice">Pick a lane to process that gate's entry and exit on this computer. The other gate is not recognized until you select it. Leaving this page only stops the picture.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">Devices</button>
@@ -548,6 +548,7 @@
               <button type="button" data-layout="all">All</button>
             </div>
             <label>Lane preset <select id="live-lane"></select></label>
+            <span class="muted" id="recognition-scope-hint"></span>
             <button class="secondary" type="button" id="apply-lane">Fill both from lane</button>
             <button class="secondary" type="button" id="refresh-live">Refresh live <kbd>F5</kbd></button>
             <span class="muted" id="live-shortcut-hint">Click a camera or press 1 / 2. F8 and F9 pulse that side only — never both.</span>
@@ -1703,6 +1704,15 @@
       els.img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
     }
 
+    async function reportViewerTransport(cameraId, transport) {
+      try {
+        await api(`/cameras/${cameraId}/live/viewer-state`, {
+          method: "POST",
+          body: JSON.stringify({ transport }),
+        });
+      } catch (_) {}
+    }
+
     async function startLiveSlot(slot, camera, force = false) {
       const els = paneEls(slot);
       if (els.camera && camera) els.camera.value = String(camera.id);
@@ -1752,6 +1762,7 @@
             if (connState === "connected") {
               const seen = whepCodec(session) || ep.codec || "";
               els.status.textContent = `LIVE (WebRTC${seen ? " · " + seen : ""})`;
+              reportViewerTransport(id, "WEBRTC");
             } else if (connState === "disconnected") {
               els.status.textContent = "DEGRADED (WebRTC reconnecting)";
             } else if (connState === "failed" || connState === "closed") {
@@ -1762,13 +1773,15 @@
           });
           if (liveWatchIds[slot] !== id) { session.closed = true; try { session.pc.close(); } catch (_) {} return; }
           whepSessions[slot] = session;
+          reportViewerTransport(id, "WEBRTC");
           refreshPlates(slot);
           return;
         } catch (err) {
           // WHEP unavailable: report it and use the MediaMTX-fed MJPEG cache.
           // The failed peer connection is closed first, so still one transport.
           whepStop(slot);
-          els.status.textContent = `DEGRADED (WebRTC unavailable: ${err.message}) · MJPEG`;
+          els.status.textContent = `DEGRADED (WebRTC unavailable: ${err.message}) · DIRECT_MJPEG`;
+          reportViewerTransport(id, "MJPEG");
         }
       } else if (ep && ep.provider === "MEDIAMTX" && ep.state === "DEGRADED" && ep.reason) {
         els.status.textContent = `DEGRADED · ${ep.reason}`;
@@ -1779,11 +1792,13 @@
       }
       els.img.style.display = "block";
       startMjpegLive(slot, id);
+      reportViewerTransport(id, "MJPEG");
       refreshPlates(slot);
     }
 
     function applyLanePreset() {
       const gateId = document.getElementById("live-lane").value;
+      pushRecognitionScope(gateId);
       const pair = pairLaneCameras(cameraRowsCache, gateId);
       [0, 1].forEach((slot) => {
         const cam = pair[slot];
@@ -1915,6 +1930,20 @@
       seen.forEach((name, id) => { html += `<option value="${id}">${name}</option>`; });
       select.innerHTML = html;
       if (current && [...select.options].some((o) => o.value === current)) select.value = current;
+      else if (!current && seen.size) select.value = [...seen.keys()][0];
+      pushRecognitionScope(select.value);
+    }
+
+    function pushRecognitionScope(gateId) {
+      const hint = document.getElementById("recognition-scope-hint");
+      api("/runtime/recognition-scope", {
+        method: "POST",
+        body: JSON.stringify({ gate_id: gateId ? Number(gateId) : null }),
+      }).then((body) => {
+        if (hint) hint.textContent = (body && body.detail) || "";
+      }).catch((err) => {
+        if (hint) hint.textContent = err.message || "";
+      });
     }
 
     function showCameraSub(name) {
@@ -1972,10 +2001,10 @@
     function renderMediaMtxTelemetry(tele, liveEndpoint) {
       if (!tele) return "";
       const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-      const transport = (liveEndpoint && liveEndpoint.transport) || "";
-      const head = [
+        const transport = (liveEndpoint && (liveEndpoint.live_provider || liveEndpoint.transport)) || "";
+        const head = [
         `Media <strong>${esc(tele.state || "OFFLINE")}</strong>`,
-        transport ? `Live transport ${esc(transport)}` : "",
+        transport ? `Live provider ${esc(transport)}` : "",
         tele.codec ? `Codec ${esc(tele.codec)}` : "",
         tele.control_api_ok ? "Control API OK" : "Control API unreachable",
       ].filter(Boolean).join(" · ");
@@ -2009,14 +2038,15 @@
 
     function renderSlotCar(slot, data) {
       const els = paneEls(slot);
-      if (data && data.clear_last_car) {
+      const emptyLane = Boolean(data && (data.clear_last_car || data.vehicle_present === false));
+      if (emptyLane) {
         liveLastCars[slot] = null;
         liveOverlays[slot] = null;
       }
-      const last = (data && (data.last_car || data.capture)) || {};
-      if (last.snapshot_url || last.crop_url || last.plate) liveLastCars[slot] = last;
-      const shown = liveLastCars[slot] || last;
-      const plate = shown.plate || shown.plate_raw || (data && data.resolved_plate) || "";
+      const last = emptyLane ? {} : ((data && (data.last_car || data.capture)) || {});
+      if (!emptyLane && (last.snapshot_url || last.crop_url || last.plate)) liveLastCars[slot] = last;
+      const shown = emptyLane ? {} : (liveLastCars[slot] || last);
+      const plate = emptyLane ? "" : (shown.plate || shown.plate_raw || (data && data.current_plate) || "");
       const chars = shown.characters || (plate ? plate.split("").join(" ") : "—");
       els.plate.textContent = chars;
       els.snap.innerHTML = shown.snapshot_url

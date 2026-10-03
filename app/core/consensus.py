@@ -121,6 +121,7 @@ class ConsensusTrack:
     min_agreeing: int = 2
     similarity: float = 0.7
     min_share: float = 0.6
+    high_confidence: float = 0.92
     max_reads: int = 12
     absence_reset_seconds: float = 0.6
     readings: list = field(default_factory=list)
@@ -184,9 +185,12 @@ class ConsensusTrack:
         decision = TrackDecision(
             False, winner, confidence, reads=len(self.readings), agreeing=len(exact), share=share, candidates=candidates,
         )
-        if len(self.readings) < self.min_reads or len(exact) < self.min_agreeing:
+        best_exact = max((item.confidence for item in exact), default=0.0)
+        single_ok = best_exact >= float(self.high_confidence) and len(exact) >= 1
+        if not single_ok and (len(self.readings) < self.min_reads or len(exact) < self.min_agreeing):
             # Similar reads raise the winner's share but do not replace an exact
-            # agreeing read; two identical texts are still required.
+            # agreeing read; two identical texts are still required unless one
+            # read already meets the high-confidence threshold (ParkWatch snap).
             decision.reason = "waiting for agreeing read"
             return decision
         if share < self.min_share:
