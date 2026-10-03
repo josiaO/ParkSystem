@@ -129,6 +129,9 @@ class FieldAcceptanceScoringTests(unittest.TestCase):
             live=None, ready=None, cameras=None, realtime=None, login_ok=False, login_error="refused", windows=True,
         )
         self.assertEqual(overall_status(failed), FAIL)
+        failed_by_id = {row["id"]: row for row in failed}
+        self.assertIn("sign-in failed", failed_by_id["P4"]["detail"])
+        self.assertIn("sign-in failed", failed_by_id["P6"]["detail"])
 
     def test_expected_cars_skipped_without_count(self):
         checks = evaluate_soak([_snap(_cam())])
@@ -146,6 +149,9 @@ class FieldAcceptanceScoringTests(unittest.TestCase):
         self.assertNotIn("\u2014".encode("utf-8"), data)
         self.assertIn(b"--password", data)
         self.assertIn(b"keep cars moving", data)
+        lab = (Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Run-CameraLab.bat").read_bytes()
+        lab.decode("ascii")
+        self.assertNotIn("\u2014".encode("utf-8"), lab)
 
     def test_windows_wipe_script_deletes_data_and_cache(self):
         path = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Wipe-SmartPark.ps1"

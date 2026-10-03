@@ -76,7 +76,7 @@ The first start creates an admin. The login page is prefilled:
 
 ```text
 Username: admin
-Password: SmartPark1!
+Password: the line in %ProgramData%\SmartParkEdge\bootstrap_password.txt
 ```
 
 You no longer need `python -m app.cli create-admin` for a first test.

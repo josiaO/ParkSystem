@@ -61,7 +61,15 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version="SmartParkHVXHost/0.1"
     def log_message(self, fmt, *args):
-        sys.stdout.write("[hvx-host] "+fmt%args+"\n")
+        # Live JPEG is polled many times a second. Writing each one to a
+        # captured stdout pipe blocks the response until that pipe drains.
+        path = urlparse(self.path).path if getattr(self, "path", "") else ""
+        if path.startswith("/live-jpeg/") or path.startswith("/capture-jpeg/"):
+            return
+        try:
+            sys.stdout.write("[hvx-host] " + (fmt % args) + "\n")
+        except Exception:
+            return
     def do_GET(self):
         parsed=urlparse(self.path)
         path=parsed.path

@@ -747,15 +747,23 @@ class HVXSDK:
                     pass
         return data if data[:2] == b"\xff\xd8" else b""
 
-    def _latest_jpg_buffer(self, handle: int) -> bytes:
-        """Net_GetJpgBuffer is a queue. Drain it and keep only the newest frame."""
+    def _latest_jpg_buffer(self, handle: int) -> tuple[bytes, bool]:
+        """Pull queued JPEGs and keep the newest.
+
+        Returns ``(jpeg, backlog)``. ``backlog`` is true when the pull hit the
+        batch cap, so the caller must drain again before sleeping. Stopping on
+        an empty or repeated buffer avoids spinning when the SDK returns one
+        cached snapshot.
+        """
         latest = b""
+        backlog = True
         for _ in range(8):
             jpeg = self._get_jpg_buffer(handle)
-            if not jpeg:
+            if not jpeg or jpeg == latest:
+                backlog = False
                 break
             latest = jpeg
-        return latest
+        return latest, backlog
 
     def _pump_messages(self):
         try:
@@ -785,13 +793,17 @@ class HVXSDK:
             with self._lock:
                 if handle not in self._video_handles:
                     break
-            jpeg = self._latest_jpg_buffer(handle)
+            jpeg, backlog = self._latest_jpg_buffer(handle)
             if jpeg:
                 idle = 0
                 with self._lock:
-                    if jpeg != self._last_live_jpeg.get(handle, b""):
+                    previous = self._last_live_jpeg.get(handle, b"")
+                if jpeg != previous:
+                    with self._lock:
                         self._last_live_jpeg[handle] = jpeg
-                time.sleep(0.03)
+                if backlog:
+                    continue
+                time.sleep(0.01)
             else:
                 idle = min(idle + 1, 8)
                 time.sleep(0.04 if idle < 3 else 0.10)

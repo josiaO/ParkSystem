@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -109,9 +110,37 @@ class StreamSession:
     bitrate_bps: int = 0
     _bytes_window: int = 0
     _bytes_at: float = 0.0
+    # Arrivals include repeated JPEGs. Freshness moves only when the picture changes.
+    frames_arrived: int = 0
+    frames_changed: int = 0
+    duplicate_frames: int = 0
+    decoder_restarts: int = 0
+    last_received_at: float = 0.0
+    last_fresh_frame_at: float = 0.0
+    frozen: bool = False
+    source_fps: float = 0.0
+    frame_intervals: deque = field(default_factory=lambda: deque(maxlen=256))
+    _restart_not_before: float = 0.0
+    _src_at: float = 0.0
+    _src_n: int = 0
+    _chg_n: int = 0
 
     def wanted(self) -> bool:
         return self.viewers > 0 or self.detect_consumers > 0 or self.spec.need_detect
+
+
+# One runtime object per physical camera. Callers and tests may use either name.
+CameraMediaSession = StreamSession
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 1)
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * fraction))))
+    return round(ordered[index], 1)
 
 
 class LocalMediaGateway:
@@ -180,15 +209,19 @@ class LocalMediaGateway:
         self.stop_producer(camera_id, force=True)
         self._sessions.pop(camera_id, None)
 
-    async def health(self, camera_id: int) -> dict[str, Any]:
+    def health_sync(self, camera_id: int) -> dict[str, Any]:
         row = self._sessions.get(camera_id)
         if row is None:
             return {
                 "camera_id": camera_id,
                 "connection_state": "DISCONNECTED",
                 "ok": False,
+                "frozen": False,
             }
         return self._health_row(row)
+
+    async def health(self, camera_id: int) -> dict[str, Any]:
+        return self.health_sync(camera_id)
 
     async def get_live_endpoint(self, camera_id: int) -> dict[str, Any]:
         return {
@@ -354,36 +387,83 @@ class LocalMediaGateway:
             pids.extend(sorted(row.child_pids))
         return pids
 
+    def _fresh_age_s(self, row: StreamSession, now: float | None = None) -> float | None:
+        if row.last_fresh_frame_at <= 0:
+            return None
+        return (now if now is not None else time.monotonic()) - row.last_fresh_frame_at
+
+    def _stale_fresh(self, row: StreamSession, *, factor: float = 2.0) -> bool:
+        age = self._fresh_age_s(row)
+        if age is None:
+            return False
+        stale = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
+        return age >= stale * factor
+
     def _health_row(self, row: StreamSession) -> dict[str, Any]:
         now = time.monotonic()
         live = row.live.latest()
         detect = row.detect.latest()
         pumping = row.producer is not None and not row.producer.done()
-        age = round(now - row.last_frame_received_at, 3) if row.last_frame_received_at else None
+        fresh_s = self._fresh_age_s(row, now)
+        received_s = (now - row.last_received_at) if row.last_received_at else None
+        age = round(fresh_s, 3) if fresh_s is not None else None
+        stale_s = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
+        frozen = bool(
+            fresh_s is not None
+            and fresh_s >= stale_s
+            and received_s is not None
+            and received_s < stale_s
+            and row.duplicate_frames > 0
+        )
+        if frozen:
+            row.frozen = True
+        elif fresh_s is not None and fresh_s < stale_s:
+            row.frozen = False
         profiles = row.spec.stream_profiles or (hvx_profiles(row.spec.sdk_handle) if row.spec.sdk_handle is not None else {})
         warnings = profile_warnings(
             profiles,
             upstream_consumers=1 if pumping else 0,
             decoder_overloaded=row.live_fps > 0 and row.live_fps < 4 and pumping,
         )
+        if frozen:
+            warnings = [*warnings, "Same frame is repeating; live picture is not fresh"]
+        state = row.state if pumping or row.state != "DISCONNECTED" else (
+            "STREAMING" if pumping else ("cached" if live else "idle")
+        )
+        if frozen and state == "STREAMING":
+            state = "DEGRADED"
+        intervals = [value * 1000.0 for value in row.frame_intervals]
+        live_age = round(fresh_s * 1000.0, 1) if fresh_s is not None else (live.age_ms(now) if live else None)
+        detect_age = detect.age_ms(now) if detect else None
+        fresh_ok = fresh_s is not None and fresh_s < stale_s and not frozen
         return {
             "camera_id": row.spec.id,
-            "connection_state": row.state if pumping or row.state != "DISCONNECTED" else (
-                "STREAMING" if pumping else ("cached" if live else "idle")
-            ),
-            "ok": pumping or bool(live),
+            "connection_state": state,
+            "ok": bool(live) and fresh_ok,
             "viewers": row.viewers,
             "detect_consumers": row.detect_consumers,
             "pumping": pumping,
             "source": row.source or (live.source if live else ""),
             "fps": row.live_fps,
-            "source_fps": row.live_fps,
+            "source_fps": row.source_fps,
             "live_fps": row.live_fps,
             "ai_processed_fps": row.ai_fps,
             "ai_samples_dropped": row.frames_dropped_ai,
-            "ai_frame_age_ms": detect.age_ms(now) if detect else None,
-            "live_frame_age_ms": live.age_ms(now) if live else None,
+            "ai_frame_age_ms": detect_age,
+            "detect_frame_age_ms": detect_age,
+            "live_frame_age_ms": live_age,
+            "frozen": frozen,
+            "duplicate_frames": row.duplicate_frames,
+            "frames_changed": row.frames_changed,
+            "decoder_restarts": row.decoder_restarts,
+            "last_received_age_ms": round(received_s * 1000.0, 1) if received_s is not None else None,
+            "frame_interval_avg_ms": round(sum(intervals) / len(intervals), 1) if intervals else None,
+            "frame_interval_p50_ms": _percentile(intervals, 0.50),
+            "frame_interval_p95_ms": _percentile(intervals, 0.95),
+            "frame_interval_max_ms": round(max(intervals), 1) if intervals else None,
             "seq": live.seq if live else 0,
+            "live_frame_seq": live.seq if live else 0,
+            "detect_frame_seq": detect.seq if detect else 0,
             "age_seconds": age,
             "queue_depth": row.live.depth(),
             "detect_queue_depth": row.detect.depth(),
@@ -400,7 +480,7 @@ class LocalMediaGateway:
             "child_pids": sorted(row.child_pids),
             "reconnects": row.reconnects,
             "decode_errors": row.decode_errors,
-            "frames_received": row.live.received,
+            "frames_received": row.frames_arrived,
             "frames_decoded": row.live.received,
             "frames_displayed": row.frames_displayed,
             "frames_dropped_live": row.live.dropped,
@@ -435,13 +515,77 @@ class LocalMediaGateway:
         if latest_detect is not None and (now - latest_detect.received_at) < interval:
             row.frames_dropped_ai += 1
             return latest_detect
+        if latest_detect is not None and latest_detect.jpeg == jpeg:
+            row.duplicate_frames += 1
+            row.last_received_at = now
+            row.frames_arrived += 1
+            return latest_detect
         if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
             row.frames_dropped_ai += 1
-        sample = row.detect.put(jpeg, source=source or "mediamtx", url=url)
+        sample = row.detect.put(jpeg, source=source or "mediamtx", url=url, camera_id=camera_id)
         row.frames_sampled_ai += 1
         row.ai_last_at = now
         row.ai_last_seq = sample.seq
         return sample
+
+    def _note_arrival(self, row: StreamSession, jpeg: bytes, now: float, *, changed: bool) -> None:
+        """Count every JPEG. Freshness and live FPS move only when the bytes change."""
+        row.last_received_at = now
+        row.frames_arrived += 1
+        if row._src_at <= 0:
+            row._src_at = now
+        row._src_n += 1
+        row._bytes_window += len(jpeg)
+        if changed:
+            if row.last_fresh_frame_at > 0:
+                gap = now - row.last_fresh_frame_at
+                if gap > 0:
+                    row.frame_intervals.append(gap)
+            row.last_fresh_frame_at = now
+            row.last_frame_received_at = now
+            row.last_keyframe_at = now
+            row.frames_changed += 1
+            row._chg_n += 1
+            row.frozen = False
+        else:
+            row.duplicate_frames += 1
+        elapsed = now - row._src_at
+        if elapsed >= 1.0:
+            row.source_fps = round(row._src_n / elapsed, 1)
+            row.live_fps = round(row._chg_n / elapsed, 1)
+            row.bitrate_bps = int((row._bytes_window * 8) / elapsed)
+            row._fps_at = now
+            row._fps_n = row._chg_n
+            row._src_at = now
+            row._src_n = 0
+            row._chg_n = 0
+            row._bytes_window = 0
+            row._bytes_at = now
+
+    def restart_decoder(self, camera_id: int) -> bool:
+        """Drop and later restart only this camera's decoder. Other sessions stay up."""
+        row = self._sessions.get(int(camera_id))
+        if row is None:
+            return False
+        now = time.monotonic()
+        if now < row._restart_not_before:
+            return False
+        wait = min(float(reconnect_for(row.spec.id).record_failure("stale or frozen video")), 8.0)
+        row._restart_not_before = now + wait
+        row.decoder_restarts += 1
+        row.reconnects += 1
+        row.state = "RECONNECTING"
+        row.last_error = "stale or frozen video"
+        pids = list(row.child_pids)
+        row.child_pids.clear()
+        row.ffmpeg_pid = None
+        for pid in pids:
+            _kill_pid(pid)
+        task = row.producer
+        row.producer = None
+        if task is not None and not task.done():
+            task.cancel()
+        return True
 
     def publish(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "", detect: bool = True) -> FrameSample | None:
         if jpeg[:2] != JPEG_SOI:
@@ -454,27 +598,14 @@ class LocalMediaGateway:
             self._sessions[camera_id] = row
         previous = row.live.latest()
         if previous is not None and previous.jpeg == jpeg:
-            row.last_frame_received_at = time.monotonic()
+            self._note_arrival(row, jpeg, time.monotonic(), changed=False)
             return previous
-        now = time.monotonic()
-        sample = row.live.put(jpeg, source=source, url=url)
-        row.last_frame_received_at = now
-        row.last_keyframe_at = now
+        sample = row.live.put(jpeg, source=source, url=url, camera_id=camera_id)
+        self._note_arrival(row, jpeg, sample.received_at, changed=True)
         row.source = source or row.source
         row.url = url or row.url
-        if row._fps_at <= 0:
-            row._fps_at = now
-        row._fps_n += 1
-        row._bytes_window += len(jpeg)
-        elapsed = now - row._fps_at
-        if elapsed >= 1.0:
-            row.live_fps = round(row._fps_n / elapsed, 1)
-            row.bitrate_bps = int((row._bytes_window * 8) / elapsed)
-            row._fps_at = now
-            row._fps_n = 0
-            row._bytes_window = 0
-            row._bytes_at = now
         if detect:
+            now = sample.received_at
             detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
             ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
             interval = 1.0 / max(ai_fps, 1.0)
@@ -482,7 +613,7 @@ class LocalMediaGateway:
             if latest_detect is None or (now - latest_detect.received_at) >= interval:
                 if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
                     row.frames_dropped_ai += 1
-                row.detect.put(jpeg, source=source, url=url)
+                row.detect.put(jpeg, source=source, url=url, camera_id=camera_id)
         from app.services.preview import remember_frame
         remember_frame(camera_id, jpeg, url=url, url_redacted=redact_url(url) if url else "", source=source)
         return sample
@@ -530,9 +661,11 @@ class LocalMediaGateway:
     async def _backoff(self, row: StreamSession, error: str) -> None:
         row.state = "RECONNECTING"
         row.reconnects += 1
+        row.decoder_restarts += 1
+        wait = min(float(reconnect_for(row.spec.id).record_failure(error)), 8.0)
+        row._restart_not_before = time.monotonic() + wait
         await self._reap_children(row)
-        wait = reconnect_for(row.spec.id).record_failure(error)
-        await asyncio.sleep(min(wait, 8.0))
+        await asyncio.sleep(wait)
 
     async def _reap_children(self, row: StreamSession) -> None:
         pids = list(row.child_pids)
@@ -570,10 +703,16 @@ class LocalMediaGateway:
                     url=f"sdk://handle/{int(spec.sdk_handle)}",
                 )
                 got = True
-                row.state = "STREAMING"
-            elif got and (time.monotonic() - row.last_frame_received_at) > float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5):
+                # The host keeps returning the last JPEG until the camera
+                # encodes a new one. Repeating those bytes is not a dead pump.
+                if self._stale_fresh(row):
+                    row.frozen = True
+                    row.state = "DEGRADED"
+                else:
+                    row.state = "STREAMING"
+            elif got and self._stale_fresh(row, factor=1.0):
                 row.state = "DEGRADED"
-                return got
+                return False
             delay = interval - (time.monotonic() - started)
             await asyncio.sleep(delay if delay > 0.002 else 0.002)
         return got
@@ -631,6 +770,10 @@ class LocalMediaGateway:
                             if not (row.wanted() or row.viewers > 0):
                                 break
                             self.publish(spec.id, jpeg, source="rtsp", url=url)
+                            if self._stale_fresh(row):
+                                row.frozen = True
+                                row.state = "DEGRADED"
+                                return False
                         return True
                     except asyncio.CancelledError:
                         await stream.aclose()
@@ -662,11 +805,13 @@ class LocalMediaGateway:
                     url=str(http.get("url") or ""),
                 )
                 got = True
-            elif got and (time.monotonic() - row.last_frame_received_at) > float(
-                getattr(settings, "stale_stream_seconds", 2.5) or 2.5
-            ):
+                if self._stale_fresh(row):
+                    row.frozen = True
+                    row.state = "DEGRADED"
+                    return False
+            elif got and self._stale_fresh(row, factor=1.0):
                 row.state = "DEGRADED"
-                return got
+                return False
             delay = interval - (time.monotonic() - started)
             await asyncio.sleep(delay if delay > 0.002 else 0.002)
         return got
@@ -746,25 +891,28 @@ class LocalMediaGateway:
                     self.stop_producer(camera_id, force=True)
 
     async def _stale_watch(self) -> None:
+        """Mark a frozen session and recover only that camera. Neighbours are not touched."""
         stale = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
         while True:
             await asyncio.sleep(0.5)
             now = time.monotonic()
             for row in list(self._sessions.values()):
-                if row.producer is None or row.producer.done():
+                producer = row.producer
+                if (producer is None or producer.done()) and row.wanted() and now >= row._restart_not_before:
+                    self.ensure_producer(row.spec)
                     continue
-                if row.state not in {"STREAMING", "DEGRADED"}:
+                if producer is None or producer.done() or row.last_fresh_frame_at <= 0:
                     continue
-                if not row.last_frame_received_at:
-                    continue
-                age = now - row.last_frame_received_at
+                age = now - row.last_fresh_frame_at
+                received_age = (now - row.last_received_at) if row.last_received_at else age
+                if age >= stale and received_age < stale and row.duplicate_frames > 0:
+                    row.frozen = True
                 if age >= stale and row.state == "STREAMING":
                     row.state = "DEGRADED"
-                if age >= stale * 2 and row.state == "DEGRADED":
-                    task = row.producer
-                    if task is not None and not task.done():
-                        row.state = "RECONNECTING"
-                        task.cancel()
+                # Restart only when bytes have stopped. A repeated SDK JPEG is
+                # still a live host response and must not tear this camera down.
+                if age >= stale * 6 and received_age >= stale:
+                    self.restart_decoder(row.spec.id)
 
 
 def _kill_pid(pid: int, *, force: bool = False) -> None:

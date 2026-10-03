@@ -21,7 +21,9 @@ folder and check %ProgramData%\SmartParkEdge\logs\launch.log
 
 No Python install. No copying the source tree. No internet.
 
-Sign in:  admin / SmartPark1!
+Sign in:  admin
+First-run password: open %ProgramData%\SmartParkEdge\bootstrap_password.txt
+(The old note admin / SmartPark1! is not the password this installer creates.)
 Cameras:  Add site cameras  then  Connect all
 Camera login: admin / admin   SDK port 30000
 Onboard wizard: Live Gates → IPs → Onboard wizard (HVX first, then ONVIF/RTSP)
@@ -67,6 +69,20 @@ another program still owns the camera callback.
 
 FastALPR (local JPEG OCR) is bundled in this kit, including ONNX models, so it
 does not need internet on the parking PC.
+
+Camera picture test (no cars required)
+---------------------------------------
+After Connect all, and with SmartPark still open, open the install folder
+(the same folder as Start-SmartPark.bat) and double-click Run-CameraLab.bat.
+That watches every camera for 15 minutes and writes a log under
+%ProgramData%\SmartParkEdge\logs\camera_lab_*.txt
+
+One camera for 10 minutes, from that same folder:
+
+  powershell -ExecutionPolicy Bypass -File .\Run-CameraLab.ps1 -Camera 1 -Duration 600
+
+This only checks that the pictures stay fresh. It does not open the gate
+or print a ticket. Send the log file back.
 
 Field acceptance (run while cars pass)
 --------------------------------------
