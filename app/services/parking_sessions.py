@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 
 from app.domain.parking import OPEN_STORED
@@ -45,7 +46,7 @@ from app.domain.recognition import NormalizedRecognitionEvent
 from app.domain.site import DEFAULT_SITE_ID
 from app.core.plate import plate_similarity
 from app.config import settings
-from app.models import ParkingSession, as_utc, utcnow
+from app.models import ParkingEntryClaim, ParkingSession, as_utc, utcnow
 
 
 def _policy(**over) -> LanePolicy:
@@ -112,6 +113,80 @@ def session_by_entry_event(db: Session, site_id: int, event_id: str) -> ParkingS
     )
 
 
+def session_by_visit(
+    db: Session,
+    *,
+    site_id: int,
+    camera_id: int | None,
+    visit_id: str,
+) -> ParkingSession | None:
+    if not visit_id or camera_id is None:
+        return None
+    return db.scalar(
+        select(ParkingSession).where(
+            ParkingSession.site_id == int(site_id),
+            ParkingSession.camera_id == int(camera_id),
+            ParkingSession.visit_id == str(visit_id),
+        )
+    )
+
+
+def _claim_for_visit(
+    db: Session,
+    *,
+    site_id: int,
+    camera_id: int | None,
+    visit_id: str,
+) -> ParkingEntryClaim | None:
+    if not visit_id or camera_id is None:
+        return None
+    return db.scalar(
+        select(ParkingEntryClaim).where(
+            ParkingEntryClaim.site_id == int(site_id),
+            ParkingEntryClaim.camera_id == int(camera_id),
+            ParkingEntryClaim.visit_id == str(visit_id),
+        )
+    )
+
+
+def _session_from_claim(db: Session, claim: ParkingEntryClaim | None) -> ParkingSession | None:
+    if claim is None or not claim.session_id:
+        return None
+    return db.get(ParkingSession, int(claim.session_id))
+
+
+def _existing_entry(
+    db: Session,
+    *,
+    site_id: int,
+    event_id: str,
+    plate: str,
+    camera_id: int | None,
+    lane_id: int | None,
+    visit_id: str = "",
+) -> ParkingSession | None:
+    found = session_by_visit(db, site_id=site_id, camera_id=camera_id, visit_id=visit_id)
+    if found is not None:
+        return found
+    found = _session_from_claim(db, _claim_for_visit(db, site_id=site_id, camera_id=camera_id, visit_id=visit_id))
+    if found is not None:
+        return found
+    found = session_by_entry_event(db, site_id, event_id)
+    if found is not None:
+        return found
+    found = active_for_plate(db, plate, site_id=site_id)
+    if found is not None:
+        return found
+    return recent_similar_entry(
+        db,
+        plate,
+        site_id=site_id,
+        camera_id=camera_id,
+        lane_id=lane_id,
+        visit_id=visit_id,
+    )
+
+
 def active_for_plate(
     db: Session,
     plate: str,
@@ -146,13 +221,14 @@ def recent_similar_entry(
     site_id: int,
     camera_id: int | None,
     lane_id: int | None,
+    visit_id: str = "",
 ) -> ParkingSession | None:
     """Collapse near-identical OCR reads from the same physical approach.
 
     Exact duplicate protection is enforced by database indexes. This extra
     guard handles the practical OCR case where one vehicle is read as
     T285DQP and, a moment later, T285DOP before it has left the entry lane.
-    It is deliberately short-lived and lane/camera scoped so two legitimate
+    It is deliberately lane/camera and visit scoped so two legitimate
     similar registrations elsewhere are never merged.
     """
     if camera_id is None and lane_id is None:
@@ -170,12 +246,13 @@ def recent_similar_entry(
         .limit(20)
     )
     # PostgreSQL serializes competing entry claims; SQLite development still
-    # relies on the unique exact-plate/event indexes.
+    # relies on the unique exact-plate/event/visit indexes.
     try:
         if db.get_bind().dialect.name != "sqlite":
             stmt = stmt.with_for_update()
     except Exception:
         pass
+    visit_id = str(visit_id or "")
     for row in db.scalars(stmt).all():
         same_approach = (
             (camera_id is not None and row.camera_id == camera_id)
@@ -183,6 +260,10 @@ def recent_similar_entry(
         )
         if not same_approach:
             continue
+        if visit_id and str(getattr(row, "visit_id", "") or "") == visit_id:
+            if plate_similarity(row.plate, plate) >= threshold or not plate:
+                return row
+            return row
         created = as_utc(row.created_at)
         if created is None:
             continue
@@ -207,31 +288,30 @@ def start_entry(
     image_ref: str = "",
     parker_kind: str = "CASUAL",
     policy: LanePolicy | None = None,
+    visit_id: str = "",
 ) -> tuple[ParkingSession, bool]:
     """Create or reuse a site session for one recognition/presence event.
 
-    Returns ``(session, created)``. Same ``event_id`` or an already-open plate
-    at this site is reused (no second session).
+    Returns ``(session, created)``. Same ``event_id``, ``visit_id``, or an
+    already-open plate at this site is reused (no second session). The
+    ``parking_entry_claims`` unique constraint is the concurrent authority.
     """
     policy = policy or LanePolicy()
     plate = (plate or "").strip().upper()
+    visit_id = str(visit_id or "")
     if not plate:
         raise ValueError("No number plate")
-    existing = session_by_entry_event(db, site_id, event_id)
-    if existing is not None:
-        return existing, False
-    open_row = active_for_plate(db, plate, site_id=site_id)
-    if open_row is not None:
-        return open_row, False
-    near_duplicate = recent_similar_entry(
+    existing = _existing_entry(
         db,
-        plate,
         site_id=site_id,
+        event_id=event_id,
+        plate=plate,
         camera_id=camera_id,
         lane_id=lane_id,
+        visit_id=visit_id,
     )
-    if near_duplicate is not None:
-        return near_duplicate, False
+    if existing is not None:
+        return existing, False
     token, human = _allocate_identity(db)
     row = ParkingSession(
         site_id=site_id,
@@ -248,18 +328,53 @@ def start_entry(
         public_token=token,
         human_reference=human,
         entry_event_id=event_id or "",
+        visit_id=visit_id,
         entry_image_ref=image_ref or "",
         parker_kind=parker_kind or "CASUAL",
         receipt_status="",
     )
     db.add(row)
     try:
+        if visit_id and camera_id is not None:
+            db.add(ParkingEntryClaim(
+                site_id=int(site_id),
+                camera_id=int(camera_id),
+                visit_id=visit_id,
+                plate=plate,
+                event_id=event_id or "",
+            ))
         db.flush()
+        if visit_id and camera_id is not None:
+            claim = _claim_for_visit(db, site_id=site_id, camera_id=camera_id, visit_id=visit_id)
+            if claim is not None and not claim.session_id:
+                claim.session_id = row.id
         db.commit()
         db.refresh(row)
+    except (IntegrityError, InvalidRequestError):
+        db.rollback()
+        dup = _existing_entry(
+            db,
+            site_id=site_id,
+            event_id=event_id,
+            plate=plate,
+            camera_id=camera_id,
+            lane_id=lane_id,
+            visit_id=visit_id,
+        )
+        if dup is None:
+            raise
+        return dup, False
     except Exception:
         db.rollback()
-        dup = session_by_entry_event(db, site_id, event_id) or active_for_plate(db, plate, site_id=site_id)
+        dup = _existing_entry(
+            db,
+            site_id=site_id,
+            event_id=event_id,
+            plate=plate,
+            camera_id=camera_id,
+            lane_id=lane_id,
+            visit_id=visit_id,
+        )
         if dup is None:
             raise
         return dup, False
@@ -285,6 +400,8 @@ def start_entry_from_recognition(
     if candidate is None:
         return None, False
     site_id = int(candidate["site_id"] or DEFAULT_SITE_ID)
+    rec_dict = rec.as_dict() if hasattr(rec, "as_dict") else {}
+    visit_id = str(candidate.get("visit_id") or rec_dict.get("visit_id") or getattr(rec, "visit_id", "") or "")
     return start_entry(
         db,
         plate=str(candidate["plate_normalized"]),
@@ -297,6 +414,7 @@ def start_entry_from_recognition(
         image_ref=str(candidate.get("image_ref") or ""),
         parker_kind=parker_kind,
         policy=policy,
+        visit_id=visit_id,
     )
 
 
@@ -517,6 +635,7 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "camera_id": row.camera_id,
         "simulated": bool(row.simulated),
         "entry_event_id": row.entry_event_id,
+        "visit_id": getattr(row, "visit_id", "") or "",
         "exit_event_id": row.exit_event_id,
         "public_token": row.public_token,
         "human_reference": row.human_reference,

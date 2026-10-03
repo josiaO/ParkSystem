@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.plate import normalize_plate
+from app.core.plate import is_empty_scene_ocr, normalize_plate
 from app.models import Camera, VehicleCapture, as_utc, utcnow
 from app.services.camera_lpr import bbox_from_lp_box, native_from_sdk_capture
 
@@ -49,12 +49,14 @@ def _bbox_aspect(box: dict | None) -> float | None:
     return w / float(h)
 
 
-def plausible_vehicle_plate(plate: str | None) -> bool:
+def plausible_vehicle_plate(plate: str | None, *, confidence: float = 0.0) -> bool:
     """Reject all-letter sign text and other non-plate strings."""
     p = normalize_plate(plate)
     if len(p) < MIN_PLATE_LEN or len(p) > MAX_PLATE_LEN:
         return False
     if p in _PLATE_DENYLIST:
+        return False
+    if is_empty_scene_ocr(p, confidence=confidence):
         return False
     letters = sum(ch.isalpha() for ch in p)
     digits = sum(ch.isdigit() for ch in p)
@@ -87,6 +89,8 @@ def should_persist_vehicle_capture(
         or 0
     )
     have_vehicle = bool(capture.get("have_vehicle") or native.get("have_vehicle"))
+    if plate and is_empty_scene_ocr(plate, confidence=conf):
+        plate = ""
     source = str(capture.get("source") or native.get("source") or "").lower()
     box = native.get("bbox") if isinstance(native.get("bbox"), dict) else None
     if not isinstance(box, dict):
@@ -94,7 +98,7 @@ def should_persist_vehicle_capture(
         box = raw_box if isinstance(raw_box, dict) else bbox_from_lp_box(raw_box)
 
     if have_vehicle:
-        if plate and not plausible_vehicle_plate(plate) and conf < 0.85:
+        if plate and not plausible_vehicle_plate(plate, confidence=conf) and conf < 0.85:
             return False, "vehicle-but-implausible-plate"
         if plate or allow_empty_vehicle:
             return True, "native-vehicle"
@@ -102,13 +106,13 @@ def should_persist_vehicle_capture(
 
     tz_like = str(plate_policy).upper() == "TZ" and bool(_TZ_PLATE_RE.match(plate))
     min_conf = MIN_FASTALPR_CONF_TZ if tz_like else MIN_FASTALPR_CONF
-    if coil_occupied and plate and plausible_vehicle_plate(plate) and conf >= min_conf:
+    if coil_occupied and plate and plausible_vehicle_plate(plate, confidence=conf) and conf >= min_conf:
         return True, "coil-plate"
 
     if not plate:
         return False, "no-vehicle-no-plate"
 
-    if not plausible_vehicle_plate(plate):
+    if not plausible_vehicle_plate(plate, confidence=conf):
         return False, "implausible-plate"
 
     if conf < min_conf:
@@ -317,6 +321,7 @@ def capture_dict(row: VehicleCapture) -> dict:
         "plate_country": getattr(row, "plate_country", None) or "",
         "plate_region": getattr(row, "plate_region", None) or "",
         "event_id": getattr(row, "event_id", None) or "",
+        "visit_id": getattr(row, "visit_id", None) or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "fusion": (row.bbox or {}).get("fusion") if isinstance(row.bbox, dict) else None,
         "native_plate": (row.bbox or {}).get("native_plate") if isinstance(row.bbox, dict) else "",
@@ -450,6 +455,7 @@ def persist_event(
         bbox=box,
         source=str((capture or {}).get("source") or native.get("source") or ""),
         event_id=str((capture or {}).get("event_id") or ""),
+        visit_id=str((capture or {}).get("visit_id") or ""),
         plate_country=str((capture or {}).get("plate_country") or ""),
         plate_region=str((capture or {}).get("plate_region") or ""),
         plate_type=str((capture or {}).get("plate_type") or ""),

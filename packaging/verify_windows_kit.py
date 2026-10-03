@@ -128,6 +128,8 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("web UI missing: app/web/index.html")
     if not (payload / "app" / "desktop" / "main.py").is_file():
         errors.append("desktop UI missing: app/desktop/main.py")
+    if not (payload / "tools" / "field_acceptance_test.py").is_file():
+        errors.append("field acceptance test missing: tools/field_acceptance_test.py")
     if not (payload / "requirements-windows.txt").is_file():
         errors.append("requirements-windows.txt missing")
 

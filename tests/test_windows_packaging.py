@@ -64,6 +64,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("Install-SmartParkServices.ps1", kit)
         self.assertIn("run_hvx_host.bat", kit)
         self.assertIn("hvx_bindings.json", kit)
+        self.assertIn("field_acceptance_test.py", kit)
+        self.assertIn("Run-FieldAcceptanceTest.ps1", kit)
+        self.assertIn("Wipe-SmartPark.ps1", kit)
+        self.assertIn("Wipe-SmartPark.bat", kit)
         self.assertIn("verify_windows_kit.py", kit)
 
     def test_installer_runs_background_services_script(self):
@@ -75,6 +79,14 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("SmartPark Site Service", services)
         self.assertIn("Start-ScheduledTask", services)
         self.assertTrue((ROOT / "packaging" / "windows" / "Install-SmartParkWinService.ps1").is_file())
+        self.assertTrue((ROOT / "packaging" / "windows" / "Run-FieldAcceptanceTest.ps1").is_file())
+        self.assertTrue((ROOT / "packaging" / "windows" / "Run-FieldAcceptanceTest.bat").is_file())
+        self.assertTrue((ROOT / "packaging" / "windows" / "Wipe-SmartPark.ps1").is_file())
+        self.assertTrue((ROOT / "packaging" / "windows" / "Wipe-SmartPark.bat").is_file())
+        installer = (ROOT / "packaging" / "windows" / "Install-SmartPark.ps1").read_text(encoding="utf-8")
+        self.assertIn("Run-FieldAcceptanceTest.ps1", installer)
+        self.assertIn("Wipe-SmartPark.ps1", installer)
+        self.assertIn("Wipe-SmartPark.bat", installer)
 
     def test_usb_payload_matches_this_rebuild(self):
         payload = ROOT / "dist" / "SmartParkEdge-Install" / "payload"

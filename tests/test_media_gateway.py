@@ -254,7 +254,7 @@ class MediaApiTests(unittest.TestCase):
         body = gw.json()
         self.assertIn("child_pids", body)
         self.assertIn("flags", body)
-        self.assertEqual(body["flags"]["live_view_provider"], "DIRECT_LEGACY")
+        self.assertEqual(body["flags"]["live_view_provider"], "MEDIAMTX")
         self.assertEqual(body["rollback"]["live_view_provider"], ["DIRECT_LEGACY", "MEDIAMTX"])
         self.assertIn("mediamtx", body)
         text = Path(__file__).resolve().parents[1].joinpath("app/services/media_gateway.py").read_text(encoding="utf-8")

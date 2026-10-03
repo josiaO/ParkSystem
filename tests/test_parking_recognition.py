@@ -136,6 +136,13 @@ class HybridProviderTests(unittest.TestCase):
 
 
 class PresenceAndStaleTests(unittest.TestCase):
+    def test_empty_scene_zc_is_not_a_visit(self):
+        engine = LaneRecognitionEngine(9, policy=RecognitionPolicy(mode=FASTALPR_ONLY))
+        self.assertEqual(_feed(engine, [("ZC1234", 0.91)] * 4), [])
+        events = _feed(engine, [("T277ECR", 0.90), ("T277ECR", 0.91)], t0=8.0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].plate_normalized, "T277ECR")
+
     def test_presence_required_ignores_background_plates(self):
         engine = LaneRecognitionEngine(
             4, policy=RecognitionPolicy(mode=FASTALPR_ONLY), presence_capable=True,

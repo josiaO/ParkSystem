@@ -18,6 +18,8 @@ class VehicleCaptureGateTests(unittest.TestCase):
         self.assertFalse(plausible_vehicle_plate("STATION"))
         self.assertFalse(plausible_vehicle_plate("POLICE"))
         self.assertFalse(plausible_vehicle_plate("ABC"))
+        self.assertFalse(plausible_vehicle_plate("ZC"))
+        self.assertFalse(plausible_vehicle_plate("ZC1234"))
         ok, reason = should_persist_vehicle_capture({"plate": "", "source": "fastalpr"})
         self.assertFalse(ok)
         self.assertEqual(reason, "no-vehicle-no-plate")
@@ -27,6 +29,12 @@ class VehicleCaptureGateTests(unittest.TestCase):
         })
         self.assertFalse(ok)
         self.assertEqual(reason, "implausible-plate")
+        ok, reason = should_persist_vehicle_capture({
+            "plate": "ZC1234", "score": 0.91, "source": "fastalpr",
+            "bbox": {"x1": 10, "y1": 20, "x2": 120, "y2": 50},
+        })
+        self.assertFalse(ok)
+        self.assertEqual(reason, "no-vehicle-no-plate")
 
     def test_accepts_native_vehicle_even_without_plate_yet(self):
         ok, reason = should_persist_vehicle_capture({"plate": "", "have_vehicle": True, "score": 0})

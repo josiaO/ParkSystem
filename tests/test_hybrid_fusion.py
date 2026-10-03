@@ -57,26 +57,33 @@ class ConsensusTrackTests(unittest.TestCase):
 
     def test_gap_starts_new_visit_and_allows_republish(self):
         track = ConsensusTrack(window_seconds=2.0, hold_seconds=20.0)
-        track.observe("ABC123", 0.0)
-        self.assertTrue(track.observe("ABC123", 0.2).publish)
-        track.observe("ABC123", 30.0)
-        self.assertTrue(track.observe("ABC123", 30.2).publish)
+        track.observe("ABC123", 0.0, confidence=0.8)
+        self.assertTrue(track.observe("ABC123", 0.2, confidence=0.8).publish)
+        track.observe("ABC123", 30.0, confidence=0.8)
+        self.assertTrue(track.observe("ABC123", 30.2, confidence=0.8).publish)
         # Within the hold window a new visit of the same plate is suppressed.
-        track.observe("ABC123", 35.0)
-        self.assertFalse(track.observe("ABC123", 35.2).publish)
+        track.observe("ABC123", 35.0, confidence=0.8)
+        self.assertFalse(track.observe("ABC123", 35.2, confidence=0.8).publish)
 
     def test_release_allows_retry_after_failed_publish(self):
         track = ConsensusTrack()
-        track.observe("ABC123", 0.0)
-        self.assertTrue(track.observe("ABC123", 0.2).publish)
+        track.observe("ABC123", 0.0, confidence=0.8)
+        self.assertTrue(track.observe("ABC123", 0.2, confidence=0.8).publish)
         track.release()
-        self.assertTrue(track.observe("ABC123", 0.4).publish)
+        self.assertTrue(track.observe("ABC123", 0.4, confidence=0.8).publish)
 
     def test_empty_read_does_not_break_visit(self):
         track = ConsensusTrack()
-        track.observe("ABC123", 0.0)
+        track.observe("ABC123", 0.0, confidence=0.8)
         self.assertFalse(track.observe("", 0.1).publish)
-        self.assertTrue(track.observe("ABC123", 0.3).publish)
+        self.assertTrue(track.observe("ABC123", 0.3, confidence=0.8).publish)
+
+    def test_high_confidence_publishes_on_first_read(self):
+        track = ConsensusTrack()
+        first = track.observe("T277ECR", 0.0, confidence=0.95)
+        self.assertTrue(first.publish)
+        self.assertEqual(first.plate, "T277ECR")
+        self.assertFalse(track.observe("T277ECR", 0.2, confidence=0.95).publish)
 
 
 class FusionCoordinatorTests(unittest.TestCase):

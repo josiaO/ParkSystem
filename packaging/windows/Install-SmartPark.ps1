@@ -322,7 +322,7 @@ Remove-Item (Join-Path `$env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Smar
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item `$root -Recurse -Force
-Write-Host 'SmartPark Edge removed. Camera database is still in %ProgramData%\SmartParkEdge'
+Write-Host 'SmartPark Edge removed. Camera database is still in %ProgramData%\SmartParkEdge unless you run Wipe-SmartPark.bat'
 "@
 Set-Content -Path $Uninstall -Value $UninstallBody -Encoding ASCII
 
@@ -330,7 +330,7 @@ $svcScript = Join-Path $KitRoot "Install-SmartParkServices.ps1"
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
-foreach ($helper in @("Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1")) {
+foreach ($helper in @("Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
     $src = Join-Path $KitRoot $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force
@@ -355,6 +355,8 @@ if (Test-Path $MediaMtxExe) {
 }
 Write-Host "  Login: admin  /  SmartPark1!"
 Write-Host "  Then: Add site cameras  ->  Connect all"
+Write-Host "  Field test (cars passing): double-click Run-FieldAcceptanceTest.bat"
+Write-Host "  Factory reset (DB + cache + app): double-click Wipe-SmartPark.bat"
 Write-Host "  Vehicles: register plates that should open the gate"
 Write-Host "  If it fails: %ProgramData%\SmartParkEdge\logs\launch.log"
 Write-Host "  Documentation: $InstallDir\documentation\index.html"

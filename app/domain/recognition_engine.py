@@ -139,6 +139,7 @@ def _new_track(policy: RecognitionPolicy) -> ConsensusTrack:
         min_agreeing=int(policy.min_agreeing),
         min_share=float(policy.min_share),
         similarity=float(policy.similarity),
+        high_confidence=float(policy.high_min),
     )
 
 
@@ -211,9 +212,10 @@ class LaneRecognitionEngine:
             plate_raw,
             normalization=self.policy.plate_normalization,
             validation=self.policy.plate_validation,
+            confidence=float(confidence or 0),
         )
         plate = str(applied.get("normalized_plate") or "")
-        if not plate or not vehicle_detected:
+        if not plate or not vehicle_detected or not applied.get("likely", True):
             return []
         if bbox and self._last_bbox and not boxes_overlap(bbox, self._last_bbox, min_iou=self.policy.bbox_iou_min):
             self._tracks[provider]._new_visit(now)

@@ -72,7 +72,7 @@ class StreamSession:
     spec: CameraLiveSpec
     state: str = "DISCONNECTED"
     live: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("live", maxsize=1))
-    detect: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("detect", maxsize=3))
+    detect: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("detect", maxsize=1))
     producer: asyncio.Task | None = None
     viewers: int = 0
     detect_consumers: int = 0

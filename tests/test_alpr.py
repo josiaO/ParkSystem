@@ -19,7 +19,9 @@ if str(ROOT) not in sys.path:
 from app.api_main import app, ensure_roles
 from app.config import Settings
 from app.core.fusion import resolve_readings
-from app.core.plate import assess_plate, correct_ocr_confusions, normalize_plate, plate_similarity
+from app.core.plate import (
+    assess_plate, correct_ocr_confusions, is_empty_scene_ocr, normalize_plate, plate_similarity,
+)
 from app.db import Base, get_db
 from app.models import Role, User, UserRole
 from app.security import hash_password
@@ -48,6 +50,20 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(hit["bbox"]["x1"], 807)
         self.assertEqual(hit["image_width"], 1280)
 
+    def test_tanzania_shape_does_not_invent_65_percent_confidence(self):
+        from app.services.alpr import _apply_country_profile, _tz_plate_score
+        from app.config import settings
+
+        plate, score = _apply_country_profile("T285DQP", 0.30)
+        self.assertEqual(plate, "T285DQP")
+        self.assertAlmostEqual(score, 0.30)
+        self.assertAlmostEqual(_tz_plate_score("T285DQP", 0.30), 0.30)
+        self.assertNotAlmostEqual(score, 0.65)
+        with patch.object(settings, "alpr_country", "tanzania"), patch.object(settings, "plate_validation", "TZ"):
+            plate, score = _apply_country_profile("T285DQP", 0.30)
+        self.assertEqual(plate, "T285DQP")
+        self.assertAlmostEqual(score, 0.30, places=2)
+
     def test_overlay_prefers_native_uslpbox(self):
         native = native_from_sdk_capture({"plate": "T285DQP", "score": 90, "plate_box": [10, 20, 80, 50], "image_width": 640, "image_height": 480})
         local = {"plate": "T285DQP", "bbox": {"x1": 1, "y1": 2, "x2": 3, "y2": 4}, "source": "fastalpr"}
@@ -55,6 +71,64 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(box["x1"], 10)
         self.assertEqual(box["label"], "T285DQP")
         self.assertEqual(box["image_width"], 640)
+
+    def test_empty_scene_zc_is_not_a_plate(self):
+        from types import SimpleNamespace
+        from app.services.alpr import accept_ocr_plate, plate_box_ok
+
+        self.assertTrue(is_empty_scene_ocr("ZC"))
+        self.assertTrue(is_empty_scene_ocr("ZC1234"))
+        self.assertFalse(is_empty_scene_ocr("T277ECR"))
+        self.assertFalse(is_empty_scene_ocr("T793ECA"))
+        self.assertFalse(accept_ocr_plate("ZC1234", 0.91))
+        self.assertFalse(accept_ocr_plate("ZC", 0.99))
+        self.assertTrue(accept_ocr_plate("T277ECR", 0.88))
+        tall = SimpleNamespace(x1=10, y1=10, x2=40, y2=200)
+        plate = SimpleNamespace(x1=100, y1=200, x2=260, y2=245)
+        self.assertFalse(plate_box_ok(tall, 640, 480))
+        self.assertTrue(plate_box_ok(plate, 640, 480))
+
+    def test_empty_lane_does_not_run_second_clahe_detect(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from app.services import alpr as alpr_mod
+
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        seen = {"detect": 0, "clahe": 0}
+
+        class FakeDet:
+            def predict(self, img):
+                seen["detect"] += 1
+                return []
+
+        engine = SimpleNamespace(detector=FakeDet(), ocr=SimpleNamespace(predict=lambda crop: None))
+        with patch.object(alpr_mod, "fastalpr_installed", return_value=True), \
+             patch.object(alpr_mod, "_load_engine", return_value=engine), \
+             patch.object(alpr_mod, "_boost_contrast", side_effect=lambda img: seen.__setitem__("clahe", seen["clahe"] + 1) or img):
+            hits, meta = alpr_mod.recognize_bgr(frame, crop_source="")
+        self.assertEqual(hits, [])
+        self.assertEqual(seen["detect"], 1)
+        self.assertEqual(seen["clahe"], 0)
+        self.assertTrue(meta["ok"])
+
+    def test_hits_from_detections_drop_zc_and_non_plate_boxes(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from app.services.alpr import _hits_from_detections
+
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        ghost = SimpleNamespace(bounding_box=SimpleNamespace(x1=10, y1=10, x2=40, y2=200), confidence=0.9)
+        zc = SimpleNamespace(bounding_box=SimpleNamespace(x1=100, y1=200, x2=260, y2=245), confidence=0.9)
+        real = SimpleNamespace(bounding_box=SimpleNamespace(x1=300, y1=220, x2=460, y2=265), confidence=0.9)
+        texts = ["ZC1234", "T277ECR"]
+
+        class FakeOcr:
+            def predict(self, crop):
+                return SimpleNamespace(text=texts.pop(0), confidence=0.88)
+
+        engine = SimpleNamespace(ocr=FakeOcr())
+        hits = _hits_from_detections(engine, frame, [ghost, zc, real])
+        self.assertEqual([hit.plate_normalized for hit in hits], ["T277ECR"])
 
     def test_crop_then_ocr_uses_padded_plate_not_full_frame(self):
         import numpy as np
@@ -180,6 +254,11 @@ class PlateFusionTests(unittest.TestCase):
         self.assertTrue(assess_plate("123456")["likely"])
         self.assertTrue(assess_plate("ABCDE")["likely"])
         self.assertTrue(assess_plate("123", policy="AE")["likely"])
+        self.assertFalse(assess_plate("ZC")["likely"])
+        self.assertFalse(assess_plate("ZC123")["likely"])
+        self.assertFalse(assess_plate("ZCABC")["likely"])
+        self.assertEqual(assess_plate("ZC1234")["likelihood"], "EMPTY_SCENE_OCR")
+        self.assertTrue(assess_plate("T277ECR")["likely"])
         fixed = correct_ocr_confusions("T28SDQP", policy="TZ")
         self.assertEqual(fixed["plate"], "T285DQP")
         self.assertTrue(fixed["corrected"])

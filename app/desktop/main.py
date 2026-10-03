@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
-from .api import api, BASE
+from .api import api, BASE, stream_http_error
 from .desk import ReportsPage, health_sentences
 from .theme import DARK, LIGHT
 
@@ -276,7 +276,7 @@ class MjpegStream(QThread):
             ) as response:
                 if response.status_code >= 400:
                     if not self._stop:
-                        self.failed.emit(response.text or str(response.status_code))
+                        self.failed.emit(stream_http_error(response))
                     return
                 buf=b""
                 last_emit=0.0
@@ -685,7 +685,7 @@ class CameraLivePane(QFrame):
             QTimer.singleShot(0, self._flush_live_frame)
     def _live_fail(self, err):
         text=str(err or "")
-        if "409" in text or "ffmpeg" in text.lower() or "ffprobe" in text.lower():
+        if "409" in text or "ffmpeg" in text.lower() or "ffprobe" in text.lower() or "no live video" in text.lower():
             if is_technician():
                 self.video.setText("Waiting for a camera JPEG.\nHVX: SDK login on port 30000. Generic IP: HTTP snapshot or RTSP + FastALPR.")
             else:
@@ -1010,7 +1010,7 @@ class Cameras(QWidget):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Live Gates"); title.setStyleSheet("font-size:24px;font-weight:700")
         l.addWidget(title)
-        hint=QLabel("Show 1 camera, 2 cameras, or every camera. A camera that is not on this screen still reads plates and fills its lane. Leaving this page only stops the picture, not recognition.")
+        hint=QLabel("Pick a lane to process that gate's entry and exit on this PC. The other gate is not recognized until you select it (or until another computer owns it). Leaving this page only stops the picture.")
         hint.setWordWrap(True); l.addWidget(hint)
         self.tabs=QTabWidget()
         live=QWidget(); live_l=QVBoxLayout(live)
@@ -1026,6 +1026,8 @@ class Cameras(QWidget):
         lane_row.addWidget(self.lane, 1)
         fill_lane=QPushButton("Fill both from lane"); fill_lane.clicked.connect(lambda: self._start_pair(True))
         lane_row.addWidget(fill_lane)
+        self.scope_hint=QLabel(""); self.scope_hint.setWordWrap(True)
+        lane_row.addWidget(self.scope_hint, 1)
         refresh_live=QPushButton(action_label("Refresh live", "F5")); refresh_live.clicked.connect(lambda: self._start_pair(False))
         lane_row.addWidget(refresh_live)
         live_l.addLayout(lane_row)
@@ -1270,8 +1272,24 @@ class Cameras(QWidget):
         idx=self.lane.findText(previous) if previous else -1
         if idx>=0:
             self.lane.setCurrentIndex(idx)
+        elif self.lane.count() > 1:
+            self.lane.setCurrentIndex(1)
         self.lane.blockSignals(False)
+        self._push_recognition_scope()
+    def _push_recognition_scope(self):
+        gid=self.lane.currentData() if self.lane.count() else None
+        def work():
+            return api.post("/runtime/recognition-scope", {"gate_id": gid}, timeout=8)
+        w=Worker(work)
+        w.done.connect(self._show_recognition_scope)
+        self._keep(w); w.start()
+    def _show_recognition_scope(self, data):
+        body=data if isinstance(data, dict) else {}
+        text=str(body.get("detail") or "")
+        if hasattr(self, "scope_hint"):
+            self.scope_hint.setText(text)
     def _lane_changed(self):
+        self._push_recognition_scope()
         self._start_pair(True)
     def _all_panes(self):
         return [self.pane_a, self.pane_b, *getattr(self, "extra_panes", [])]

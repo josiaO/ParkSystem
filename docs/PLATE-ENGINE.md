@@ -6,7 +6,9 @@ Read lane photos the way ParkWatch did, with an engine that can be retrained or 
 
 ParkWatch (`InALPR=ON` / `OutALPR=ON`) saved each entry and exit JPEG and sent it to SimpleLPR (`LPRHelper.RecognizeAll`) with `Country=Tanzania` and contrast `918`. The camera supplied the picture. The PC supplied the plate text.
 
-SmartPark keeps that split. The HVX/QY camera still snaps the JPEG. **FastALPR** is the reader. Parking sees one plate event.
+ParkWatch on this site uses QY cameras (`CameraType=3` in `ParkWatch.ini`) through DVNetSDK: login, live stream for the operator pane, then a capture JPEG (`CaptureWaitTime=200`, `IdentifyWaitTime=5`). SimpleLPR is a **PC recognition engine**, not the camera's onboard OCR. Native LPR callbacks exist on QY/Vz cameras but are optional.
+
+SmartPark keeps that split. The HVX/QY camera still snaps the JPEG. **FastALPR** is the reader (not SimpleLPR). Parking sees one plate event. `NATIVE_ONLY` is the only lane mode that skips FastALPR.
 
 ## What owns this
 
@@ -34,9 +36,10 @@ Country default is Tanzania. Contrast sensitivity default is `0.918` (ParkWatch 
 1. Camera connects (HVX port 30000, or RTSP/HTTP for a camera without that SDK).
 2. A car triggers a JPEG (image callback, coil, or the detect frame).
 3. `recognize_frame` sends that JPEG to the active engine.
-4. FastALPR detects the plate, pads the crop, and OCRs the crop only.
-5. The Tanzania profile fixes digit/letter positions on `T###XXX` plates.
-6. Parking stores one normalized plate.
+4. FastALPR detects the plate inside the recognition zone (ParkWatch `车牌识别区`), pads the crop, and OCRs the crop only.
+5. Empty-lane OCR such as `ZC…` (Chinese-configured cameras / FastALPR glare) is discarded. No plate is invented when there is no car.
+6. The Tanzania profile fixes digit/letter positions on `T###XXX` plates only when that site profile is enabled.
+7. Parking stores one normalized plate.
 
 `NATIVE_ONLY` still exists for a lane that should keep the camera's own text. The site default is `FASTALPR_ONLY`.
 

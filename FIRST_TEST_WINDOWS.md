@@ -1,6 +1,20 @@
 # First Windows Hardware Test
 
-Copy `dist/SmartParkEdge-Install` or `dist/SmartParkEdge-USB.zip` onto a USB stick. On the parking PC, double-click **Install-SmartPark.bat**, then open the Desktop shortcut **SmartPark Edge**.
+Copy `dist/SmartParkEdge-Install` or `dist/SmartParkEdge-USB.zip` onto a USB stick.
+
+Before a clean reinstall, wipe **all** previous SmartPark data on that PC — not only the running window. Stopping the Desktop leaves `%ProgramData%\SmartParkEdge` (SQLite, snapshots, logs) and FastALPR model caches. From the USB folder:
+
+```powershell
+.\Wipe-SmartPark.bat
+```
+
+or:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Wipe-SmartPark.ps1
+```
+
+Type `YES`. That stops tasks/services, deletes the database and caches, and removes the installed app. Then double-click **Install-SmartPark.bat**, then open the Desktop shortcut **SmartPark Edge**.
 
 You do not copy the source tree, and you do not install Python yourself. Re-run the installer if a previous copy installed but never opened — it now writes user environment variables (`SMARTPARK_HOME`, Qt plugin paths, SDK/Python on `PATH`) and a `Start-SmartPark.bat` shortcut.
 
@@ -155,4 +169,30 @@ powershell -ExecutionPolicy Bypass -File .\Enable-MediaMTX.ps1 -CameraId 3 -Live
 Check `http://127.0.0.1:8760/media/gateway` — `mediamtx.ok` should be `true`.
 
 Rollback: `setx SMARTPARK_LIVE_VIEW_PROVIDER DIRECT_LEGACY` then restart the Site Service task.
+
+## 8. Field acceptance while cars pass
+
+This is the live proof that unit tests cannot replace. After **Add site cameras** and **Connect all**:
+
+```powershell
+cd "$env:LOCALAPPDATA\Programs\SmartPark Edge"
+powershell -ExecutionPolicy Bypass -File .\Run-FieldAcceptanceTest.ps1 -Minutes 8 -ExpectedCars 6
+```
+
+Or double-click `Run-FieldAcceptanceTest.bat` on the USB kit or desktop install folder. Keep cars moving for the full 8 minutes.
+
+| Check | PASS means |
+|---|---|
+| P1–P7 | Site Service, database, login, cameras connected, HVX host |
+| S1 | Recognition pending queue depth ≤ 1 |
+| S2 | Connected cameras are not OFFLINE the whole soak |
+| S3 | Live frame age p95 under 500 ms (fail at 2500 ms) |
+| S4 | AI frame age p50 under 1000 ms (fail at 4000 ms) |
+| S5 | FastALPR `software_reads` or native events increase |
+| S6 | A stall on one camera does not freeze the others |
+| S7 | Empty lane does not keep a plate |
+| S8 | Sessions do not multiply past published visits |
+| S10 | At least `--expected-cars` published events |
+
+Reports land in `%ProgramData%\SmartParkEdge\logs\field_acceptance_*.txt`. Overall **FAIL** means do not treat the site as healthy.
 
