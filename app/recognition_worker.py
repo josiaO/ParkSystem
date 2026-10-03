@@ -166,6 +166,9 @@ def _camera_rows() -> list[dict]:
         for camera in db.query(Camera).filter(Camera.enabled == True).all():  # noqa: E712
             if not media_mtx_for_camera(int(camera.id), db) or not _software_camera(camera, db):
                 continue
+            from app.services.node_scope import camera_in_recognition_scope
+            if not camera_in_recognition_scope(camera, db=db):
+                continue
             from app.services.ocr_policy import camera_recognition_mode
 
             rows.append({
@@ -199,7 +202,6 @@ async def _infer_camera(
     from app.infrastructure.recognition import recognition_provider_for
     from app.services.media_gateway import LocalMediaGateway
     from app.infrastructure.media.registry import get_detect_endpoint
-    from app.services.latest_frame import LatestFrameBuffer
     from app.config import settings
 
     camera_id = int(camera["id"])
@@ -222,10 +224,14 @@ async def _infer_camera(
         min_agreeing=rec_policy.min_agreeing,
         min_share=rec_policy.min_share,
         similarity=rec_policy.similarity,
+        high_confidence=rec_policy.high_min,
     )
-    frames = LatestFrameBuffer(f"worker-{camera_id}", maxsize=1)
+    from app.services.recognition_runtime import runtime
+    lane = runtime.lane(camera_id)
+    lane.inflight = None
+    runtime.scheduler.release(camera_id)
+    frames = lane.mailbox
     ready = asyncio.Event()
-    inference_limiter = inference_limiter or asyncio.Semaphore(1)
     interval = 1.0 / settings.detect_fps
     backoff = 1.0
 
@@ -247,7 +253,7 @@ async def _infer_camera(
                     ready.set()
                     if stats.get("state") not in {"READY", "DEGRADED"}:
                         stats["state"] = "STREAMING"
-                    stats.update(last_frame_at=time.time(), frame_buffer=frames.snapshot())
+                    stats.update(last_frame_at=time.time(), frame_buffer=frames.snapshot(), frame_seq=frames.seq)
                     backoff = 1.0
             except asyncio.CancelledError:
                 raise
@@ -266,52 +272,84 @@ async def _infer_camera(
                 backoff = min(8.0, backoff * 2)
 
     async def _infer() -> None:
+        stall = float(getattr(settings, "recognition_worker_stall_seconds", 5.0) or 5.0)
         while not stop.is_set():
             try:
                 await asyncio.wait_for(ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-            async with inference_limiter:
+            ticket = runtime.begin_if_idle(camera_id, stale_frame_ms=rec_policy.stale_frame_ms)
+            if ticket is None:
                 ready.clear()
-                sample = frames.take()
-                if sample is None or sample.jpeg[:2] != b"\xff\xd8":
-                    continue
-                stats["input_frame_age_ms"] = sample.age_ms()
-                if sample.age_ms() > rec_policy.stale_frame_ms:
-                    stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
-                    continue
-                started = time.monotonic()
-                try:
-                    event = await provider.process({
-                        "jpeg": sample.jpeg,
+                await asyncio.sleep(0.02)
+                continue
+            if ticket.jpeg[:2] != b"\xff\xd8":
+                runtime.finish(ticket, plate="")
+                continue
+            ready.clear()
+            stats["input_frame_age_ms"] = ticket.frame_age_ms()
+            stats["recognition_generation"] = ticket.generation
+            stats["recognition_inflight"] = True
+            stats["recognition_frame_seq"] = ticket.frame_seq
+            started = time.monotonic()
+            try:
+                event = await asyncio.wait_for(
+                    provider.process({
+                        "jpeg": ticket.jpeg,
                         "camera_id": camera_id,
                         "site_id": camera.get("site_id"),
                         "camera_label": f"worker-{camera_id}",
                         "lane_id": camera.get("lane_id"),
                         "plate_policy": camera.get("plate_policy") or {},
-                    })
-                except Exception as exc:
-                    stats["last_error"] = type(exc).__name__
-                    stats["state"] = "DEGRADED"
-                    await asyncio.sleep(interval)
-                    continue
-            stats.update(state="READY", last_inference_at=time.time())
-            stats["infer_ms"] = round((time.monotonic() - started) * 1000.0, 1)
-            stats["last_plate"] = str(event.get("normalized_plate") or "")
-            if event.get("ok") is False:
+                    }),
+                    timeout=stall,
+                )
+            except asyncio.TimeoutError:
+                stats["last_error"] = "stall-timeout"
+                stats["state"] = "STALLED"
+                runtime.recover(camera_id)
+                stats["recognition_stalls"] = int(stats.get("recognition_stalls") or 0) + 1
+                stats["recognition_restarts"] = int(stats.get("recognition_restarts") or 0) + 1
+                continue
+            except Exception as exc:
+                runtime.finish(ticket, plate="")
+                stats["last_error"] = type(exc).__name__
                 stats["state"] = "DEGRADED"
                 await asyncio.sleep(interval)
                 continue
+            plate = str(event.get("normalized_plate") or "")
+            accepted = runtime.finish(ticket, plate=plate, stale_frame_ms=rec_policy.stale_frame_ms)
+            stats.update(state="READY", last_inference_at=time.time(), recognition_inflight=False)
+            stats["infer_ms"] = round((time.monotonic() - started) * 1000.0, 1)
+            stats["last_plate"] = plate
+            stats["visit_id"] = lane.visit.visit_id
+            if not accepted:
+                stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
+                continue
+            if event.get("ok") is False and not plate:
+                decision = note_reading_detail(track, "", time.monotonic())
+                stats["consensus"] = decision.as_dict()
+                if not plate:
+                    lane.visit.observe(presence=False, plate="")
+                    if lane.visit.state == "IDLE":
+                        stats["last_plate"] = ""
+                await asyncio.sleep(interval)
+                continue
             decision = note_reading_detail(
-                track, stats["last_plate"], time.monotonic(), confidence=float(event.get("confidence") or 0),
+                track, plate, time.monotonic(), confidence=float(event.get("confidence") or 0),
             )
             stats["consensus"] = decision.as_dict()
+            if not plate:
+                lane.visit.observe(presence=False, plate="")
+                if lane.visit.state == "IDLE":
+                    stats["last_plate"] = ""
+                await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
+                continue
+            lane.visit.observe(presence=True, plate=plate)
             if not decision.publish:
                 await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
                 continue
             try:
-                # Consensus text/confidence replace the single-frame read; the raw
-                # frame read stays in the payload as evidence.
                 event["frame_plate"] = event.get("normalized_plate")
                 event["frame_confidence"] = event.get("confidence")
                 event["normalized_plate"] = decision.plate
@@ -322,12 +360,15 @@ async def _infer_camera(
                 event["recognition_mode"] = camera.get("recognition_mode") or "LOCAL_ONLY"
                 event["fusion_role"] = "candidate" if camera.get("recognition_mode") == "NATIVE_WITH_LOCAL_VERIFY" else "accepted"
                 event["needs_review"] = bool(event.get("needs_review") or decision.confidence < .75)
-                await asyncio.to_thread(_publish_frame, event, sample.jpeg)
+                event["visit_id"] = lane.visit.visit_id
+                event["frame_seq"] = ticket.frame_seq
+                event["generation"] = ticket.generation
+                await asyncio.to_thread(_publish_frame, event, ticket.jpeg)
                 stats["published"] = int(stats.get("published") or 0) + 1
+                lane.note_published()
+                lane.visit.mark_published(decision.plate)
             except Exception as exc:
                 stats["last_error"] = type(exc).__name__
-                # A failed durable write must be eligible for retry on the next
-                # agreeing frame; only successful publication owns the hold.
                 track.release()
             await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
 
@@ -356,6 +397,7 @@ async def _loop() -> None:
     # parallelism so one slow camera cannot block every other lane while also
     # avoiding CPU oversubscription.
     inference_limiter = asyncio.Semaphore(int(settings.recognition_max_concurrency))
+    from app.services.recognition_runtime import runtime
     try:
         while True:
             with SessionLocal() as db:
@@ -376,6 +418,10 @@ async def _loop() -> None:
                     and (now_wall - (last_infer or started_at)) > float(settings.recognition_worker_stall_seconds)
                 )
                 if camera_id not in wanted_by_id or configurations[camera_id] != wanted_by_id[camera_id] or task.done() or inference_stalled:
+                    if inference_stalled:
+                        runtime.recover(camera_id)
+                        stats["recognition_stalls"] = int(stats.get("recognition_stalls") or 0) + 1
+                        stats["recognition_restarts"] = int(stats.get("recognition_restarts") or 0) + 1
                     tasks.pop(camera_id)
                     configurations.pop(camera_id)
                     stop.set()

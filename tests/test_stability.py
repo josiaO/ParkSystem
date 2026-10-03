@@ -108,9 +108,11 @@ class QueueAndCircuitTests(unittest.TestCase):
             self.assertTrue(should_run_local(native_plate="", native_plates=False))
             self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, native_plates=False))
 
-    def test_local_only_always_runs(self):
+    def test_local_only_runs_on_presence_or_generic(self):
         with patch("app.services.ocr_policy.alpr_mode", return_value=LOCAL_ONLY):
-            self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99))
+            self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, presence=True))
+            self.assertFalse(should_run_local(native_plate="T123ABC", native_confidence=0.99, presence=False))
+            self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, native_plates=False))
 
 
 class HealthApiTests(unittest.TestCase):

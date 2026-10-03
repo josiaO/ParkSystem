@@ -72,12 +72,27 @@ def upstream_role_uris(
 
 
 def source_config_for_camera(camera) -> dict[str, Any]:
+    profiles = dict(getattr(camera, "stream_profiles", None) or {})
+    protocol = str(
+        (profiles.get(ROLE_SUB) or profiles.get(ROLE_LIVE) or profiles.get("MAIN") or {}).get("protocol") or ""
+    )
+    if protocol == "sdk" or getattr(camera, "sdk_handle", None) is not None:
+        # OcxConfig/NetSDK already owns the live stream. Do not invent an RTSP
+        # client — QY cameras have few stream slots and a second pull stacks.
+        return {
+            "uri": "",
+            "detect_uri": "",
+            "evidence_uri": "",
+            "ip": camera.ip_address,
+            "rtsp_url": "",
+            "transport": "TCP",
+        }
     live_uri, detect_uri, evidence_uri = upstream_role_uris(
         ip=camera.ip_address,
         username=camera.username,
         password=camera.password_secret,
         rtsp_url=getattr(camera, "rtsp_url", None) or "",
-        stream_profiles=dict(getattr(camera, "stream_profiles", None) or {}),
+        stream_profiles=profiles,
     )
     return {
         "uri": live_uri,
@@ -90,9 +105,16 @@ def source_config_for_camera(camera) -> dict[str, Any]:
 
 
 def sync_camera(camera, *, db=None) -> dict[str, Any]:
-    from app.infrastructure.media.registry import register_camera_source
+    from app.infrastructure.media.registry import register_camera_source, unregister_camera_source
 
     cfg = source_config_for_camera(camera)
     if not str(cfg.get("uri") or "").startswith("rtsp://"):
-        return {"registered": False, "reason": "no RTSP upstream URI resolved"}
+        # HVX/QY live video is Net_StartVideo + GetJpgBuffer (OcxConfig PlaySdk).
+        # A leftover MediaMTX RTSP pull is a second camera client and is how one
+        # lane stays live while the next stacks or drops.
+        try:
+            unregister_camera_source(int(camera.id))
+        except Exception:
+            pass
+        return {"registered": False, "reason": "HVX uses SDK JPEG, not MediaMTX RTSP"}
     return register_camera_source(int(camera.id), cfg, db=db)

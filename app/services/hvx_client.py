@@ -36,7 +36,7 @@ def _shared_live_client(base_url: str) -> httpx.AsyncClient:
         client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(0.8, connect=0.4),
-            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8, keepalive_expiry=2.0),
+            limits=httpx.Limits(max_keepalive_connections=16, max_connections=32, keepalive_expiry=2.0),
         )
         _live_clients[key] = client
     return client

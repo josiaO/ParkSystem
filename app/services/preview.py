@@ -27,6 +27,7 @@ __all__ = [
     "PreviewState",
     "acquire_detect",
     "acquire_live",
+    "ensure_mjpeg_source",
     "ffmpeg_jpeg_stream",
     "fresh_alpr",
     "fresh_last_car",
@@ -66,6 +67,8 @@ class PreviewState:
     alpr_at: float = 0.0
     last_car: dict = field(default_factory=dict)
     last_car_at: float = 0.0
+    viewer_transport: str = ""
+    viewer_transport_at: float = 0.0
     seq: int = 0
     source: str = ""
     disk_at: float = 0.0
@@ -194,6 +197,21 @@ def fresh_last_car(camera_id: int, *, max_age_seconds: float | None = None) -> d
         row.last_car_at = 0.0
         return None
     return row.last_car
+
+
+def remember_viewer_transport(camera_id: int, transport: str) -> None:
+    row = get_state(camera_id)
+    row.viewer_transport = str(transport or "").upper()
+    row.viewer_transport_at = time.monotonic() if transport else 0.0
+
+
+def viewer_live_provider(camera_id: int) -> str:
+    row = get_state(camera_id)
+    if not row.viewer_transport or row.viewer_transport_at <= 0:
+        return ""
+    if time.monotonic() - row.viewer_transport_at > 30.0:
+        return ""
+    return row.viewer_transport
 
 
 def media_path(kind: str, name: str):
@@ -424,6 +442,27 @@ def acquire_live(spec: CameraLiveSpec) -> None:
     """Acquire a JPEG/MJPEG viewer; unlike WebRTC this needs a local decoder."""
     _viewers[spec.id] = viewers_for(spec.id) + 1
     _last_view[spec.id] = time.monotonic()
+    ensure_mjpeg_source(spec)
+
+
+def ensure_mjpeg_source(spec: CameraLiveSpec) -> None:
+    """Fill the JPEG cache that desktop /live.mjpeg reads.
+
+    MediaMTX still owns browser WebRTC. HVX/QY desktop panes use the SDK
+    live_jpeg pump (ParkWatch picture path) so we do not add a second FFmpeg
+    JPEG decoder on top of MediaMTX ingest. Generic IP cameras keep the
+    MediaMTX JPEG consumer. If that consumer produces no frame, callers can
+    invoke this again after a short wait; ``gateway.ensure_producer`` is the
+    last-resort SDK/RTSP pump.
+    """
+    _last_view[spec.id] = time.monotonic()
+    if spec.sdk_handle is not None:
+        start_idle_watch()
+        row = gateway._session_for(spec)
+        row.viewers = max(row.viewers, viewers_for(spec.id))
+        row.last_view_at = time.monotonic()
+        gateway.ensure_producer(spec)
+        return
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
         from app.services.mediamtx_live import ensure_live_consumer

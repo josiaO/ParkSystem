@@ -5,6 +5,33 @@ import httpx
 BASE="http://127.0.0.1:8760"
 
 
+def stream_http_error(response: httpx.Response) -> str:
+    """Describe an HTTP error from a streaming response without using .text.
+
+    httpx raises ResponseNotRead if a ``client.stream()`` body is accessed via
+    ``response.text`` before ``read()``. Desktop live.mjpeg used that path on
+    409 and painted the exception onto the camera pane.
+    """
+    code = int(getattr(response, "status_code", 0) or 0)
+    try:
+        data = response.read()
+    except Exception:
+        return f"HTTP {code}"
+    text = data.decode("utf-8", "replace").strip() if data else ""
+    if not text:
+        return f"HTTP {code}"
+    if text.startswith("{"):
+        try:
+            import json
+            body = json.loads(text)
+            detail = body.get("detail") if isinstance(body, dict) else None
+            if isinstance(detail, str) and detail.strip():
+                return f"HTTP {code}: {detail.strip()[:240]}"
+        except Exception:
+            pass
+    return f"HTTP {code}: {text[:240]}"
+
+
 def _detail(response: httpx.Response) -> str:
     try:
         body = response.json()
@@ -15,7 +42,10 @@ def _detail(response: httpx.Response) -> str:
         detail = "; ".join(str(item.get("msg") or item) for item in detail)
     if isinstance(detail, str) and detail.strip():
         return detail.strip()
-    text = (response.text or "").strip()
+    try:
+        text = (response.text or "").strip()
+    except Exception:
+        return f"HTTP {response.status_code}"
     if text:
         return text[:400]
     return f"HTTP {response.status_code}"

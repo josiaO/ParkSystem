@@ -113,26 +113,26 @@ class CameraSelectionTests(unittest.TestCase):
 
     def test_consensus_expires_and_does_not_join_different_visits(self):
         track = PlateTrack()
-        self.assertFalse(note_reading(track, "ABC123", 0))
-        self.assertFalse(note_reading(track, "ABC123", 30))
-        self.assertTrue(note_reading(track, "ABC123", 30.2))
-        self.assertFalse(note_reading(track, "ABC123", 30.4))
+        self.assertFalse(note_reading(track, "ABC123", 0, confidence=0.8))
+        self.assertFalse(note_reading(track, "ABC123", 30, confidence=0.8))
+        self.assertTrue(note_reading(track, "ABC123", 30.2, confidence=0.8))
+        self.assertFalse(note_reading(track, "ABC123", 30.4, confidence=0.8))
 
     def test_clear_lane_releases_published_plate_for_next_visit(self):
         track = PlateTrack(absence_reset_seconds=0.5)
-        self.assertFalse(note_reading(track, "ABC123", 0.0))
-        self.assertTrue(note_reading(track, "ABC123", 0.2))
-        self.assertFalse(note_reading(track, "", 0.3))
-        self.assertFalse(note_reading(track, "", 0.9))
-        self.assertFalse(note_reading(track, "ABC123", 1.0))
-        self.assertTrue(note_reading(track, "ABC123", 1.2))
+        self.assertFalse(note_reading(track, "ABC123", 0.0, confidence=0.8))
+        self.assertTrue(note_reading(track, "ABC123", 0.2, confidence=0.8))
+        self.assertFalse(note_reading(track, "", 0.3, confidence=0.8))
+        self.assertFalse(note_reading(track, "", 0.9, confidence=0.8))
+        self.assertFalse(note_reading(track, "ABC123", 1.0, confidence=0.8))
+        self.assertTrue(note_reading(track, "ABC123", 1.2, confidence=0.8))
 
     def test_continuously_visible_plate_does_not_republish_after_hold(self):
         track = PlateTrack()
-        self.assertFalse(note_reading(track, "ABC123", 0))
-        self.assertTrue(note_reading(track, "ABC123", .2))
+        self.assertFalse(note_reading(track, "ABC123", 0, confidence=0.8))
+        self.assertTrue(note_reading(track, "ABC123", .2, confidence=0.8))
         for second in range(1, 60):
-            self.assertFalse(note_reading(track, "ABC123", float(second)))
+            self.assertFalse(note_reading(track, "ABC123", float(second), confidence=0.8))
 
     def test_outbox_contract_preserves_recognition_evidence(self):
         event = from_recognition_dict({"event_id": "capture-1", "occurred_at": "2026-09-30T12:00:00Z", "normalized_plate": "ABC123", "validation_result": {"valid": True}, "bbox": {"x1": 1}})

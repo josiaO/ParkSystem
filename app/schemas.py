@@ -375,3 +375,7 @@ class OnboardingStep(BaseModel):
     user: dict | None = None
     health_ok: bool | None = None
     skip: bool = False
+
+
+class RecognitionScopeUpdate(BaseModel):
+    gate_id: int | None = None

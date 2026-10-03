@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.core.plate import apply_site_plate, normalize_plate, validate_plate
 from app.domain.devices import DEFAULT_CAMERA_ADAPTER
-from app.domain.flags import DEFAULT_FLAGS, LIVE_VIEW_DIRECT_LEGACY
+from app.domain.flags import DEFAULT_FLAGS, LIVE_VIEW_DIRECT_LEGACY, LIVE_VIEW_MEDIAMTX
 from app.infrastructure.hardware.cameras import camera_adapter_for
 from app.infrastructure.hardware.gates import live_gate_adapter
 from app.infrastructure.media import registry as media_registry
@@ -59,11 +59,13 @@ class PlatePolicyTests(unittest.TestCase):
 class FlagAndSiteTests(unittest.TestCase):
     def test_defaults_keep_working_path_authoritative(self):
         cfg = flags()
-        self.assertFalse(cfg["media_gateway_enabled"])
-        self.assertFalse(cfg["fastalpr_new_pipeline_enabled"])
-        self.assertFalse(cfg["webrtc_live_enabled"])
+        # Env/settings prefer MediaMTX; DEFAULT_FLAGS remain the rollback snapshot.
+        self.assertTrue(cfg["media_gateway_enabled"])
+        self.assertTrue(cfg["fastalpr_new_pipeline_enabled"])
+        self.assertTrue(cfg["webrtc_live_enabled"])
         self.assertTrue(cfg["native_alpr_enabled"])
-        self.assertEqual(cfg["live_view_provider"], LIVE_VIEW_DIRECT_LEGACY)
+        self.assertEqual(cfg["live_view_provider"], LIVE_VIEW_MEDIAMTX)
+        self.assertFalse(DEFAULT_FLAGS["media_gateway_enabled"])
         self.assertEqual(DEFAULT_FLAGS["live_view_provider"], LIVE_VIEW_DIRECT_LEGACY)
 
     def test_site_policy_currency_is_configurable(self):

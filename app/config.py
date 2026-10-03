@@ -43,11 +43,13 @@ class Settings(BaseSettings):
     rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
     local_alpr_cooldown_seconds: float = 0.5
-    recognition_max_concurrency: int = 2
+    recognition_max_concurrency: int = 4
     recognition_absence_reset_seconds: float = 0.6
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
     live_mjpeg_fps: float = 10.0
+    # Production: pin this PC to one gate (entry+exit). 0/unset = operator chooses.
+    recognition_gate_id: int | None = None
     entry_dedupe_seconds: float = 2.0
     entry_dedupe_similarity: float = 0.85
     coil_gpio_index: int = 1
@@ -66,9 +68,15 @@ class Settings(BaseSettings):
     alpr_timeout_seconds: float = 15.0
     alpr_country: str = ""
     alpr_csf: float = 0.918
-    alpr_detector_confidence: float = 0.18
+    alpr_detector_confidence: float = 0.26
     alpr_crop_padding_ratio: float = 0.18
     alpr_ocr_target_width: int = 320
+    # ParkWatch OcxConfig recognition zone (车牌识别区): skip sky / far field.
+    # Normalized x1,y1,x2,y2. "off" uses the full frame.
+    alpr_detect_roi: str = "0.06,0.18,0.94,0.92"
+    alpr_min_ocr_confidence: float = 0.40
+    alpr_min_ocr_confidence_shaped: float = 0.28
+    alpr_save_debug_frames: bool = False
     default_hvx_sdk_port: int = 30000
     bootstrap_username: str = "admin"
     bootstrap_password: str = ""
@@ -180,6 +188,13 @@ class Settings(BaseSettings):
             raise ValueError("SMARTPARK_RECOGNITION_MAX_CONCURRENCY must be between 1 and 8")
         return workers
 
+    @field_validator("recognition_gate_id", mode="before")
+    @classmethod
+    def _optional_gate_id(cls, value):
+        if value in (None, "", 0, "0"):
+            return None
+        return int(value)
+
     @field_validator(
         "recognition_absence_reset_seconds",
         "recognition_worker_stall_seconds",
@@ -209,7 +224,12 @@ class Settings(BaseSettings):
             raise ValueError("SMARTPARK_RECOGNITION_CONSENSUS_WINDOW_SECONDS must be between 0.2 and 30")
         return seconds
 
-    @field_validator("alpr_detector_confidence", "alpr_crop_padding_ratio")
+    @field_validator(
+        "alpr_detector_confidence",
+        "alpr_crop_padding_ratio",
+        "alpr_min_ocr_confidence",
+        "alpr_min_ocr_confidence_shaped",
+    )
     @classmethod
     def _alpr_fraction(cls, value: float) -> float:
         score = float(value)
@@ -224,6 +244,22 @@ class Settings(BaseSettings):
         if not 96 <= width <= 1024:
             raise ValueError("SMARTPARK_ALPR_OCR_TARGET_WIDTH must be between 96 and 1024")
         return width
+
+    @field_validator("alpr_detect_roi")
+    @classmethod
+    def _alpr_detect_roi(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        if raw.lower() in {"", "off", "none", "full"}:
+            return "off"
+        parts = [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+        if len(parts) != 4:
+            raise ValueError("SMARTPARK_ALPR_DETECT_ROI must be off or x1,y1,x2,y2")
+        x1, y1, x2, y2 = (float(item) for item in parts)
+        if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+            raise ValueError("SMARTPARK_ALPR_DETECT_ROI coordinates must be 0-1 with x1<x2 and y1<y2")
+        if (x2 - x1) < 0.4 or (y2 - y1) < 0.4:
+            raise ValueError("SMARTPARK_ALPR_DETECT_ROI is too small to cover a lane")
+        return f"{x1:g},{y1:g},{x2:g},{y2:g}"
 
     @field_validator("recognition_high_confidence", "recognition_medium_confidence")
     @classmethod

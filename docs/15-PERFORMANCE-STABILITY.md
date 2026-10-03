@@ -15,12 +15,14 @@ Keep SmartPark running on the Windows parking PC without freezing the UI, decodi
 
 ## Live video design
 
-Live view shares one MediaGateway producer per camera. HVX uses the host JPEG pump (`Net_GetJpgBuffer`); generic IP uses one FFmpeg process with a named profile (`LOW_LATENCY_LAN` with `COMPATIBLE` fallback). Both paths keep a **latest-frame** live buffer (max 1) and a separate detect buffer for FastALPR. The UI shows that latest frame; it does not play a backlog. **Live Gates** shows 1 camera, 2 cameras, or every camera, with last-car snapshot, cropped plate, and read time under each pane. A camera that is not on screen still reads plates. Discover, Connect all, and camera IPs are on the inner **IPs** tab. FastALPR runs on every **connected** lane (HVX callbacks, coil, or sampled detect frames) even if live view is closed. Opening a camera is view-only. Leaving Live Gates, switching to IPs, or hiding the window releases UI viewers; the producer stays up only if detect still needs it. Stream profiles (MAIN/SUB/LIVE/DETECT), codec, FPS, GOP, transport, and live/AI frame age are on **Live Gates → IPs → Stream profiles** and Hardware Lab.
+Live view shares one MediaGateway producer per camera. HVX uses the host JPEG pump (`Net_GetJpgBuffer`); generic IP uses one FFmpeg process with a named profile (`LOW_LATENCY_LAN` with `COMPATIBLE` fallback). Both paths keep a **latest-frame** live buffer (max 1) and a separate detect buffer for FastALPR. The UI shows that latest frame; it does not play a backlog. **Live Gates** shows 1 camera, 2 cameras, or every camera, with last-car snapshot, cropped plate, and read time under each pane. The **Lane preset** selects which gate this PC recognizes (entry and exit only). Other gates stay idle until chosen, matching one-computer-per-gate in production (`SMARTPARK_RECOGNITION_GATE_ID`). Discover, Connect all, and camera IPs are on the inner **Devices** tab. Leaving Live Gates only stops the picture. Stream profiles (MAIN/SUB/LIVE/DETECT), codec, FPS, GOP, transport, and live/AI frame age are on **Live Gates → Devices**.
 
 ## What it must NOT do
 
 - Load `NetSDK.dll` in the 64-bit UI or Site Service
 - Run FastALPR continuously on all four streams
+- Pump every HVX camera's `Net_GetJpgBuffer` on one shared thread
+- Register a MediaMTX RTSP pull on an HVX/QY camera that already has `Net_StartVideo`
 - Start live pumps at Connect all
 - Hold a DB session open during GPIO or MJPEG
 - Use `uvicorn --reload` on the site PC

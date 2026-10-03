@@ -116,6 +116,17 @@ def note_camera(camera_id: int, **fields) -> None:
     row.update(fields)
 
 
+def camera_stats(camera_id: int) -> dict:
+    row = _camera_stats.get(int(camera_id)) or {}
+    policy = reconnect_for(int(camera_id)).snapshot()
+    return {
+        "reconnect_count": row.get("reconnect_count", policy.get("attempts") or 0),
+        "last_event_at": row.get("last_event_at") or 0,
+        "event_latency_ms": row.get("event_latency_ms") or 0,
+        "sdk_callback": row.get("sdk_callback") or "idle",
+    }
+
+
 def _avg(values: deque[float]) -> float:
     if not values:
         return 0.0
@@ -213,6 +224,7 @@ def details() -> dict:
     from app.services import mediamtx
     from app.services.modules import module_health
     from app.recognition_worker import worker_health
+    from app.services.recognition_runtime import runtime
     from app.db import short_session
     with short_session() as _db:
         modules_snapshot = module_health(_db)
@@ -275,6 +287,7 @@ def details() -> dict:
         "circuit_breakers": all_breakers(),
         "worker_failures": list(_worker_failures),
         "recognition_worker": worker_health(),
+        "recognition_runtime": {"scheduler": runtime.scheduler.snapshot(), "cameras": runtime.snapshot()},
         "disk": _disk(settings.data_dir),
         "time": datetime.now(timezone.utc).isoformat(),
     }
