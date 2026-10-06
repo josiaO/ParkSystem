@@ -176,28 +176,37 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 first_inference.set()
                 await burst_decoded.wait()
             await asyncio.sleep(0.06)
-            if len(inferred) >= 3:
+            if len(inferred) >= 2:
                 done.set()
             return {"event_id": "event123", "normalized_plate": "ABC123", "camera_id": 1, "confidence": .9}
 
         stats = {}
         provider = type("Provider", (), {"process": staticmethod(infer)})()
+        from app.services.recognition_runtime import runtime
+        runtime.reset()
         with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://127.0.0.1:8554/cam1_detect"})), \
-             patch("app.services.media_gateway.LocalMediaGateway.ffmpeg_jpeg_stream", stream), \
+             patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.plate_still_present", return_value=True), \
              patch("app.infrastructure.recognition.recognition_provider_for", return_value=provider), \
              patch("app.recognition_worker._publish_frame") as publish, \
-             patch.object(settings, "detect_fps", 30):
+             patch.object(settings, "recognition_sample_fps", 30), \
+             patch.object(settings, "recognition_departure_check_seconds", 5):
             task = asyncio.create_task(_infer_camera({"id": 1, "plate_policy": {"plate_validation": "TZ"}}, stop, stats))
             try:
                 await asyncio.wait_for(done.wait(), 2)
+                await asyncio.sleep(0.25)
             finally:
                 stop.set()
                 await asyncio.wait_for(task, 2)
+            runtime.reset()
         self.assertTrue(closed.is_set())
         self.assertGreater(inferred[1] - inferred[0], 1)
         self.assertLess(len(inferred), len(decoded))
+        self.assertEqual(len(inferred), 2)
         self.assertGreater(stats["frame_buffer"]["dropped"], 0)
+        self.assertLessEqual(stats["frame_buffer"]["depth"], 1)
         self.assertEqual(received_policy[0], {"plate_validation": "TZ"})
+        self.assertTrue(stats.get("ocr_paused"))
         publish.assert_called_once()
 
     async def test_provider_moves_blocking_model_work_off_event_loop(self):

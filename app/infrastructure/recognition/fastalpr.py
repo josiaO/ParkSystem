@@ -15,7 +15,10 @@ class FastALPRProvider:
     async def process(self, event_or_frame: dict[str, Any]) -> dict[str, Any]:
         jpeg = event_or_frame.get("jpeg") or b""
         label = str(event_or_frame.get("camera_label") or event_or_frame.get("camera_id") or "frame")
-        inference = asyncio.create_task(asyncio.to_thread(recognize_frame, jpeg, camera_label=str(label)))
+        detect_roi = event_or_frame.get("detect_roi") or None
+        inference = asyncio.create_task(
+            asyncio.to_thread(recognize_frame, jpeg, camera_label=str(label), detect_roi=detect_roi)
+        )
         try:
             result = await asyncio.shield(inference)
         except asyncio.CancelledError:

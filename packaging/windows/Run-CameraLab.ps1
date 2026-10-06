@@ -23,7 +23,8 @@ param(
     [int]$Duration = 900,
     [string]$Url = "http://127.0.0.1:8760",
     [string]$Username = "admin",
-    [string]$Password = ""
+    [string]$Password = "",
+    [switch]$Recognition
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,6 +74,10 @@ if ($Camera -gt 0) {
     $argsList += "--all"
 }
 if ($Password) { $argsList += @("--password", $Password) }
+if ($Recognition) {
+    $argsList += "--recognition"
+    Write-Host "Recognition benchmark is on. It does not create a parking session."
+}
 
 & $Py @argsList 2>&1 | Tee-Object -FilePath $log
 $code = $LASTEXITCODE

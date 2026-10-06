@@ -22,14 +22,16 @@ Keep **camera connectivity**, **media streaming**, and **recognition** on separa
 
 ```text
 PHYSICAL CAMERA
-  ├─ Camera Control Adapter (HVX / RTSP / ONVIF)
-  └─ Media Source (SDK JPEG or RTSP)
-        └─ LocalMediaGateway (one producer, latest-frame LIVE + DETECT)
-              ├─ Live view (MJPEG / optional MediaMTX WebRTC)
-              └─ FastALPR (DETECT buffer only)
+  ├─ HVX SDK host (login, native event, GPIO, gate) — not replaced by MediaMTX
+  └─ RTSP, when the camera exposes it
+        └─ MediaMTX (one upstream per distinct URI, remux)
+              ├─ WebRTC/WHEP → browser
+              ├─ local RTSP → recognition decoder → FastALPR
+              └─ evidence path, on demand
+DIRECT_LEGACY (LocalMediaGateway MJPEG) remains the rollback live view.
 ```
 
-Default live view provider is `DIRECT_LEGACY` (LocalMediaGateway). Set `live_view_provider=MEDIAMTX` and `media_gateway_enabled=true` only after a camera has soaked in parallel.
+MediaMTX is the preferred video router when `live_view_provider=MEDIAMTX` and `media_gateway_enabled=true` (the current defaults). The registry falls back to `DIRECT_LEGACY` when MediaMTX is not running. HVX/QY pictures stay on the SDK JPEG pump so a second RTSP client is not stacked on those cameras. Generic RTSP cameras are pulled once by MediaMTX; the recognition worker decodes only `rtsp://127.0.0.1:8554/<path>`.
 
 `GET /media/gateway` reports local sessions, FFmpeg profiles, decode path, MediaMTX health, per-path MediaMTX telemetry (`mediamtx_paths`), and rollback names (`DIRECT_LEGACY` / `FASTALPR_LEGACY`).
 

@@ -76,8 +76,12 @@ async def _consume(spec: "CameraLiveSpec") -> None:
 
 def ensure_detect_consumer(spec: "CameraLiveSpec") -> None:
     from app.infrastructure.media.registry import mediamtx_detect_active
+    from app.recognition_worker import worker_owns_software_reads
 
     camera_id = int(spec.id)
+    if worker_owns_software_reads(camera_id):
+        # The recognition worker already decodes this MediaMTX path.
+        return
     if not mediamtx_detect_active(camera_id):
         return
     task = _consumers.get(camera_id)

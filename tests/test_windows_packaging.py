@@ -100,6 +100,14 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertTrue(payload.is_dir(), "Rebuild the USB kit with ./packaging/make_windows_kit.sh")
         self.assertTrue((payload / "app" / "media_service.py").is_file())
         self.assertTrue((payload / "app" / "recognition_worker.py").is_file())
+        self.assertIn(
+            "recognition_decoder",
+            (payload / "app" / "recognition_worker.py").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((payload / "app" / "services" / "recognition_decoder.py").is_file())
+        self.assertIn("--recognition", (payload / "tools" / "camera_lab.py").read_text(encoding="utf-8"))
+        lab_script = ROOT / "dist" / "SmartParkEdge-Install" / "Run-CameraLab.ps1"
+        self.assertIn("[switch]$Recognition", lab_script.read_text(encoding="utf-8"))
         self.assertTrue((payload / "app" / "services" / "access.py").is_file())
         self.assertTrue((payload / "app" / "services" / "receipts.py").is_file())
         self.assertTrue((payload / "app" / "infrastructure" / "hardware" / "printers.py").is_file())

@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     stale_stream_seconds: float = 2.5
     stream_read_timeout_seconds: float = 3.0
     detect_fps: float = 5.0
+    # Recognition samples a stopped vehicle. This is not the camera or browser FPS.
+    recognition_sample_fps: float = 3.0
+    # After a plate is confirmed, OCR stops. A detector-only check at this
+    # interval notices the vehicle leaving without reading the plate again.
+    recognition_departure_check_seconds: float = 1.0
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
@@ -180,6 +185,14 @@ class Settings(BaseSettings):
             raise ValueError("SmartPark video FPS values must be between 1 and 30")
         return fps
 
+    @field_validator("recognition_sample_fps")
+    @classmethod
+    def _recognition_sample_fps(cls, value: float) -> float:
+        fps = float(value)
+        if not 1.0 <= fps <= 10.0:
+            raise ValueError("SMARTPARK_RECOGNITION_SAMPLE_FPS must be between 1 and 10")
+        return fps
+
     @field_validator("recognition_max_concurrency")
     @classmethod
     def _recognition_concurrency(cls, value: int) -> int:
@@ -197,6 +210,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "recognition_absence_reset_seconds",
+        "recognition_departure_check_seconds",
         "recognition_worker_stall_seconds",
         "live_plate_fresh_seconds",
         "entry_dedupe_seconds",
