@@ -19,8 +19,8 @@ Vendor-independent OCR on JPEG frames. It is a **consumer** of the DETECT buffer
 - Latest-frame queue size 1–3 (`LatestFrameBuffer`).
 - If inference is slower than the source, drop stale frames.
 - Default authority is the Site Service camera-event loop (`FASTALPR_LEGACY`).
-- `fastalpr_new_pipeline_enabled` starts `SmartParkRecognitionWorker` on `rtsp://127.0.0.1:8554/cam{id}_detect`. The worker keeps one persistent decoder per camera, drops stale frames, and publishes `PlateRecognized` on the durable outbox.
-- For cameras on that path, Site Service stops in-process FastALPR and applies the worker event. Native HVX callbacks stay in Site Service. The flag defaults to off, so the legacy loop remains authoritative until it is enabled.
+- `fastalpr_new_pipeline_enabled` starts `SmartParkRecognitionWorker` on the local MediaMTX detect path (`rtsp://127.0.0.1:8554/<path>`). The worker's FFmpeg process is only a decoder (`app/services/recognition_decoder.py`). It samples `SMARTPARK_RECOGNITION_SAMPLE_FPS` (default 3), keeps one pending frame, and publishes one `PlateRecognized` event per visit. After consensus, OCR pauses until a detector-only check sees the lane empty.
+- For cameras on that path, Site Service stops in-process FastALPR and applies the worker event. Native HVX callbacks stay in Site Service. The settings default is on; a site migration flag can turn it off, and a missing worker heartbeat releases software reads back to the Site Service loop.
 
 ## Worker safeguards
 
@@ -100,3 +100,17 @@ The engine is isolated and replaceable. See [PLATE-ENGINE.md](PLATE-ENGINE.md).
 ## DETECT FPS vs time-in-view
 
 Default `SMARTPARK_DETECT_FPS=5` is 200 ms between frames. A plate that is readable for about 1 s at typical entry speed yields ~5 frames, which is enough for two agreeing FastALPR reads (or one read ≥ 0.92). Do not drop below ~3 FPS if consensus is required. `/alpr/status` reports this coverage math under `detect`.
+
+### Recognition recovery
+
+Detector-only departure checks refresh the worker heartbeat while OCR is paused,
+so a stopped vehicle does not trigger decoder restarts or duplicate Site Service
+inference. OCR pauses only after an event is published for the current visit;
+a missed read before consensus keeps OCR active. Incoming frames update lane
+freshness as well as the bounded mailbox. Detector errors do not mean an empty lane.
+
+Closing the recognition stream explicitly closes and reaps its FFmpeg child.
+The read timeout measures time since a complete JPEG, so partial data cannot
+keep a broken stream alive indefinitely. Partial image storage remains bounded.
+These recovery checks are covered by synthetic tests; camera latency, codec
+compatibility, and plate accuracy require the Windows Camera Lab and a field soak.

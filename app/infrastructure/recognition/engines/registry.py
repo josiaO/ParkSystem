@@ -53,6 +53,9 @@ def engine_for(engine_id: str | None) -> PlateEngine:
     return _ENGINES[key]
 
 
-def recognize_frame(jpeg: bytes, *, camera_label: str = "frame") -> dict[str, Any]:
+def recognize_frame(jpeg: bytes, *, camera_label: str = "frame", detect_roi: str | None = None) -> dict[str, Any]:
     """ParkWatch RecognizeAll equivalent: one JPEG in, plate candidates out."""
-    return active_engine().recognize_bytes(jpeg, camera_label=camera_label)
+    engine = active_engine()
+    if detect_roi:
+        return engine.recognize_bytes(jpeg, camera_label=camera_label, detect_roi=detect_roi)
+    return engine.recognize_bytes(jpeg, camera_label=camera_label)

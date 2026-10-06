@@ -61,8 +61,8 @@ class FastALPRPlateEngine:
             ),
         }
 
-    def recognize_bytes(self, jpeg: bytes, *, camera_label: str = "frame") -> dict[str, Any]:
-        result = alpr.recognize_bytes(jpeg, camera_label=camera_label)
+    def recognize_bytes(self, jpeg: bytes, *, camera_label: str = "frame", detect_roi: str | None = None) -> dict[str, Any]:
+        result = alpr.recognize_bytes(jpeg, camera_label=camera_label, detect_roi=detect_roi)
         result["engine_id"] = self.id
         result["engine_version"] = self.version
         return result

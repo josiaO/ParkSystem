@@ -1,10 +1,11 @@
-"""SmartParkRecognitionWorker — FastALPR on the MediaMTX detect RTSP path.
+"""SmartParkRecognitionWorker — FastALPR on the local MediaMTX RTSP path.
 
-This process does not share the Site Service media gateway. It reads
-``rtsp://127.0.0.1:8554/cam{id}_detect`` with one persistent decoder per
-camera, keeps the newest JPEG, and publishes a normalized PlateRecognized
-event. The Site Service camera-event loop stays authoritative until
-``fastalpr_new_pipeline_enabled`` is turned on.
+MediaMTX owns the camera connection and browser video. This process is only
+a recognition consumer: one lightweight FFmpeg decoder per lane reads
+``rtsp://127.0.0.1:8554/<detect-path>``, keeps the newest JPEG, and samples
+a few frames per second. After consensus confirms a plate, OCR pauses until
+the vehicle leaves. The Site Service camera-event loop stays authoritative
+until ``fastalpr_new_pipeline_enabled`` is turned on.
 """
 
 from __future__ import annotations
@@ -171,6 +172,7 @@ def _camera_rows() -> list[dict]:
                 continue
             from app.services.ocr_policy import camera_recognition_mode
 
+            profiles = dict(camera.stream_profiles or {})
             rows.append({
                 "id": int(camera.id),
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
@@ -179,6 +181,7 @@ def _camera_rows() -> list[dict]:
                 "site_id": camera.site_id,
                 "plate_policy": site_policy(db),
                 "recognition_mode": camera_recognition_mode(camera),
+                "detect_roi": str(profiles.get("detect_roi") or profiles.get("alpr_detect_roi") or ""),
             })
     return rows
 
@@ -200,7 +203,7 @@ async def _infer_camera(
     inference_limiter: asyncio.Semaphore | None = None,
 ) -> None:
     from app.infrastructure.recognition import recognition_provider_for
-    from app.services.media_gateway import LocalMediaGateway
+    from app.services.recognition_decoder import iter_jpegs, require_local_mediamtx
     from app.infrastructure.media.registry import get_detect_endpoint
     from app.config import settings
 
@@ -211,11 +214,19 @@ async def _infer_camera(
         stats["last_error"] = "MediaMTX detect endpoint unavailable"
         return
     url = str(endpoint.get("rtsp") or "")
+    try:
+        require_local_mediamtx(url)
+    except ValueError as exc:
+        stats["state"] = "DEGRADED"
+        stats["last_error"] = str(exc)
+        return
     from app.domain.recognition_engine import policy_from_settings
 
     provider = recognition_provider_for("fastalpr")
-    decoder = LocalMediaGateway()
     rec_policy = policy_from_settings()
+    sample_fps = float(getattr(settings, "recognition_sample_fps", 3.0) or 3.0)
+    departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
+    detect_roi = str(camera.get("detect_roi") or "") or None
     track = PlateTrack(
         window_seconds=rec_policy.consensus_window_seconds,
         hold_seconds=rec_policy.hold_seconds,
@@ -232,28 +243,43 @@ async def _infer_camera(
     runtime.scheduler.release(camera_id)
     frames = lane.mailbox
     ready = asyncio.Event()
-    interval = 1.0 / settings.detect_fps
+    interval = 1.0 / max(sample_fps, 1.0)
     backoff = 1.0
+    stats.update(
+        sample_fps=sample_fps,
+        decoder_role="recognition-consumer",
+        media_owner="mediamtx",
+        queue_depth=0,
+        ocr_paused=False,
+        decoder_pid=None,
+    )
+
+    def _note_pid(pid: int) -> None:
+        stats["decoder_pid"] = pid
 
     async def _decode() -> None:
         nonlocal backoff
         while not stop.is_set():
             stream = None
             try:
-                stream = decoder.ffmpeg_jpeg_stream(
-                    url,
-                    scale=960,
-                    output_fps=float(settings.detect_fps),
-                    transport="TCP",
-                )
+                stream = iter_jpegs(url, sample_fps=sample_fps, scale=960, on_pid=_note_pid)
                 async for jpeg in stream:
                     if stop.is_set():
                         break
-                    frames.put(jpeg, source="mediamtx")
+                    lane.offer_frame(jpeg, source="mediamtx")
                     ready.set()
                     if stats.get("state") not in {"READY", "DEGRADED"}:
                         stats["state"] = "STREAMING"
-                    stats.update(last_frame_at=time.time(), frame_buffer=frames.snapshot(), frame_seq=frames.seq)
+                    sampled = int(stats.get("frames_sampled") or 0) + 1
+                    elapsed = max(time.time() - float(stats.get("started_at") or time.time()), 0.001)
+                    stats.update(
+                        last_frame_at=time.time(),
+                        frame_buffer=frames.snapshot(),
+                        frame_seq=frames.seq,
+                        frames_sampled=sampled,
+                        sampled_fps=round(sampled / elapsed, 2),
+                        queue_depth=frames.depth(),
+                    )
                     backoff = 1.0
             except asyncio.CancelledError:
                 raise
@@ -265,19 +291,88 @@ async def _infer_camera(
                         await stream.aclose()
                     except Exception:
                         pass
+            stats["decoder_pid"] = None
             if not stop.is_set():
                 stats["state"] = "RECONNECTING"
                 stats["reconnects"] = int(stats.get("reconnects", 0)) + 1
                 await asyncio.sleep(backoff)
                 backoff = min(8.0, backoff * 2)
 
+    last_probe = 0.0
+    confirmed_visit_id = lane.visit.visit_id if lane.visit.state == "EVENT_PUBLISHED" else ""
+
     async def _infer() -> None:
+        nonlocal last_probe, confirmed_visit_id
         stall = float(getattr(settings, "recognition_worker_stall_seconds", 5.0) or 5.0)
         while not stop.is_set():
             try:
                 await asyncio.wait_for(ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            if confirmed_visit_id and lane.visit.visit_id == confirmed_visit_id:
+                stats["ocr_paused"] = True
+                now_m = time.monotonic()
+                if now_m - last_probe < departure_every:
+                    await asyncio.sleep(0.02)
+                    continue
+                last_probe = now_m
+                ticket = runtime.begin_if_idle(camera_id, stale_frame_ms=rec_policy.stale_frame_ms)
+                if ticket is None or ticket.jpeg[:2] != b"\xff\xd8":
+                    if ticket is not None:
+                        runtime.finish(ticket, plate="")
+                    ready.clear()
+                    continue
+                ready.clear()
+                from app.services.alpr import plate_still_present
+
+                probe = asyncio.create_task(asyncio.to_thread(
+                    plate_still_present, ticket.jpeg, detect_roi=detect_roi,
+                ))
+                try:
+                    present = await asyncio.shield(probe)
+                except asyncio.CancelledError:
+                    # Cancellation cannot stop the model thread. Drain it before
+                    # a replacement lane can start another detector call.
+                    try:
+                        await probe
+                    finally:
+                        runtime.finish(ticket, plate="")
+                    raise
+                except Exception as exc:
+                    runtime.finish(ticket, plate="")
+                    stats["last_error"] = type(exc).__name__
+                    continue
+                runtime.finish(ticket, plate=lane.visit.published_plate if present else "")
+                stats["departure_checks"] = int(stats.get("departure_checks") or 0) + 1
+                stats["recognition_inflight"] = False
+                # Detector-only work is recognition progress while OCR is paused.
+                stats["last_inference_at"] = time.time()
+                if present is None:
+                    stats["state"] = "DEGRADED"
+                    stats["last_error"] = "departure-detector-unavailable"
+                    continue
+                stats["state"] = "READY"
+                if present:
+                    if lane.visit.state == "VEHICLE_DEPARTING":
+                        lane.visit.state = "EVENT_PUBLISHED"
+                        lane.visit.vehicle_present = True
+                        lane.visit.last_empty_at = 0.0
+                    else:
+                        lane.visit.observe(presence=True, plate=lane.visit.published_plate or "")
+                    continue
+                decision = note_reading_detail(track, "", time.monotonic())
+                stats["consensus"] = decision.as_dict()
+                lane.visit.observe(
+                    presence=False,
+                    plate="",
+                    absence_seconds=rec_policy.absence_reset_seconds,
+                )
+                if lane.visit.state == "IDLE":
+                    lane.clear_current_plate()
+                    stats["last_plate"] = ""
+                    stats["ocr_paused"] = False
+                continue
+            stats["ocr_paused"] = False
             ticket = runtime.begin_if_idle(camera_id, stale_frame_ms=rec_policy.stale_frame_ms)
             if ticket is None:
                 ready.clear()
@@ -301,6 +396,7 @@ async def _infer_camera(
                         "camera_label": f"worker-{camera_id}",
                         "lane_id": camera.get("lane_id"),
                         "plate_policy": camera.get("plate_policy") or {},
+                        "detect_roi": detect_roi,
                     }),
                     timeout=stall,
                 )
@@ -367,6 +463,7 @@ async def _infer_camera(
                 stats["published"] = int(stats.get("published") or 0) + 1
                 lane.note_published()
                 lane.visit.mark_published(decision.plate)
+                confirmed_visit_id = lane.visit.visit_id
             except Exception as exc:
                 stats["last_error"] = type(exc).__name__
                 track.release()

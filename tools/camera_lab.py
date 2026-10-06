@@ -8,6 +8,7 @@ Examples:
 
     python -m tools.camera_lab --camera 1 --duration 60
     python -m tools.camera_lab --all --duration 300
+    python -m tools.camera_lab --camera 1 --duration 60 --recognition
 """
 
 from __future__ import annotations
@@ -150,7 +151,10 @@ def run_attach(args: argparse.Namespace) -> int:
         if time.monotonic() >= deadline:
             break
         time.sleep(max(0.2, float(args.interval)))
-    return _report(buckets, mediamtx, names, duration_s=float(args.duration), mode="attach")
+    code = _report(buckets, mediamtx, names, duration_s=float(args.duration), mode="attach")
+    if args.recognition:
+        _print_recognition(args, token, camera_filter)
+    return code
 
 
 def _camera_names(base: str, token: str) -> dict[int, str]:
@@ -318,6 +322,81 @@ def _resolution(summary: dict[str, Any]) -> str:
     return "n/a"
 
 
+def _print_recognition(args: argparse.Namespace, token: str, camera_filter: int | None) -> None:
+    """Worker health plus a bounded detect/crop/OCR sample. Never a parking event."""
+    from app.recognition_worker import worker_health
+
+    print("\nRecognition")
+    print("No parking session, receipt, gate command, or payment is created.")
+    health = worker_health()
+    if not health.get("ok"):
+        print("  worker: not running (software reads stay with Site Service until the heartbeat is fresh)")
+    else:
+        rows = [row for row in health.get("cameras") or [] if isinstance(row, dict)]
+        if camera_filter is not None:
+            rows = [row for row in rows if int(row.get("camera_id") or 0) == int(camera_filter)]
+        if not rows:
+            print("  worker: running, no matching lane")
+        for row in rows:
+            print(f"  camera {row.get('camera_id')}:")
+            for label, key in (
+                ("state", "state"),
+                ("sample fps", "sample_fps"),
+                ("sampled fps", "sampled_fps"),
+                ("frame age source", "last_frame_at"),
+                ("queue depth", "queue_depth"),
+                ("decoder pid", "decoder_pid"),
+                ("reconnects", "reconnects"),
+                ("ocr paused", "ocr_paused"),
+                ("inference ms", "infer_ms"),
+                ("stale dropped", "stale_dropped"),
+                ("media owner", "media_owner"),
+            ):
+                if row.get(key) not in (None, ""):
+                    print(f"    {label}: {row.get(key)}")
+    if camera_filter is None:
+        print("  benchmark: pass --camera N --recognition to OCR one frame. That still does not publish a parking event.")
+        return
+    try:
+        jpeg = _snapshot_jpeg(args.url, token, int(camera_filter))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        print(f"  benchmark: no snapshot ({exc.__class__.__name__})")
+        return
+    if jpeg[:2] != b"\xff\xd8":
+        print("  benchmark: snapshot was not a JPEG")
+        return
+    print(f"  benchmark: {scrub(benchmark_frame(jpeg))}")
+
+
+def _snapshot_jpeg(base: str, token: str, camera_id: int) -> bytes:
+    req = urllib.request.Request(
+        f"{base.rstrip('/')}/cameras/{int(camera_id)}/snapshot.jpg",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=8) as res:
+        return res.read()
+
+
+def benchmark_frame(jpeg: bytes) -> dict[str, Any]:
+    """One detect → crop → OCR pass. The result is not published."""
+    from app.services.alpr import recognize_bytes
+
+    result = recognize_bytes(jpeg, camera_label="camera-lab", save_evidence=False)
+    best = result.get("best") if isinstance(result.get("best"), dict) else {}
+    bbox = best.get("bbox") if isinstance(best.get("bbox"), dict) else {}
+    crop = bbox.get("crop") if isinstance(bbox.get("crop"), dict) else {}
+    return {
+        "pipeline": result.get("pipeline") or "",
+        "latency_ms": result.get("latency_ms"),
+        "normalized_plate": best.get("plate_normalized") or "",
+        "confidence": best.get("plate_confidence"),
+        "crop_width": (int(crop["x2"]) - int(crop["x1"])) if crop else None,
+        "crop_height": (int(crop["y2"]) - int(crop["y1"])) if crop else None,
+        "detail": result.get("detail") or "",
+        "published_parking_event": False,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Sample SmartPark media acquisition without parking logic.")
     target = parser.add_mutually_exclusive_group(required=True)
@@ -337,6 +416,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="With --direct, start anyway even if Site Service is running. Can add a second decoder.",
+    )
+    parser.add_argument(
+        "--recognition",
+        action="store_true",
+        help="Also report the recognition worker and benchmark a few frames. Does not publish a parking event.",
     )
     return parser
 
