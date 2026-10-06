@@ -2753,6 +2753,8 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
     """
     from .recognition_worker import worker_owns_software_reads
     if worker_owns_software_reads(camera_id):
+        from .services.mediamtx_detect import stop_detect_consumer
+        stop_detect_consumer(camera_id)
         return
     with short_session() as db:
         camera = db.get(Camera, camera_id)
@@ -3020,6 +3022,8 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     """Periodic FastALPR for cameras that have no onboard plate engine."""
     from .recognition_worker import worker_owns_software_reads
     if worker_owns_software_reads(camera_id):
+        from .services.mediamtx_detect import stop_detect_consumer
+        stop_detect_consumer(camera_id)
         return
     if not _local_alpr_ready(camera_id):
         return

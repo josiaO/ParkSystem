@@ -460,9 +460,14 @@ def parse_detect_roi(value: str | None = None) -> tuple[float, float, float, flo
     return x1, y1, x2, y2
 
 
-def _roi_crop(bgr):
-    """Crop to the ParkWatch-style recognition zone. Returns (view, x_off, y_off)."""
-    roi = parse_detect_roi()
+def _roi_crop(bgr, detect_roi: str | None = None):
+    """Crop to the recognition zone. Returns (view, x_off, y_off).
+
+    ``detect_roi`` is a per-camera override (``x1,y1,x2,y2`` or ``off``).
+    None uses the site-wide ``alpr_detect_roi`` setting. ``off`` is the full frame.
+    Boxes found in the crop are shifted back by the returned offsets.
+    """
+    roi = parse_detect_roi(detect_roi) if detect_roi is not None else parse_detect_roi()
     if roi is None or bgr is None or getattr(bgr, "size", 0) == 0:
         return bgr, 0, 0
     height, width = bgr.shape[:2]
@@ -704,7 +709,36 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         }
 
 
-def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False) -> tuple[list[PlateHit], dict]:
+def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None) -> bool | None:
+    """Detector-only presence check. Does not run OCR.
+
+    True when a plate-shaped box is in the frame, False when the detector ran
+    and found none, None when the detector could not run. None must not be
+    treated as an empty lane.
+    """
+    if not jpeg or not fastalpr_installed():
+        return None
+    try:
+        bgr = decode_alpr_image(jpeg)
+        engine = _load_engine()
+    except Exception:
+        return None
+    if not hasattr(engine, "detector"):
+        return None
+    try:
+        view, dx, dy = _roi_crop(bgr, detect_roi)
+        detections = _shift_detections(engine.detector.predict(view), dx, dy)
+    except Exception:
+        return None
+    width, height = int(bgr.shape[1]), int(bgr.shape[0])
+    for item in detections or []:
+        bbox = getattr(item, "bounding_box", None)
+        if bbox is not None and plate_box_ok(bbox, width, height):
+            return True
+    return False
+
+
+def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False, detect_roi: str | None = None) -> tuple[list[PlateHit], dict]:
     started = time.monotonic()
     if not fastalpr_installed():
         return [], {
@@ -720,7 +754,7 @@ def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False) -> tuple[l
         plate_shaped = []
         try:
             if hasattr(engine, "detector") and hasattr(engine, "ocr"):
-                view, dx, dy = _roi_crop(bgr)
+                view, dx, dy = _roi_crop(bgr, detect_roi)
                 detections = _shift_detections(engine.detector.predict(view), dx, dy)
                 image_size = (int(bgr.shape[1]), int(bgr.shape[0]))
                 plate_shaped = [
@@ -762,7 +796,7 @@ def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False) -> tuple[l
         if boosted is not None:
             try:
                 if hasattr(engine, "detector") and hasattr(engine, "ocr"):
-                    view, dx, dy = _roi_crop(boosted)
+                    view, dx, dy = _roi_crop(boosted, detect_roi)
                     retry = _shift_detections(engine.detector.predict(view), dx, dy)
                     hits = _hits_from_detections(engine, boosted, retry, save_crops=save_crops)
                 else:
@@ -807,7 +841,13 @@ def recognize_file(image_path: str) -> tuple[list[PlateHit], dict]:
     return recognize_bgr(bgr, crop_source=str(source))
 
 
-def recognize_bytes(jpeg: bytes, *, camera_label: str = "frame", save_evidence: bool | None = None) -> dict:
+def recognize_bytes(
+    jpeg: bytes,
+    *,
+    camera_label: str = "frame",
+    save_evidence: bool | None = None,
+    detect_roi: str | None = None,
+) -> dict:
     """Run FastALPR on a camera frame or simulation upload. Never invents plates.
 
     Continuous lane OCR must not write a unique JPEG per frame (that filled disks).
@@ -832,7 +872,7 @@ def recognize_bytes(jpeg: bytes, *, camera_label: str = "frame", save_evidence: 
             "detail": "could not decode that photo",
         }
     persist = bool(save_evidence if save_evidence is not None else getattr(settings, "alpr_save_debug_frames", False))
-    hits, meta = recognize_bgr(bgr, crop_source="", save_crops=persist)
+    hits, meta = recognize_bgr(bgr, crop_source="", save_crops=persist, detect_roi=detect_roi)
     plates = [hit.as_dict() for hit in hits]
     best = max(hits, key=lambda h: h.plate_confidence) if hits else None
     annotated = None

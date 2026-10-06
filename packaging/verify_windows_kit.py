@@ -130,6 +130,17 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("desktop UI missing: app/desktop/main.py")
     if not (payload / "tools" / "field_acceptance_test.py").is_file():
         errors.append("field acceptance test missing: tools/field_acceptance_test.py")
+    decoder = payload / "app" / "services" / "recognition_decoder.py"
+    if not decoder.is_file():
+        errors.append("recognition decoder missing: app/services/recognition_decoder.py")
+    worker = payload / "app" / "recognition_worker.py"
+    if worker.is_file() and "recognition_decoder" not in worker.read_text(encoding="utf-8"):
+        errors.append("recognition worker in the kit does not use the local MediaMTX decoder")
+    lab = payload / "tools" / "camera_lab.py"
+    if not lab.is_file():
+        errors.append("camera lab missing: tools/camera_lab.py")
+    elif "--recognition" not in lab.read_text(encoding="utf-8"):
+        errors.append("camera lab in the kit has no --recognition benchmark")
     if not (payload / "requirements-windows.txt").is_file():
         errors.append("requirements-windows.txt missing")
 
