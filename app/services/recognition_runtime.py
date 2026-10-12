@@ -60,6 +60,7 @@ class LaneVisit:
     state: str = IDLE
     visit_id: str = ""
     published_plate: str = ""
+    event_published: bool = False
     vehicle_present: bool = False
     last_presence_at: float = 0.0
     last_empty_at: float = 0.0
@@ -72,6 +73,7 @@ class LaneVisit:
         self.state = VEHICLE_PRESENT
         self.vehicle_present = True
         self.published_plate = ""
+        self.event_published = False
         self.last_presence_at = now
         self.last_empty_at = 0.0
 
@@ -79,6 +81,7 @@ class LaneVisit:
         self.state = IDLE
         self.visit_id = ""
         self.published_plate = ""
+        self.event_published = False
         self.vehicle_present = False
         if now is not None:
             self.last_empty_at = now
@@ -100,14 +103,15 @@ class LaneVisit:
         if presence:
             self.last_presence_at = now
             self.last_empty_at = 0.0
-            if self.state in {IDLE, VEHICLE_DEPARTING} or not self.visit_id:
+            if self.state == IDLE or not self.visit_id:
                 self._begin(now)
-            elif self.state == EVENT_PUBLISHED:
+            elif self.event_published:
+                self.state = EVENT_PUBLISHED
                 self.vehicle_present = True
             else:
                 self.vehicle_present = True
-                if self.state == IDLE:
-                    self._begin(now)
+                if self.state == VEHICLE_DEPARTING:
+                    self.state = RECOGNIZING
             if plate and self.state in {VEHICLE_PRESENT, RECOGNIZING}:
                 self.state = PLATE_CONFIRMED
                 self.published_plate = plate
@@ -130,7 +134,7 @@ class LaneVisit:
 
     def mark_published(self, plate: str = "") -> bool:
         """Return True when this visit may create a parking event."""
-        if self.state == EVENT_PUBLISHED:
+        if self.event_published:
             self.duplicate_events_suppressed += 1
             return False
         if plate:
@@ -138,6 +142,7 @@ class LaneVisit:
         if not self.visit_id:
             self._begin(time.monotonic())
         self.state = EVENT_PUBLISHED
+        self.event_published = True
         self.vehicle_present = True
         self.published_events += 1
         return True

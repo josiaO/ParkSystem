@@ -146,6 +146,9 @@ class ApiClient:
     def post(self, path, payload=None, timeout=15):
         r=_check(httpx.post(BASE+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
 
+    def put(self, path, payload=None, timeout=15):
+        r=_check(httpx.put(BASE+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
+
     def post_file(self, path, files, data=None, timeout=30):
         r=_check(httpx.post(BASE+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout))
         return r.json()

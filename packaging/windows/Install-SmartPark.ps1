@@ -12,6 +12,24 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Task registration must succeed before this installation is reported ready.
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Administrator approval is required to register SmartPark background tasks."
+    $elevation = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($InstallDir) { $elevation += " -InstallDir `"$InstallDir`"" }
+    if ($AllUsers) { $elevation += " -AllUsers" }
+    if ($StartApp) { $elevation += " -StartApp" }
+    try {
+        $elevated = Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $elevation -Wait -PassThru
+        if ($null -eq $elevated) { exit 1 }
+        exit $elevated.ExitCode
+    } catch {
+        throw "Installation stopped: administrator approval was not granted. $($_.Exception.Message)"
+    }
+}
 $KitRoot = $PSScriptRoot
 $Payload = Join-Path $KitRoot "payload"
 if (-not (Test-Path (Join-Path $Payload "app"))) {
@@ -269,13 +287,12 @@ $desk.WindowStyle = 7
 $desk.Description = "SmartPark Edge"
 $desk.Save()
 
+# Background tasks own parking. Do not auto-launch the heavier desktop UI.
 $Startup = [Environment]::GetFolderPath("Startup")
-$boot = $Wsh.CreateShortcut((Join-Path $Startup "SmartPark Edge.lnk"))
-$boot.TargetPath = $StartVbs
-$boot.WorkingDirectory = $InstallDir
-$boot.WindowStyle = 7
-$boot.Description = "SmartPark Edge"
-$boot.Save()
+Remove-Item (Join-Path $Startup "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
+$WebShortcut = "[InternetShortcut]`r`nURL=http://127.0.0.1:8760/`r`n"
+Set-Content (Join-Path $Desktop "SmartPark Edge Web.url") $WebShortcut -Encoding ASCII
+Set-Content (Join-Path $Programs "SmartPark Edge Web.url") $WebShortcut -Encoding ASCII
 
 $Uninstall = Join-Path $InstallDir "Uninstall-SmartPark.ps1"
 $UninstallBody = @"
@@ -320,6 +337,7 @@ if (`$userPath) {
 }
 Remove-Item (Join-Path `$env:APPDATA 'Microsoft\Windows\Start Menu\Programs\SmartPark') -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark Edge Web.url') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item `$root -Recurse -Force
 Write-Host 'SmartPark Edge removed. Camera database is still in %ProgramData%\SmartParkEdge unless you run Wipe-SmartPark.bat'
@@ -341,19 +359,70 @@ if (Test-Path $svcScript) {
     try {
         & $svcScript -InstallDir $InstallDir
     } catch {
-        Write-Host ("WARNING: Could not register background tasks: {0}" -f $_)
-        Write-Host "The Desktop shortcut still starts the API if the tasks are missing."
+        Write-Host ("WARNING: background tasks were not fully registered. The app will still open. {0}" -f $_)
+    }
+}
+
+Write-Host ""
+Write-Host "Setting the sign-in password to the install password..."
+$env:SMARTPARK_HOME = $InstallDir
+$env:PYTHONPATH = $InstallDir
+$env:SMARTPARK_HVX_VENDOR_DIR = Join-Path $InstallDir "vendor"
+& $Py64 -m app.cli reset-admin
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Could not set the admin password. The file is %ProgramData%\SmartParkEdge\bootstrap_password.txt"
+}
+
+$AdminStart = Join-Path $InstallDir "Start-SmartPark-Admin.ps1"
+$AdminBody = @"
+`$ErrorActionPreference = 'Continue'
+`$root = '$($InstallDir.Replace("'","''"))'
+`$services = Join-Path `$root 'Install-SmartParkServices.ps1'
+if (Test-Path `$services) {
+    try { & `$services -InstallDir `$root } catch { Write-Host `$_ }
+}
+`$start = Join-Path `$root 'Start-SmartPark.bat'
+Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c start `"SmartPark Edge`" `"' + `$start + '`"') -WorkingDirectory `$root
+Start-Sleep -Seconds 3
+Start-Process 'http://127.0.0.1:8760/'
+"@
+Set-Content -Path $AdminStart -Value $AdminBody -Encoding ASCII
+
+function Test-SmartParkAdmin {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Start-SmartParkFromInstaller {
+    Write-Host "Opening the desktop and the browser..."
+    $startArgs = '/c start "SmartPark Edge" "' + $StartBat + '"'
+    if (Test-SmartParkAdmin) {
+        Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -WorkingDirectory $InstallDir
+        Start-Sleep -Seconds 3
+        Start-Process "http://127.0.0.1:8760/"
+        return
+    }
+    Write-Host ""
+    Write-Host "Windows will ask to start SmartPark Edge from an administrator prompt."
+    Write-Host "Approve it so Site Service, the HVX host, and Media Service can register."
+    try {
+        Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $AdminStart
+        )
+    } catch {
+        Write-Host "The administrator prompt was not approved. Background services were not registered."
+        Write-Host "Run this again and approve the prompt, or right-click Start-SmartPark-Admin.ps1 and choose Run as administrator."
     }
 }
 
 Write-Host ""
 Write-Host "Installed."
-Write-Host "  Open: Desktop shortcut 'SmartPark Edge'"
+Write-Host "  Open: SmartPark Edge Web (lighter browser UI); SmartPark Edge desktop is optional."
 Write-Host "  Background: Site Service + HVX host + Media Service start at Windows logon"
 if (Test-Path $MediaMtxExe) {
     Write-Host "  MediaMTX: bundled (off until Enable-MediaMTX.ps1)"
 }
-Write-Host "  Login: admin. First-run password: %ProgramData%\SmartParkEdge\bootstrap_password.txt"
+Write-Host "  Login: admin. Use the password printed above. It is also in %ProgramData%\SmartParkEdge\bootstrap_password.txt"
 Write-Host "  Then: Add site cameras  ->  Connect all"
 Write-Host "  Field test (cars passing): double-click Run-FieldAcceptanceTest.bat"
 Write-Host "  Camera picture test: double-click Run-CameraLab.bat in this install folder"
@@ -365,10 +434,10 @@ Write-Host "  Uninstall: $Uninstall"
 Write-Host ""
 
 if ($StartApp) {
-    Start-Process -FilePath $StartBat -WorkingDirectory $InstallDir
+    Start-SmartParkFromInstaller
 } else {
-    $answer = Read-Host "Start SmartPark Edge now? (Y/n)"
+    $answer = Read-Host "Start SmartPark Edge from an administrator prompt now? (Y/n)"
     if ($answer -notmatch '^[nN]') {
-        Start-Process -FilePath $StartBat -WorkingDirectory $InstallDir
+        Start-SmartParkFromInstaller
     }
 }

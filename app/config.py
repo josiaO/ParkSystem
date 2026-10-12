@@ -271,8 +271,8 @@ class Settings(BaseSettings):
         x1, y1, x2, y2 = (float(item) for item in parts)
         if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
             raise ValueError("SMARTPARK_ALPR_DETECT_ROI coordinates must be 0-1 with x1<x2 and y1<y2")
-        if (x2 - x1) < 0.4 or (y2 - y1) < 0.4:
-            raise ValueError("SMARTPARK_ALPR_DETECT_ROI is too small to cover a lane")
+        if (x2 - x1) < 0.08 or (y2 - y1) < 0.08:
+            raise ValueError("SMARTPARK_ALPR_DETECT_ROI must cover at least 8% of the frame")
         return f"{x1:g},{y1:g},{x2:g},{y2:g}"
 
     @field_validator("recognition_high_confidence", "recognition_medium_confidence")

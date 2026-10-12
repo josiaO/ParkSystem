@@ -322,7 +322,7 @@
     .live-pane .live-card { height: 100%; display: flex; flex-direction: column; min-width: 0; }
     .live-pane .live-frame { height: min(34vh, 360px); max-height: 360px; min-height: 200px; flex: 1; }
     .live-pane img[data-role="video"] {
-      width: 100%; height: min(34vh, 360px); max-height: 360px; object-fit: contain; display: block; background: #070B10;
+      width: 100%; height: 100%; object-fit: contain; display: block; background: #070B10;
     }
     .live-pane img[data-role="video"]:not([src]) { display: none; }
     .live-pane canvas[data-role="overlay"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -337,6 +337,10 @@
     .car-stills img { width: 100%; height: 92px; object-fit: contain; background: #070B10; border-radius: 6px; display: block; }
     .car-meta { margin-top: 8px; }
     .pane-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .framing-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    .framing-bar label { display: flex; gap: 6px; align-items: center; margin: 0; font-size: 12px; }
+    .framing-bar input[type="range"] { width: 110px; }
+    .live-pane canvas[data-role="overlay"].zone-editing { pointer-events: auto; cursor: crosshair; }
     @media (max-width: 980px) { .dual-live { grid-template-columns: 1fr; } }
     .last-car { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .last-car img { width: 100%; height: 160px; max-height: 160px; object-fit: contain; background: #070B10; border-radius: 6px; display: block; }
@@ -564,11 +568,20 @@
                   <span class="chip c-acc" data-role="shortcut-target">F8 / F9 this camera</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:100%;object-fit:contain;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
                 <p class="muted" data-role="status">Choose a camera to start live video.</p>
+                <div class="framing-bar" data-role="framing">
+                  <button class="secondary" type="button" data-role="zone-edit">Set detection zone</button>
+                  <label>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
+                  <span data-role="zoom-label">1.0×</span>
+                  <label>View zoom <input data-role="view-zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="View zoom"></label>
+                  <span data-role="view-zoom-label">1.0×</span>
+                  <button class="secondary" type="button" data-role="zone-save">Save zone</button>
+                  <p class="muted" data-role="zone-hint">Drag a box where the car should stop. Detection focus narrows the reading area. View zoom magnifies the picture only. Digital zoom does not add camera detail.</p>
+                </div>
                 <div class="car-meta">
                   <div class="conf-line">
                     <div class="plate-chars" data-role="plate">—</div>
@@ -611,11 +624,20 @@
                   <span class="chip c-acc" data-role="shortcut-target">F8 / F9 this camera</span>
                 </div>
                 <div class="live-frame" data-role="pick" title="Click to choose a camera">
-                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:min(56vh,620px);max-height:620px;background:#000;display:none;"></video>
+                  <video data-role="webrtc" title="Live camera" autoplay muted playsinline style="width:100%;height:100%;object-fit:contain;background:#000;display:none;"></video>
                   <img data-role="video" alt="Live camera">
                   <canvas data-role="overlay"></canvas>
                 </div>
                 <p class="muted" data-role="status">Choose a camera to start live video.</p>
+                <div class="framing-bar" data-role="framing">
+                  <button class="secondary" type="button" data-role="zone-edit">Set detection zone</button>
+                  <label>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
+                  <span data-role="zoom-label">1.0×</span>
+                  <label>View zoom <input data-role="view-zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="View zoom"></label>
+                  <span data-role="view-zoom-label">1.0×</span>
+                  <button class="secondary" type="button" data-role="zone-save">Save zone</button>
+                  <p class="muted" data-role="zone-hint">Drag a box where the car should stop. Detection focus narrows the reading area. View zoom magnifies the picture only. Digital zoom does not add camera detail.</p>
+                </div>
                 <div class="car-meta">
                   <div class="conf-line">
                     <div class="plate-chars" data-role="plate">—</div>
@@ -963,7 +985,7 @@
             <button type="button" id="commission-refresh">Refresh diagnostics</button>
             <button class="secondary" type="button" id="commission-read">Run one software read</button>
           </div>
-          <p class="muted">Diagnostic only. It does not create a parking session, print a receipt, or open a barrier.</p>
+          <p class="muted">Diagnostic only. It does not create a parking session, print a receipt, or open a barrier. Live lanes use the same crop-then-read path: the plate is read once after it stops inside the detection zone on the Live page.</p>
           <div id="commission-summary" class="muted">Choose a camera to inspect recognition quality.</div>
           <div id="commission-evidence" class="biz-grid" style="margin-top:12px"></div>
           <div id="commission-recommendations" style="margin-top:12px"></div>
@@ -1367,6 +1389,7 @@
     const snapshotTimers = [null, null];
     // One WHEP session per pane. Closed before any other transport starts.
     const whepSessions = [null, null];
+    const liveGenerations = [0, 0];
 
     async function whepStart(video, whepUrl, onState) {
       if (typeof RTCPeerConnection === "undefined") throw new Error("WebRTC unavailable in this browser");
@@ -1380,7 +1403,8 @@
         else if (!video.srcObject) video.srcObject = new MediaStream([evt.track]);
         video.play().catch(() => {});
       };
-      pc.onconnectionstatechange = () => { if (!session.closed && onState) onState(pc.connectionState); };
+      pc.onconnectionstatechange = () => { if (!session.closed && onState) onState(pc.connectionState, session); };
+      try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await new Promise((resolve) => {
@@ -1394,6 +1418,7 @@
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
         body: pc.localDescription.sdp,
+        signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`WHEP ${res.status}`);
       session.location = res.headers.get("Location");
@@ -1402,6 +1427,12 @@
       }
       await pc.setRemoteDescription({ type: "answer", sdp: await res.text() });
       return session;
+      } catch (error) {
+        session.closed = true;
+        pc.close();
+        if (session.location) fetch(session.location, { method: "DELETE" }).catch(() => {});
+        throw error;
+      }
     }
 
     function whepStop(slot) {
@@ -1449,6 +1480,9 @@
         webrtc: pane.querySelector('[data-role="webrtc"]'),
         canvas: pane.querySelector('[data-role="overlay"]'),
         status: pane.querySelector('[data-role="status"]'),
+        zoom: pane.querySelector('[data-role="zoom"]'),
+        zoomLabel: pane.querySelector('[data-role="zoom-label"]'),
+        zoneHint: pane.querySelector('[data-role="zone-hint"]'),
         snap: pane.querySelector('[data-role="snap"]'),
         crop: pane.querySelector('[data-role="crop"]'),
         plate: pane.querySelector('[data-role="plate"]'),
@@ -1544,7 +1578,11 @@
         startLiveSlot(slot, cameraFromSelect(slot), true);
         markLiveShortcutTarget(slot);
       });
-      if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
+      if (pick) pick.addEventListener("click", () => {
+        if (pane.dataset.zoneEdit === "1") return;
+        openCameraPicker(slot);
+      });
+      bindZoneEditor(pane);
       const openBtn = pane.querySelector('[data-role="open-side"]');
       if (openBtn) openBtn.addEventListener("click", () => openPaneSide(slot, "open"));
       const closeBtn = pane.querySelector('[data-role="close-side"]');
@@ -1616,6 +1654,7 @@
       liveWatchIds[slot] = null;
       if (release) unwatchCamera(prev);
       const els = paneEls(slot);
+      liveGenerations[slot] = (liveGenerations[slot] || 0) + 1;
       whepStop(slot);
       if (els.webrtc) {
         els.webrtc.style.display = "none";
@@ -1643,40 +1682,200 @@
       liveCameras.forEach((_, slot) => { liveCameras[slot] = null; });
     }
 
+    const zoneDraft = {};
+    const zoneZoom = {};
+
+    function liveMedia(slot) {
+      const els = paneEls(slot);
+      if (els.webrtc && els.webrtc.style.display !== "none" && els.webrtc.videoWidth) return els.webrtc;
+      return els.img;
+    }
+
+    function mediaBox(slot, canvas) {
+      const media = liveMedia(slot);
+      const nw = (media && (media.videoWidth || media.naturalWidth)) || canvas.width;
+      const nh = (media && (media.videoHeight || media.naturalHeight)) || canvas.height;
+      const scale = Math.min(canvas.width / Math.max(nw, 1), canvas.height / Math.max(nh, 1));
+      const drawW = nw * scale;
+      const drawH = nh * scale;
+      return { ox: (canvas.width - drawW) / 2, oy: (canvas.height - drawH) / 2, drawW, drawH };
+    }
+
+    function parseRoi(value) {
+      const parts = String(value || "").split(",").map((item) => Number(item.trim()));
+      if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+      const [x1, y1, x2, y2] = parts;
+      if (!(x1 >= 0 && y1 >= 0 && x2 <= 1 && y2 <= 1 && x2 - x1 >= 0.08 && y2 - y1 >= 0.08)) return null;
+      return { x1, y1, x2, y2 };
+    }
+
+    function defaultZone() {
+      return { x1: 0.06, y1: 0.18, x2: 0.94, y2: 0.92 };
+    }
+
+    function loadZone(slot, camera) {
+      const framing = (camera && camera.framing) || {};
+      zoneDraft[slot] = parseRoi(framing.detect_roi) || defaultZone();
+      zoneZoom[slot] = Math.min(4, Math.max(1, Number(framing.detect_zoom) || 1));
+      const els = paneEls(slot);
+      if (els.zoom) els.zoom.value = String(zoneZoom[slot]);
+      if (els.zoomLabel) els.zoomLabel.textContent = zoneZoom[slot].toFixed(1) + "×";
+      drawLiveOverlay(slot);
+    }
+
     function drawLiveOverlay(slot) {
       const els = paneEls(slot);
-      const img = els.img;
       const canvas = els.canvas;
-      if (!img || !canvas) return;
+      if (!canvas) return;
       const frame = canvas.parentElement;
-      const rect = (frame || img).getBoundingClientRect();
+      const rect = (frame || canvas).getBoundingClientRect();
       canvas.width = Math.max(1, Math.round(rect.width));
       canvas.height = Math.max(1, Math.round(rect.height));
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const placed = mediaBox(slot, canvas);
       const box = liveOverlays[slot];
-      if (!box || !img.naturalWidth) return;
-      const srcW = box.image_width || img.naturalWidth;
-      const srcH = box.image_height || img.naturalHeight;
-      const scale = Math.min(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
-      const drawW = img.naturalWidth * scale;
-      const drawH = img.naturalHeight * scale;
-      const ox = (canvas.width - drawW) / 2;
-      const oy = (canvas.height - drawH) / 2;
-      const sx = drawW / srcW;
-      const sy = drawH / srcH;
-      const x = ox + box.x1 * sx;
-      const y = oy + box.y1 * sy;
-      const w = Math.max(2, (box.x2 - box.x1) * sx);
-      const h = Math.max(2, (box.y2 - box.y1) * sy);
-      ctx.strokeStyle = "#00dc5a";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, w, h);
-      if (box.label) {
-        ctx.fillStyle = "#00dc5a";
-        ctx.font = "14px sans-serif";
-        ctx.fillText(box.label, x, Math.max(14, y - 6));
+      const media = liveMedia(slot);
+      const nw = media && (media.videoWidth || media.naturalWidth);
+      if (box && nw) {
+        const srcW = box.image_width || nw;
+        const srcH = box.image_height || (media.videoHeight || media.naturalHeight);
+        const sx = placed.drawW / srcW;
+        const sy = placed.drawH / srcH;
+        const x = placed.ox + box.x1 * sx;
+        const y = placed.oy + box.y1 * sy;
+        const w = Math.max(2, (box.x2 - box.x1) * sx);
+        const h = Math.max(2, (box.y2 - box.y1) * sy);
+        ctx.strokeStyle = "#00dc5a";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, w, h);
+        if (box.label) {
+          ctx.fillStyle = "#00dc5a";
+          ctx.font = "14px sans-serif";
+          ctx.fillText(box.label, x, Math.max(14, y - 6));
+        }
       }
+      const zone = zoneDraft[slot];
+      if (!zone) return;
+      const zx = placed.ox + zone.x1 * placed.drawW;
+      const zy = placed.oy + zone.y1 * placed.drawH;
+      const zw = (zone.x2 - zone.x1) * placed.drawW;
+      const zh = (zone.y2 - zone.y1) * placed.drawH;
+      ctx.strokeStyle = "#f5c542";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(zx, zy, zw, zh);
+      const zoom = zoneZoom[slot] || 1;
+      if (zoom > 1.05) {
+        const innerW = zw / zoom;
+        const innerH = zh / zoom;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(zx + (zw - innerW) / 2, zy + (zh - innerH) / 2, innerW, innerH);
+        ctx.setLineDash([]);
+      }
+    }
+
+    function pointerToNorm(slot, ev) {
+      const canvas = paneEls(slot).canvas;
+      const rect = canvas.getBoundingClientRect();
+      const placed = mediaBox(slot, canvas);
+      const scaleX = canvas.width / Math.max(rect.width, 1);
+      const scaleY = canvas.height / Math.max(rect.height, 1);
+      const x = ((ev.clientX - rect.left) * scaleX - placed.ox) / placed.drawW;
+      const y = ((ev.clientY - rect.top) * scaleY - placed.oy) / placed.drawH;
+      return {
+        x: Math.min(1, Math.max(0, x)),
+        y: Math.min(1, Math.max(0, y)),
+      };
+    }
+
+    function bindZoneEditor(pane) {
+      const slot = Number(pane.dataset.slot);
+      const canvas = pane.querySelector('[data-role="overlay"]');
+      const edit = pane.querySelector('[data-role="zone-edit"]');
+      const zoom = pane.querySelector('[data-role="zoom"]');
+      const save = pane.querySelector('[data-role="zone-save"]');
+      const viewZoom = pane.querySelector('[data-role="view-zoom"]');
+      if (viewZoom) viewZoom.addEventListener("input", () => {
+        const factor = Math.min(4, Math.max(1, Number(viewZoom.value) || 1));
+        pane.querySelectorAll('.live-frame > video, .live-frame > img, .live-frame > canvas').forEach((element) => {
+          element.style.transform = `scale(${factor})`;
+          element.style.transformOrigin = "center center";
+        });
+        pane.querySelector('[data-role="view-zoom-label"]').textContent = factor.toFixed(1) + "×";
+      });
+      let drag = null;
+      if (edit) edit.addEventListener("click", () => {
+        const on = pane.dataset.zoneEdit !== "1";
+        pane.dataset.zoneEdit = on ? "1" : "0";
+        if (canvas) canvas.classList.toggle("zone-editing", on);
+        edit.textContent = on ? "Done drawing" : "Set detection zone";
+        const hint = pane.querySelector('[data-role="zone-hint"]');
+        if (hint) hint.textContent = on
+          ? "Drag on the picture. A tight box where the car stops is better than the whole view."
+          : "Drag a box where the car should stop. Detection focus narrows the reading area. View zoom magnifies the picture only. Digital zoom does not add camera detail.";
+      });
+      if (zoom) zoom.addEventListener("input", () => {
+        zoneZoom[slot] = Number(zoom.value) || 1;
+        const label = pane.querySelector('[data-role="zoom-label"]');
+        if (label) label.textContent = zoneZoom[slot].toFixed(1) + "×";
+        drawLiveOverlay(slot);
+      });
+      if (canvas) {
+        canvas.addEventListener("pointerdown", (ev) => {
+          if (pane.dataset.zoneEdit !== "1") return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          const start = pointerToNorm(slot, ev);
+          drag = start;
+          zoneDraft[slot] = { x1: start.x, y1: start.y, x2: start.x, y2: start.y };
+          canvas.setPointerCapture(ev.pointerId);
+        });
+        canvas.addEventListener("pointermove", (ev) => {
+          if (!drag || pane.dataset.zoneEdit !== "1") return;
+          const point = pointerToNorm(slot, ev);
+          zoneDraft[slot] = {
+            x1: Math.min(drag.x, point.x),
+            y1: Math.min(drag.y, point.y),
+            x2: Math.max(drag.x, point.x),
+            y2: Math.max(drag.y, point.y),
+          };
+          drawLiveOverlay(slot);
+        });
+        const finish = (ev) => {
+          if (!drag) return;
+          drag = null;
+          const zone = zoneDraft[slot];
+          if (!zone || zone.x2 - zone.x1 < 0.08 || zone.y2 - zone.y1 < 0.08) {
+            zoneDraft[slot] = defaultZone();
+            toast("Draw a larger box. It needs to cover the car's plate area.", "warn");
+          }
+          drawLiveOverlay(slot);
+          if (ev) ev.stopPropagation();
+        };
+        canvas.addEventListener("pointerup", finish);
+        canvas.addEventListener("pointercancel", finish);
+        canvas.addEventListener("click", (ev) => {
+          if (pane.dataset.zoneEdit === "1") ev.stopPropagation();
+        });
+      }
+      if (save) save.addEventListener("click", async () => {
+        const cam = liveCameras[slot];
+        const zone = zoneDraft[slot];
+        if (!cam || !zone) { toast("Choose a camera first.", "warn"); return; }
+        const detect_roi = [zone.x1, zone.y1, zone.x2, zone.y2].map((n) => n.toFixed(3)).join(",");
+        try {
+          const data = await api(`/cameras/${cam.id}/framing`, {
+            method: "PUT",
+            body: JSON.stringify({ detect_roi, detect_zoom: zoneZoom[slot] || 1 }),
+          });
+          cam.framing = data.framing;
+          const row = cameraRowsCache.find((item) => item.id === cam.id);
+          if (row) row.framing = data.framing;
+          toast("Detection zone saved. The next stopped car is cropped, then read.");
+        } catch (err) {
+          toast(err.message, "dgr");
+        }
+      });
     }
 
     function startMjpegLive(slot, id) {
@@ -1730,14 +1929,16 @@
       }
       const id = camera.id;
       liveCameras[slot] = camera;
+      loadZone(slot, camera);
       saveSlotId(slot, id);
-      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || whepSessions[slot])) {
+      if (!force && els.img.dataset.cameraId === String(id) && (snapshotTimers[slot] || whepSessions[slot] || els.img.getAttribute("src"))) {
         refreshPlates(slot);
         return;
       }
       if (els.img.dataset.cameraId !== String(id)) liveLastCars[slot] = null;
       const prev = liveWatchIds[slot];
       stopLiveSlot(slot, false);
+      const generation = liveGenerations[slot];
       if (prev && prev !== id) unwatchCamera(prev);
       liveCameras[slot] = camera;
       liveWatchIds[slot] = id;
@@ -1746,7 +1947,7 @@
       watchCamera(id);
       let ep = null;
       try { ep = await api(`/cameras/${id}/live/endpoint`); } catch (_) {}
-      if (liveWatchIds[slot] !== id) return; // switched while resolving
+      if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) return; // switched while resolving
       if (ep && ep.provider === "MEDIAMTX" && ep.transport === "WEBRTC" && (ep.whep || ep.webrtc) && els.webrtc) {
         // WebRTC is the only live transport for this pane. Do not also poll
         // snapshot.jpg or MJPEG: that is a second decode path per viewer.
@@ -1757,10 +1958,10 @@
         const stateLabel = ep.state && ep.state !== "LIVE" ? ep.state : "LIVE";
         els.status.textContent = `${stateLabel} (WebRTC${codec})`;
         try {
-          const session = await whepStart(els.webrtc, ep.whep || `${ep.webrtc.replace(/\/$/, "")}/whep`, (connState) => {
-            if (liveWatchIds[slot] !== id) return;
+          const session = await whepStart(els.webrtc, ep.whep || `${ep.webrtc.replace(/\/$/, "")}/whep`, (connState, activeSession) => {
+            if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) return;
             if (connState === "connected") {
-              const seen = whepCodec(session) || ep.codec || "";
+              const seen = whepCodec(activeSession) || ep.codec || "";
               els.status.textContent = `LIVE (WebRTC${seen ? " · " + seen : ""})`;
               reportViewerTransport(id, "WEBRTC");
             } else if (connState === "disconnected") {
@@ -1768,15 +1969,22 @@
             } else if (connState === "failed" || connState === "closed") {
               els.status.textContent = "OFFLINE (WebRTC lost) · retrying…";
               whepStop(slot);
-              setTimeout(() => { if (liveWatchIds[slot] === id) startLiveSlot(slot, camera, true); }, 3000);
+              setTimeout(() => { if (liveWatchIds[slot] === id && liveGenerations[slot] === generation) startLiveSlot(slot, camera, true); }, 3000);
             }
           });
           if (liveWatchIds[slot] !== id) { session.closed = true; try { session.pc.close(); } catch (_) {} return; }
+          if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) {
+            session.closed = true;
+            session.pc.close();
+            if (session.location) fetch(session.location, {method: "DELETE"}).catch(() => {});
+            return;
+          }
           whepSessions[slot] = session;
           reportViewerTransport(id, "WEBRTC");
           refreshPlates(slot);
           return;
         } catch (err) {
+          if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) return;
           // WHEP unavailable: report it and use the MediaMTX-fed MJPEG cache.
           // The failed peer connection is closed first, so still one transport.
           whepStop(slot);
@@ -2991,8 +3199,10 @@
         const me = await refreshSessionContext();
         setSignedIn({ ...data, ...me });
       } catch (err) {
-        error.textContent = err.message || "Sign in failed";
-        toast(err.message || "Sign in failed", "dgr");
+        const hint = (document.getElementById("login-hint") || {}).textContent || "";
+        const msg = err.message || "Sign in failed";
+        error.textContent = hint && /invalid|password|401/i.test(msg) ? `${msg}. ${hint}` : msg;
+        toast(msg, "dgr");
       } finally {
         btn.disabled = false;
       }
@@ -3759,7 +3969,11 @@
         startLiveSlot(slot, cameraFromSelect(slot), true);
         markLiveShortcutTarget(slot);
       });
-      if (pick) pick.addEventListener("click", () => openCameraPicker(slot));
+      if (pick) pick.addEventListener("click", () => {
+        if (pane.dataset.zoneEdit === "1") return;
+        openCameraPicker(slot);
+      });
+      bindZoneEditor(pane);
       pane.addEventListener("pointerdown", () => { markLiveShortcutTarget(slot); });
     });
     document.getElementById("cameras-subnav").addEventListener("click", (e) => {

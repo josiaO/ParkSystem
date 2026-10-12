@@ -21,6 +21,21 @@ from app.services.queues import SQLiteOutbox
 from app.services.site_policy import save_site_policy
 
 
+def _still_plate(*_args, **_kwargs):
+    return ([{
+        "x1": 40, "y1": 80, "x2": 180, "y2": 120,
+        "image_width": 640, "image_height": 360, "confidence": 0.9,
+    }], {"available": True})
+
+
+def _ready_gate(camera_id):
+    from app.services.camera_framing import gate_for
+    gate = gate_for(camera_id)
+    gate.reset()
+    gate.stable_seconds = 0
+    return gate
+
+
 def _produce(path: str, count: int) -> None:
     box = SQLiteOutbox(Path(path))
     for number in range(count):
@@ -161,7 +176,9 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     number += 1
                     decoded.append(number)
                     yield b"\xff\xd8" + str(number).encode()
-                    if number == 1:
+                    # The first frame only marks the plate as moving. The next
+                    # frame is the still crop that OCR is allowed to read.
+                    if number == 2:
                         await first_inference.wait()
                     elif number == 10:
                         burst_decoded.set()
@@ -184,8 +201,10 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         provider = type("Provider", (), {"process": staticmethod(infer)})()
         from app.services.recognition_runtime import runtime
         runtime.reset()
+        _ready_gate(1)
         with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://127.0.0.1:8554/cam1_detect"})), \
              patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.locate_plate_boxes", _still_plate), \
              patch("app.services.alpr.plate_still_present", return_value=True), \
              patch("app.infrastructure.recognition.recognition_provider_for", return_value=provider), \
              patch("app.recognition_worker._publish_frame") as publish, \
@@ -208,6 +227,61 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received_policy[0], {"plate_validation": "TZ"})
         self.assertTrue(stats.get("ocr_paused"))
         publish.assert_called_once()
+
+    async def test_detector_failure_resumes_ocr_without_a_second_event(self):
+        from app.config import settings
+
+        calls = []
+        held = []
+        done = asyncio.Event()
+        stop = asyncio.Event()
+        limiter = asyncio.Semaphore(1)
+
+        async def stream(*args, **kwargs):
+            number = 0
+            while True:
+                number += 1
+                yield b"\xff\xd8" + str(number).encode()
+                await asyncio.sleep(0.01)
+
+        async def infer(frame):
+            held.append(limiter.locked())
+            calls.append(frame["jpeg"])
+            if len(calls) >= 2:
+                done.set()
+            return {
+                "event_id": "event123",
+                "normalized_plate": "ABC123",
+                "camera_id": 1,
+                "confidence": 0.95,
+            }
+
+        stats = {}
+        provider = type("Provider", (), {"process": staticmethod(infer)})()
+        from app.services.recognition_runtime import runtime
+        runtime.reset()
+        _ready_gate(1)
+        with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://127.0.0.1:8554/cam1_detect"})), \
+             patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.locate_plate_boxes", _still_plate), \
+             patch("app.services.alpr.plate_still_present", return_value=None), \
+             patch("app.infrastructure.recognition.recognition_provider_for", return_value=provider), \
+             patch("app.recognition_worker._publish_frame") as publish, \
+             patch.object(settings, "recognition_sample_fps", 30), \
+             patch.object(settings, "recognition_departure_check_seconds", 0.01):
+            task = asyncio.create_task(_infer_camera(
+                {"id": 1, "plate_policy": {}}, stop, stats, limiter,
+            ))
+            try:
+                await asyncio.wait_for(done.wait(), 2)
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 2)
+            runtime.reset()
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(any(held))
+        publish.assert_called_once()
+        self.assertEqual(stats.get("last_plate"), "ABC123")
 
     async def test_provider_moves_blocking_model_work_off_event_loop(self):
         import threading
