@@ -152,6 +152,21 @@ class RoiAndCropTests(unittest.TestCase):
         self.assertNotEqual(tuple(seen[0][:2]), (80, 200))
 
 
+def _still_plate(*_args, **_kwargs):
+    return ([{
+        "x1": 40, "y1": 80, "x2": 180, "y2": 120,
+        "image_width": 640, "image_height": 360, "confidence": 0.9,
+    }], {"available": True})
+
+
+def _ready_gate(camera_id):
+    from app.services.camera_framing import gate_for
+    gate = gate_for(camera_id)
+    gate.reset()
+    gate.stable_seconds = 0
+    return gate
+
+
 class LaneBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirmed_plate_pauses_ocr_and_departure_clears_it(self):
         from app.config import settings
@@ -182,13 +197,15 @@ class LaneBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 "camera_id": 7,
             }
 
-        def present(_jpeg, detect_roi=None):
+        def present(_jpeg, detect_roi=None, detect_zoom=None):
             return phase["present"]
 
         provider = type("Provider", (), {"process": staticmethod(infer)})()
         stats = {"started_at": 0}
+        _ready_gate(7)
         with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://127.0.0.1:8554/cam7_detect"})), \
              patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.locate_plate_boxes", _still_plate), \
              patch("app.services.alpr.plate_still_present", present), \
              patch("app.infrastructure.recognition.recognition_provider_for", return_value=provider), \
              patch("app.recognition_worker._publish_frame", side_effect=lambda event, _jpeg: published.append(event["normalized_plate"])), \
@@ -311,8 +328,10 @@ class UnconfirmedVisitTests(unittest.IsolatedAsyncioTestCase):
             plate = "" if len(reads) == 2 else "ABC123"
             return {"ok": bool(plate), "normalized_plate": plate, "confidence": .9}
 
+        _ready_gate(8)
         with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://localhost:8554/cam8"})), \
              patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.locate_plate_boxes", _still_plate), \
              patch("app.infrastructure.recognition.recognition_provider_for", return_value=SimpleNamespace(process=infer)), \
              patch("app.services.alpr.plate_still_present", return_value=True), \
              patch("app.recognition_worker._publish_frame", side_effect=lambda *args: published.append(1)), \

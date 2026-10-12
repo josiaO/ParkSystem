@@ -108,6 +108,9 @@ def verify_payload(payload: Path) -> list[str]:
     if not (vendor / "mediamtx" / "mediamtx.exe").is_file():
         errors.append("MediaMTX missing: vendor/mediamtx/mediamtx.exe")
 
+    if not (vendor / "ffmpeg" / "bin" / "ffmpeg.exe").is_file():
+        errors.append("FFmpeg missing: vendor/ffmpeg/bin/ffmpeg.exe")
+
     models = payload / "models"
     for rel in REQUIRED_MODELS:
         if not (models / rel).is_file():

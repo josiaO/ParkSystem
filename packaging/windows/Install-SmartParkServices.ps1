@@ -27,53 +27,85 @@ if (-not (Test-Path $Py64)) {
     throw "Install SmartPark Edge first. Missing $Py64"
 }
 
+function Write-SmartParkLauncher {
+    param(
+        [string]$BatName,
+        [string]$PythonExe,
+        [string]$Arguments
+    )
+    $bat = Join-Path $InstallDir $BatName
+    $mtxLine = ""
+    if (Test-Path $MediaMtx) {
+        $mtxLine = "set `"SMARTPARK_MEDIAMTX_BIN=$MediaMtx`""
+    }
+    @"
+@echo off
+setlocal
+set "SMARTPARK_HOME=$InstallDir"
+set "PYTHONPATH=%SMARTPARK_HOME%"
+set "SMARTPARK_HVX_VENDOR_DIR=%SMARTPARK_HOME%\vendor"
+$mtxLine
+set "PATH=%SMARTPARK_HOME%\python64;%SMARTPARK_HOME%\python64\Scripts;%SMARTPARK_HOME%\vendor;%PATH%"
+"$PythonExe" $Arguments
+"@ | Set-Content -Path $bat -Encoding ASCII
+    return $bat
+}
+
 function Register-SmartParkTask {
     param(
         [string]$Name,
-        [string]$Command,
+        [string]$Launcher,
         [string]$WorkingDirectory
     )
     Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue
-    $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $Command" -WorkingDirectory $WorkingDirectory
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    # Quote the launcher. "SmartPark Edge" has a space; an unquoted set-chain
+    # makes Start-ScheduledTask fail and the installer never opens the app.
+    $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument ("/c `"{0}`"" -f $Launcher) -WorkingDirectory $WorkingDirectory
+    $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
     try {
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggerLogon -Settings $settings -Principal $principal -Force | Out-Null
     } catch {
         Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggerLogon -Settings $settings -Force | Out-Null
     }
-    Start-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    try {
+        Start-ScheduledTask -TaskName $Name -ErrorAction Stop
+    } catch {
+        throw "registered, but Windows did not start it: $($_.Exception.Message)"
+    }
 }
 
-$mtxBin = ""
-if (Test-Path $MediaMtx) {
-    $mtxBin = "set SMARTPARK_MEDIAMTX_BIN=$MediaMtx&& "
+$siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
+$hostBat = ""
+if (Test-Path $Py32) {
+    $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`""
 }
-$envPrefix = "set SMARTPARK_HOME=$InstallDir&& set PYTHONPATH=$InstallDir&& set SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor&& ${mtxBin}set PATH=$InstallDir\python64;$InstallDir\python64\Scripts;$InstallDir\vendor;%PATH%"
-$siteCmd = "$envPrefix&& `"$Py64`" -m app.site_service"
-$hostCmd = "$envPrefix&& `"$Py32`" `"$HostPy`""
-$mediaCmd = "$envPrefix&& `"$Py64`" -m app.media_service"
+$mediaBat = ""
+if (Test-Path $MediaMtx) {
+    $mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe $Py64 -Arguments "-m app.media_service"
+}
 
 Write-Host "Registering SmartPark background tasks..."
 $failed = @()
 try {
-    Register-SmartParkTask -Name "SmartPark Site Service" -Command $siteCmd -WorkingDirectory $InstallDir
+    Register-SmartParkTask -Name "SmartPark Site Service" -Launcher $siteBat -WorkingDirectory $InstallDir
 } catch {
     $failed += "Site Service: $_"
 }
-if (Test-Path $Py32) {
+if ($hostBat) {
     try {
-        Register-SmartParkTask -Name "SmartPark HVX Host" -Command $hostCmd -WorkingDirectory (Join-Path $InstallDir "tools\hvx_sdk_host")
+        Register-SmartParkTask -Name "SmartPark HVX Host" -Launcher $hostBat -WorkingDirectory (Join-Path $InstallDir "tools\hvx_sdk_host")
     } catch {
         $failed += "HVX host: $_"
     }
 } else {
     Write-Host "HVX host skipped: 32-bit Python is not in this kit."
 }
-if (Test-Path $MediaMtx) {
+if ($mediaBat) {
     try {
-        Register-SmartParkTask -Name "SmartPark Media Service" -Command $mediaCmd -WorkingDirectory $InstallDir
+        Register-SmartParkTask -Name "SmartPark Media Service" -Launcher $mediaBat -WorkingDirectory $InstallDir
     } catch {
         $failed += "Media Service: $_"
     }
@@ -81,7 +113,9 @@ if (Test-Path $MediaMtx) {
     Write-Host "Media Service skipped: vendor\mediamtx\mediamtx.exe not in this kit."
 }
 if ($failed.Count -gt 0) {
-    throw ($failed -join "; ")
+    Write-Host ("WARNING: {0}" -f ($failed -join "; "))
+    Write-Host "The desktop and browser will still open. Site Service starts with the desktop if a task did not."
+    exit 0
 }
 
 Write-Host ""

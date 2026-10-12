@@ -16,9 +16,14 @@ class FastALPRProvider:
         jpeg = event_or_frame.get("jpeg") or b""
         label = str(event_or_frame.get("camera_label") or event_or_frame.get("camera_id") or "frame")
         detect_roi = event_or_frame.get("detect_roi") or None
-        inference = asyncio.create_task(
-            asyncio.to_thread(recognize_frame, jpeg, camera_label=str(label), detect_roi=detect_roi)
-        )
+        detect_zoom = event_or_frame.get("detect_zoom")
+        call = recognize_frame
+        options = {"camera_label": str(label), "detect_roi": detect_roi, "detect_zoom": detect_zoom}
+        if event_or_frame.get("plate_boxes") is not None:
+            from app.services.alpr import recognize_arrival_bytes
+            call = recognize_arrival_bytes
+            options["detected_boxes"] = event_or_frame["plate_boxes"]
+        inference = asyncio.create_task(asyncio.to_thread(call, jpeg, **options))
         try:
             result = await asyncio.shield(inference)
         except asyncio.CancelledError:

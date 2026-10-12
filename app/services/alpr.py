@@ -455,29 +455,49 @@ def parse_detect_roi(value: str | None = None) -> tuple[float, float, float, flo
     x1, y1, x2, y2 = parts
     if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
         return None
-    if (x2 - x1) < 0.4 or (y2 - y1) < 0.4:
+    # 8% of the frame is enough for a lane trigger box. The old 40% floor
+    # blocked the tighter locator an operator draws on the live view.
+    if (x2 - x1) < 0.08 or (y2 - y1) < 0.08:
         return None
     return x1, y1, x2, y2
 
 
-def _roi_crop(bgr, detect_roi: str | None = None):
-    """Crop to the recognition zone. Returns (view, x_off, y_off).
+def _roi_crop(bgr, detect_roi: str | None = None, detect_zoom: float | None = None):
+    """Crop to the recognition zone, then apply digital zoom. Returns (view, x_off, y_off).
 
     ``detect_roi`` is a per-camera override (``x1,y1,x2,y2`` or ``off``).
     None uses the site-wide ``alpr_detect_roi`` setting. ``off`` is the full frame.
+    ``detect_zoom`` above 1 keeps the center of that zone (2 keeps the middle half).
     Boxes found in the crop are shifted back by the returned offsets.
     """
+    from app.services.camera_framing import parse_detect_zoom
+
     roi = parse_detect_roi(detect_roi) if detect_roi is not None else parse_detect_roi()
-    if roi is None or bgr is None or getattr(bgr, "size", 0) == 0:
+    if bgr is None or getattr(bgr, "size", 0) == 0:
         return bgr, 0, 0
-    height, width = bgr.shape[:2]
-    left = max(0, min(width - 1, int(width * roi[0])))
-    top = max(0, min(height - 1, int(height * roi[1])))
-    right = max(left + 1, min(width, int(width * roi[2])))
-    bottom = max(top + 1, min(height, int(height * roi[3])))
-    if right - left < 32 or bottom - top < 32:
-        return bgr, 0, 0
-    return bgr[top:bottom, left:right], left, top
+    if roi is None:
+        view, left, top = bgr, 0, 0
+    else:
+        height, width = bgr.shape[:2]
+        left = max(0, min(width - 1, int(width * roi[0])))
+        top = max(0, min(height - 1, int(height * roi[1])))
+        right = max(left + 1, min(width, int(width * roi[2])))
+        bottom = max(top + 1, min(height, int(height * roi[3])))
+        if right - left < 32 or bottom - top < 32:
+            return bgr, 0, 0
+        view = bgr[top:bottom, left:right]
+    zoom = parse_detect_zoom(detect_zoom)
+    if zoom <= 1.01:
+        return view, left, top
+    view_h, view_w = view.shape[:2]
+    keep_w = max(32, int(view_w / zoom))
+    keep_h = max(32, int(view_h / zoom))
+    if keep_w >= view_w and keep_h >= view_h:
+        return view, left, top
+    cx, cy = view_w // 2, view_h // 2
+    zoom_left = max(0, min(view_w - keep_w, cx - keep_w // 2))
+    zoom_top = max(0, min(view_h - keep_h, cy - keep_h // 2))
+    return view[zoom_top:zoom_top + keep_h, zoom_left:zoom_left + keep_w], left + zoom_left, top + zoom_top
 
 
 def _shift_detections(detections, dx: int, dy: int):
@@ -709,7 +729,122 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         }
 
 
-def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None) -> bool | None:
+def locate_plate_boxes(
+    jpeg: bytes,
+    *,
+    detect_roi: str | None = None,
+    detect_zoom: float | None = None,
+) -> tuple[list[dict], dict]:
+    """Detector only. Returns plate boxes in full-frame pixels.
+
+    ``available`` is False when the detector could not run. An empty list
+    with ``available`` True means the zone was searched and no plate is there.
+    OCR is not called.
+    """
+    if not jpeg or not fastalpr_installed():
+        return [], {"available": False, "reason": "detector-unavailable"}
+    try:
+        bgr = decode_alpr_image(jpeg)
+        engine = _load_engine()
+    except Exception:
+        return [], {"available": False, "reason": "detector-unavailable"}
+    if not hasattr(engine, "detector"):
+        return [], {"available": False, "reason": "detector-unavailable"}
+    try:
+        view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
+        detections = _shift_detections(engine.detector.predict(view), dx, dy)
+    except Exception:
+        return [], {"available": False, "reason": "detector-unavailable"}
+    width, height = int(bgr.shape[1]), int(bgr.shape[0])
+    min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
+    boxes: list[dict] = []
+    for item in detections or []:
+        bbox = getattr(item, "bounding_box", None)
+        if bbox is None or not plate_box_ok(bbox, width, height):
+            continue
+        if _detection_score(item) < min_det:
+            continue
+        box = bbox_dict(bbox) or {}
+        box["image_width"] = width
+        box["image_height"] = height
+        box["confidence"] = _detection_score(item)
+        boxes.append(box)
+    boxes.sort(
+        key=lambda item: (float(item.get("confidence") or 0), int(item["x2"]) - int(item["x1"])),
+        reverse=True,
+    )
+    return boxes, {"available": True, "image_width": width, "image_height": height}
+
+
+def recognize_arrival_bytes(
+    jpeg: bytes,
+    *,
+    camera_label: str = "arrival",
+    detect_roi: str | None = None,
+    detect_zoom: float | None = None,
+    save_evidence: bool | None = None,
+    detected_boxes: list | None = None,
+) -> dict:
+    """When a plate is in the zone, crop it and OCR that crop. Never OCR the car.
+
+    No plate box means no OCR. A detector that cannot run also means no OCR:
+    reading the whole live frame is what made the gate slow and inaccurate.
+    """
+    if detected_boxes is None:
+        boxes, meta = locate_plate_boxes(jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom)
+    else:
+        boxes, meta = detected_boxes, {"available": True}
+    if not meta.get("available"):
+        return {
+            "ok": False,
+            "backend": "fastalpr",
+            "pipeline": "arrival_crop_ocr",
+            "plates": [],
+            "count": 0,
+            "best": None,
+            "detail": "detector unavailable; the live frame was not read",
+        }
+    if not boxes:
+        return {
+            "ok": True,
+            "backend": "fastalpr",
+            "pipeline": "arrival_crop_ocr",
+            "plates": [],
+            "count": 0,
+            "best": None,
+            "detail": "no plate in the detection zone",
+        }
+    try:
+        bgr = decode_alpr_image(jpeg)
+        engine = _load_engine()
+    except Exception:
+        return {"ok": False, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [], "best": None, "detail": "could not decode frame"}
+    from types import SimpleNamespace
+
+    best_box = boxes[0]
+    detection = SimpleNamespace(
+        bounding_box=SimpleNamespace(
+            x1=int(best_box["x1"]), y1=int(best_box["y1"]),
+            x2=int(best_box["x2"]), y2=int(best_box["y2"]),
+        ),
+        confidence=float(best_box.get("confidence") or 1),
+    )
+    persist = bool(save_evidence if save_evidence is not None else getattr(settings, "alpr_save_debug_frames", False))
+    hits = _hits_from_detections(engine, bgr, [detection], save_crops=persist)
+    plates = [hit.as_dict() for hit in hits]
+    best = hits[0] if hits else None
+    return {
+        "ok": True,
+        "backend": "fastalpr",
+        "pipeline": "arrival_crop_ocr",
+        "plates": plates,
+        "count": len(plates),
+        "best": best.as_dict() if best else None,
+        "detail": "plate cropped, then read" if best else "plate crop was not readable",
+    }
+
+
+def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None, detect_zoom: float | None = None) -> bool | None:
     """Detector-only presence check. Does not run OCR.
 
     True when a plate-shaped box is in the frame, False when the detector ran
@@ -726,7 +861,7 @@ def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None) -> bool |
     if not hasattr(engine, "detector"):
         return None
     try:
-        view, dx, dy = _roi_crop(bgr, detect_roi)
+        view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
         detections = _shift_detections(engine.detector.predict(view), dx, dy)
     except Exception:
         return None
@@ -738,7 +873,14 @@ def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None) -> bool |
     return False
 
 
-def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False, detect_roi: str | None = None) -> tuple[list[PlateHit], dict]:
+def recognize_bgr(
+    bgr,
+    *,
+    crop_source: str,
+    save_crops: bool = False,
+    detect_roi: str | None = None,
+    detect_zoom: float | None = None,
+) -> tuple[list[PlateHit], dict]:
     started = time.monotonic()
     if not fastalpr_installed():
         return [], {
@@ -754,7 +896,7 @@ def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False, detect_roi
         plate_shaped = []
         try:
             if hasattr(engine, "detector") and hasattr(engine, "ocr"):
-                view, dx, dy = _roi_crop(bgr, detect_roi)
+                view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
                 detections = _shift_detections(engine.detector.predict(view), dx, dy)
                 image_size = (int(bgr.shape[1]), int(bgr.shape[0]))
                 plate_shaped = [
@@ -796,7 +938,7 @@ def recognize_bgr(bgr, *, crop_source: str, save_crops: bool = False, detect_roi
         if boosted is not None:
             try:
                 if hasattr(engine, "detector") and hasattr(engine, "ocr"):
-                    view, dx, dy = _roi_crop(boosted, detect_roi)
+                    view, dx, dy = _roi_crop(boosted, detect_roi, detect_zoom)
                     retry = _shift_detections(engine.detector.predict(view), dx, dy)
                     hits = _hits_from_detections(engine, boosted, retry, save_crops=save_crops)
                 else:
@@ -847,6 +989,7 @@ def recognize_bytes(
     camera_label: str = "frame",
     save_evidence: bool | None = None,
     detect_roi: str | None = None,
+    detect_zoom: float | None = None,
 ) -> dict:
     """Run FastALPR on a camera frame or simulation upload. Never invents plates.
 
@@ -872,7 +1015,9 @@ def recognize_bytes(
             "detail": "could not decode that photo",
         }
     persist = bool(save_evidence if save_evidence is not None else getattr(settings, "alpr_save_debug_frames", False))
-    hits, meta = recognize_bgr(bgr, crop_source="", save_crops=persist, detect_roi=detect_roi)
+    hits, meta = recognize_bgr(
+        bgr, crop_source="", save_crops=persist, detect_roi=detect_roi, detect_zoom=detect_zoom,
+    )
     plates = [hit.as_dict() for hit in hits]
     best = max(hits, key=lambda h: h.plate_confidence) if hits else None
     annotated = None

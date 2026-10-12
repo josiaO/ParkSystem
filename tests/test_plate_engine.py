@@ -77,7 +77,7 @@ class PlateEngineTests(unittest.TestCase):
             stream_profiles={},
         )
         spec = _live_spec(camera)
-        self.assertFalse(spec.need_detect)
+        self.assertTrue(spec.need_detect)
         native = SimpleNamespace(**{**camera.__dict__, "recognition_mode": "NATIVE_ONLY"})
         self.assertFalse(_live_spec(native).need_detect)
         generic = SimpleNamespace(**{**camera.__dict__, "adapter_id": "rtsp", "sdk_handle": None})
@@ -87,7 +87,8 @@ class PlateEngineTests(unittest.TestCase):
         self.assertIn("software_ocr_enabled(camera)", watch)
         self.assertNotIn("live_jpeg(handle)", watch)
         self.assertIn("adapter_has_native_plates(camera)", watch)
-        self.assertIn("acquire_detect(_live_spec(camera, need_detect=True))", watch)
+        self.assertIn("spec = _live_spec(camera, need_detect=True)", watch)
+        self.assertIn("acquire_detect(spec)", watch)
 
     def test_fastalpr_is_the_known_engine(self):
         self.assertEqual(active_engine_id(), "fastalpr")

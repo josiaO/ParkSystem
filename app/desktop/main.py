@@ -11,7 +11,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QKeyS
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog, QGroupBox
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog, QGroupBox
 )
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
@@ -248,13 +248,17 @@ def show_printable_receipt(parent, body, path="", qr_url="", qr_payload=""):
     dlg.exec()
 
 
+from .frame_mailbox import DisplayMailbox
+
+
 class MjpegStream(QThread):
     """Read /live.mjpeg and emit only the newest JPEG. Old frames in the pipe are dropped."""
-    frame=Signal(bytes)
+    frame=Signal()
     failed=Signal(str)
     def __init__(self, camera_id):
         super().__init__()
         self.camera_id=camera_id
+        self.mailbox=DisplayMailbox()
         self._stop=False
         self._client=None
     def stop(self):
@@ -281,7 +285,7 @@ class MjpegStream(QThread):
                 buf=b""
                 last_emit=0.0
                 pending=None
-                chunks=response.iter_bytes(65536)
+                chunks=response.iter_bytes()
                 while not self._stop:
                     try:
                         chunk=next(chunks)
@@ -302,11 +306,13 @@ class MjpegStream(QThread):
                         pending=latest
                     now=time.monotonic()
                     if pending is not None and (now-last_emit) >= 0.025:
-                        self.frame.emit(pending)
+                        if self.mailbox.offer(pending):
+                            self.frame.emit()
                         pending=None
                         last_emit=now
                 if pending is not None and not self._stop:
-                    self.frame.emit(pending)
+                    if self.mailbox.offer(pending):
+                        self.frame.emit()
         except Exception as e:
             if not self._stop:
                 self.failed.emit(str(e))
@@ -418,9 +424,19 @@ class Login(QDialog):
 
 class ClickLabel(QLabel):
     clicked=Signal()
+    pressed=Signal(object)
+    moved=Signal(object)
+    released=Signal(object)
     def mousePressEvent(self, event):
+        self.pressed.emit(event.pos())
         self.clicked.emit()
         super().mousePressEvent(event)
+    def mouseMoveEvent(self, event):
+        self.moved.emit(event.pos())
+        super().mouseMoveEvent(event)
+    def mouseReleaseEvent(self, event):
+        self.released.emit(event.pos())
+        super().mouseReleaseEvent(event)
 
 
 class CameraLivePane(QFrame):
@@ -445,10 +461,30 @@ class CameraLivePane(QFrame):
         self.video.setMaximumHeight(480)
         self.video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video.clicked.connect(self._on_video)
+        self.video.pressed.connect(self._zone_press)
+        self.video.moved.connect(self._zone_move)
+        self.video.released.connect(self._zone_release)
         l.addWidget(self.video, 3)
         self.status=QLabel("Click this view or the list to choose a camera.")
         self.status.setWordWrap(True)
         l.addWidget(self.status)
+        zone_row=QHBoxLayout()
+        self.zone_btn=QPushButton("Set detection zone")
+        self.zone_btn.setToolTip("Drag on the picture to choose where the car must stop. The plate is cropped from this box, then read.")
+        self.zone_btn.clicked.connect(self._toggle_zone)
+        self.zoom_label=QLabel("Zoom 1.0")
+        self.zoom=QSlider(Qt.Orientation.Horizontal)
+        self.zoom.setRange(10, 40)
+        self.zoom.setValue(10)
+        self.zoom.setToolTip("Digital zoom inside the detection zone, from 1× to 4×")
+        self.zoom.valueChanged.connect(self._zoom_changed)
+        self.zone_save=QPushButton("Save zone")
+        self.zone_save.clicked.connect(self._save_zone)
+        zone_row.addWidget(self.zone_btn)
+        zone_row.addWidget(self.zoom_label)
+        zone_row.addWidget(self.zoom, 1)
+        zone_row.addWidget(self.zone_save)
+        l.addLayout(zone_row)
         stills=QHBoxLayout()
         snap_col=QVBoxLayout(); snap_col.addWidget(QLabel("Snapshot"))
         self.last_snap=QLabel("Waiting for a car")
@@ -509,9 +545,97 @@ class CameraLivePane(QFrame):
         self._pending_live=b""
         self._held_car=None
         self._watching=None
+        self._zone=(0.06, 0.18, 0.94, 0.92)
+        self._zone_edit=False
+        self._zone_drag=None
     def _on_video(self):
+        if self._zone_edit:
+            return
         self.armed.emit(self)
         self.picker.showPopup()
+    def _toggle_zone(self):
+        self._zone_edit=not self._zone_edit
+        self.zone_btn.setText("Done drawing" if self._zone_edit else "Set detection zone")
+        self.video.setText("Drag a box on the picture. The plate is read from that crop." if self._zone_edit and not self._last_jpeg else self.video.text())
+        if self._last_jpeg:
+            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
+    def _zoom_changed(self, value):
+        self.zoom_label.setText(f"Zoom {value/10:.1f}")
+        if self._last_jpeg:
+            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
+    def _load_zone(self, camera):
+        framing=(camera or {}).get("framing") or {}
+        roi=str(framing.get("detect_roi") or "")
+        parts=[part.strip() for part in roi.split(",")]
+        self._zone=(0.06, 0.18, 0.94, 0.92)
+        if len(parts)==4:
+            try:
+                vals=tuple(float(part) for part in parts)
+            except ValueError:
+                vals=None
+            if vals and vals[2]-vals[0] >= 0.08 and vals[3]-vals[1] >= 0.08:
+                self._zone=vals
+        zoom=float(framing.get("detect_zoom") or 1)
+        self.zoom.blockSignals(True)
+        self.zoom.setValue(int(round(max(1.0, min(4.0, zoom))*10)))
+        self.zoom.blockSignals(False)
+        self.zoom_label.setText(f"Zoom {self.zoom.value()/10:.1f}")
+    def _norm_at(self, pos):
+        pix=self.video.pixmap()
+        if pix is None or pix.isNull():
+            return None
+        rect=self.video.contentsRect()
+        x0=rect.x()+max(0, (rect.width()-pix.width())//2)
+        y0=rect.y()+max(0, (rect.height()-pix.height())//2)
+        nx=(float(pos.x())-x0)/max(pix.width(), 1)
+        ny=(float(pos.y())-y0)/max(pix.height(), 1)
+        return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
+    def _zone_press(self, pos):
+        if not self._zone_edit:
+            return
+        point=self._norm_at(pos)
+        if point is None:
+            return
+        self._zone_drag=point
+        self._zone=(point[0], point[1], point[0], point[1])
+    def _zone_move(self, pos):
+        if not self._zone_edit or self._zone_drag is None:
+            return
+        point=self._norm_at(pos)
+        if point is None:
+            return
+        x1,y1=self._zone_drag
+        x2,y2=point
+        self._zone=(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        if self._last_jpeg:
+            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
+    def _zone_release(self, pos):
+        if not self._zone_edit:
+            return
+        self._zone_move(pos)
+        self._zone_drag=None
+    def _save_zone(self):
+        cid=self.camera_id()
+        if cid is None:
+            self.status.setText("Choose a camera before saving the zone.")
+            return
+        x1,y1,x2,y2=self._zone
+        if (x2-x1) < 0.08 or (y2-y1) < 0.08:
+            self.status.setText("Draw a larger box. The zone needs to cover the plate.")
+            return
+        roi=f"{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}"
+        zoom=self.zoom.value()/10
+        try:
+            data=api.put(f"/cameras/{cid}/framing", {"detect_roi": roi, "detect_zoom": zoom})
+        except Exception as exc:
+            self.status.setText(str(exc))
+            return
+        framing=(data or {}).get("framing") or {}
+        if self.camera is not None:
+            self.camera["framing"]=framing
+        self._zone_edit=False
+        self.zone_btn.setText("Set detection zone")
+        self.status.setText("Zone saved. The live gate crops the plate from this box, then reads that crop.")
     def mousePressEvent(self, event):
         self.armed.emit(self)
         super().mousePressEvent(event)
@@ -549,6 +673,8 @@ class CameraLivePane(QFrame):
         same=self.camera and cid and self.camera.get("id")==cid
         self.camera=camera
         self._sync_picker()
+        if not same:
+            self._load_zone(camera)
         if not camera:
             self.status.setText("Click this view or the list to choose a camera.")
             self.details.setText("Any added camera can go on the left or the right.")
@@ -589,7 +715,7 @@ class CameraLivePane(QFrame):
         try: api.post(f"/cameras/{cid}/live/watch", {}, timeout=8)
         except Exception: pass
         stream=MjpegStream(cid)
-        stream.frame.connect(self._queue_live_frame)
+        stream.frame.connect(self._consume_live_frame)
         stream.failed.connect(self._mjpeg_fail)
         self._mjpeg=stream
         stream.start()
@@ -626,6 +752,8 @@ class CameraLivePane(QFrame):
     def _set_pixmap(self, label, jpeg, overlay=None):
         image=QImage.fromData(jpeg)
         if image.isNull(): return False
+        if label is self.video:
+            image=self._paint_zone(image)
         if overlay and label is self.video:
             image=self._paint_overlay(image, overlay)
         pix=QPixmap.fromImage(image)
@@ -637,6 +765,27 @@ class CameraLivePane(QFrame):
             box=QSize(max(label.width(), 480), max_h if max_h and max_h < 16777215 else 360)
         label.setPixmap(pix.scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
         return True
+    def _paint_zone(self, image):
+        zone=getattr(self, "_zone", None)
+        if not zone:
+            return image
+        x1, y1, x2, y2 = zone
+        width, height = image.width(), image.height()
+        ax1, ay1 = int(x1 * width), int(y1 * height)
+        ax2, ay2 = int(x2 * width), int(y2 * height)
+        painted=image.copy()
+        painter=QPainter(painted)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(255, 196, 0), max(2, width // 240)))
+        painter.drawRect(ax1, ay1, max(1, ax2 - ax1), max(1, ay2 - ay1))
+        zoom=self.zoom.value() / 10 if hasattr(self, "zoom") else 1
+        if zoom > 1.01 and ax2 > ax1 and ay2 > ay1:
+            cx, cy = (ax1 + ax2) / 2, (ay1 + ay2) / 2
+            zw, zh = max(8, (ax2 - ax1) / zoom), max(8, (ay2 - ay1) / zoom)
+            painter.setPen(QPen(QColor(255, 196, 0), 1, Qt.PenStyle.DashLine))
+            painter.drawRect(int(cx - zw / 2), int(cy - zh / 2), int(zw), int(zh))
+        painter.end()
+        return painted
     def _paint_overlay(self, image, overlay):
         src_w=int(overlay.get("image_width") or 0) or image.width()
         src_h=int(overlay.get("image_height") or 0) or image.height()
@@ -662,6 +811,14 @@ class CameraLivePane(QFrame):
         self._snap_busy=True
         w=Worker(lambda: api.get_bytes(f"/cameras/{cid}/snapshot.jpg", timeout=3))
         w.done.connect(self._queue_live_frame); w.failed.connect(self._live_fail); w.finished.connect(lambda: setattr(self,"_snap_busy",False)); self._keep(w); w.start()
+    def _consume_live_frame(self):
+        stream = self.sender()
+        # A queued signal may arrive after teardown, when both references are None.
+        if stream is None or stream is not self._mjpeg:
+            return
+        jpeg = stream.mailbox.take()
+        if jpeg:
+            self._queue_live_frame(jpeg)
     def _queue_live_frame(self, jpeg):
         self._pending_live=jpeg
         if not self._paint_busy:

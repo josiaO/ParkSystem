@@ -46,6 +46,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
                 output_fps=float(getattr(settings, "live_mjpeg_fps", 10.0) or 10.0),
                 transport="TCP",
                 session=row,
+                jpeg_q=12,
             )
             async for jpeg in stream:
                 if not mediamtx_live_active(camera_id) or viewers_for(camera_id) <= 0:

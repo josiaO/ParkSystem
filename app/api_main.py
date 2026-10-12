@@ -19,7 +19,7 @@ from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
 from .domain.site import DEFAULT_SITE_ID
 from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
 from .schemas import (
-    CameraCreate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
+    CameraCreate, CameraFramingUpdate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
@@ -631,6 +631,7 @@ def camera_dict(c: Camera):
     gate = c.gate
     lane_name = None if gate is None else gate.name
     from .services.stream_roles import public_profiles
+    from .services.camera_framing import framing_from_profiles
     from .domain.cameras import camera_type_for
     native = adapter_has_native_plates(c)
     from .services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
@@ -671,6 +672,7 @@ def camera_dict(c: Camera):
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
         "stream_profiles": public_profiles(getattr(c, "stream_profiles", None) or {}),
+        "framing": framing_from_profiles(getattr(c, "stream_profiles", None)),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),
         "onvif": _camera_onvif_brief(c),
         "media": _camera_media_brief(c.id),
@@ -1264,6 +1266,7 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
 
 _local_alpr_at: dict[int, float] = {}
 _alpr_fp: dict[int, int] = {}
+_detect_at: dict[int, float] = {}
 
 
 def _coil_indexes(camera_id: int | None = None) -> list[int]:
@@ -1297,16 +1300,26 @@ def _mark_local_alpr(camera_id: int) -> None:
     _local_alpr_at[camera_id] = time.monotonic()
 
 
+def _detect_due(camera_id: int) -> bool:
+    """Detector cadence while a live picture is open. OCR stays on the still crop."""
+    return time.monotonic() - _detect_at.get(int(camera_id), 0.0) >= 0.5
+
+
+def _mark_detect(camera_id: int) -> None:
+    _detect_at[int(camera_id)] = time.monotonic()
+
+
 def _local_alpr_ready(camera_id: int) -> bool:
     """True when this camera may start OCR. Does not consume the cooldown."""
     return _local_alpr_due(camera_id)
 
 
-def _crop_from_alpr(alpr: dict | None) -> bytes:
+def _crop_from_alpr(alpr: dict | None, jpeg: bytes = b"") -> bytes:
     best = (alpr or {}).get("best") or {}
     rel = best.get("plate_crop_path")
     if not rel:
-        return b""
+        from .services.captures import _crop_from_bbox
+        return _crop_from_bbox(jpeg, best.get("bbox")) if jpeg else b""
     path = settings.media_dir / rel
     try:
         data = path.read_bytes()
@@ -1423,8 +1436,18 @@ async def _run_local_alpr_locked(
             camera_label=f"cam-{camera.id}-{camera.ip_address}-native-crop",
         )
     else:
+        from .services.alpr import recognize_arrival_bytes
+        from .services.camera_framing import framing_from_profiles
+        framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
+        from .services.camera_framing import gate_for
+        prepared = gate_for(int(camera.id)).prepared
+        boxes = prepared[1] if prepared and prepared[0] == hash(jpeg) else None
         alpr = await asyncio.to_thread(
-            recognize_frame, jpeg, camera_label=f"cam-{camera.id}-{camera.ip_address}",
+            recognize_arrival_bytes, jpeg,
+            camera_label=f"cam-{camera.id}-{camera.ip_address}",
+            detect_roi=framing["detect_roi"] or None,
+            detect_zoom=framing["detect_zoom"],
+            detected_boxes=boxes,
         )
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     local = local_from_fastalpr(alpr)
@@ -1467,7 +1490,7 @@ async def _run_local_alpr_locked(
         alpr = dict(alpr or {})
         alpr["persist_skipped"] = reason
         return alpr
-    await _persist_capture_event(db, camera, capture, jpeg, _crop_from_alpr(alpr))
+    await _persist_capture_event(db, camera, capture, jpeg, _crop_from_alpr(alpr, jpeg))
     return alpr
 
 
@@ -1726,6 +1749,30 @@ async def update_camera_streams(
     if pumping_spec(c.id) is not None or viewers_for(c.id) > 0:
         start_live_pump(spec)
     return await camera_streams(c.id, db)
+
+
+@app.put("/cameras/{camera_id}/framing")
+def update_camera_framing(
+    camera_id: int,
+    payload: CameraFramingUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("cameras.manage")),
+):
+    """Save the detection zone and zoom for any camera, not only HVX/OcxConfig."""
+    from .services.camera_framing import apply_framing, framing_from_profiles
+
+    camera = get_camera_or_404(db, camera_id)
+    try:
+        camera.stream_profiles = apply_framing(
+            camera.stream_profiles,
+            detect_roi=payload.detect_roi,
+            detect_zoom=payload.detect_zoom,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    write_audit(db, user, "camera.framing", "camera", str(camera.id), payload.detect_roi or "site default")
+    return {"camera": camera_dict(camera), "framing": framing_from_profiles(camera.stream_profiles)}
 
 
 @app.post("/cameras/{camera_id}/onvif/discover")
@@ -2052,11 +2099,9 @@ def _resolve_stream_profiles(camera: Camera) -> dict:
 
 
 def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "LIVE") -> CameraLiveSpec:
-    # Software OCR on generic IP cameras needs a detect JPEG. HVX/QY already
-    # delivers event/coil JPEGs — do not start a second FFmpeg detect stream.
-    detect = need_detect or (
-        software_ocr_enabled(camera) and not adapter_has_native_plates(camera)
-    )
+    # Software recognition needs frames even on cameras capable of native LPR.
+    # WebRTC viewing does not populate the Python recognition buffer.
+    detect = need_detect or software_ocr_enabled(camera)
     return CameraLiveSpec(
         id=camera.id,
         ip=camera.ip_address,
@@ -2650,8 +2695,8 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
     for capture in events:
         image_id = int(capture.get("image_id") or 0)
         plate = str(capture.get("plate") or "")
-        from .services.dedup import camera_events
-        if camera_events.seen(camera_id=camera_id, plate=plate, image_id=image_id):
+        from .services.dedup import native_callbacks
+        if native_callbacks.seen(camera_id=camera_id, plate=plate, image_id=image_id):
             continue
         try:
             jpeg = await hvx.event_jpeg(handle, image_id=image_id or None)
@@ -2686,8 +2731,11 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 # The coordinator persists exactly one fused capture per vehicle.
                 await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
                 continue
-            if presence:
+            from .services.ocr_policy import NATIVE_ONLY, camera_recognition_mode
+            if presence and camera_recognition_mode(row) == NATIVE_ONLY:
                 await _persist_capture_event(db, row, capture, jpeg, crop)
+            # Software and hybrid modes must reach their FastALPR/fusion
+            # decision before native text can create a session or open a gate.
             from .recognition_worker import worker_owns_software_reads
             if not worker_owns_software_reads(camera_id) and should_run_local(
                 native_plate=str(native.get("plate") or ""),
@@ -2744,6 +2792,56 @@ async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
     await _read_presence_now(camera_id, handle)
 
 
+async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
+    """True when this video frame should be cropped and read.
+
+    Moving frames stay on the detector. A still plate in the zone is read
+    once. HVX snaps and coil triggers do not use this gate; they already
+    mean the car has arrived.
+    """
+    from .services.alpr import locate_plate_boxes
+    from .services.camera_framing import framing_from_profiles, gate_for
+    from .services.recognition_runtime import runtime
+
+    if not _detect_due(int(camera.id)):
+        return False
+    _mark_detect(int(camera.id))
+    framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
+    boxes, located = await asyncio.to_thread(
+        locate_plate_boxes,
+        jpeg,
+        detect_roi=framing["detect_roi"] or None,
+        detect_zoom=framing["detect_zoom"],
+    )
+    gate = gate_for(int(camera.id))
+    if not located.get("available"):
+        return False
+    gate.prepared = (hash(jpeg), boxes)
+    phase = gate.observe(boxes[0] if boxes else None, time.monotonic())
+    lane = runtime.lane(int(camera.id))
+    if phase == "ready":
+        return True
+    if phase == "absent":
+        lane.visit.observe(presence=False, plate="")
+        if lane.visit.state == "IDLE":
+            gate.reset()
+    else:
+        lane.visit.observe(presence=True, plate="")
+    return False
+
+
+def _note_arrival_result(camera_id: int, alpr: dict | None) -> None:
+    from .services.camera_framing import gate_for
+
+    if alpr is None:
+        gate_for(int(camera_id)).rearm()
+        return
+    best = (alpr or {}).get("best") or {}
+    plate = str(best.get("plate_normalized") or best.get("plate") or "")
+    kept = bool(plate) and not alpr.get("persist_skipped")
+    gate_for(int(camera_id)).note_ocr(published=kept)
+
+
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
     """FastALPR samples the latest detect JPEG the way ParkWatch SimpleLPR did.
 
@@ -2761,32 +2859,23 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         if camera is None or not software_ocr_enabled(camera):
             return
     from .services.media_gateway import gateway
-    watching = viewers_for(camera_id) > 0
     sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
-    if sample and sample.jpeg[:2] == b"\xff\xd8":
-        jpeg = sample.jpeg
-        fp = get_state(camera_id).fingerprint
-    elif watching:
-        jpeg = get_state(camera_id).jpeg
-        if jpeg[:2] != b"\xff\xd8":
-            return
-        fp = get_state(camera_id).fingerprint
-    else:
+    jpeg = sample.jpeg if sample else get_state(camera_id).jpeg
+    if jpeg[:2] != b"\xff\xd8":
         from app.infrastructure.media.registry import mediamtx_detect_active
-        if mediamtx_detect_active(camera_id):
-            sample = gateway.peek_detect(camera_id)
-            if not sample or sample.jpeg[:2] != b"\xff\xd8":
+        with short_session() as db:
+            camera = db.get(Camera, camera_id)
+            if camera is None or not software_ocr_enabled(camera):
                 return
-            jpeg = sample.jpeg
-            fp = hash(jpeg)
-        else:
-            if _local_alpr_due(camera_id):
-                with short_session() as db:
-                    camera = db.get(Camera, camera_id)
-                    if camera is not None and not adapter_has_native_plates(camera):
-                        acquire_detect(_live_spec(camera, need_detect=True))
-                _mark_local_alpr(camera_id)
-            return
+            spec = _live_spec(camera, need_detect=True)
+            if mediamtx_detect_active(camera_id):
+                from app.services.mediamtx_detect import ensure_detect_consumer
+                ensure_detect_consumer(spec)
+            else:
+                acquire_detect(spec)
+        return
+    fp = hash(jpeg)
+    watching = viewers_for(camera_id) > 0
     if fp and _alpr_fp.get(camera_id) == fp:
         if not watching:
             _mark_local_alpr(camera_id)
@@ -2796,7 +2885,8 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         camera = db.get(Camera, camera_id)
         if camera is None or not software_ocr_enabled(camera):
             return
-        native = await _native_capture_for_camera(camera)
+        from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+        native = {} if camera_recognition_mode(camera) == LOCAL_ONLY else await _native_capture_for_camera(camera)
         from .services.recognition_runtime import runtime
         # HVX last_capture plate text is not presence. Coil/visit/generic IP are.
         presence = bool(
@@ -2804,7 +2894,13 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             or runtime.lane(camera_id).visit.vehicle_present
             or (software_ocr_enabled(camera) and not adapter_has_native_plates(camera))
         )
-        alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=presence)
+        if not await _video_arrival_ready(camera, jpeg):
+            gateway.note_ai_sample(camera_id, dropped=True)
+            return
+        # The zone already saw a still plate. Read that crop even if the coil
+        # has not pulsed; a moving frame never reaches this call.
+        alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True)
+        _note_arrival_result(camera.id, alpr)
         if alpr is not None:
             _alpr_fp[camera_id] = fp
 
@@ -3025,8 +3121,6 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
         from .services.mediamtx_detect import stop_detect_consumer
         stop_detect_consumer(camera_id)
         return
-    if not _local_alpr_ready(camera_id):
-        return
     from .services.media_gateway import gateway
     sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
     jpeg = sample.jpeg if sample else get_state(camera_id).jpeg
@@ -3054,7 +3148,11 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
         if fp and _alpr_fp.get(camera_id) == fp:
             gateway.note_ai_sample(camera_id, dropped=True)
             return
-        alpr = await _run_local_alpr(db, camera, jpeg, presence=coil_watch.occupied(camera_id), force=True)
+        if not await _video_arrival_ready(camera, jpeg):
+            gateway.note_ai_sample(camera_id, dropped=True)
+            return
+        alpr = await _run_local_alpr(db, camera, jpeg, presence=True, force=False)
+        _note_arrival_result(camera.id, alpr)
         if alpr is not None:
             _alpr_fp[camera_id] = fp
 
@@ -3093,13 +3191,17 @@ async def _camera_event_loop():
             async def service_hvx(camera_id: int, handle: int) -> None:
                 started_one = time.perf_counter()
                 camera_breaker = breaker(f"hvx-camera-{camera_id}")
+                # Software video recognition must survive an SDK/GPIO outage.
+                try:
+                    await _maybe_watch_local_alpr(camera_id, handle)
+                except Exception as exc:
+                    note_worker_failure("camera-software-recognition", str(exc))
                 if not camera_breaker.allow():
                     note_camera(camera_id, sdk_callback="circuit-open")
                     return
                 try:
                     await _drain_camera_events(camera_id, handle)
                     await _poll_coil_and_read(camera_id, handle)
-                    await _maybe_watch_local_alpr(camera_id, handle)
                     camera_breaker.success()
                     note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
                 except Exception as exc:

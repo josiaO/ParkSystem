@@ -3,7 +3,8 @@
 MediaMTX owns the camera connection and browser video. This process is only
 a recognition consumer: one lightweight FFmpeg decoder per lane reads
 ``rtsp://127.0.0.1:8554/<detect-path>``, keeps the newest JPEG, and samples
-a few frames per second. After consensus confirms a plate, OCR pauses until
+a few frames per second. The detector watches the camera's zone. OCR runs
+only after the plate holds still, on the cropped plate, then pauses until
 the vehicle leaves. The Site Service camera-event loop stays authoritative
 until ``fastalpr_new_pipeline_enabled`` is turned on.
 """
@@ -144,15 +145,11 @@ def _software_camera(camera, db) -> bool:
     """
     from app.services.modules import is_enabled, load_config
     from app.services.ocr_policy import camera_recognition_mode
-    from app.infrastructure.hardware.cameras import adapter_has_native_plates
-
-    # Native-LPR cameras already deliver a vehicle-trigger JPEG/metadata event.
-    # Re-read that JPEG once in Site Service (ParkWatch pattern) instead of
-    # continuously decoding their RTSP stream in the worker. Generic cameras
-    # without event LPR keep the continuous DETECT worker.
+    # Recognition policy owns this choice. An HVX camera may have native LPR
+    # capability without delivering callbacks (country/trigger configuration).
+    # FASTALPR_ONLY must keep detecting on video independently of those events.
     return (bool(camera.enabled) and is_enabled("recognition.alpr", db)
             and load_config(db).get("recognition_default") != "VIDEO_ONLY"
-            and not adapter_has_native_plates(camera)
             and camera_recognition_mode(camera) in WORKER_MODES)
 
 
@@ -172,7 +169,10 @@ def _camera_rows() -> list[dict]:
                 continue
             from app.services.ocr_policy import camera_recognition_mode
 
+            from app.services.camera_framing import framing_from_profiles
+
             profiles = dict(camera.stream_profiles or {})
+            framing = framing_from_profiles(profiles)
             rows.append({
                 "id": int(camera.id),
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
@@ -181,7 +181,8 @@ def _camera_rows() -> list[dict]:
                 "site_id": camera.site_id,
                 "plate_policy": site_policy(db),
                 "recognition_mode": camera_recognition_mode(camera),
-                "detect_roi": str(profiles.get("detect_roi") or profiles.get("alpr_detect_roi") or ""),
+                "detect_roi": framing["detect_roi"],
+                "detect_zoom": framing["detect_zoom"],
             })
     return rows
 
@@ -227,6 +228,10 @@ async def _infer_camera(
     sample_fps = float(getattr(settings, "recognition_sample_fps", 3.0) or 3.0)
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
     detect_roi = str(camera.get("detect_roi") or "") or None
+    detect_zoom = camera.get("detect_zoom")
+    from app.services.camera_framing import gate_for
+
+    arrival = gate_for(camera_id)
     track = PlateTrack(
         window_seconds=rec_policy.consensus_window_seconds,
         hold_seconds=rec_policy.hold_seconds,
@@ -299,10 +304,17 @@ async def _infer_camera(
                 backoff = min(8.0, backoff * 2)
 
     last_probe = 0.0
+    probe_failures = 0
     confirmed_visit_id = lane.visit.visit_id if lane.visit.state == "EVENT_PUBLISHED" else ""
 
+    async def _with_limiter(call):
+        if inference_limiter is None:
+            return await call
+        async with inference_limiter:
+            return await call
+
     async def _infer() -> None:
-        nonlocal last_probe, confirmed_visit_id
+        nonlocal last_probe, probe_failures, confirmed_visit_id
         stall = float(getattr(settings, "recognition_worker_stall_seconds", 5.0) or 5.0)
         while not stop.is_set():
             try:
@@ -325,9 +337,12 @@ async def _infer_camera(
                 ready.clear()
                 from app.services.alpr import plate_still_present
 
-                probe = asyncio.create_task(asyncio.to_thread(
-                    plate_still_present, ticket.jpeg, detect_roi=detect_roi,
-                ))
+                async def _probe_present():
+                    return await _with_limiter(asyncio.to_thread(
+                        plate_still_present, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
+                    ))
+
+                probe = asyncio.create_task(_probe_present())
                 try:
                     present = await asyncio.shield(probe)
                 except asyncio.CancelledError:
@@ -342,15 +357,26 @@ async def _infer_camera(
                     runtime.finish(ticket, plate="")
                     stats["last_error"] = type(exc).__name__
                     continue
-                runtime.finish(ticket, plate=lane.visit.published_plate if present else "")
+                runtime.finish(
+                    ticket,
+                    plate=lane.visit.published_plate if present is not False else "",
+                )
                 stats["departure_checks"] = int(stats.get("departure_checks") or 0) + 1
                 stats["recognition_inflight"] = False
                 # Detector-only work is recognition progress while OCR is paused.
                 stats["last_inference_at"] = time.time()
                 if present is None:
+                    probe_failures += 1
                     stats["state"] = "DEGRADED"
                     stats["last_error"] = "departure-detector-unavailable"
+                    # A stuck detector must not freeze the lane. Resume OCR
+                    # without clearing the published plate or opening a new visit.
+                    if probe_failures >= 3:
+                        confirmed_visit_id = ""
+                        stats["ocr_paused"] = False
+                        arrival.reset()
                     continue
+                probe_failures = 0
                 stats["state"] = "READY"
                 if present:
                     if lane.visit.state == "VEHICLE_DEPARTING":
@@ -371,6 +397,7 @@ async def _infer_camera(
                     lane.clear_current_plate()
                     stats["last_plate"] = ""
                     stats["ocr_paused"] = False
+                    arrival.reset()
                 continue
             stats["ocr_paused"] = False
             ticket = runtime.begin_if_idle(camera_id, stale_frame_ms=rec_policy.stale_frame_ms)
@@ -386,10 +413,60 @@ async def _infer_camera(
             stats["recognition_generation"] = ticket.generation
             stats["recognition_inflight"] = True
             stats["recognition_frame_seq"] = ticket.frame_seq
+            from app.services.alpr import locate_plate_boxes
+
+            locate_task = asyncio.create_task(_with_limiter(asyncio.to_thread(
+                locate_plate_boxes, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
+            )))
+            try:
+                boxes, located = await asyncio.shield(locate_task)
+            except asyncio.CancelledError:
+                # Cancelling the waiter does not cancel the model thread.
+                try:
+                    await locate_task
+                finally:
+                    runtime.finish(ticket, plate="")
+                raise
+            except Exception as exc:
+                runtime.finish(ticket, plate="")
+                stats["last_error"] = type(exc).__name__
+                stats["recognition_inflight"] = False
+                await asyncio.sleep(interval)
+                continue
+            if not located.get("available"):
+                # Do not OCR the live frame when the detector cannot crop a plate.
+                stats.update(state="READY", last_inference_at=time.time(), recognition_inflight=False)
+                stats["arrival"] = "detector-wait"
+                runtime.finish(ticket, plate="")
+                await asyncio.sleep(interval)
+                continue
+            # A healthy empty-lane detector is progress, even without OCR.
+            # Otherwise the supervisor restarts idle lanes every few seconds.
+            stats.update(state="READY", last_inference_at=time.time())
+            phase = arrival.observe(boxes[0] if boxes else None, time.monotonic())
+            stats["arrival"] = phase
+            if phase == "absent":
+                runtime.finish(ticket, plate="")
+                decision = note_reading_detail(track, "", time.monotonic())
+                stats["consensus"] = decision.as_dict()
+                lane.visit.observe(presence=False, plate="")
+                if lane.visit.state == "IDLE":
+                    stats["last_plate"] = ""
+                    arrival.reset()
+                stats["recognition_inflight"] = False
+                await asyncio.sleep(interval)
+                continue
+            if phase != "ready":
+                runtime.finish(ticket, plate="")
+                lane.visit.observe(presence=True, plate="")
+                stats["recognition_inflight"] = False
+                stats["last_inference_at"] = time.time()
+                await asyncio.sleep(interval)
+                continue
             started = time.monotonic()
             try:
                 event = await asyncio.wait_for(
-                    provider.process({
+                    _with_limiter(provider.process({
                         "jpeg": ticket.jpeg,
                         "camera_id": camera_id,
                         "site_id": camera.get("site_id"),
@@ -397,18 +474,22 @@ async def _infer_camera(
                         "lane_id": camera.get("lane_id"),
                         "plate_policy": camera.get("plate_policy") or {},
                         "detect_roi": detect_roi,
-                    }),
+                        "detect_zoom": detect_zoom,
+                        "plate_boxes": boxes if located.get("available") else None,
+                    })),
                     timeout=stall,
                 )
             except asyncio.TimeoutError:
                 stats["last_error"] = "stall-timeout"
                 stats["state"] = "STALLED"
                 runtime.recover(camera_id)
+                arrival.rearm()
                 stats["recognition_stalls"] = int(stats.get("recognition_stalls") or 0) + 1
                 stats["recognition_restarts"] = int(stats.get("recognition_restarts") or 0) + 1
                 continue
             except Exception as exc:
                 runtime.finish(ticket, plate="")
+                arrival.rearm()
                 stats["last_error"] = type(exc).__name__
                 stats["state"] = "DEGRADED"
                 await asyncio.sleep(interval)
@@ -420,15 +501,11 @@ async def _infer_camera(
             stats["last_plate"] = plate
             stats["visit_id"] = lane.visit.visit_id
             if not accepted:
+                arrival.rearm()
                 stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
                 continue
             if event.get("ok") is False and not plate:
-                decision = note_reading_detail(track, "", time.monotonic())
-                stats["consensus"] = decision.as_dict()
-                if not plate:
-                    lane.visit.observe(presence=False, plate="")
-                    if lane.visit.state == "IDLE":
-                        stats["last_plate"] = ""
+                arrival.rearm()
                 await asyncio.sleep(interval)
                 continue
             decision = note_reading_detail(
@@ -436,13 +513,21 @@ async def _infer_camera(
             )
             stats["consensus"] = decision.as_dict()
             if not plate:
-                lane.visit.observe(presence=False, plate="")
+                arrival.note_ocr(published=False)
+                lane.visit.observe(presence=bool(boxes), plate="")
                 if lane.visit.state == "IDLE":
                     stats["last_plate"] = ""
                 await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
                 continue
             lane.visit.observe(presence=True, plate=plate)
+            if (
+                lane.visit.state == "EVENT_PUBLISHED"
+                and lane.visit.visit_id
+                and plate == (lane.visit.published_plate or "")
+            ):
+                confirmed_visit_id = lane.visit.visit_id
             if not decision.publish:
+                arrival.note_ocr(published=False)
                 await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
                 continue
             try:
@@ -464,9 +549,11 @@ async def _infer_camera(
                 lane.note_published()
                 lane.visit.mark_published(decision.plate)
                 confirmed_visit_id = lane.visit.visit_id
+                arrival.note_ocr(published=True)
             except Exception as exc:
                 stats["last_error"] = type(exc).__name__
                 track.release()
+                arrival.rearm()
             await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
 
     decode_task = asyncio.create_task(_decode(), name=f"detect-decode-{camera_id}")

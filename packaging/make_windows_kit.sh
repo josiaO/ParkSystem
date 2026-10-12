@@ -52,6 +52,35 @@ download() {
   mv "$dest.partial" "$dest"
 }
 
+echo "Bundling FFmpeg (Windows amd64)..."
+FFMPEG_ARCHIVE="imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl"
+FFMPEG_SHA256="02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a"
+download "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl" "$CACHE/$FFMPEG_ARCHIVE"
+echo "$FFMPEG_SHA256  $CACHE/$FFMPEG_ARCHIVE" | sha256sum --check --status
+python3 - "$CACHE/$FFMPEG_ARCHIVE" "$OUT/payload/vendor/ffmpeg" <<'PYFFMPEG'
+import sys
+import zipfile
+from pathlib import Path
+archive, output = sys.argv[1], Path(sys.argv[2])
+(output / "bin").mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(archive) as z:
+    binary = z.read("imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe")
+    if not binary.startswith(b"MZ"):
+        raise SystemExit("FFmpeg is not a Windows executable")
+    (output / "bin" / "ffmpeg.exe").write_bytes(binary)
+    (output / "IMAGEIO-LICENSE.txt").write_bytes(z.read("imageio_ffmpeg-0.6.0.dist-info/LICENSE"))
+PYFFMPEG
+cp "$ROOT/packaging/licenses/FFmpeg-GPL-3.txt" "$OUT/payload/vendor/ffmpeg/LICENSE.txt"
+cat > "$OUT/payload/vendor/ffmpeg/PROVENANCE.txt" <<'FFMPEGINFO'
+FFmpeg 7.1 Windows x64, distributed by imageio-ffmpeg 0.6.0.
+Archive SHA256: 02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a
+Distribution: https://pypi.org/project/imageio-ffmpeg/0.6.0/
+Build scripts: https://github.com/imageio/imageio-ffmpeg/tree/v0.6.0/binaries
+FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/n7.1
+FFmpeg is a separate executable, licensed under GPL version 3.
+The imageio packaging license is included separately.
+FFMPEGINFO
+
 echo "Bundling MediaMTX (Windows amd64, optional sidecar)..."
 MEDIAMTX_VER="${MEDIAMTX_VERSION:-v1.11.3}"
 MEDIAMTX_ZIP="$CACHE/mediamtx_${MEDIAMTX_VER}_windows_amd64.zip"
@@ -199,6 +228,9 @@ cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
 cp "$ROOT/docs-site/i18n.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
+if [[ -f "$ROOT/PARKWATCH-LESSONS.md" ]]; then
+  cp "$ROOT/PARKWATCH-LESSONS.md" "$OUT/documentation/"
+fi
 
 echo "Verifying offline payload (wheels, NetSDK, models, Python)..."
 python3 "$ROOT/packaging/verify_windows_kit.py" "$OUT/payload"

@@ -37,12 +37,13 @@ class FastALPRPlateEngine:
             "replaceable": True,
             "country": settings.alpr_country or "",
             "contrast_sensitivity": float(settings.alpr_csf or 0.918),
-            "pipeline": "detect_crop_ocr",
+            "pipeline": "arrival_crop_ocr",
             "flow": [
-                "Camera snaps a JPEG (HVX/QY image callback or coil snapshot).",
-                "This engine detects the plate on that JPEG.",
-                "OCR runs on the padded plate crop only.",
-                "Parking receives one normalized plate event.",
+                "The detector watches the camera's detection zone.",
+                "OCR waits until the plate holds still, then reads the crop only.",
+                "An HVX/OcxConfig vehicle snap uses that still, or the camera's own plate crop.",
+                "Other cameras (RTSP, ONVIF, Hikvision, Dahua) use the same zone and zoom.",
+                "Parking receives one plate for the visit.",
             ],
             "models": {
                 "detector": alpr.DETECTOR_MODEL,
@@ -61,8 +62,17 @@ class FastALPRPlateEngine:
             ),
         }
 
-    def recognize_bytes(self, jpeg: bytes, *, camera_label: str = "frame", detect_roi: str | None = None) -> dict[str, Any]:
-        result = alpr.recognize_bytes(jpeg, camera_label=camera_label, detect_roi=detect_roi)
+    def recognize_bytes(
+        self,
+        jpeg: bytes,
+        *,
+        camera_label: str = "frame",
+        detect_roi: str | None = None,
+        detect_zoom: float | None = None,
+    ) -> dict[str, Any]:
+        result = alpr.recognize_bytes(
+            jpeg, camera_label=camera_label, detect_roi=detect_roi, detect_zoom=detect_zoom,
+        )
         result["engine_id"] = self.id
         result["engine_version"] = self.version
         return result

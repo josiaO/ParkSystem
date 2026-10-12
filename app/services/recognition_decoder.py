@@ -156,7 +156,7 @@ class RecognitionDecoder:
                 buf += chunk
                 if len(buf) > 1_000_000:
                     start = buf.rfind(_JPEG_SOI)
-                    buf = buf[start:] if start > 0 else b""
+                    buf = buf[start:] if start >= 0 else b""
                 jpeg, buf = _latest_jpeg(buf)
                 if jpeg[:2] == _JPEG_SOI and jpeg.endswith(_JPEG_EOI):
                     deadline = loop.time() + timeout

@@ -113,8 +113,9 @@ def setup_status(db: Session) -> dict:
         hint = f"Sign in as {settings.bootstrap_username} with the install password"
     else:
         hint = (
-            "This PC already has an admin account, so the first-run password will not work. "
-            "Use the existing password, or run: python -m app.cli reset-admin"
+            "This PC already has an admin account, so an older password will be rejected. "
+            f"The install password is in {bootstrap_password_path()}. "
+            "If that password is rejected, run: python -m app.cli reset-admin"
         )
         password = ""
     if not platform["hvx_host_supported"]:

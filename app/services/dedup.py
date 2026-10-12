@@ -37,5 +37,6 @@ class EventDeduper:
         self._seen = {k: v for k, v in self._seen.items() if v > now}
 
 
+native_callbacks = EventDeduper(window_seconds=2.0)
 camera_events = EventDeduper(window_seconds=2.0)
 gate_commands = EventDeduper(window_seconds=1.5)
