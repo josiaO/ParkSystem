@@ -170,6 +170,8 @@ def profile_warnings(
 def public_profiles(profiles: dict[str, Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for role, row in (profiles or {}).items():
+        if not isinstance(row, dict):
+            continue
         item = dict(row or {})
         uri = str(item.get("uri") or item.get("url") or "")
         if uri:
@@ -188,7 +190,12 @@ def merge_profiles(existing: dict[str, Any] | None, incoming: dict[str, Any] | N
     merged = dict(existing or {})
     for role, row in (incoming or {}).items():
         key = str(role).upper()
-        if key not in STREAM_ROLES:
+        if key == "FRAMING" and isinstance(row, dict):
+            current = dict(merged.get(key) or {})
+            current.update({k: v for k, v in row.items() if v not in (None, "")})
+            merged[key] = current
+            continue
+        if key not in STREAM_ROLES or not isinstance(row, dict):
             continue
         current = dict(merged.get(key) or {})
         current.update({k: v for k, v in dict(row or {}).items() if v not in (None, "")})

@@ -85,6 +85,11 @@ class CameraUpdate(BaseModel):
     camera_type: str | None = None
 
 
+class CameraFramingUpdate(BaseModel):
+    detect_roi: str = ""
+    detect_zoom: float = Field(default=1.0, ge=1.0, le=4.0)
+
+
 class GateCreate(BaseModel):
     name: str
     mode: str = "COMMISSIONING"

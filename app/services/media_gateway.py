@@ -53,6 +53,30 @@ def take_latest_jpeg(buf: bytes) -> tuple[bytes, bytes]:
         buf = buf[end + 2:]
 
 
+def live_scale_filter(scale: int) -> str:
+    """Fit inside the requested width. A smaller substream is not enlarged."""
+    width = max(160, min(int(scale), 1920))
+    return f"scale={width}:-2:force_original_aspect_ratio=decrease"
+
+
+async def _drain_stderr(stream, sink: bytearray, limit: int = 4096) -> None:
+    """Read FFmpeg logs while frames flow. An unread stderr pipe stalls the decoder."""
+    if stream is None:
+        return
+    try:
+        while True:
+            chunk = await stream.read(1024)
+            if not chunk:
+                return
+            sink.extend(chunk)
+            if len(sink) > limit:
+                del sink[: len(sink) - limit]
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+
+
 @dataclass(frozen=True)
 class CameraLiveSpec:
     id: int
@@ -825,6 +849,7 @@ class LocalMediaGateway:
         scale: int | None = 960,
         output_fps: float | None = None,
         session: StreamSession | None = None,
+        jpeg_q: int = 8,
     ):
         """Keep one ffmpeg process open so live view is a real stream, not one still per spawn."""
         binary = ffmpeg_bin()
@@ -841,10 +866,11 @@ class LocalMediaGateway:
         if output_fps:
             filters.append(f"fps={max(1.0, min(float(output_fps), 30.0)):g}")
         if scale:
-            filters.append(f"scale={int(scale)}:-2")
+            filters.append(live_scale_filter(scale))
         if filters:
             cmd.extend(["-vf", ",".join(filters)])
-        cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "8", "pipe:1"])
+        quality = max(2, min(int(jpeg_q), 31))
+        cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", str(quality), "pipe:1"])
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=512 * 1024,
@@ -852,26 +878,32 @@ class LocalMediaGateway:
         if session is not None and proc.pid:
             session.child_pids.add(proc.pid)
             session.ffmpeg_pid = proc.pid
+        errors = bytearray()
+        stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, errors))
         buf = b""
+        timeout = float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         try:
             while True:
-                chunk = await asyncio.wait_for(
-                    proc.stdout.read(65536),
-                    timeout=float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0),
-                )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("live decoder produced no complete frame")
+                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=remaining)
                 if not chunk:
-                    err = b""
-                    if proc.stderr:
-                        err = await proc.stderr.read()
-                    raise RuntimeError((err.decode(errors="replace") or "ffmpeg live stream ended")[-300:])
+                    text = errors.decode(errors="replace").strip()
+                    raise RuntimeError(text[-300:] or "ffmpeg live stream ended")
                 buf += chunk
                 if len(buf) > 2_000_000:
                     start = buf.rfind(JPEG_SOI)
                     buf = buf[start:] if start >= 0 else buf[-200_000:]
                 jpeg, buf = take_latest_jpeg(buf)
                 if jpeg:
+                    deadline = loop.time() + timeout
                     yield jpeg
         finally:
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
             await _terminate_proc(proc)
             if session is not None and proc.pid:
                 session.child_pids.discard(proc.pid)

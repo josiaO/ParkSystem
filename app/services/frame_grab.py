@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import platform
 import shutil
 import uuid
+from pathlib import Path
 
 from app.config import settings
 from app.services.rtsp_probe import redact_url, vendor_candidates
@@ -13,6 +15,11 @@ JPEG_SOI = b"\xff\xd8"
 
 
 def ffmpeg_bin() -> str | None:
+    # Resolve relative to the installed app, independent of service PATH/cwd.
+    if platform.system() == "Windows":
+        bundled = Path(__file__).resolve().parents[2] / "vendor" / "ffmpeg" / "bin" / "ffmpeg.exe"
+        if bundled.is_file():
+            return str(bundled)
     return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
 
 

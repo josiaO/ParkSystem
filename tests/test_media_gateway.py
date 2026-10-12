@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import unittest
 from pathlib import Path
 import sys
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -21,7 +22,7 @@ from app.models import Role, User, UserRole
 from app.security import hash_password
 from app.services.ffmpeg_profiles import fallback_profile, list_profiles, normalize_profile, profile_args
 from app.services.latest_frame import LatestFrameBuffer
-from app.services.media_gateway import LocalMediaGateway, take_latest_jpeg
+from app.services.media_gateway import LocalMediaGateway, live_scale_filter, take_latest_jpeg
 from app.services.onvif_discover import parse_media_xaddr, parse_profiles, parse_stream_uri
 from app.services.preview import CameraLiveSpec, acquire_live, live_metrics, release_live, remember_frame, stop_live_pumps, viewers_for
 from app.services.queues import AI_FRAMES, BoundedQueue
@@ -271,6 +272,68 @@ class MediaApiTests(unittest.TestCase):
         self.assertEqual(viewers_for(77), 0)
         rows = {row["camera_id"]: row for row in live_metrics()}
         self.assertEqual(rows[77]["viewers"], 0)
+
+
+class LiveDecodeTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_scale_fits_without_enlarging(self):
+        self.assertEqual(
+            live_scale_filter(960),
+            "scale=960:-2:force_original_aspect_ratio=decrease",
+        )
+
+    async def test_stderr_is_drained_before_the_next_frame(self):
+        drained = asyncio.Event()
+        seen = {}
+
+        class Stdout:
+            def __init__(self):
+                self.calls = 0
+
+            async def read(self, _size):
+                self.calls += 1
+                if self.calls == 1:
+                    await asyncio.wait_for(drained.wait(), 0.5)
+                    return b"\xff\xd8" + b"frame" + b"\xff\xd9"
+                return b""
+
+        class Stderr:
+            async def read(self, _size):
+                if not drained.is_set():
+                    drained.set()
+                    return b"rtsp warning " * 4000
+                return b""
+
+        proc = type("Proc", (), {})()
+        proc.pid = 41
+        proc.returncode = 0
+        proc.stdout = Stdout()
+        proc.stderr = Stderr()
+        proc.terminate = lambda: None
+        proc.kill = lambda: None
+        proc.wait = AsyncMock()
+
+        async def fake_exec(*cmd, **kwargs):
+            seen["cmd"] = cmd
+            return proc
+
+        gateway = LocalMediaGateway()
+        jpegs = []
+        with patch("app.services.media_gateway.ffmpeg_bin", return_value="ffmpeg"), \
+             patch("app.services.media_gateway.asyncio.create_subprocess_exec", fake_exec):
+            stream = gateway.ffmpeg_jpeg_stream(
+                "rtsp://127.0.0.1:8554/cam1",
+                output_fps=10,
+                scale=960,
+                jpeg_q=12,
+            )
+            async for jpeg in stream:
+                jpegs.append(jpeg)
+                break
+            await stream.aclose()
+        self.assertEqual(jpegs, [b"\xff\xd8" + b"frame" + b"\xff\xd9"])
+        command = " ".join(seen["cmd"])
+        self.assertIn("fps=10,scale=960:-2:force_original_aspect_ratio=decrease", command)
+        self.assertIn("-q:v 12", command)
 
 
 if __name__ == "__main__":

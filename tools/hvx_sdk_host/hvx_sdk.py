@@ -175,6 +175,7 @@ class HVXSDK:
         self.dll = ctypes.WinDLL(str(dll))  # stdcall
         self._report_cbs = {}
         self._image_cbs = {}
+        self._recognition_sessions = {}
         self._last_capture = {}
         self._last_live_jpeg = {}
         self._last_event_jpeg = {}
@@ -347,12 +348,16 @@ class HVXSDK:
         return 0
 
     def _register_report(self, handle: int) -> int:
-        cb = self._FGetReportCBEx(self._on_report)
+        cb = self._report_cbs.get(handle)
+        if cb is None:
+            cb = self._FGetReportCBEx(self._on_report)
         self._report_cbs[handle] = cb
         return int(self.dll.Net_RegReportMessEx(handle, cb, None))
 
     def _register_image(self, handle: int) -> int:
-        cb = self._FGetImageCbEx(self._on_image)
+        cb = self._image_cbs.get(handle)
+        if cb is None:
+            cb = self._FGetImageCbEx(self._on_image)
         self._image_cbs[handle] = cb
         rc = int(self.dll.Net_RegImageRecvEx(handle, cb, None))
         if hasattr(self.dll, "Net_RegImageRecvEx2"):
@@ -405,6 +410,13 @@ class HVXSDK:
             steps.append({"api": "Net_RegOffLineClient", "rc": offline_rc, "name": describe_rc(offline_rc)})
             image_rc = self._register_image(handle)
             steps.append({"api": "Net_RegImageRecvEx", "rc": image_rc, "name": describe_rc(image_rc)})
+            with self._lock:
+                self._recognition_sessions[int(handle)] = {
+                    "lock": threading.Lock(), "closed": False, "state": state,
+                    "pending": image_rc != DC_NO_ERROR, "image_recv_rc": image_rc,
+                    "next_check": 0.0, "retry_at": 0.0, "backoff": 1.0,
+                    "rearms": 0, "last_error": "",
+                }
             video = self.start_video(handle)
             steps.append({"api": "Net_StartVideo", **{k: v for k, v in video.items() if k != "hwnd"}})
             snap_rc = int(self.snapshot_trigger(handle))
@@ -468,6 +480,7 @@ class HVXSDK:
         return self.jpeg_for(handle)
 
     def drain_events(self, handle: int) -> list[dict]:
+        self._refresh_recognition(handle)
         with self._lock:
             queue = self._pending_events.get(int(handle))
             if not queue:
@@ -501,13 +514,74 @@ class HVXSDK:
                     return pair[1]
             return self._last_event_crop.get(int(handle), b"")
 
+    def _refresh_recognition(self, handle: int, observed_state=None) -> dict:
+        """Re-arm existing callbacks after an observed SDK reconnect.
+
+        Called by background event polling, never by the JPEG pump. SDK ABI,
+        login, video and gate operations stay on their existing paths.
+        """
+        handle = int(handle)
+        with self._lock:
+            session = self._recognition_sessions.get(handle)
+        if session is None:
+            return {"ready": False, "reason": "no active SDK session"}
+        with session["lock"]:
+            now = time.monotonic()
+            if session["closed"]:
+                return {"ready": False, "reason": "SDK session closed"}
+            if observed_state is not None or now >= session["next_check"]:
+                session["next_check"] = now + 1.0
+                try:
+                    state = int(observed_state if observed_state is not None
+                                else self.dll.Net_QueryConnState(handle))
+                    previous = session["state"]
+                    session["state"] = state
+                    if state in {CONN_STATE_DIS, CONN_STATE_TRYING}:
+                        session["pending"] = True
+                    if state == CONN_STATE_SUCC and previous in {CONN_STATE_DIS, CONN_STATE_TRYING}:
+                        session["pending"] = True
+                        session["retry_at"] = 0.0
+                    if state == CONN_STATE_SUCC and session["pending"] and now >= session["retry_at"]:
+                        # Keep the same ctypes callback objects alive across re-registration.
+                        self._register_report(handle)
+                        rc = self._register_image(handle)
+                        session["image_recv_rc"] = rc
+                        session["pending"] = rc != DC_NO_ERROR
+                        session["last_error"] = "" if rc == DC_NO_ERROR else describe_rc(rc)
+                        if rc == DC_NO_ERROR:
+                            session["rearms"] += 1
+                            session["backoff"] = 1.0
+                        else:
+                            session["retry_at"] = now + session["backoff"]
+                            session["backoff"] = min(8.0, session["backoff"] * 2)
+                except Exception as exc:
+                    session["pending"] = True
+                    session["last_error"] = type(exc).__name__
+                    session["retry_at"] = now + session["backoff"]
+                    session["next_check"] = session["retry_at"]
+                    session["backoff"] = min(8.0, session["backoff"] * 2)
+            return {
+                "ready": session["state"] == CONN_STATE_SUCC and not session["pending"],
+                "image_recv_rc": session["image_recv_rc"],
+                "rearms": session["rearms"],
+                "retry_pending": session["pending"],
+                "last_error": session["last_error"],
+            }
+
     def state(self, handle: int):
         state = int(self.dll.Net_QueryConnState(handle))
         with self._lock:
             capture = dict(self._last_capture.get(int(handle)) or {})
-        return {"state": state, "name": describe_state(state), "last_capture": capture or None}
+        recognition = self._refresh_recognition(handle, observed_state=state)
+        return {"state": state, "name": describe_state(state), "last_capture": capture or None,
+                "recognition": recognition}
 
     def disconnect(self, handle: int):
+        with self._lock:
+            session = self._recognition_sessions.pop(int(handle), None)
+        if session is not None:
+            with session["lock"]:
+                session["closed"] = True
         self.stop_video(handle)
         rc = self.dll.Net_DisConnCamera(handle)
         self._report_cbs.pop(handle, None)
