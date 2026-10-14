@@ -146,6 +146,7 @@ if (-not $KeepApp) {
     foreach ($root in $installRoots) { Remove-TreeRetry $root }
     Remove-Item (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\SmartPark") -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path ([Environment]::GetFolderPath("Desktop")) "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path ([Environment]::GetFolderPath("Desktop")) "SmartPark startup check.lnk") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path ([Environment]::GetFolderPath("Startup")) "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
 }
 

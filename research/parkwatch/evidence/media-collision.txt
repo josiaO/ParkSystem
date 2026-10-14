@@ -1,0 +1,1 @@
+CONFIRMED: two queued events with image_id=0 share the second image; missing ID 999 also returns the latest image.

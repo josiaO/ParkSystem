@@ -42,13 +42,13 @@ from .services.gates import controller
 from .services.led_udp import send_led_text
 from .services.hvx_client import HVXHostClient, HVXHostUnavailable
 from .services.hvx_vendor import vendor_inventory
-from .services.camera_lpr import choose_overlay_box, local_from_fastalpr, native_from_sdk_capture
+from .services.camera_lpr import choose_overlay_box, fit_plate_box, live_plate_overlay, local_from_fastalpr, native_from_sdk_capture
 from .services.ocr_policy import fusion_mode, should_run_local, software_ocr_enabled
 from .services.presence import coil_watch
 from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
-    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, remember_viewer_transport, fresh_alpr, fresh_last_car, snapshot_for_camera, start_idle_watch,
+    pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, remember_plate_box, held_plate_box, remember_viewer_transport, fresh_alpr, fresh_last_car, snapshot_for_camera, start_idle_watch,
     watch_live,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
@@ -1211,7 +1211,9 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         local_confidence=float(local.get("confidence") or 0),
         mode=fusion_mode(camera),
     )
-    overlay = choose_overlay_box(native, local)
+    fresh_overlay = choose_overlay_box(native, None)
+    if fresh_overlay:
+        remember_plate_box(camera.id, fresh_overlay)
     live = state
     lane = runtime.lane(camera.id)
     rec = lane.snapshot()
@@ -1219,11 +1221,17 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         rec.get("vehicle_present")
         or coil_watch.occupied(camera.id)
         or (native or {}).get("have_vehicle")
+        or fresh_overlay
     )
     last = fresh_last_car(camera.id) if occupied else None
     if not occupied:
         remember_last_car(camera.id, None)
+        if not fresh_overlay:
+            remember_plate_box(camera.id, None)
         last = None
+    overlay = live_plate_overlay(
+        native, local, held_plate_box(camera.id), occupied=occupied or bool(fresh_overlay),
+    )
     current_plate = str((last or {}).get("plate") or rec.get("last_plate") or "")
     if not occupied:
         current_plate = ""
@@ -1247,7 +1255,7 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "alpr": alpr if occupied else None,
         "resolved_plate": current_plate,
         "current_plate": current_plate or None,
-        "overlay": overlay if occupied else None,
+        "overlay": overlay,
         "last_car": last,
         "clear_last_car": last is None,
         "vehicle_present": occupied,
@@ -1442,6 +1450,15 @@ async def _run_local_alpr_locked(
         from .services.camera_framing import gate_for
         prepared = gate_for(int(camera.id)).prepared
         boxes = prepared[1] if prepared and prepared[0] == hash(jpeg) else None
+        if boxes is None and isinstance(native.get("bbox"), dict):
+            fitted = fit_plate_box(
+                {**native["bbox"], "image_width": native.get("image_width") or 0, "image_height": native.get("image_height") or 0},
+                jpeg,
+                src_w=int(native.get("image_width") or 0),
+                src_h=int(native.get("image_height") or 0),
+            )
+            if fitted:
+                boxes = [fitted]
         alpr = await asyncio.to_thread(
             recognize_arrival_bytes, jpeg,
             camera_label=f"cam-{camera.id}-{camera.ip_address}",
@@ -2697,6 +2714,12 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         plate = str(capture.get("plate") or "")
         from .services.dedup import native_callbacks
         if native_callbacks.seen(camera_id=camera_id, plate=plate, image_id=image_id):
+            # A second callback can carry the box the first one missed. Remember
+            # it for the live view, but do not open another session.
+            late = native_from_sdk_capture(capture)
+            late_box = choose_overlay_box(late)
+            if late_box:
+                remember_plate_box(camera_id, late_box)
             continue
         try:
             jpeg = await hvx.event_jpeg(handle, image_id=image_id or None)
@@ -2711,8 +2734,12 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         real_native = bool(native_plate) and not is_empty_scene_ocr(
             native_plate, confidence=float(native.get("confidence") or 0),
         )
-        # Only treat real vehicle signals as presence — not empty-scene OCR (ZC…).
-        presence = bool(native.get("have_vehicle") or real_native)
+        plate_overlay = choose_overlay_box(native)
+        if plate_overlay:
+            remember_plate_box(camera_id, plate_overlay)
+        # A camera plate rectangle is a vehicle even when the plate text is empty.
+        # Empty-scene OCR (ZC…) is not.
+        presence = bool(native.get("have_vehicle") or real_native or plate_overlay)
         from .services.recognition_runtime import runtime
         lane = runtime.lane(camera_id)
         lane.note_native_event()
@@ -3228,6 +3255,7 @@ async def _camera_event_loop():
                 except Exception:
                     pass
                 remember_last_car(camera_id, None)
+                remember_plate_box(camera_id, None)
                 from .services.recognition_runtime import runtime
                 lane = runtime.lane(camera_id)
                 lane.clear_current_plate()
@@ -3262,6 +3290,7 @@ async def _camera_event_loop():
                 lane.visit.observe(presence=False, absence_seconds=absence)
                 if lane.visit.state == IDLE:
                     remember_last_car(camera_id, None)
+                    remember_plate_box(camera_id, None)
                     lane.clear_current_plate()
                     remember_alpr(camera_id, {})
             for camera_id in ipcam_ids:
@@ -3274,6 +3303,7 @@ async def _camera_event_loop():
                     lane.visit.observe(presence=False, absence_seconds=absence)
                 if lane.visit.state == IDLE:
                     remember_last_car(camera_id, None)
+                    remember_plate_box(camera_id, None)
                     lane.clear_current_plate()
         except asyncio.CancelledError:
             raise

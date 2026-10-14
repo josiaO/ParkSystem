@@ -413,7 +413,20 @@ def persist_event(
             elif incoming_plate and float(native.get("confidence") or 0) > float(existing.confidence or 0):
                 existing.confidence = float(native.get("confidence") or existing.confidence or 0)
                 updated = True
-            existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
+            incoming = bbox_from_lp_box(box)
+            already = bbox_from_lp_box(existing.bbox)
+            if incoming:
+                merged = dict(existing.bbox or {})
+                merged.update(incoming)
+                if box.get("image_width"):
+                    merged["image_width"] = box.get("image_width")
+                    merged["image_height"] = box.get("image_height")
+                if box.get("source"):
+                    merged["source"] = box.get("source")
+                existing.bbox = attach_fusion_audit(merged, capture)
+                updated = True
+            elif not already:
+                existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
             if plate_jpeg[:2] == b"\xff\xd8":
                 existing.crop_path = _write_jpeg("crops", f"cam{camera.id}-img{image_id}-plate.jpg", plate_jpeg)
                 updated = True
@@ -438,6 +451,18 @@ def persist_event(
             # same callback/frame, never forever; otherwise an old plate can
             # become the camera's permanent "latest vehicle".
             if 0 <= age <= 1.0:
+                # The picture callback and the plate-info report can arrive as
+                # two image_id=0 events. Keep the one that actually has usLpBox.
+                incoming = bbox_from_lp_box(box)
+                already = bbox_from_lp_box(latest.bbox)
+                if incoming and not already:
+                    latest.bbox = attach_fusion_audit({**(latest.bbox or {}), **incoming}, capture)
+                    if plate_jpeg[:2] == b"\xff\xd8":
+                        latest.crop_path = _write_jpeg(
+                            "crops", f"cam{camera.id}-img0-plate.jpg", plate_jpeg,
+                        )
+                    db.commit()
+                    db.refresh(latest)
                 return latest
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
     snapshot_path = _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg) if jpeg[:2] == b"\xff\xd8" else ""

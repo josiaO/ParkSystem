@@ -869,10 +869,12 @@ class CameraLivePane(QFrame):
         fusion=payload.get("fusion") or {}
         native=payload.get("native") or {}
         resolved=payload.get("resolved_plate") or fusion.get("resolved_plate") or shown.get("plate") or native.get("plate") or ""
-        self._last_overlay=payload.get("overlay") or native.get("bbox")
+        stored=shown.get("bbox") if isinstance(shown.get("bbox"), dict) else None
+        self._last_overlay=payload.get("overlay") or native.get("bbox") or stored
         if isinstance(self._last_overlay, dict) and "x1" in self._last_overlay:
-            if "image_width" not in self._last_overlay:
-                self._last_overlay={**self._last_overlay, "label": resolved or native.get("plate") or "", "image_width": native.get("image_width") or 0, "image_height": native.get("image_height") or 0}
+            width=int(self._last_overlay.get("image_width") or native.get("image_width") or (stored or {}).get("image_width") or 0)
+            height=int(self._last_overlay.get("image_height") or native.get("image_height") or (stored or {}).get("image_height") or 0)
+            self._last_overlay={**self._last_overlay, "label": self._last_overlay.get("label") or resolved or native.get("plate") or "", "image_width": width, "image_height": height}
             if self._last_jpeg:
                 self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
         plate=resolved or shown.get("plate") or shown.get("plate_raw") or ""

@@ -72,6 +72,36 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(box["label"], "T285DQP")
         self.assertEqual(box["image_width"], 640)
 
+    def test_camera_box_stays_on_the_live_view_for_the_visit(self):
+        from app.services.camera_lpr import bbox_from_lp_box, fit_plate_box, jpeg_pixel_size, live_plate_overlay
+
+        self.assertIsNone(bbox_from_lp_box([0, 0, 0, 0]))
+        self.assertEqual(bbox_from_lp_box({"x1": 12, "y1": 20, "x2": 80, "y2": 48})["x2"], 80)
+        native = native_from_sdk_capture({
+            "plate": "T285DQP", "score": 90, "plate_box": [100, 200, 280, 250],
+            "image_width": 1920, "image_height": 1080,
+        })
+        self.assertTrue(native["have_vehicle"])
+        self.assertEqual(native["bbox"]["x1"], 100)
+        held = choose_overlay_box(native)
+        # Callback is no longer fresh, but the car is still in the lane.
+        overlay = live_plate_overlay({}, {}, held, occupied=True)
+        self.assertEqual(overlay["x1"], 100)
+        self.assertEqual(overlay["image_width"], 1920)
+        self.assertIsNone(live_plate_overlay({}, {}, held, occupied=False))
+        jpeg = bytes([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x0B, 0x08,
+            0x01, 0x68, 0x02, 0x80,
+            0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xD9,
+        ])
+        self.assertEqual(jpeg_pixel_size(jpeg), (640, 360))
+        fitted = fit_plate_box(native["bbox"], jpeg, src_w=1920, src_h=1080)
+        self.assertEqual(fitted["x1"], 33)
+        self.assertEqual(fitted["y1"], 67)
+        self.assertGreater(fitted["x2"], fitted["x1"])
+
     def test_empty_scene_zc_is_not_a_plate(self):
         from types import SimpleNamespace
         from app.services.alpr import accept_ocr_plate, plate_box_ok

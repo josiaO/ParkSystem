@@ -108,6 +108,8 @@ class LaneViewTests(unittest.TestCase):
                 capture={"image_id": 41, "plate": "T123ABC", "score": 92},
             )
             self.assertEqual(second.id, first.id)
+            self.assertEqual(first.bbox["x1"], 10)
+            self.assertEqual(first.bbox["y2"], 50)
             count = db.scalar(select(func.count()).select_from(VehicleCapture).where(VehicleCapture.camera_id == camera.id))
             self.assertEqual(count, 1)
             self.assertTrue((self.media / first.snapshot_path).is_file())
@@ -128,6 +130,23 @@ class LaneViewTests(unittest.TestCase):
         listed = self.client.get(f"/captures?gate_id={gate_id}", headers=self.headers).json()
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["lane_direction"], "ENTRY")
+
+    def test_later_callback_keeps_the_camera_plate_box(self):
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            first = persist_event(
+                db, camera, jpeg=JPEG, crop=b"",
+                capture={"image_id": 0, "plate": "T285DQP", "score": 90},
+            )
+            self.assertIsNotNone(first)
+            second = persist_event(
+                db, camera, jpeg=JPEG, crop=b"",
+                capture={"image_id": 0, "plate": "T285DQP", "score": 90, "plate_box": [30, 40, 140, 80]},
+            )
+            self.assertEqual(second.id, first.id)
+            self.assertEqual(second.bbox["x1"], 30)
+            self.assertEqual(second.bbox["y2"], 80)
 
     def test_fastalpr_fills_empty_native_capture(self):
         self.client.post("/cameras/seed-site", headers=self.headers, json={})

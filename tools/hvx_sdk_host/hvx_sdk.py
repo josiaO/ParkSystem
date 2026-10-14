@@ -146,6 +146,96 @@ def describe_state(state: int) -> str:
     return CONN_STATES.get(int(state), f"unknown_{state}")
 
 
+# E_ReportMess.REPORT_LPRINFO_EXT — plate text and usLpBox, no picture.
+REPORT_LPRINFO_EXT = 20
+# DCCSendPictureByCallBackEx memset size for T_ImageUserInfo.
+IMAGE_USER_INFO_BYTES = 0x44
+
+
+def plate_box_usable(box) -> bool:
+    try:
+        return int(box[2]) > int(box[0]) and int(box[3]) > int(box[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def parse_image_user_info(blob: bytes) -> dict:
+    """Read the callback prefix the OcxConfig NetSDK fills.
+
+    DCCSendPictureByCallBackEx copies 0x44 bytes into the Ex/Ex2 argument.
+    FUN_1000a470 writes the plate at +8 and the four usLpBox ushorts at
+    +0x18, +0x1a, +0x1c and +0x1e. OcxConfig's image callback reads the same
+    words. Score is the byte at +0x40.
+    """
+    if not blob or len(blob) < 0x20:
+        return {}
+    width, height = struct.unpack_from("<HH", blob, 0)
+    box = [int(value) for value in struct.unpack_from("<HHHH", blob, 0x18)]
+    return {
+        "plate_raw": bytes(blob[8:24]),
+        "plate_box": box,
+        "image_width": int(width),
+        "image_height": int(height),
+        "score": int(blob[0x40]) if len(blob) > 0x40 else None,
+        "have_vehicle": bool(blob[0x25]) if len(blob) > 0x25 else False,
+        "snap_type": int(blob[0x24]) if len(blob) > 0x24 else None,
+    }
+
+
+def jpeg_pixel_size(blob: bytes) -> tuple[int, int]:
+    if not blob or blob[:2] != b"\xff\xd8":
+        return 0, 0
+    index = 2
+    limit = len(blob)
+    while index + 8 < limit:
+        if blob[index] != 0xFF:
+            index += 1
+            continue
+        marker = blob[index + 1]
+        if marker in (0xD8, 0xD9):
+            index += 2
+            continue
+        if index + 4 > limit:
+            break
+        length = int.from_bytes(blob[index + 2:index + 4], "big")
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3) and index + 8 < limit:
+            height = int.from_bytes(blob[index + 5:index + 7], "big")
+            width = int.from_bytes(blob[index + 7:index + 9], "big")
+            if width > 0 and height > 0:
+                return width, height
+        if length < 2:
+            break
+        index += 2 + length
+    return 0, 0
+
+
+def retain_plate_box(previous: dict | None, row: dict, *, now: float | None = None) -> dict:
+    """Do not let a later empty callback erase a box for the same picture."""
+    if plate_box_usable(row.get("plate_box")):
+        return row
+    prev = previous or {}
+    if not plate_box_usable(prev.get("plate_box")):
+        return row
+    moment = time.time() if now is None else float(now)
+    try:
+        age = moment - float(prev.get("captured_at_epoch") or 0)
+    except (TypeError, ValueError):
+        return row
+    if age < 0 or age > 3.0:
+        return row
+    same_image = int(row.get("image_id") or 0) != 0 and int(row.get("image_id") or 0) == int(prev.get("image_id") or 0)
+    same_plate = bool(row.get("plate")) and row.get("plate") == prev.get("plate")
+    if not same_image and not same_plate:
+        return row
+    kept = dict(row)
+    kept["plate_box"] = list(prev["plate_box"])
+    if not int(kept.get("image_width") or 0):
+        kept["image_width"] = int(prev.get("image_width") or 0)
+        kept["image_height"] = int(prev.get("image_height") or 0)
+    kept["have_vehicle"] = True
+    return kept
+
+
 def _decode_plate(raw: bytes) -> str:
     text = raw.split(b"\x00", 1)[0].strip()
     if not text:
@@ -281,10 +371,49 @@ class HVXSDK:
     def _on_report(self, handle, msg_type, message, user):
         row = {"msg_type": int(msg_type), "at": time.time()}
         key = int(handle)
+        if int(msg_type) == REPORT_LPRINFO_EXT and message:
+            self._note_plate_report(key, message)
         with self._lock:
             queue = self._pending_reports.setdefault(key, deque(maxlen=64))
             queue.append(dict(row))
         return 0
+
+    def _note_plate_report(self, handle: int, message) -> None:
+        """REPORT_LPRINFO_EXT carries usLpBox at the same +0x18 offset, without a JPEG."""
+        try:
+            blob = ctypes.string_at(message, 0x20)
+        except Exception:
+            return
+        parsed = parse_image_user_info(blob)
+        box = parsed.get("plate_box")
+        plate = _decode_plate(parsed.get("plate_raw") or b"")
+        if not plate_box_usable(box) and not plate:
+            return
+        with self._lock:
+            previous = dict(self._last_capture.get(handle) or {})
+            event = {
+                "image_id": int(previous.get("image_id") or 0),
+                "captured_at_epoch": time.time(),
+                "plate": plate or previous.get("plate"),
+                "score": previous.get("score"),
+                "plate_box": list(box) if plate_box_usable(box) else previous.get("plate_box"),
+                "image_width": int(previous.get("image_width") or 0),
+                "image_height": int(previous.get("image_height") or 0),
+                "jpeg_bytes": previous.get("jpeg_bytes") or 0,
+                "crop_bytes": previous.get("crop_bytes") or 0,
+                "have_vehicle": True if plate_box_usable(box) else bool(previous.get("have_vehicle")),
+                "snap_type": previous.get("snap_type"),
+            }
+            event = retain_plate_box(previous, event)
+            self._last_capture[handle] = event
+            pending = self._pending_events.setdefault(handle, deque(maxlen=64))
+            if pending and not plate_box_usable(pending[-1].get("plate_box")):
+                pending[-1]["plate_box"] = list(event["plate_box"]) if event.get("plate_box") else pending[-1].get("plate_box")
+                pending[-1]["have_vehicle"] = bool(event.get("have_vehicle"))
+                if plate and not pending[-1].get("plate"):
+                    pending[-1]["plate"] = plate
+            elif not pending and plate_box_usable(event.get("plate_box")):
+                pending.append(dict(event))
 
     def _copy_buffer(self, ptr, length: int) -> bytes:
         if not ptr or length <= 0:
@@ -306,20 +435,39 @@ class HVXSDK:
         have_vehicle = False
         snap_type = None
         if pt_info:
-            info = pt_info.contents
-            plate = _decode_plate(bytes(info.szLprResult))
-            score = int(info.ucScore)
-            box = [int(info.usLpBox[i]) for i in range(4)]
-            width = int(info.usWidth)
-            height = int(info.usHeight)
-            have_vehicle = bool(int(info.ucHaveVehicle))
-            snap_type = int(info.ucSnapType)
+            parsed = {}
+            try:
+                address = ctypes.cast(pt_info, ctypes.c_void_p).value
+                if address:
+                    parsed = parse_image_user_info(ctypes.string_at(address, IMAGE_USER_INFO_BYTES))
+            except Exception:
+                parsed = {}
+            if not parsed:
+                info = pt_info.contents
+                parsed = {
+                    "plate_raw": bytes(info.szLprResult),
+                    "plate_box": [int(info.usLpBox[i]) for i in range(4)],
+                    "image_width": int(info.usWidth),
+                    "image_height": int(info.usHeight),
+                    "score": int(info.ucScore),
+                    "have_vehicle": bool(int(info.ucHaveVehicle)),
+                    "snap_type": int(info.ucSnapType),
+                }
+            plate = _decode_plate(parsed.get("plate_raw") or b"")
+            score = parsed.get("score")
+            box = parsed.get("plate_box")
+            width = int(parsed.get("image_width") or 0)
+            height = int(parsed.get("image_height") or 0)
+            have_vehicle = bool(parsed.get("have_vehicle")) or plate_box_usable(box)
+            snap_type = parsed.get("snap_type")
         if pt_pic:
             pic = pt_pic.contents
             jpeg = self._copy_buffer(pic.ptPanoramaPicBuff, int(pic.uiPanoramaPicLen or 0))
             crop = self._copy_buffer(pic.ptVehiclePicBuff, int(pic.uiVehiclePicLen or 0))
             if not jpeg and crop[:2] == b"\xff\xd8":
                 jpeg = crop
+            if plate_box_usable(box) and (width <= 0 or height <= 0):
+                width, height = jpeg_pixel_size(jpeg)
         row = {
             "image_id": int(image_id),
             "captured_at_epoch": time.time(),
@@ -335,6 +483,7 @@ class HVXSDK:
         }
         key = int(handle)
         with self._lock:
+            row = retain_plate_box(self._last_capture.get(key), row)
             self._last_capture[key] = row
             if jpeg[:2] == b"\xff\xd8":
                 self._last_event_jpeg[key] = jpeg

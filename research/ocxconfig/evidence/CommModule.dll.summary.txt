@@ -1,0 +1,10 @@
+PROGRAM CommModule.dll
+PATH /home/josiamosses/Downloads/smartpark_edge_rebuild/Current_ParkSystem_configs/Camera_config/OcxConfig/CommModule.dll
+LANGUAGE x86:LE:32:default
+IMAGE_BASE 10000000
+STR 1000465c "WS2_32.dll"
+STR 100046f2 "KERNEL32.dll"
+STR 10004798 "MSVCR80.dll"
+STR 100048c2 "Log.dll"
+STR 10004cfa "CommModule.dll"
+DECOMPILED 0

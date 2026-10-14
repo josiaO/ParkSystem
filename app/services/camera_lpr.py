@@ -58,13 +58,81 @@ def native_confidence(score) -> float:
 
 
 def bbox_from_lp_box(box) -> dict | None:
-    """T_ImageUserInfo.usLpBox: top-left (0,1), bottom-right (2,3)."""
-    if not box or len(box) < 4:
+    """T_ImageUserInfo.usLpBox: top-left (0, 1), bottom-right (2, 3).
+
+    OcxConfig and ParkWatch both read those four ushorts at bytes 0x18, 0x1a,
+    0x1c and 0x1e of the image callback. A zero rectangle is not a plate.
+    """
+    if isinstance(box, dict):
+        try:
+            left, top, right, bottom = (
+                int(box.get("x1")), int(box.get("y1")), int(box.get("x2")), int(box.get("y2")),
+            )
+        except (TypeError, ValueError):
+            return None
+    elif not box or len(box) < 4:
         return None
-    left, top, right, bottom = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+    else:
+        try:
+            left, top, right, bottom = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+        except (TypeError, ValueError):
+            return None
     if right <= left or bottom <= top:
         return None
     return {"x1": left, "y1": top, "x2": right, "y2": bottom}
+
+
+def jpeg_pixel_size(blob: bytes) -> tuple[int, int]:
+    """Width and height from a JPEG SOF marker. (0, 0) when the frame is not a JPEG."""
+    if not blob or blob[:2] != b"\xff\xd8":
+        return 0, 0
+    index = 2
+    limit = len(blob)
+    while index + 8 < limit:
+        if blob[index] != 0xFF:
+            index += 1
+            continue
+        marker = blob[index + 1]
+        if marker in (0xD8, 0xD9):
+            index += 2
+            continue
+        if index + 4 > limit:
+            break
+        length = int.from_bytes(blob[index + 2:index + 4], "big")
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3) and index + 8 < limit:
+            height = int.from_bytes(blob[index + 5:index + 7], "big")
+            width = int.from_bytes(blob[index + 7:index + 9], "big")
+            if width > 0 and height > 0:
+                return width, height
+        if length < 2:
+            break
+        index += 2 + length
+    return 0, 0
+
+
+def fit_plate_box(box, jpeg: bytes, *, src_w: int = 0, src_h: int = 0) -> dict | None:
+    """Map a camera plate rectangle onto this JPEG.
+
+    usLpBox is in the snapshot's pixel space. The live view is often a smaller
+    copy of that same frame, so a box without the snapshot size is drawn off
+    the picture.
+    """
+    rect = bbox_from_lp_box(box)
+    if rect is None:
+        return None
+    if isinstance(box, dict):
+        src_w = int(src_w or box.get("image_width") or 0)
+        src_h = int(src_h or box.get("image_height") or 0)
+    width, height = jpeg_pixel_size(jpeg)
+    if width > 0 and height > 0 and src_w > 0 and src_h > 0 and (src_w != width or src_h != height):
+        rect = {
+            "x1": int(round(rect["x1"] * width / float(src_w))),
+            "y1": int(round(rect["y1"] * height / float(src_h))),
+            "x2": int(round(rect["x2"] * width / float(src_w))),
+            "y2": int(round(rect["y2"] * height / float(src_h))),
+        }
+        rect = bbox_from_lp_box(rect)
+    return rect
 
 
 def plate_capture_quality(box: dict | None) -> dict:
@@ -108,12 +176,39 @@ def choose_overlay_box(native: dict | None = None, local: dict | None = None) ->
             "y1": y1,
             "x2": x2,
             "y2": y2,
-            "label": str(src.get("plate") or ""),
-            "image_width": int(src.get("image_width") or 0),
-            "image_height": int(src.get("image_height") or 0),
-            "source": src.get("source") or "",
+            "label": str(src.get("plate") or box.get("label") or ""),
+            "image_width": int(src.get("image_width") or box.get("image_width") or 0),
+            "image_height": int(src.get("image_height") or box.get("image_height") or 0),
+            "source": src.get("source") or box.get("source") or "",
         }
     return None
+
+
+def live_plate_overlay(native: dict | None, local: dict | None, held: dict | None, *, occupied: bool) -> dict | None:
+    """Box to draw on the live picture.
+
+    A camera usLpBox is drawn as soon as the callback arrives. While the
+    vehicle is still in the lane, that box stays up after the callback is no
+    longer fresh — the same way ParkWatch keeps the plate region on the video
+    for the visit. A FastALPR box is only the fallback while the lane is occupied.
+    """
+    camera = choose_overlay_box(native, None)
+    if camera is not None:
+        return camera
+    if not occupied:
+        return None
+    local_box = choose_overlay_box(None, local)
+    if local_box is not None:
+        return local_box
+    if not isinstance(held, dict):
+        return None
+    return choose_overlay_box({
+        "bbox": held,
+        "plate": held.get("label") or "",
+        "image_width": held.get("image_width") or 0,
+        "image_height": held.get("image_height") or 0,
+        "source": held.get("source") or "",
+    })
 
 
 def native_from_sdk_capture(capture: dict | None) -> dict:
@@ -121,19 +216,20 @@ def native_from_sdk_capture(capture: dict | None) -> dict:
     capture = capture or {}
     raw = str(capture.get("plate") or "").strip()
     box = capture.get("plate_box") or capture.get("bbox")
+    rect = bbox_from_lp_box(box)
     source = str(capture.get("source") or "").strip() or "qy_Net_RegImageRecvEx"
     return {
         "plate": normalize_plate(raw),
         "plate_raw": raw,
         "confidence": native_confidence(capture.get("score") if "score" in capture else capture.get("confidence")),
-        "bbox": bbox_from_lp_box(box) if not isinstance(box, dict) else box,
+        "bbox": rect,
         "source": source,
         "image_id": capture.get("image_id"),
         "image_width": int(capture.get("image_width") or 0),
         "image_height": int(capture.get("image_height") or 0),
         "jpeg_bytes": capture.get("jpeg_bytes") or 0,
         "crop_bytes": capture.get("crop_bytes") or 0,
-        "have_vehicle": bool(capture.get("have_vehicle")),
+        "have_vehicle": bool(capture.get("have_vehicle")) or rect is not None,
         "snap_type": capture.get("snap_type"),
     }
 
