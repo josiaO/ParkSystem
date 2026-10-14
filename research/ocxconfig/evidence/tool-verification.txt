@@ -1,0 +1,2 @@
+Ghidra 12.1.4 official GitHub release
+SHA-256 verified: ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db

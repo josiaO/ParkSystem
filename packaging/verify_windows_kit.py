@@ -133,6 +133,11 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("desktop UI missing: app/desktop/main.py")
     if not (payload / "tools" / "field_acceptance_test.py").is_file():
         errors.append("field acceptance test missing: tools/field_acceptance_test.py")
+    startup = payload / "tools" / "startup_check.py"
+    if not startup.is_file():
+        errors.append("startup check missing: tools/startup_check.py")
+    elif '"dry_run": True' not in startup.read_text(encoding="utf-8"):
+        errors.append("startup check must dry-run the gate and must not pulse the barrier")
     decoder = payload / "app" / "services" / "recognition_decoder.py"
     if not decoder.is_file():
         errors.append("recognition decoder missing: app/services/recognition_decoder.py")

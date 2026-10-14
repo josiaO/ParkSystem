@@ -75,6 +75,46 @@ class VendorPackageTests(unittest.TestCase):
             {"192.168.1.62", "192.168.1.70", "192.168.1.66", "192.168.1.68"},
         )
 
+    def test_image_callback_keeps_uslpbox_at_parkwatch_offsets(self):
+        import struct
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_sdk
+
+        blob = bytearray(0x44)
+        struct.pack_into("<HH", blob, 0, 1920, 1080)
+        blob[8:16] = b"T285DQP\x00"
+        struct.pack_into("<HHHH", blob, 0x18, 807, 303, 866, 354)
+        blob[0x25] = 2
+        blob[0x40] = 91
+        parsed = hvx_sdk.parse_image_user_info(bytes(blob))
+        self.assertEqual(parsed["plate_box"], [807, 303, 866, 354])
+        self.assertEqual(parsed["image_width"], 1920)
+        self.assertEqual(parsed["image_height"], 1080)
+        self.assertEqual(parsed["score"], 91)
+        self.assertTrue(parsed["have_vehicle"])
+        self.assertTrue(hvx_sdk.plate_box_usable(parsed["plate_box"]))
+        empty = {
+            "image_id": 9, "plate": "T285DQP", "plate_box": [0, 0, 0, 0],
+            "captured_at_epoch": 100.0, "image_width": 0, "image_height": 0,
+        }
+        kept = hvx_sdk.retain_plate_box(
+            {"image_id": 9, "plate": "T285DQP", "plate_box": [807, 303, 866, 354],
+             "captured_at_epoch": 99.0, "image_width": 1920, "image_height": 1080},
+            empty,
+            now=100.0,
+        )
+        self.assertEqual(kept["plate_box"], [807, 303, 866, 354])
+        self.assertEqual(kept["image_width"], 1920)
+        other_car = hvx_sdk.retain_plate_box(
+            {"image_id": 9, "plate": "T285DQP", "plate_box": [807, 303, 866, 354], "captured_at_epoch": 99.0},
+            {"image_id": 10, "plate": "T111AAA", "plate_box": [0, 0, 0, 0], "captured_at_epoch": 100.0},
+            now=100.0,
+        )
+        self.assertEqual(other_car["plate_box"], [0, 0, 0, 0])
+
     def test_hvx_sdk_protocol_matches_qy_header(self):
         import sys
         from pathlib import Path

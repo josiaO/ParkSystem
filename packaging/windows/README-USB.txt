@@ -84,6 +84,20 @@ One camera for 10 minutes, from that same folder:
 This only checks that the pictures stay fresh. It does not open the gate
 or print a ticket. Send the log file back.
 
+Startup check (run when SmartPark is open)
+-------------------------------------------
+After Install and after SmartPark is running, double-click
+SmartPark startup check on the Desktop, or Run-StartupCheck.bat in the
+install folder. It watches the live picture for 20 seconds, runs one
+recognition read on each connected camera, and dry-runs every lane.
+The barrier is not opened and no ticket is printed. The report is
+%ProgramData%\SmartParkEdge\logs\startup_check_*.txt
+
+Connect all before you run it. An empty lane can finish as WARN because
+recognition ran and the picture had no plate. FAIL means the picture did
+not move, the recognition engine did not answer, or the gate path rejected
+the dry-run.
+
 Field acceptance (run while cars pass)
 --------------------------------------
 After Connect all, double-click  Run-FieldAcceptanceTest.bat
