@@ -1,0 +1,65 @@
+PROGRAM OcxConfigClient.exe
+PATH /home/josiamosses/Downloads/smartpark_edge_rebuild/Current_ParkSystem_configs/Camera_config/OcxConfig/OcxConfigClient.exe
+LANGUAGE x86:LE:32:default
+IMAGE_BASE 00400000
+STR 00455978 u"comctl32.dll"
+STR 0045599c u"comdlg32.dll"
+STR 0045774c u"ntdll.dll"
+STR 004577ec u"kernel32.dll"
+STR 00457a70 u"cm80u.dll"
+STR 00458bec u"user32.dll"
+STR 0045917a u"ole32.dll"
+STR 00459798 "kernel32.dll"
+STR 00459808 "mscoree.dll"
+STR 00459de4 "KERNEL32.DLL"
+STR 0045a148 "USER32.DLL"
+STR 0045ba80 "OLEACC.dll"
+STR 0045bbb8 u"http://"
+STR 0045bf44 u"DevSearchHelper.dll"
+STR 0045d848 u"DevSearchHelperBatch.dll"
+STR 0045e0bc u"ICMP.DLL"
+STR 004674fe "NetSDK.dll"
+STR 00467f5c "KERNEL32.dll"
+STR 004687f6 "USER32.dll"
+STR 00468b0c "GDI32.dll"
+STR 00468b46 "MSIMG32.dll"
+STR 00468b62 "comdlg32.dll"
+STR 00468c48 "ADVAPI32.dll"
+STR 00468c66 "SHELL32.dll"
+STR 00468c8a "COMCTL32.dll"
+STR 00468d08 "SHLWAPI.dll"
+STR 00468d22 "oledlg.dll"
+STR 00468e90 "ole32.dll"
+STR 00468e9a "OLEAUT32.dll"
+STR 00468ebe "urlmon.dll"
+STR 0046904e "gdiplus.dll"
+STR 0046905a "WS2_32.dll"
+STR 00469074 "WINMM.dll"
+FUNCTION FUN_00407e50 ENTRY 00407e50
+  CALL EnterCriticalSection @ EXTERNAL:0000009d
+  CALL Net_AddCamera @ EXTERNAL:00000001
+  CALL Net_ConnCamera @ EXTERNAL:00000009
+  CALL Net_QueryTimeSetup @ EXTERNAL:00000002
+  CALL GetLocalTime @ EXTERNAL:0000008d
+  CALL Net_TimeSetup @ EXTERNAL:00000003
+  CALL Net_FileUpdate @ EXTERNAL:00000004
+  CALL Net_DisConnCamera @ EXTERNAL:00000005
+  CALL Net_DelCamera @ EXTERNAL:00000006
+  CALL LeaveCriticalSection @ EXTERNAL:0000009c
+  CALL FUN_00436a45 @ 00436a45
+FUNCTION FUN_00407fb0 ENTRY 00407fb0
+  CALL EnterCriticalSection @ EXTERNAL:0000009d
+  CALL LeaveCriticalSection @ EXTERNAL:0000009c
+  CALL Net_AddCamera @ EXTERNAL:00000001
+  CALL Net_ConnCamera @ EXTERNAL:00000009
+  CALL Net_BlackWhiteListSend @ EXTERNAL:00000007
+  CALL Net_DisConnCamera @ EXTERNAL:00000005
+  CALL Net_DelCamera @ EXTERNAL:00000006
+FUNCTION FUN_00436a45 ENTRY 00436a45
+  CALL IsDebuggerPresent @ EXTERNAL:0000001e
+  CALL FUN_0044258b @ 0044258b
+  CALL SetUnhandledExceptionFilter @ EXTERNAL:0000001d
+  CALL UnhandledExceptionFilter @ EXTERNAL:0000001c
+  CALL GetCurrentProcess @ EXTERNAL:00000027
+  CALL TerminateProcess @ EXTERNAL:00000084
+DECOMPILED 3

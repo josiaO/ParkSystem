@@ -1,0 +1,13 @@
+PROGRAM DevSearchHelper.dll
+PATH /home/josiamosses/Downloads/smartpark_edge_rebuild/Current_ParkSystem_configs/Camera_config/OcxConfig/DevSearchHelper.dll
+LANGUAGE x86:LE:32:default
+IMAGE_BASE 10000000
+STR 10005a1e "KERNEL32.dll"
+STR 10005a60 "USER32.dll"
+STR 10005b52 "MSVCP80.dll"
+STR 10005b5e "WS2_32.dll"
+STR 10005b7c "iphlpapi.dll"
+STR 10005cda "MSVCR80.dll"
+STR 10005fc6 "DevSearchHelper.dll"
+STR 10007264 u"DevSearc.dll"
+DECOMPILED 0

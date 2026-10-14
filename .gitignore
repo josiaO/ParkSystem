@@ -65,6 +65,10 @@ vendor/mediamtx/*.zip
 # Site dump of the previous ParkWatch install (binaries, logs, backups)
 Current_ParkSystem_configs/
 
+# Static-analysis dumps. These are local evidence, not source.
+research/**/*.asm
+research/**/inventory.json
+
 # OS and editors
 .DS_Store
 Thumbs.db

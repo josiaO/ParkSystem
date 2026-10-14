@@ -67,6 +67,8 @@ class PreviewState:
     alpr_at: float = 0.0
     last_car: dict = field(default_factory=dict)
     last_car_at: float = 0.0
+    plate_box: dict = field(default_factory=dict)
+    plate_box_at: float = 0.0
     viewer_transport: str = ""
     viewer_transport_at: float = 0.0
     seq: int = 0
@@ -164,6 +166,29 @@ def fresh_alpr(camera_id: int, *, max_age_seconds: float | None = None) -> dict 
         row.alpr_at = 0.0
         return None
     return row.alpr
+
+
+def remember_plate_box(camera_id: int, overlay: dict | None) -> None:
+    """Keep the camera plate rectangle for the current visit."""
+    row = get_state(camera_id)
+    if overlay:
+        row.plate_box = dict(overlay)
+        row.plate_box_at = time.monotonic()
+    else:
+        row.plate_box = {}
+        row.plate_box_at = 0.0
+
+
+def held_plate_box(camera_id: int, *, max_age_seconds: float = 180.0) -> dict | None:
+    """Last camera plate box, until the lane goes idle or this cap elapses."""
+    row = get_state(camera_id)
+    if not row.plate_box or row.plate_box_at <= 0:
+        return None
+    if time.monotonic() - row.plate_box_at > max_age_seconds:
+        row.plate_box = {}
+        row.plate_box_at = 0.0
+        return None
+    return dict(row.plate_box)
 
 
 def remember_last_car(camera_id: int, payload: dict | None) -> None:

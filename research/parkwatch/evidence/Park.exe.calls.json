@@ -1,0 +1,74 @@
+[
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_Capture",
+    "iat_va": "0x9431ac",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_CloseDevice",
+    "iat_va": "0x9431b0",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_CloseRS485",
+    "iat_va": "0x9431b4",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_Exec",
+    "iat_va": "0x9431b8",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_InitSDK",
+    "iat_va": "0x9431bc",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_OpenDevice",
+    "iat_va": "0x9431c0",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_OpenRS485",
+    "iat_va": "0x9431c4",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_ReleaseSDK",
+    "iat_va": "0x9431c8",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_SetCaptureCallback",
+    "iat_va": "0x9431cc",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_StartStream",
+    "iat_va": "0x9431d0",
+    "references": []
+  },
+  {
+    "dll": "DVNETSDK.DLL",
+    "name": "DV_WriteRS485",
+    "iat_va": "0x9431d4",
+    "references": []
+  },
+  {
+    "dll": "GDI32.DLL",
+    "name": "PlayEnhMetaFile",
+    "iat_va": "0x943cac",
+    "references": []
+  }
+]
