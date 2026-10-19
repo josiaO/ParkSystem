@@ -137,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 handle=int(path.rsplit("/",1)[-1])
                 image_id=query.get("image_id") or query.get("id")
-                jpeg=sdk.event_jpeg_for(handle, int(image_id[0]) if image_id else None)
+                jpeg=sdk.event_jpeg_for(handle, int(image_id[0]) if image_id else None, capture_token=(query.get("capture_token") or [None])[0])
                 if not jpeg:
                     return reply(self,404,{"error":"no car snapshot yet"})
                 return reply_jpeg(self, jpeg)
@@ -147,7 +147,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 handle=int(path.rsplit("/",1)[-1])
                 image_id=query.get("image_id") or query.get("id")
-                jpeg=sdk.event_crop_for(handle, int(image_id[0]) if image_id else None)
+                jpeg=sdk.event_crop_for(handle, int(image_id[0]) if image_id else None, capture_token=(query.get("capture_token") or [None])[0])
                 if not jpeg:
                     return reply(self,404,{"error":"no plate crop yet"})
                 return reply_jpeg(self, jpeg)

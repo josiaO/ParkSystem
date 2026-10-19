@@ -109,6 +109,7 @@ def collect_cameras(samples: list[dict]) -> dict[int, dict[str, Any]]:
                 "camera_name": row.get("camera_name") or f"camera {cid}",
                 "live_providers": [],
                 "live_connected": [],
+                "media_bytes": [],
                 "frame_ages": [],
                 "ai_ages": [],
                 "pending": [],
@@ -128,6 +129,8 @@ def collect_cameras(samples: list[dict]) -> dict[int, dict[str, Any]]:
             if row.get("live_provider"):
                 bucket["live_providers"].append(str(row["live_provider"]))
             bucket["live_connected"].append(bool(row.get("live_connected")))
+            if row.get("media_ready"):
+                bucket["media_bytes"].append(int(row.get("media_bytes_received") or 0))
             if row.get("estimated_frame_age_ms") is not None:
                 bucket["frame_ages"].append(float(row["estimated_frame_age_ms"]))
             if row.get("ai_frame_age_ms") is not None:
@@ -187,8 +190,7 @@ def evaluate_preflight(
     rows = cameras if isinstance(cameras, list) else []
     if rows:
         checks.append(_check("P4", "Cameras configured", PASS if len(rows) >= 1 else FAIL, f"{len(rows)} camera(s)"))
-        if len(rows) < 4:
-            checks.append(_check("P4b", "Four-camera site", WARN, f"expected 4 lanes, found {len(rows)}"))
+        checks.append(_check("P4b", "Local entry/exit pair", PASS if len(rows) == 2 else WARN, f"expected 2 assigned cameras, found {len(rows)}"))
         connected = [c for c in rows if str(c.get("status") or "").upper() in CONNECTED]
         checks.append(_check(
             "P5", "Cameras connected",
@@ -257,12 +259,10 @@ def evaluate_soak(
     live_ok = []
     for cid, bucket in by_cam.items():
         name = bucket["camera_name"]
-        providers = bucket["live_providers"]
-        last = providers[-1] if providers else "OFFLINE"
-        mostly_offline = providers and all(p == "OFFLINE" for p in providers)
-        if connected_ids and cid in connected_ids and mostly_offline:
+        observed_live = any(bucket["live_connected"]) or _delta(bucket["media_bytes"]) > 0
+        if connected_ids and cid in connected_ids and not observed_live:
             offline_fail.append(name)
-        elif last != "OFFLINE" or any(bucket["live_connected"]):
+        elif observed_live:
             live_ok.append(name)
         p95 = _p95(bucket["frame_ages"])
         if p95 is not None:
@@ -287,7 +287,7 @@ def evaluate_soak(
             stale.append(f"{name} ({bucket['empty_with_plate']}/{bucket['empty_samples']} empty samples still showed a plate)")
 
     if connected_ids and offline_fail:
-        checks.append(_check("S2", "Live video present", FAIL, "OFFLINE entire soak: " + ", ".join(offline_fail)))
+        checks.append(_check("S2", "Live video present", FAIL, "No live frames observed: " + ", ".join(offline_fail)))
     elif live_ok:
         checks.append(_check("S2", "Live video present", PASS, ", ".join(live_ok)))
     else:
@@ -517,6 +517,9 @@ def main(argv: list[str] | None = None) -> int:
     if token:
         try:
             cameras = get_json(args.url, "/cameras", token)
+            scope = get_json(args.url, "/runtime/recognition-scope", token)
+            local_ids = {int(row["id"]) for row in scope.get("cameras", [])}
+            cameras = [row for row in cameras if int(row["id"]) in local_ids]
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
             login_error = f"cameras: {exc}"
         try:

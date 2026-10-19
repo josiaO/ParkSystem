@@ -59,18 +59,31 @@ def _camera_enabled(camera_id: int, db=None) -> bool:
 
 
 def mediamtx_live_active(camera_id: int, db=None) -> bool:
-    """True only when MediaMTX is the selected and healthy live-view provider."""
+    """True only when MediaMTX is selected and has this camera's path."""
     cfg = _migration_flags(db)
-    return (
+    selected = (
         _camera_enabled(camera_id, db)
         and str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX
         and mediamtx.running()
     )
+    if not selected:
+        return False
+    telemetry = media_telemetry(camera_id)
+    roles = telemetry.get("roles") or {}
+    if roles:
+        return bool((roles.get(mediamtx.ROLE_LIVE) or {}).get("registered"))
+    return str(telemetry.get("state") or "").upper() not in {"", "OFFLINE", "UNREGISTERED"}
 
 
 def mediamtx_detect_active(camera_id: int, db=None) -> bool:
-    """Use MediaMTX as the detect source only while its local control API is alive."""
-    return _camera_enabled(camera_id, db) and mediamtx.running()
+    """Use MediaMTX only after the detect role exists in its control API."""
+    if not (_camera_enabled(camera_id, db) and mediamtx.running()):
+        return False
+    telemetry = media_telemetry(camera_id)
+    roles = telemetry.get("roles") or {}
+    if roles:
+        return bool((roles.get(mediamtx.ROLE_DETECT) or {}).get("registered"))
+    return str(telemetry.get("state") or "").upper() not in {"", "OFFLINE", "UNREGISTERED"}
 
 
 def register_camera_source(camera_id: int, source_config: dict[str, Any], db=None) -> dict[str, Any]:
@@ -162,6 +175,10 @@ async def get_detect_endpoint(camera_id: int, db=None) -> dict[str, Any]:
     camera_id = int(camera_id)
     if mediamtx_detect_active(camera_id, db):
         endpoint = mediamtx.detect_endpoint(camera_id)
+        role = (media_telemetry(camera_id).get("roles") or {}).get(mediamtx.ROLE_DETECT) or {}
+        path = role.get("mediamtx_path")
+        if path:
+            endpoint = {**endpoint, "mediamtx_path": path, "rtsp": f"rtsp://127.0.0.1:8554/{path}"}
         return {
             "provider": LIVE_VIEW_MEDIAMTX,
             "camera_id": camera_id,

@@ -84,7 +84,7 @@ class PathPlanTests(unittest.TestCase):
         self.assertIn("  cam30:\n", body)
         self.assertNotIn("cam30_detect:", body)
         self.assertIn("cam30_evidence:", body)
-        self.assertEqual(body.count("source: rtsp://cam/only"), 1)
+        self.assertEqual(body.count('source: "rtsp://cam/only"'), 1)
         evidence_block = body.split("cam30_evidence:")[1]
         self.assertIn("sourceOnDemand: yes", evidence_block)
         live_block = body.split("  cam30:")[1].split("cam30_evidence:")[0]
@@ -282,8 +282,10 @@ class BrowserLiveViewTests(unittest.TestCase):
         self.assertIn("whepStop(slot)", stop_fn)
         self.assertIn("srcObject = null", stop_fn)
         whep_stop = self.html.split("function whepStop(")[1].split("\n    }\n")[0]
-        self.assertIn("pc.close()", whep_stop)
-        self.assertIn('method: "DELETE"', whep_stop)
+        self.assertIn("closeWhepSession(session)", whep_stop)
+        close = self.html.split("function closeWhepSession(")[1].split("\n    }\n")[0]
+        self.assertIn("session.reader.close()", close)
+        self.assertIn('method: "DELETE"', close)
 
     def test_webrtc_pane_never_also_starts_mjpeg_or_snapshot_polling(self):
         start_fn = self.html.split("async function startLiveSlot(")[1].split("\n    }\n")[0]

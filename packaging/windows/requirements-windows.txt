@@ -10,6 +10,7 @@ httpx
 argon2-cffi
 shiboken6
 PySide6_Essentials
+PySide6_Addons
 pillow
 numpy
 opencv-python-headless>=4.9.0.80,<5
@@ -24,5 +25,6 @@ markupsafe
 typing_extensions
 python-dotenv
 greenlet
-# PostgreSQL later: psycopg[binary]
+psycopg[binary]==3.3.6
+tzdata
 # Do not add watchfiles — it is only used by uvicorn --reload and conflicts with production.

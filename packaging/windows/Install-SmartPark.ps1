@@ -63,6 +63,7 @@ function Stop-SmartParkProcesses {
             $cmd -like "*app.desktop.main*" -or
             $cmd -like "*app.site_service*" -or
             $cmd -like "*app.media_service*" -or
+            $cmd -like "*app.recognition_worker*" -or
             $cmd -like "*mediamtx.exe*" -or
             ($root -and $cmd -like "*$root*")
         )) -or ($root -and $exe -and $exe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase))
@@ -188,6 +189,12 @@ if ($wheelFiles.Count -eq 0) {
 Write-Host ("Installing {0} bundled wheels..." -f $wheelFiles.Count)
 & $Py64 -m pip install --no-index --find-links $Wheels --no-deps @wheelFiles
 if ($LASTEXITCODE -ne 0) { throw "Package install failed." }
+& $Py64 -m pip check
+if ($LASTEXITCODE -ne 0) { throw "Installed Python dependencies are incompatible. Rebuild the offline wheel bundle." }
+
+$RuntimeCheck = Join-Path $InstallDir "tools\hvx_sdk_host\check_runtime.py"
+& (Join-Path $InstallDir "python32\python.exe") $RuntimeCheck --vendor-dir (Join-Path $InstallDir "vendor")
+if ($LASTEXITCODE -ne 0) { throw "Vendor DLL load check failed. Resolve the runtime/dependency error above before starting cameras." }
 
 $StartBat = Join-Path $InstallDir "Start-SmartPark.bat"
 $StartCmd = @"
@@ -299,7 +306,7 @@ $checkDesk.WorkingDirectory = $InstallDir
 $checkDesk.Description = "Check video, recognition, and a gate dry-run. Does not open the barrier."
 $checkDesk.Save()
 
-# Background tasks own parking. Do not auto-launch the heavier desktop UI.
+# Background tasks own parking. The desktop is the primary operator UI.
 $Startup = [Environment]::GetFolderPath("Startup")
 Remove-Item (Join-Path $Startup "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
 $WebShortcut = "[InternetShortcut]`r`nURL=http://127.0.0.1:8760/`r`n"
@@ -313,6 +320,7 @@ $UninstallBody = @"
 Unregister-ScheduledTask -TaskName 'SmartPark Site Service' -Confirm:`$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'SmartPark HVX Host' -Confirm:`$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'SmartPark Media Service' -Confirm:`$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'SmartPark Recognition Worker' -Confirm:`$false -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
     `$cmd = [string]`$_.CommandLine
     `$exe = [string]`$_.ExecutablePath
@@ -368,12 +376,16 @@ foreach ($helper in @("Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-Field
     }
 }
 if (Test-Path $svcScript) {
-    Write-Host "Starting Site Service, HVX host, and Media Service (MediaMTX idle until enabled)..."
+    Write-Host "Starting Site Service, HVX host, Media Service and Recognition Worker..."
     try {
         & $svcScript -InstallDir $InstallDir
     } catch {
-        Write-Host ("WARNING: background tasks were not fully registered. The app will still open. {0}" -f $_)
+        throw "Background task registration failed: $_"
     }
+}
+$enableMedia = Join-Path $InstallDir "Enable-MediaMTX.ps1"
+if (Test-Path $enableMedia) {
+    & $enableMedia -InstallDir $InstallDir -LiveView
 }
 
 Write-Host ""
@@ -430,7 +442,7 @@ function Start-SmartParkFromInstaller {
 
 Write-Host ""
 Write-Host "Installed."
-Write-Host "  Open: SmartPark Edge Web (lighter browser UI); SmartPark Edge desktop is optional."
+Write-Host "  Open: SmartPark Edge (desktop operator UI). SmartPark Edge Web is for administration/remote access."
 Write-Host "  Background: Site Service + HVX host + Media Service start at Windows logon"
 if (Test-Path $MediaMtxExe) {
     Write-Host "  MediaMTX: bundled (off until Enable-MediaMTX.ps1)"

@@ -41,6 +41,11 @@ smartpark.db
 data/
 logs/
 media/
+!app/infrastructure/media/
+app/infrastructure/media/*
+!app/infrastructure/media/__init__.py
+!app/infrastructure/media/registry.py
+!app/infrastructure/media/diagnostics.py
 *.log
 
 # FastALPR models (downloaded by packaging/make_windows_kit.sh)

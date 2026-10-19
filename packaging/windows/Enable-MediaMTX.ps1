@@ -60,6 +60,7 @@ if ($LiveView) {
 $env:SMARTPARK_HOME = $InstallDir
 $env:PYTHONPATH = $InstallDir
 $env:SMARTPARK_MEDIAMTX_BIN = $mtx
+Set-Location -LiteralPath $InstallDir
 
 # SiteSetting overrides environment defaults, so persist the rollout in the DB.
 $liveProvider = if ($LiveView) { "MEDIAMTX" } else { "DIRECT_LEGACY" }
@@ -67,6 +68,8 @@ $webrtc = if ($LiveView) { "True" } else { "False" }
 & $Py64 -c @"
 from app.db import SessionLocal
 from app.services.flags import save_flags
+from app.desktop.launch import wait_for_api
+wait_for_api()
 camera_id = int($CameraId)
 with SessionLocal() as db:
     out = save_flags(db, {
@@ -93,7 +96,8 @@ if ($LiveView) {
     if ($isAdmin) {
         $rules = @(
             @{ Name = "SmartPark MediaMTX WebRTC"; Protocol = "TCP"; Port = 8889 },
-            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 }
+            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 },
+            @{ Name = "SmartPark MediaMTX ICE TCP"; Protocol = "TCP"; Port = 8189 }
         )
         foreach ($rule in $rules) {
             if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
@@ -106,7 +110,7 @@ if ($LiveView) {
     }
 }
 
-foreach ($task in @("SmartPark Media Service", "SmartPark Site Service")) {
+foreach ($task in @("SmartPark Site Service", "SmartPark Media Service", "SmartPark Recognition Worker")) {
     try {
         Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1

@@ -88,7 +88,10 @@ def should_persist_vehicle_capture(
         or capture.get("confidence")
         or 0
     )
-    have_vehicle = bool(capture.get("have_vehicle") or native.get("have_vehicle"))
+    source = str(capture.get("source") or "").lower()
+    local_read = source in {"fastalpr", "local"} or "fastalpr" in source
+    # A software detector rectangle is not an independent native vehicle signal.
+    have_vehicle = not local_read and bool(capture.get("have_vehicle") or native.get("have_vehicle"))
     if plate and is_empty_scene_ocr(plate, confidence=conf):
         plate = ""
     source = str(capture.get("source") or native.get("source") or "").lower()
@@ -100,9 +103,13 @@ def should_persist_vehicle_capture(
     if have_vehicle:
         if plate and not plausible_vehicle_plate(plate, confidence=conf) and conf < 0.85:
             return False, "vehicle-but-implausible-plate"
-        if plate or allow_empty_vehicle:
+        if plate:
             return True, "native-vehicle"
-        return False, "vehicle-no-plate"
+        # A camera "vehicle" flag with no plate and no plate-shaped box is an
+        # empty lane. Do not store that picture.
+        if allow_empty_vehicle and _bbox_aspect(box) is not None:
+            return True, "native-vehicle"
+        return False, "empty-scene"
 
     tz_like = str(plate_policy).upper() == "TZ" and bool(_TZ_PLATE_RE.match(plate))
     min_conf = MIN_FASTALPR_CONF_TZ if tz_like else MIN_FASTALPR_CONF
@@ -140,7 +147,7 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
 
 def _jpeg_from_ref(ref: str | None) -> bytes:
     """Load a previously saved crop/snapshot from a relative path or /media URL."""
-    text = str(ref or "").strip()
+    text = str(ref or "").strip().split("?", 1)[0]
     if not text:
         return b""
     if text.startswith("/media/"):
@@ -208,6 +215,41 @@ def _padded_box(xyxy: tuple[int, int, int, int], width: int, height: int, *, pad
     right = min(width, x2 + pad_x)
     bottom = min(height, y2 + pad_y)
     return left, top, right, bottom
+
+
+def looks_like_no_plate_card(jpeg: bytes) -> bool:
+    """The camera's blue 无车牌 graphic, not a photograph of a plate."""
+    if not jpeg or jpeg[:2] != b"\xff\xd8":
+        return False
+    try:
+        from PIL import Image
+        image = Image.open(BytesIO(jpeg)).convert("RGB")
+    except Exception:
+        return False
+    image.thumbnail((48, 48))
+    raw = image.tobytes()
+    total = len(raw) // 3
+    if total < 16:
+        return False
+    blue = 0
+    for index in range(0, total * 3, 3):
+        red, green, blue_ch = raw[index], raw[index + 1], raw[index + 2]
+        if blue_ch > 140 and blue_ch > red + 40 and blue_ch > green + 20:
+            blue += 1
+    return blue / total >= 0.5
+
+
+def camera_crop_usable(crop: bytes, jpeg: bytes, plate_raw: str = "") -> bool:
+    """A camera vehicle-picture is usable only when it is a real plate photo.
+
+    无车牌 and the solid blue result card are the camera's Chinese OCR miss.
+    Those bytes must not be sent to OCR or shown as the plate crop.
+    """
+    from app.core.plate import is_camera_no_plate
+
+    if is_camera_no_plate(plate_raw) or looks_like_no_plate_card(crop):
+        return False
+    return _looks_like_plate_crop(crop, jpeg)
 
 
 def _looks_like_plate_crop(crop: bytes, jpeg: bytes) -> bool:
