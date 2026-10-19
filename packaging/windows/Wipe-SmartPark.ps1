@@ -40,6 +40,7 @@ function Stop-SmartParkProcesses {
             $cmd -like "*app.site_service*" -or
             $cmd -like "*app.media_service*" -or
             $cmd -like "*app.recognition_worker*" -or
+            $cmd -like "*app.recognition_worker*" -or
             $cmd -like "*mediamtx.exe*"
         ))
     } | ForEach-Object {
@@ -90,7 +91,8 @@ Write-Host "Stopping SmartPark processes, tasks, and services..."
 foreach ($name in @(
     "SmartPark Site Service",
     "SmartPark HVX Host",
-    "SmartPark Media Service"
+    "SmartPark Media Service",
+    "SmartPark Recognition Worker"
 )) {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
