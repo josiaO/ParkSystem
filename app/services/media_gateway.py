@@ -651,7 +651,7 @@ class LocalMediaGateway:
                 try:
                     if spec.sdk_handle is not None:
                         ok = await self._sdk_frames(row)
-                    else:
+                    if not ok:
                         try:
                             ok = await self._rtsp_frames(row)
                         except asyncio.CancelledError:
@@ -709,6 +709,8 @@ class LocalMediaGateway:
         host = HVXHostClient()
         interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
         got = False
+        last_jpeg_at = time.monotonic()
+        silence_limit = max(1.0, float(settings.stream_read_timeout_seconds))
         row.state = "STREAMING"
         row.source = "sdk"
         while row.wanted() or row.viewers > 0:
@@ -721,6 +723,7 @@ class LocalMediaGateway:
                 row.last_error = str(exc)[:300]
                 jpeg = b""
             if jpeg[:2] == JPEG_SOI:
+                last_jpeg_at = time.monotonic()
                 self.publish(
                     spec.id, jpeg,
                     source="sdk",
@@ -734,8 +737,9 @@ class LocalMediaGateway:
                     row.state = "DEGRADED"
                 else:
                     row.state = "STREAMING"
-            elif got and self._stale_fresh(row, factor=1.0):
+            elif time.monotonic() - last_jpeg_at >= silence_limit:
                 row.state = "DEGRADED"
+                row.last_error = "SDK video supplied no JPEG; trying RTSP fallback"
                 return False
             delay = interval - (time.monotonic() - started)
             await asyncio.sleep(delay if delay > 0.002 else 0.002)
@@ -760,7 +764,7 @@ class LocalMediaGateway:
         if preferred.startswith("rtsp://"):
             urls = [preferred] + [url for url in urls if url != preferred]
         # When live view fell back to a main-style URL, try known substream paths first.
-        if role not in {ROLE_MAIN, ROLE_EVIDENCE}:
+        if role not in {ROLE_MAIN, ROLE_EVIDENCE} and not preferred.startswith("rtsp://"):
             subs = [url for url in vendor_candidates(spec.ip, spec.username, spec.password, "") if "sub" in url.lower() or "102" in url or "av0_1" in url or "subtype=1" in url]
             urls = subs + [url for url in urls if url not in subs]
         profiles_to_try = [normalize_profile(spec.ffmpeg_profile)]
@@ -859,7 +863,8 @@ class LocalMediaGateway:
             binary,
             "-hide_banner", "-loglevel", "error",
             *profile_args(profile, transport=transport),
-            "-i", url,
+            "-threads", "1", "-i", url,
+            "-threads", "1", "-filter_threads", "1",
             "-an", "-vsync", "0", "-flush_packets", "1",
         ]
         filters: list[str] = []

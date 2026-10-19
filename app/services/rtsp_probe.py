@@ -30,14 +30,17 @@ def vendor_candidates(ip: str, username: str, password: str, explicit: str = "")
         out.append(explicit)
     u=quote(username, safe="")
     p=quote(password, safe="")
-    # HVX/QY templates from OcxConfig/RtspRecvSdk.dll, then common Hikvision / Dahua / generic paths.
+    # ParkWatch builds ``RTSP://<ip>:<port>/video`` and ``/subvideo`` for
+    # continuous video.  Put credential-bearing variants first so MediaMTX can
+    # authenticate without relying on the vendor SDK process.  OcxConfig's
+    # av0_0/av0_1 forms remain fallbacks for older QY firmware.
     out += [
-        f"rtsp://{ip}/av0_0&user={u}&password={p}",
-        f"rtsp://{ip}/av0_1&user={u}&password={p}",
-        f"rtsp://{ip}:554/video",
-        f"rtsp://{ip}:554/subvideo",
-        f"rtsp://{u}:{p}@{ip}:554/video",
         f"rtsp://{u}:{p}@{ip}:554/subvideo",
+        f"rtsp://{u}:{p}@{ip}:554/video",
+        f"rtsp://{ip}:554/subvideo",
+        f"rtsp://{ip}:554/video",
+        f"rtsp://{ip}/av0_1&user={u}&password={p}",
+        f"rtsp://{ip}/av0_0&user={u}&password={p}",
         f"rtsp://{u}:{p}@{ip}:554/Streaming/Channels/101",
         f"rtsp://{u}:{p}@{ip}:554/Streaming/Channels/102",
         f"rtsp://{u}:{p}@{ip}:554/h264/ch1/main/av_stream",
@@ -53,7 +56,7 @@ def vendor_candidates(ip: str, username: str, password: str, explicit: str = "")
     return seen
 
 
-async def probe(url: str) -> ProbeResult:
+async def probe(url: str, *, timeout_seconds: float | None = None) -> ProbeResult:
     cmd=[
         "ffprobe", "-v", "error",
         "-rtsp_transport", "tcp",
@@ -63,7 +66,8 @@ async def probe(url: str) -> ProbeResult:
     try:
         proc=await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
-            stdout, stderr=await asyncio.wait_for(proc.communicate(), timeout=settings.rtsp_probe_timeout_seconds)
+            timeout = float(timeout_seconds or settings.rtsp_probe_timeout_seconds)
+            stdout, stderr=await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill(); await proc.wait()
             return ProbeResult(False, redact_url(url), error="FFprobe timeout")

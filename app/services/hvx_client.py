@@ -150,16 +150,20 @@ class HVXHostClient:
         except Exception as exc:
             raise HVXHostUnavailable(str(exc)) from exc
 
-    async def event_jpeg(self, handle: int, image_id: int | None = None) -> bytes:
-        suffix = f"?image_id={int(image_id)}" if image_id is not None else ""
+    async def event_jpeg(self, handle: int, image_id: int | None = None, *, capture_token: str | None = None) -> bytes:
+        from urllib.parse import urlencode
+        query = {"capture_token": capture_token} if capture_token else ({"image_id": int(image_id)} if image_id is not None else {})
+        suffix = "?" + urlencode(query) if query else ""
         async with httpx.AsyncClient(timeout=2.0) as client:
             r = await client.get(f"{self.base_url}/event-jpeg/{int(handle)}{suffix}")
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
                 return r.content
         return b""
 
-    async def event_crop(self, handle: int, image_id: int | None = None) -> bytes:
-        suffix = f"?image_id={int(image_id)}" if image_id is not None else ""
+    async def event_crop(self, handle: int, image_id: int | None = None, *, capture_token: str | None = None) -> bytes:
+        from urllib.parse import urlencode
+        query = {"capture_token": capture_token} if capture_token else ({"image_id": int(image_id)} if image_id is not None else {})
+        suffix = "?" + urlencode(query) if query else ""
         async with httpx.AsyncClient(timeout=2.0) as client:
             r = await client.get(f"{self.base_url}/event-crop/{int(handle)}{suffix}")
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":

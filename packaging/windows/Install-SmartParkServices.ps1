@@ -78,6 +78,7 @@ function Register-SmartParkTask {
 }
 
 $siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
+$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker"
 $hostBat = ""
 if (Test-Path $Py32) {
     $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`""
@@ -113,15 +114,15 @@ if ($mediaBat) {
     Write-Host "Media Service skipped: vendor\mediamtx\mediamtx.exe not in this kit."
 }
 if ($failed.Count -gt 0) {
-    Write-Host ("WARNING: {0}" -f ($failed -join "; "))
-    Write-Host "The desktop and browser will still open. Site Service starts with the desktop if a task did not."
-    exit 0
+    throw ($failed -join "; ")
 }
+Register-SmartParkTask -Name "SmartPark Recognition Worker" -Launcher $recognitionBat -WorkingDirectory $InstallDir
 
 Write-Host ""
 Write-Host "Background tasks:"
 Write-Host "  SmartPark Site Service   (API + camera events, port 8760)"
 Write-Host "  SmartPark HVX Host       (32-bit NetSDK, port 8765)"
+Write-Host "  SmartPark Recognition Worker (local lane plate detection and OCR)"
 if (Test-Path $MediaMtx) {
     Write-Host "  SmartPark Media Service  (MediaMTX realtime gateway when enabled by effective site flags)"
 }

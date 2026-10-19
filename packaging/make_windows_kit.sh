@@ -23,6 +23,7 @@ rsync -a --delete \
 
 cp "$ROOT/tools/hvx_sdk_host/hvx_host.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/hvx_sdk.py" "$OUT/payload/tools/hvx_sdk_host/"
+cp "$ROOT/tools/hvx_sdk_host/check_runtime.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/run_hvx_host.bat" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/field_acceptance_test.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/startup_check.py" "$OUT/payload/tools/"
@@ -186,7 +187,7 @@ import sys
 from packaging.version import InvalidVersion, Version
 
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-skip = ("pyside6-", "pyside6_addons-", "watchfiles-")
+skip = ("pyside6-", "watchfiles-")
 best: dict[str, tuple[Version, Path]] = {}
 for path in src.glob("*.whl"):
     name = path.name
@@ -231,6 +232,8 @@ cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
 cp "$ROOT/docs-site/i18n.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
+cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
+cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
 if [[ -f "$ROOT/PARKWATCH-LESSONS.md" ]]; then
   cp "$ROOT/PARKWATCH-LESSONS.md" "$OUT/documentation/"
 fi

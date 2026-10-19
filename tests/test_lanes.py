@@ -154,7 +154,8 @@ class LaneViewTests(unittest.TestCase):
             camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
             empty = persist_event(
                 db, camera, jpeg=JPEG, crop=CROP,
-                capture={"image_id": 77, "plate": "", "score": 0, "have_vehicle": True},
+                capture={"image_id": 77, "plate": "", "score": 0, "have_vehicle": True,
+                         "bbox": {"x1": 10, "y1": 20, "x2": 80, "y2": 50}},
             )
             self.assertEqual(empty.plate, "")
             filled = persist_event(
