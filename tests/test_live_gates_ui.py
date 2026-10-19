@@ -39,7 +39,7 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn("/live/watch", html)
         self.assertIn("function startDualLive", html)
         self.assertIn('data-layout="all"', html)
-        self.assertIn("The other gate is not recognized", html)
+        self.assertIn("It connects, streams, and recognizes only that lane", html)
         self.assertIn("/runtime/recognition-scope", html)
         self.assertIn("function pairLaneCameras", html)
 
@@ -61,7 +61,7 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn("Manual close", desktop)
         self.assertIn("/cameras/{cam['id']}/plate-corrections", desktop)
         self.assertIn("All cameras", desktop)
-        self.assertIn("The other gate is not recognized", desktop)
+        self.assertIn("It connects, streams, and recognizes only that lane", desktop)
         self.assertIn("/runtime/recognition-scope", desktop)
         self.assertIn("Find visit", desktop)
         self.assertIn("Save tariff", desktop)

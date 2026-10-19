@@ -39,10 +39,9 @@ class FastALPRPlateEngine:
             "contrast_sensitivity": float(settings.alpr_csf or 0.918),
             "pipeline": "arrival_crop_ocr",
             "flow": [
-                "The detector watches the camera's detection zone.",
-                "OCR waits until the plate holds still, then reads the crop only.",
-                "An HVX/OcxConfig vehicle snap uses that still, or the camera's own plate crop.",
-                "Other cameras (RTSP, ONVIF, Hikvision, Dahua) use the same zone and zoom.",
+                "An OcxConfig camera sends the plate box. That box is cropped and read.",
+                "A frame with no camera box is searched across the whole picture, then the plate crop is read.",
+                "The same crop-then-read is what Hardware Lab runs on one picture.",
                 "Parking receives one plate for the visit.",
             ],
             "models": {

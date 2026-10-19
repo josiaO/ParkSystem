@@ -473,20 +473,18 @@ def acquire_live(spec: CameraLiveSpec) -> None:
 def ensure_mjpeg_source(spec: CameraLiveSpec) -> None:
     """Fill the JPEG cache that desktop /live.mjpeg reads.
 
-    MediaMTX still owns browser WebRTC. HVX/QY desktop panes use the SDK
-    live_jpeg pump (ParkWatch picture path) so we do not add a second FFmpeg
-    JPEG decoder on top of MediaMTX ingest. Generic IP cameras keep the
-    MediaMTX JPEG consumer. If that consumer produces no frame, callers can
-    invoke this again after a short wait; ``gateway.ensure_producer`` is the
-    last-resort SDK/RTSP pump.
+    MediaMTX owns the camera RTSP connection for both browser and desktop.
+    Desktop MJPEG is only a presentation adapter: one persistent FFmpeg reader
+    decodes MediaMTX's localhost path into the latest-frame cache.  The vendor
+    SDK producer remains a bounded fallback when no MediaMTX path is registered.
     """
     _last_view[spec.id] = time.monotonic()
-    if spec.sdk_handle is not None:
-        start_idle_watch()
-        row = gateway._session_for(spec)
-        row.viewers = max(row.viewers, viewers_for(spec.id))
+    # A fallback already owns this camera's JPEG production. A new viewer
+    # must not restart the MediaMTX decoder alongside that producer.
+    row = gateway.session(spec.id)
+    if row is not None and row.producer is not None and not row.producer.done():
+        row.viewers = viewers_for(spec.id)
         row.last_view_at = time.monotonic()
-        gateway.ensure_producer(spec)
         return
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
