@@ -1,4 +1,4 @@
-"""HVX live video must stay OcxConfig-shaped: one stream per camera, isolated pumps."""
+"""HVX control stays in OcxConfig while MediaMTX owns continuous RTSP video."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from app.services.stream_roles import hvx_profiles
 
 
 class HvxLiveIsolationTests(unittest.TestCase):
-    def test_hvx_camera_does_not_register_mediamtx_rtsp(self):
+    def test_hvx_camera_registers_park_watch_subvideo_with_mediamtx(self):
         camera = SimpleNamespace(
             id=3,
             ip_address="192.168.1.49",
@@ -29,13 +29,14 @@ class HvxLiveIsolationTests(unittest.TestCase):
             stream_profiles=hvx_profiles(7),
         )
         cfg = source_config_for_camera(camera)
-        self.assertFalse(str(cfg.get("uri") or "").startswith("rtsp://"))
-        with patch("app.infrastructure.media.registry.register_camera_source") as register, \
+        self.assertTrue(str(cfg.get("uri") or "").startswith("rtsp://"))
+        self.assertIn("/subvideo", cfg["uri"])
+        with patch("app.infrastructure.media.registry.register_camera_source", return_value={"registered": True}) as register, \
              patch("app.infrastructure.media.registry.unregister_camera_source") as unregister:
             out = sync_camera(camera)
-        self.assertFalse(out.get("registered"))
-        register.assert_not_called()
-        unregister.assert_called_once_with(3)
+        self.assertTrue(out.get("registered"))
+        register.assert_called_once()
+        unregister.assert_not_called()
 
     def test_generic_rtsp_camera_still_registers(self):
         camera = SimpleNamespace(

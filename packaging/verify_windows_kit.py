@@ -25,11 +25,12 @@ REQUIRED_MODELS = (
 REQUIRED_HOST = (
     "hvx_host.py",
     "hvx_sdk.py",
+    "check_runtime.py",
     "run_hvx_host.bat",
     "hvx_bindings.json",
 )
 
-FORBIDDEN_WHEEL_PREFIXES = ("pyside6-", "pyside6_addons-", "watchfiles-")
+FORBIDDEN_WHEEL_PREFIXES = ("pyside6-", "watchfiles-")
 
 # Direct names from packaging/windows/requirements-windows.txt plus pip/setuptools/wheel.
 REQUIRED_DISTS = {
@@ -45,6 +46,10 @@ REQUIRED_DISTS = {
     "argon2-cffi",
     "shiboken6",
     "pyside6-essentials",
+    "pyside6-addons",
+    "psycopg",
+    "psycopg-binary",
+    "tzdata",
     "pillow",
     "numpy",
     "opencv-python-headless",

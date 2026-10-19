@@ -21,7 +21,7 @@ async def discover_camera_streams(
     discovered: list[dict[str, Any]] = list(onvif.get("profiles") or [])
     source = "onvif" if discovered else ""
     if not discovered and explicit:
-        result = await probe(explicit)
+        result = await probe(explicit, timeout_seconds=timeout)
         row = {
             "uri": explicit,
             "uri_redacted": result.url_redacted,
@@ -39,7 +39,7 @@ async def discover_camera_streams(
     if not discovered:
         source = "vendor"
         for index, url in enumerate(vendor_candidates(ip, username, password, explicit)[:6]):
-            result = await probe(url)
+            result = await probe(url, timeout_seconds=timeout)
             if not result.ok:
                 continue
             row = {
