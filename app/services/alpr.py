@@ -202,12 +202,20 @@ def _load_engine():
         if _engine is None:
             from fast_alpr import ALPR
 
+            import onnxruntime as ort
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = settings.alpr_cpu_threads
+            options.inter_op_num_threads = 1
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            options.add_session_config_entry("session.inter_op.allow_spinning", "0")
             models = ensure_alpr_model_cache()
             kwargs = {
                 "detector_model": DETECTOR_MODEL,
                 "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
                 "ocr_device": "cpu",
                 "detector_providers": ["CPUExecutionProvider"],
+                "detector_sess_options": options,
+                "ocr_sess_options": options,
                 "ocr_providers": ["CPUExecutionProvider"],
             }
             if models.get("ocr_path") and models.get("ocr_config_path"):
@@ -218,6 +226,15 @@ def _load_engine():
                 kwargs["ocr_model"] = OCR_MODEL
             _engine = ALPR(**kwargs)
         return _engine
+
+
+def warmup_engine() -> None:
+    """Initialize both models before accepting live recognition frames."""
+    import numpy as np
+
+    engine = _load_engine()
+    engine.detector.predict(np.zeros((540, 960, 3), dtype=np.uint8))
+    engine.ocr.predict(_prepare_ocr_crop(np.zeros((80, 320, 3), dtype=np.uint8)))
 
 
 def unload_engine() -> None:

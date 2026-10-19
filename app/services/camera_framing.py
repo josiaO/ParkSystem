@@ -1,9 +1,8 @@
-"""Per-camera detection zone and digital zoom.
+"""Saved framing values and the per-visit read gate.
 
-Works for the site's HVX/OcxConfig cameras and for any other adapter
-(RTSP, ONVIF, Hikvision, Dahua). The zone says where the car should be.
-Zoom tightens the search on the center of that zone. Recognition watches
-the zone with the detector, and OCRs only after the plate holds still.
+Live recognition no longer crops an operator-drawn zone. The camera plate
+box is the crop. ArrivalGate only stops the same visit from being published
+again after the plate has been read.
 """
 
 from __future__ import annotations
@@ -84,8 +83,8 @@ def gate_for(camera_id: int) -> "ArrivalGate":
 class ArrivalGate:
     """Detector watches the zone. OCR runs once the plate box holds still.
 
-    A moving plate returns ``moving`` and must not be read. ``ready`` is
-    raised once per settle. ``held`` means this visit was already read, so
+    A moving plate returns ``moving`` for callers that allow prompt first reads.
+    ``ready`` is raised once per settle. ``held`` means this visit was already read, so
     the same stopped car cannot open another session. An empty zone for
     ``absence_seconds`` starts the next visit.
     """

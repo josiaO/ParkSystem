@@ -3,10 +3,10 @@
 MediaMTX owns the camera connection and browser video. This process is only
 a recognition consumer: one lightweight FFmpeg decoder per lane reads
 ``rtsp://127.0.0.1:8554/<detect-path>``, keeps the newest JPEG, and samples
-a few frames per second. The detector watches the camera's zone. OCR runs
-only after the plate holds still, on the cropped plate, then pauses until
-the vehicle leaves. The Site Service camera-event loop stays authoritative
-until ``fastalpr_new_pipeline_enabled`` is turned on.
+a few frames per second. The first plate box on the whole frame is cropped
+and read, then OCR pauses until the vehicle leaves. The Site Service
+camera-event loop stays authoritative until ``fastalpr_new_pipeline_enabled``
+is turned on.
 """
 
 from __future__ import annotations
@@ -169,10 +169,6 @@ def _camera_rows() -> list[dict]:
                 continue
             from app.services.ocr_policy import camera_recognition_mode
 
-            from app.services.camera_framing import framing_from_profiles
-
-            profiles = dict(camera.stream_profiles or {})
-            framing = framing_from_profiles(profiles)
             rows.append({
                 "id": int(camera.id),
                 "lane_direction": str(camera.lane_direction or "ENTRY"),
@@ -181,8 +177,6 @@ def _camera_rows() -> list[dict]:
                 "site_id": camera.site_id,
                 "plate_policy": site_policy(db),
                 "recognition_mode": camera_recognition_mode(camera),
-                "detect_roi": framing["detect_roi"],
-                "detect_zoom": framing["detect_zoom"],
             })
     return rows
 
@@ -227,8 +221,6 @@ async def _infer_camera(
     rec_policy = policy_from_settings()
     sample_fps = float(getattr(settings, "recognition_sample_fps", 3.0) or 3.0)
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
-    detect_roi = str(camera.get("detect_roi") or "") or None
-    detect_zoom = camera.get("detect_zoom")
     from app.services.camera_framing import gate_for
 
     arrival = gate_for(camera_id)
@@ -338,9 +330,7 @@ async def _infer_camera(
                 from app.services.alpr import plate_still_present
 
                 async def _probe_present():
-                    return await _with_limiter(asyncio.to_thread(
-                        plate_still_present, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
-                    ))
+                    return await _with_limiter(asyncio.to_thread(plate_still_present, ticket.jpeg))
 
                 probe = asyncio.create_task(_probe_present())
                 try:
@@ -416,7 +406,7 @@ async def _infer_camera(
             from app.services.alpr import locate_plate_boxes
 
             locate_task = asyncio.create_task(_with_limiter(asyncio.to_thread(
-                locate_plate_boxes, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
+                locate_plate_boxes, ticket.jpeg,
             )))
             try:
                 boxes, located = await asyncio.shield(locate_task)
@@ -435,7 +425,8 @@ async def _infer_camera(
                 continue
             if not located.get("available"):
                 # Do not OCR the live frame when the detector cannot crop a plate.
-                stats.update(state="READY", last_inference_at=time.time(), recognition_inflight=False)
+                stats.update(state="DEGRADED", last_inference_at=time.time(), recognition_inflight=False)
+                stats["last_error"] = "plate detector unavailable"
                 stats["arrival"] = "detector-wait"
                 runtime.finish(ticket, plate="")
                 await asyncio.sleep(interval)
@@ -456,9 +447,14 @@ async def _infer_camera(
                 stats["recognition_inflight"] = False
                 await asyncio.sleep(interval)
                 continue
-            if phase != "ready":
+            # Try the first detected crop immediately. Consensus still prevents
+            # a low-confidence moving read from publishing until another frame
+            # agrees, while high-confidence plates no longer wait for the car to
+            # remain motionless before OCR begins.
+            if phase not in {"moving", "ready"} or not boxes:
                 runtime.finish(ticket, plate="")
-                lane.visit.observe(presence=True, plate="")
+                if phase != "absent":
+                    lane.visit.observe(presence=True, plate="")
                 stats["recognition_inflight"] = False
                 stats["last_inference_at"] = time.time()
                 await asyncio.sleep(interval)
@@ -473,8 +469,6 @@ async def _infer_camera(
                         "camera_label": f"worker-{camera_id}",
                         "lane_id": camera.get("lane_id"),
                         "plate_policy": camera.get("plate_policy") or {},
-                        "detect_roi": detect_roi,
-                        "detect_zoom": detect_zoom,
                         "plate_boxes": boxes if located.get("available") else None,
                     })),
                     timeout=stall,
@@ -577,6 +571,7 @@ async def _loop() -> None:
 
     tasks: dict[int, tuple[asyncio.Event, asyncio.Task, dict]] = {}
     configurations: dict[int, dict] = {}
+    warmed_up = False
     # CPUExecutionProvider sessions support concurrent Run() calls. Bound the
     # parallelism so one slow camera cannot block every other lane while also
     # avoiding CPU oversubscription.
@@ -587,6 +582,16 @@ async def _loop() -> None:
             with SessionLocal() as db:
                 enabled = bool(flags(db).get("fastalpr_new_pipeline_enabled"))
             wanted = _camera_rows() if enabled else []
+            if wanted and not warmed_up:
+                from app.services.alpr import warmup_engine
+                _write_health({"enabled": enabled, "cameras": [], "state": "WARMING_UP"})
+                try:
+                    await asyncio.to_thread(warmup_engine)
+                    warmed_up = True
+                except Exception as exc:
+                    _write_health({"enabled": enabled, "cameras": [], "state": "DEGRADED", "last_error": str(exc)[:200]})
+                    await asyncio.sleep(5.0)
+                    continue
             wanted_by_id = {int(row["id"]): row for row in wanted}
             now_wall = time.time()
             for camera_id in list(tasks):
@@ -648,6 +653,8 @@ def main() -> int:
         print("SmartPark Recognition Worker is already running.", file=sys.stderr)
         return 0
     print("Recognition worker reads MediaMTX cam{id}_detect when fastalpr_new_pipeline_enabled=true.")
+    from app.desktop.launch import wait_for_api
+    wait_for_api()
     asyncio.run(_loop())
     return 0
 

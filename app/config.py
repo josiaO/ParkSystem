@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import platform
+import socket
+from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +26,9 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8760
     database_url: str | None = None
+    node_id: str = socket.gethostname()
+    node_role: Literal["SERVER", "CLIENT"] = "SERVER"
+    shared_media_dir: Path | None = None
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_timeout_seconds: float = 8.0
@@ -40,7 +45,7 @@ class Settings(BaseSettings):
     stream_read_timeout_seconds: float = 3.0
     detect_fps: float = 5.0
     # Recognition samples a stopped vehicle. This is not the camera or browser FPS.
-    recognition_sample_fps: float = 3.0
+    recognition_sample_fps: float = 4.0
     # After a plate is confirmed, OCR stops. A detector-only check at this
     # interval notices the vehicle leaving without reading the plate again.
     recognition_departure_check_seconds: float = 1.0
@@ -48,7 +53,9 @@ class Settings(BaseSettings):
     rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
     local_alpr_cooldown_seconds: float = 0.5
-    recognition_max_concurrency: int = 4
+    recognition_max_concurrency: int = 2
+    # Bound each ONNX model pool so video and UI retain CPU headroom.
+    alpr_cpu_threads: int = 2
     recognition_absence_reset_seconds: float = 0.6
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
@@ -193,12 +200,12 @@ class Settings(BaseSettings):
             raise ValueError("SMARTPARK_RECOGNITION_SAMPLE_FPS must be between 1 and 10")
         return fps
 
-    @field_validator("recognition_max_concurrency")
+    @field_validator("recognition_max_concurrency", "alpr_cpu_threads")
     @classmethod
     def _recognition_concurrency(cls, value: int) -> int:
         workers = int(value)
         if not 1 <= workers <= 8:
-            raise ValueError("SMARTPARK_RECOGNITION_MAX_CONCURRENCY must be between 1 and 8")
+            raise ValueError("Recognition concurrency and ALPR CPU threads must be between 1 and 8")
         return workers
 
     @field_validator("recognition_gate_id", mode="before")
@@ -327,7 +334,7 @@ class Settings(BaseSettings):
 
     @property
     def media_dir(self) -> Path:
-        p = self.data_dir / "media"
+        p = self.shared_media_dir or self.data_dir / "media"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -336,6 +343,17 @@ class Settings(BaseSettings):
         if self.database_url:
             return self.database_url
         return f"sqlite:///{(self.data_dir / 'smartpark.db').as_posix()}"
+
+    @model_validator(mode="after")
+    def validate_node_topology(self):
+        if self.node_role == "CLIENT":
+            if not str(self.database_url or "").startswith(("postgresql://", "postgresql+psycopg://")):
+                raise ValueError("A lane client requires the server PostgreSQL database URL")
+            if not self.recognition_gate_id or self.recognition_gate_id < 1:
+                raise ValueError("A lane client requires its own SMARTPARK_RECOGNITION_GATE_ID")
+            if self.shared_media_dir is None:
+                raise ValueError("A lane client requires SMARTPARK_SHARED_MEDIA_DIR for shared vehicle evidence")
+        return self
 
 
 settings = Settings()

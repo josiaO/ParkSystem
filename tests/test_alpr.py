@@ -118,6 +118,28 @@ class PlateFusionTests(unittest.TestCase):
         self.assertFalse(plate_box_ok(tall, 640, 480))
         self.assertTrue(plate_box_ok(plate, 640, 480))
 
+    def test_chinese_no_plate_is_not_a_reading(self):
+        from io import BytesIO
+        from PIL import Image
+        from app.core.plate import is_camera_no_plate
+        from app.services.captures import camera_crop_usable, looks_like_no_plate_card
+
+        self.assertTrue(is_camera_no_plate("无车牌"))
+        self.assertTrue(is_camera_no_plate("NO PLATE"))
+        self.assertFalse(is_camera_no_plate("T285DQP"))
+        native = native_from_sdk_capture({"plate": "无车牌", "score": 90, "have_vehicle": True, "plate_box": [10, 10, 80, 40]})
+        self.assertEqual(native["plate"], "")
+        card = BytesIO()
+        Image.new("RGB", (320, 100), (20, 90, 210)).save(card, format="JPEG")
+        card_bytes = card.getvalue()
+        scene = BytesIO()
+        Image.new("RGB", (640, 360), (30, 30, 30)).save(scene, format="JPEG")
+        self.assertTrue(looks_like_no_plate_card(card_bytes))
+        self.assertFalse(camera_crop_usable(card_bytes, scene.getvalue(), "无车牌"))
+        photo = BytesIO()
+        Image.effect_noise((180, 48), 80).convert("RGB").save(photo, format="JPEG")
+        self.assertFalse(looks_like_no_plate_card(photo.getvalue()))
+
     def test_empty_lane_does_not_run_second_clahe_detect(self):
         import numpy as np
         from types import SimpleNamespace

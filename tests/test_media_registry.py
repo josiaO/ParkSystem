@@ -57,6 +57,7 @@ class MediaRegistryTests(unittest.TestCase):
             patch.object(registry, "media_mtx_for_camera", return_value=True),
             patch.object(registry.mediamtx, "running", return_value=True),
             patch.object(registry.mediamtx, "live_endpoint", return_value=endpoint),
+            patch.object(registry, "media_telemetry", return_value={"roles": {"LIVE": {"registered": True}}, "state": "LIVE"}),
         ):
             body = asyncio.run(registry.get_live_endpoint(3))
         self.assertEqual(body["provider"], LIVE_VIEW_MEDIAMTX)
