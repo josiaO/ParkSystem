@@ -239,14 +239,23 @@ class CameraRecognitionLane:
                 if self.inflight is ticket:
                     self.inflight = None
                 return False
+            if ticket.visit_id and ticket.visit_id != self.visit.visit_id:
+                self.stale_results_rejected += 1
+                if self.inflight is ticket:
+                    self.inflight = None
+                return False
             if ticket.frame_seq < self.last_accepted_seq and ticket.generation == self.last_accepted_generation:
                 self.stale_results_rejected += 1
                 if self.inflight is ticket:
                     self.inflight = None
                 return False
             age = ticket.frame_age_ms(now)
-            if age > float(stale_frame_ms) and not plate:
+            if age > float(stale_frame_ms):
                 self.stale_results_rejected += 1
+                self.last_recognition_completed_at = now
+                if self.inflight is ticket:
+                    self.inflight = None
+                return False
             self.last_accepted_seq = max(self.last_accepted_seq, ticket.frame_seq)
             self.last_accepted_generation = ticket.generation
             self.last_recognition_completed_at = now
@@ -383,6 +392,7 @@ class FairInferenceScheduler:
     def __init__(self, max_concurrency: int = 2) -> None:
         self.max_concurrency = max(1, int(max_concurrency or 1))
         self._held: dict[int, float] = {}
+        self._waiting: list[int] = []
         self._lock = threading.Lock()
         self._zombies = 0
 
@@ -392,17 +402,24 @@ class FairInferenceScheduler:
         with self._lock:
             if camera_id in self._held:
                 return False
-            if len(self._held) >= self.max_concurrency:
+            if camera_id not in self._waiting:
+                self._waiting.append(camera_id)
+            if len(self._held) >= self.max_concurrency or self._waiting[0] != camera_id:
                 return False
+            self._waiting.pop(0)
             self._held[camera_id] = now
             return True
 
     def release(self, camera_id: int) -> None:
         with self._lock:
             self._held.pop(int(camera_id), None)
+            if int(camera_id) in self._waiting:
+                self._waiting.remove(int(camera_id))
 
     def force_release(self, camera_id: int) -> None:
         with self._lock:
+            if int(camera_id) in self._waiting:
+                self._waiting.remove(int(camera_id))
             if int(camera_id) in self._held:
                 self._held.pop(int(camera_id), None)
                 self._zombies += 1
@@ -417,6 +434,7 @@ class FairInferenceScheduler:
                 "max_concurrency": self.max_concurrency,
                 "inflight_cameras": list(self._held),
                 "inflight": len(self._held),
+                "waiting_cameras": list(self._waiting),
                 "zombies_released": self._zombies,
             }
 
@@ -448,6 +466,9 @@ class RecognitionRuntime:
         lane = self.lane(camera_id)
         if lane.inflight is not None:
             return None
+        if lane.mailbox.depth() == 0:
+            self.scheduler.release(camera_id)
+            return None
         if not self.scheduler.try_acquire(camera_id):
             return None
         sample = lane.take_pending()
@@ -463,7 +484,8 @@ class RecognitionRuntime:
     def finish(self, ticket: RecognitionTicket, *, plate: str = "", stale_frame_ms: float = 1000.0) -> bool:
         lane = self.lane(ticket.camera_id)
         ok = lane.accept(ticket, plate=plate, stale_frame_ms=stale_frame_ms)
-        self.scheduler.release(ticket.camera_id)
+        if ticket.generation == lane.generation:
+            self.scheduler.release(ticket.camera_id)
         return ok
 
     def recover(self, camera_id: int) -> int:

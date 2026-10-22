@@ -15,6 +15,7 @@ from io import BytesIO
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -92,12 +93,14 @@ def should_persist_vehicle_capture(
     if plate and is_empty_scene_ocr(plate, confidence=conf):
         plate = ""
     source = str(capture.get("source") or native.get("source") or "").lower()
+    if source in {"fastalpr", "local"} or "fastalpr" in source:
+        have_vehicle = bool(capture.get("have_vehicle"))
     box = native.get("bbox") if isinstance(native.get("bbox"), dict) else None
     if not isinstance(box, dict):
         raw_box = capture.get("bbox") or capture.get("plate_box")
         box = raw_box if isinstance(raw_box, dict) else bbox_from_lp_box(raw_box)
 
-    if have_vehicle:
+    if have_vehicle and not (source in {"fastalpr", "local"} or "fastalpr" in source):
         if plate and not plausible_vehicle_plate(plate, confidence=conf) and conf < 0.85:
             return False, "vehicle-but-implausible-plate"
         if plate or allow_empty_vehicle:
@@ -135,7 +138,7 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / name
     dest.write_bytes(data)
-    return str(Path(kind) / name)
+    return (Path(kind) / name).as_posix()
 
 
 def _jpeg_from_ref(ref: str | None) -> bytes:
@@ -284,8 +287,13 @@ def _plate_jpeg(jpeg: bytes, crop: bytes, box: dict | None, capture: dict | None
 
 
 def attach_fusion_audit(box: dict | None, capture: dict | None) -> dict:
-    """Keep native vs FastALPR disagreement on the capture row (bbox JSON)."""
+    """Keep native vs FastALPR disagreement and timing on the capture row."""
     box = dict(box or {})
+    if (capture or {}).get("timeline"):
+        box["timeline"] = capture["timeline"]
+    for key in ("detector_confidence", "frame_confidence", "consensus", "validation_result", "timings"):
+        if (capture or {}).get(key) is not None:
+            box[key] = capture[key]
     capture = capture or {}
     fusion = capture.get("fusion") if isinstance(capture.get("fusion"), dict) else {}
     native_plate = str(fusion.get("native_plate") or capture.get("native_plate") or "")
@@ -304,6 +312,8 @@ def attach_fusion_audit(box: dict | None, capture: dict | None) -> dict:
 
 def capture_dict(row: VehicleCapture) -> dict:
     chars = " ".join(list(row.plate)) if row.plate else ""
+    snapshot = (row.snapshot_path or "").replace("\\", "/")
+    crop = (row.crop_path or "").replace("\\", "/")
     return {
         "id": row.id,
         "camera_id": row.camera_id,
@@ -314,8 +324,8 @@ def capture_dict(row: VehicleCapture) -> dict:
         "characters": chars,
         "confidence": float(row.confidence or 0),
         "image_id": row.image_id,
-        "snapshot_url": f"/media/{row.snapshot_path}" if row.snapshot_path else None,
-        "crop_url": f"/media/{row.crop_path}" if row.crop_path else None,
+        "snapshot_url": f"/media/{snapshot}" if snapshot else None,
+        "crop_url": f"/media/{crop}" if crop else None,
         "bbox": row.bbox,
         "source": getattr(row, "source", None) or ((row.bbox or {}).get("source") if isinstance(row.bbox, dict) else None),
         "plate_country": getattr(row, "plate_country", None) or "",
@@ -348,6 +358,18 @@ def find_capture_for_session(db: Session, *, plate: str = "", camera_id: int | N
     return None
 
 
+def _capture_by_identity(db: Session, camera_id: int, capture: dict | None) -> VehicleCapture | None:
+    for key in ("visit_id", "event_id"):
+        value = str((capture or {}).get(key) or "")
+        if value:
+            existing = db.scalar(select(VehicleCapture).where(
+                VehicleCapture.camera_id == camera_id, getattr(VehicleCapture, key) == value,
+            ))
+            if existing is not None:
+                return existing
+    return None
+
+
 def persist_event(
     db: Session,
     camera: Camera,
@@ -358,6 +380,9 @@ def persist_event(
     coil_occupied: bool = False,
     force: bool = False,
 ) -> VehicleCapture | None:
+    existing = _capture_by_identity(db, camera.id, capture)
+    if existing is not None:
+        return existing
     jpeg = jpeg or b""
     crop = crop or b""
     if jpeg[:2] != b"\xff\xd8" and crop[:2] == b"\xff\xd8":
@@ -394,7 +419,8 @@ def persist_event(
         pass
     box = attach_fusion_audit(box, capture)
     plate_jpeg = _plate_jpeg(jpeg, crop, box, capture)
-    if image_id:
+    has_identity = bool((capture or {}).get("visit_id") or (capture or {}).get("event_id"))
+    if image_id and not has_identity:
         existing = db.scalar(
             select(VehicleCapture).where(
                 VehicleCapture.camera_id == camera.id,
@@ -437,7 +463,7 @@ def persist_event(
                 db.commit()
                 db.refresh(existing)
             return existing
-    else:
+    elif not has_identity:
         latest = latest_for_camera(db, camera.id)
         if (
             latest
@@ -486,7 +512,14 @@ def persist_event(
         plate_type=str((capture or {}).get("plate_type") or ""),
     )
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = _capture_by_identity(db, camera.id, capture)
+        if existing is None:
+            raise
+        return existing
     db.refresh(row)
     return row
 

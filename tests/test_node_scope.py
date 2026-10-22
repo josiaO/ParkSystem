@@ -26,6 +26,59 @@ from app.services.preview import stop_live_pumps
 
 
 class NodeScopeTests(unittest.TestCase):
+    def test_production_owner_assignment_persists_entry_and_exit_only(self):
+        from app.config import settings
+        from app.services.node_scope import describe_recognition_scope
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_gate_id", None), patch.object(settings, "recognition_all_gates_enabled", False):
+            with self.Session() as db:
+                self.assertEqual(describe_recognition_scope(db)["mode"], "unassigned")
+            response = self.client.put("/runtime/recognition-owner", headers=self.headers, json={"gate_id": self.gate1["id"]})
+            self.assertEqual(response.status_code, 200, response.text)
+            reset_recognition_scope()
+            with self.Session() as db:
+                scope = describe_recognition_scope(db)
+                self.assertEqual({row["id"] for row in scope["cameras"]}, {self.cam1e["id"], self.cam1x["id"]})
+                self.assertFalse(camera_in_recognition_scope(self.cam2e, db=db))
+            from app.recognition_worker import _camera_rows
+            with patch("app.db.SessionLocal", self.Session), patch("app.services.flags.media_mtx_for_camera", return_value=True), patch("app.recognition_worker._software_camera", return_value=True):
+                self.assertEqual({row["id"] for row in _camera_rows()}, {self.cam1e["id"], self.cam1x["id"]})
+            response = self.client.post("/runtime/recognition-scope", headers=self.headers, json={"gate_id": self.gate2["id"]})
+            self.assertEqual(response.status_code, 409)
+            response = self.client.get("/runtime/recognition-scope", headers=self.headers)
+            self.assertEqual(response.json()["gate_id"], self.gate1["id"])
+
+    def test_owner_assignment_rejects_all_gates_unknown_gate_and_env_override(self):
+        from app.config import settings
+        for gate_id, expected in ((None, 422), (-1, 422), (999999, 404)):
+            response = self.client.put("/runtime/recognition-owner", headers=self.headers, json={"gate_id": gate_id})
+            self.assertEqual(response.status_code, expected, response.text)
+        with patch.object(settings, "recognition_gate_id", self.gate1["id"]):
+            response = self.client.put("/runtime/recognition-owner", headers=self.headers, json={"gate_id": self.gate2["id"]})
+            self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.client.put("/runtime/recognition-owner", json={"gate_id": self.gate1["id"]}).status_code, 401)
+
+    def test_database_assignment_overrides_stale_process_local_selection(self):
+        from app.models import SiteSetting
+        from app.services.node_scope import recognition_gate_id
+        set_recognition_gate_id(self.gate1["id"])
+        with self.Session() as db:
+            db.add(SiteSetting(key="node", value={"recognition_gate_id": self.gate2["id"]}))
+            db.commit()
+        with self.Session() as db:
+            self.assertEqual(recognition_gate_id(db), self.gate2["id"])
+
+    def test_operator_cannot_reassign_production_owner(self):
+        with self.Session() as db:
+            role = db.scalar(select(Role).where(Role.name == "Operator"))
+            user = User(username="operator", full_name="Operator", password_hash=hash_password("operator-pass"))
+            db.add(user)
+            db.flush()
+            db.add(UserRole(user_id=user.id, role_id=role.id))
+            db.commit()
+        token = self.client.post("/auth/login", json={"username": "operator", "password": "operator-pass"}).json()["token"]
+        response = self.client.put("/runtime/recognition-owner", headers={"Authorization": f"Bearer {token}"}, json={"gate_id": self.gate1["id"]})
+        self.assertEqual(response.status_code, 403, response.text)
+
     def setUp(self):
         reset_recognition_scope()
         self.engine = create_engine(

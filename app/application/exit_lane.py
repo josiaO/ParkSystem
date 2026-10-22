@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.parking_engine import (
@@ -162,6 +163,14 @@ class ExitLaneController:
                 "message": "No plate was resolved.",
             }
         from app.services.parking_sessions import active_for_plate
+        if event_id:
+            previous = db.scalar(select(ParkingSession).where(
+                ParkingSession.site_id == site_id, ParkingSession.exit_event_id == event_id,
+            ))
+            if previous is not None and (previous.exit_open_command_uuid or previous.closed_at is not None):
+                return {"ok": True, "action": "EXIT", "reason": "duplicate", "duplicate": True,
+                        "barrier_opened": bool(previous.exit_open_command_uuid), "session": snapshot(previous),
+                        "message": "This exit event already belongs to its original session."}
         row = active_for_plate(db, plate, site_id=site_id)
         if row is None:
             record_access_decision(
@@ -322,12 +331,24 @@ class ExitLaneController:
                 "message": "Exit is authorized but no barrier is assigned to this lane.",
             }
 
-        command_uuid = row.exit_open_command_uuid or uuid4().hex
+        if row.exit_open_command_uuid:
+            return {"ok": True, "action": "EXIT", "reason": "gate_command_in_progress",
+                    "duplicate": True, "barrier_opened": False, "session": snapshot(row),
+                    "financial": financial, "message": "An exit barrier command already owns this session."}
+        command_uuid = uuid4().hex
         if not row.exit_open_command_uuid:
-            row.exit_open_command_uuid = command_uuid
+            claimed = db.execute(update(ParkingSession).where(
+                ParkingSession.id == row.id,
+                or_(ParkingSession.exit_open_command_uuid == "", ParkingSession.exit_open_command_uuid.is_(None)),
+            ).values(exit_open_command_uuid=command_uuid))
             db.commit()
             db.refresh(row)
+            if claimed.rowcount != 1:
+                return {"ok": True, "action": "EXIT", "reason": "gate_command_in_progress",
+                        "duplicate": True, "barrier_opened": False, "session": snapshot(row), "financial": financial}
         cameras = _cameras(gate, camera)
+        from app.services.lane_timing import mark
+        mark("gate_requested", command_uuid=command_uuid)
         if self.opener is None:
             from app.services.simulation import _pulse_gate
             opened = await _pulse_gate(

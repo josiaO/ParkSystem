@@ -380,6 +380,14 @@ class SiteSetting(Base):
 class VehicleCapture(Base):
     """One car event from a QY image callback: full snapshot + plate crop + characters."""
     __tablename__ = "vehicle_captures"
+    __table_args__ = (
+        Index("uq_vehicle_captures_camera_event", "camera_id", "event_id", unique=True,
+              sqlite_where=text("event_id != '' AND camera_id IS NOT NULL"),
+              postgresql_where=text("event_id != '' AND camera_id IS NOT NULL")),
+        Index("uq_vehicle_captures_camera_visit", "camera_id", "visit_id", unique=True,
+              sqlite_where=text("visit_id != '' AND camera_id IS NOT NULL"),
+              postgresql_where=text("visit_id != '' AND camera_id IS NOT NULL")),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True, index=True)
     gate_id: Mapped[int | None] = mapped_column(ForeignKey("gates.id"), nullable=True, index=True)

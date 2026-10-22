@@ -15,8 +15,12 @@ def default_data_dir() -> Path:
     return Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "smartpark-edge"
 
 
+def install_directory() -> Path:
+    return Path(os.environ.get("SMARTPARK_HOME") or Path(__file__).resolve().parents[1]).resolve()
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=install_directory() / ".env", extra="ignore")
 
     app_name: str = "SmartPark Edge"
     app_version: str = "0.3.0"
@@ -47,14 +51,19 @@ class Settings(BaseSettings):
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
     camera_event_poll_seconds: float = 0.25
+    parking_event_poll_seconds: float = 0.1
     local_alpr_cooldown_seconds: float = 0.5
     recognition_max_concurrency: int = 4
+    recognition_model_threads: int = 0
     recognition_absence_reset_seconds: float = 0.6
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
     live_mjpeg_fps: float = 10.0
     # Production: pin this PC to one gate (entry+exit). 0/unset = operator chooses.
     recognition_gate_id: int | None = None
+    deployment_profile: str = "DEVELOPMENT"
+    recognition_all_gates_enabled: bool = False
+    mediamtx_browser_base_url: str = ""
     entry_dedupe_seconds: float = 2.0
     entry_dedupe_similarity: float = 0.85
     coil_gpio_index: int = 1
@@ -169,6 +178,25 @@ class Settings(BaseSettings):
     recognition_high_confidence: float = 0.92
     recognition_medium_confidence: float = 0.75
 
+    @field_validator("deployment_profile")
+    @classmethod
+    def _deployment_profile(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"DEVELOPMENT", "PRODUCTION"}:
+            raise ValueError("deployment_profile must be DEVELOPMENT or PRODUCTION")
+        return value
+
+    @field_validator("mediamtx_browser_base_url")
+    @classmethod
+    def _browser_base(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        if value:
+            parsed = urlsplit(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("MediaMTX browser base must be an HTTP(S) URL without credentials, query or fragment")
+        return value
+
     @field_validator("api_port", "default_hvx_sdk_port", "board_tcp_port", "led_udp_port", "printer_escpos_port")
     @classmethod
     def _port_range(cls, value: int) -> int:
@@ -201,6 +229,13 @@ class Settings(BaseSettings):
             raise ValueError("SMARTPARK_RECOGNITION_MAX_CONCURRENCY must be between 1 and 8")
         return workers
 
+    @field_validator("recognition_model_threads")
+    @classmethod
+    def _model_threads(cls, value: int) -> int:
+        if not 0 <= value <= 32:
+            raise ValueError("recognition_model_threads must be 0 (automatic CPU budget) or 1-32")
+        return value
+
     @field_validator("recognition_gate_id", mode="before")
     @classmethod
     def _optional_gate_id(cls, value):
@@ -210,6 +245,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "recognition_absence_reset_seconds",
+        "parking_event_poll_seconds",
         "recognition_departure_check_seconds",
         "recognition_worker_stall_seconds",
         "live_plate_fresh_seconds",
@@ -334,6 +370,14 @@ class Settings(BaseSettings):
     @property
     def resolved_database_url(self) -> str:
         if self.database_url:
+            from sqlalchemy.engine import make_url
+
+            url = make_url(self.database_url)
+            filename = url.database
+            if url.get_backend_name() == "sqlite" and filename and filename != ":memory:" and not filename.startswith("file:"):
+                path = Path(filename)
+                if not path.is_absolute():
+                    return url.set(database=(install_directory() / path).as_posix()).render_as_string(hide_password=False)
             return self.database_url
         return f"sqlite:///{(self.data_dir / 'smartpark.db').as_posix()}"
 

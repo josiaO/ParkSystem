@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import platform
@@ -23,7 +25,8 @@ def resolve_vendor_dir() -> Path:
     ocx = here.parent.parent / "OcxConfig"
     local = here / "vendor"
     configs_ocx = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
-    for candidate in (ocx, local, configs_ocx):
+    installed = here.parent.parent / "vendor"
+    for candidate in (installed, ocx, local, configs_ocx):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else local
@@ -79,6 +82,7 @@ class Handler(BaseHTTPRequestHandler):
             files = {name: (VENDOR / name).exists() for name in required}
             return reply(self, 200, {
                 "available": sdk is not None,
+                "connections": sdk.connection_sessions() if sdk else [],
                 "startup_error": startup_error,
                 "python_bits": struct.calcsize("P") * 8,
                 "platform": platform.platform(),
@@ -226,6 +230,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    log_directory = Path(os.environ.get("PROGRAMDATA") or Path.home()) / "SmartParkEdge" / "logs"
+    log_directory.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_directory / "hvx-host.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    host_log = logging.getLogger("smartpark.hvx")
+    host_log.setLevel(logging.INFO)
+    host_log.addHandler(handler)
+    host_log.info("SDK host starting: bits=%s vendor=%s available=%s error=%s", struct.calcsize('P')*8, VENDOR, sdk is not None, startup_error)
     print(f"SmartPark HVX SDK Host — http://{HOST}:{PORT}")
     print(f"Python bitness: {struct.calcsize('P')*8}")
     if startup_error: print("SDK unavailable:",startup_error)

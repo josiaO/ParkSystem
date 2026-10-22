@@ -31,6 +31,9 @@ class FastALPRProvider:
             # current model call before releasing worker model ownership.
             await inference
             raise
+        if result.get("ok") is False:
+            from app.services.redaction import redact_text
+            raise RuntimeError(redact_text(str(result.get("detail") or "FastALPR could not read the plate crop")))
         local = local_from_fastalpr(result)
         from app.infrastructure.recognition import normalize_event
 
@@ -46,6 +49,8 @@ class FastALPRProvider:
             image_ref=result.get("image_url") or event_or_frame.get("image_ref"),
             plate_crop_ref=best.get("crop_url") or best.get("plate_crop_path"),
             extra={"local": local, "backend": result.get("backend"), "ok": result.get("ok"),
-                   "bbox": local.get("bbox"), "model_version": result.get("engine_version")},
+                   "bbox": local.get("bbox"), "model_version": result.get("engine_version"),
+                   "detector_confidence": best.get("detector_confidence", 0),
+                   "timings": best.get("timings") or {}},
             plate_policy=event_or_frame.get("plate_policy"),
         )

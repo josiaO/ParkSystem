@@ -18,7 +18,7 @@ def test_live_callback_ignores_destroyed_and_replaced_streams():
     from pathlib import Path
     from types import SimpleNamespace
 
-    source = Path(__file__).resolve().parents[1] / 'app/desktop/main.py'
+    source = Path(__file__).resolve().parents[1] / 'app/desktop/live_pane.py'
     tree = ast.parse(source.read_text())
     pane = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'CameraLivePane')
     method = next(n for n in pane.body if isinstance(n, ast.FunctionDef) and n.name == '_consume_live_frame')

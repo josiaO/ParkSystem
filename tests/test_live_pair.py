@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.live_pair import camera_label, camera_side, lane_options, pair_lane_cameras, slot_cameras
+from app.services.live_pair import camera_label, camera_side, lane_options, pair_lane_cameras, reconcile_slots, slot_cameras
 
 
 class LivePairTests(unittest.TestCase):
+    def test_missing_second_camera_is_filled_after_refresh(self):
+        entry = {"id": 1, "gate_id": 10, "lane_direction": "ENTRY"}
+        exit_cam = {"id": 2, "gate_id": 10, "lane_direction": "EXIT"}
+        self.assertEqual(reconcile_slots([entry], 1, None, 10), (entry, None))
+        self.assertEqual(reconcile_slots([entry, exit_cam], 1, None, 10), (entry, exit_cam))
+
+    def test_removed_camera_is_replaced_without_selecting_other_gate(self):
+        entry = {"id": 1, "gate_id": 10, "lane_direction": "ENTRY"}
+        exit_cam = {"id": 2, "gate_id": 10, "lane_direction": "EXIT"}
+        other = {"id": 3, "gate_id": 20, "lane_direction": "ENTRY"}
+        self.assertEqual(reconcile_slots([other, entry, exit_cam], 99, 2, 10), (entry, exit_cam))
+
     def test_pairs_entry_and_exit_of_one_gate(self):
         cams = [
             {"id": 1, "name": "1# Entry", "gate_id": 10, "lane_direction": "ENTRY"},

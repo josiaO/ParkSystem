@@ -28,6 +28,7 @@ from app.services.camera_lpr import camera_contract
 
 _lock = threading.Lock()
 _engine = None
+_warm_engine = None
 
 
 @dataclass
@@ -37,10 +38,12 @@ class PlateHit:
     plate_confidence: float
     plate_crop_path: str | None = None
     bbox: dict | None = None
+    detector_confidence: float = 0.0
+    timings: dict = field(default_factory=dict)
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def as_dict(self) -> dict:
-        crop = self.plate_crop_path
+        crop = self.plate_crop_path.replace("\\", "/") if self.plate_crop_path else None
         return {
             "plate": self.plate_normalized or self.plate_raw,
             "plate_raw": self.plate_raw,
@@ -50,6 +53,8 @@ class PlateHit:
             "crop_url": f"/media/{crop}" if crop else None,
             "bbox": self.bbox,
             "event_id": self.event_id,
+            "detector_confidence": self.detector_confidence,
+            "timings": self.timings,
         }
 
 
@@ -90,7 +95,7 @@ def annotate_image(image_path: str, hits: list[PlateHit], dest_name: str | None 
         folder.mkdir(parents=True, exist_ok=True)
         dest = folder / (dest_name or f"{uuid.uuid4().hex}.jpg")
         img.save(dest, quality=85)
-        return str(dest.relative_to(settings.media_dir))
+        return dest.relative_to(settings.media_dir).as_posix()
     except Exception:
         return None
 
@@ -210,6 +215,17 @@ def _load_engine():
                 "detector_providers": ["CPUExecutionProvider"],
                 "ocr_providers": ["CPUExecutionProvider"],
             }
+            import onnxruntime as ort
+
+            options = ort.SessionOptions()
+            workers = max(1, int(settings.recognition_max_concurrency))
+            automatic = max(1, min(2, ((os.cpu_count() or 2) - 1) // workers))
+            options.intra_op_num_threads = settings.recognition_model_threads or automatic
+            options.inter_op_num_threads = 1
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+            kwargs["detector_sess_options"] = options
+            kwargs["ocr_sess_options"] = options
             if models.get("ocr_path") and models.get("ocr_config_path"):
                 kwargs["ocr_model"] = None
                 kwargs["ocr_model_path"] = models["ocr_path"]
@@ -222,9 +238,25 @@ def _load_engine():
 
 def unload_engine() -> None:
     """Drop the loaded reader so the next frame picks up a new model pack."""
-    global _engine
+    global _engine, _warm_engine
     with _lock:
         _engine = None
+        _warm_engine = None
+
+
+def warmup() -> dict:
+    """Initialize and exercise both models without publishing or saving evidence."""
+    global _warm_engine
+    import numpy as np
+
+    started = time.monotonic()
+    engine = _load_engine()
+    if _warm_engine is engine:
+        return {"ready": True, "cached": True, "warmup_ms": 0.0}
+    engine.detector.predict(np.zeros((360, 640, 3), dtype=np.uint8))
+    engine.ocr.predict(np.zeros((64, 320, 3), dtype=np.uint8))
+    _warm_engine = engine
+    return {"ready": True, "warmup_ms": round((time.monotonic() - started) * 1000, 1)}
 
 
 def _crop_path(image_path: str, bbox) -> str | None:
@@ -244,7 +276,7 @@ def _crop_path(image_path: str, bbox) -> str | None:
         folder.mkdir(parents=True, exist_ok=True)
         dest = folder / f"{uuid.uuid4().hex}.jpg"
         crop.convert("RGB").save(dest, quality=92)
-        return str(dest.relative_to(settings.media_dir))
+        return dest.relative_to(settings.media_dir).as_posix()
     except Exception:
         return None
 
@@ -323,7 +355,7 @@ def _crop_bgr(bgr, bbox, *, pad_ratio: float = 0.12):
     return crop, (left, top, right, bottom)
 
 
-def _prepare_ocr_crop(crop_bgr):
+def _prepare_ocr_crop(crop_bgr, *, enhance: bool = True):
     """Upscale and lightly enhance the plate crop before OCR — never OCR the full car."""
     if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
         return crop_bgr
@@ -342,7 +374,7 @@ def _prepare_ocr_crop(crop_bgr):
             (max(1, int(w * scale)), max(1, int(h * scale))),
             interpolation=cv2.INTER_CUBIC,
         )
-    boosted = _boost_contrast(crop_bgr)
+    boosted = _boost_contrast(crop_bgr) if enhance else None
     return boosted if boosted is not None else crop_bgr
 
 
@@ -359,7 +391,7 @@ def _save_crop_bgr(crop_bgr) -> str | None:
         folder.mkdir(parents=True, exist_ok=True)
         dest = folder / f"{uuid.uuid4().hex}.jpg"
         Image.fromarray(rgb).save(dest, quality=95)
-        return str(dest.relative_to(settings.media_dir))
+        return dest.relative_to(settings.media_dir).as_posix()
     except Exception:
         return None
 
@@ -535,7 +567,7 @@ def _detection_score(detection) -> float:
             return float(value)
         except (TypeError, ValueError):
             continue
-    return 1.0
+    return 0.0
 
 
 def _bbox_size(bbox) -> tuple[int, int]:
@@ -600,6 +632,7 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
     image_h = int(bgr.shape[0])
     min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     for detection in detections or []:
+        crop_started = time.monotonic()
         bbox = getattr(detection, "bounding_box", None)
         if bbox is None:
             continue
@@ -614,13 +647,25 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
         )
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
-        ocr_input = _prepare_ocr_crop(crop)
+        crop_ready = time.monotonic()
+        ocr_input = _prepare_ocr_crop(crop, enhance=False)
+        ocr_started = time.monotonic()
         try:
             ocr = engine.ocr.predict(ocr_input)
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError(f"FastALPR plate-crop OCR failed: {exc}") from exc
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
+        if text and conf < float(settings.recognition_high_confidence) and accept_ocr_plate(plate, conf, bbox=bbox, image_size=(image_w, image_h)):
+            try:
+                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop))
+                enhanced_text, enhanced_conf = _ocr_result_text(enhanced)
+                enhanced_plate, _rank = _apply_country_profile(enhanced_text, enhanced_conf)
+                if enhanced_conf > conf and accept_ocr_plate(enhanced_plate, enhanced_conf, bbox=bbox, image_size=(image_w, image_h)):
+                    text, conf, plate = enhanced_text, enhanced_conf, enhanced_plate
+            except Exception:
+                pass
+        ocr_finished = time.monotonic()
         raw_conf = max(0.0, min(float(conf or 0), 1.0))
         if not accept_ocr_plate(plate, raw_conf, bbox=bbox, image_size=(image_w, image_h)):
             continue
@@ -636,6 +681,11 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
                 plate_confidence=raw_conf,
                 plate_crop_path=_save_crop_bgr(crop) if save_crops else None,
                 bbox=box,
+                detector_confidence=_detection_score(detection),
+                timings={"crop_ms": round((crop_ready - crop_started) * 1000, 1),
+                         "ocr_ms": round((ocr_finished - ocr_started) * 1000, 1),
+                         "crop_ready_at": crop_ready, "ocr_started_at": ocr_started,
+                         "ocr_finished_at": ocr_finished},
             )
         )
     hits.sort(
@@ -746,15 +796,18 @@ def locate_plate_boxes(
     try:
         bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
-    except Exception:
-        return [], {"available": False, "reason": "detector-unavailable"}
+    except Exception as exc:
+        from .redaction import redact_text
+        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
     if not hasattr(engine, "detector"):
         return [], {"available": False, "reason": "detector-unavailable"}
+    started = time.monotonic()
     try:
         view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
         detections = _shift_detections(engine.detector.predict(view), dx, dy)
-    except Exception:
-        return [], {"available": False, "reason": "detector-unavailable"}
+    except Exception as exc:
+        from .redaction import redact_text
+        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
     width, height = int(bgr.shape[1]), int(bgr.shape[0])
     min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     boxes: list[dict] = []
@@ -773,7 +826,10 @@ def locate_plate_boxes(
         key=lambda item: (float(item.get("confidence") or 0), int(item["x2"]) - int(item["x1"])),
         reverse=True,
     )
-    return boxes, {"available": True, "image_width": width, "image_height": height}
+    finished = time.monotonic()
+    return boxes, {"available": True, "image_width": width, "image_height": height,
+                   "detector_ms": round((finished - started) * 1000, 1),
+                   "detector_started_at": started, "detector_finished_at": finished}
 
 
 def recognize_arrival_bytes(
@@ -790,6 +846,7 @@ def recognize_arrival_bytes(
     No plate box means no OCR. A detector that cannot run also means no OCR:
     reading the whole live frame is what made the gate slow and inaccurate.
     """
+    started = time.monotonic()
     if detected_boxes is None:
         boxes, meta = locate_plate_boxes(jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom)
     else:
@@ -821,16 +878,32 @@ def recognize_arrival_bytes(
         return {"ok": False, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [], "best": None, "detail": "could not decode frame"}
     from types import SimpleNamespace
 
-    best_box = boxes[0]
+    valid_boxes = []
+    for box in boxes:
+        try:
+            candidate = SimpleNamespace(**{key: int(box[key]) for key in ("x1", "y1", "x2", "y2")})
+            if plate_box_ok(candidate, int(bgr.shape[1]), int(bgr.shape[0])):
+                valid_boxes.append(box)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    if not valid_boxes:
+        return {"ok": True, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [], "best": None, "detail": "no valid plate crop"}
+    best_box = max(valid_boxes, key=lambda box: (float(box.get("confidence") or 0),
+                       (int(box["x2"]) - int(box["x1"])) * (int(box["y2"]) - int(box["y1"]))))
     detection = SimpleNamespace(
         bounding_box=SimpleNamespace(
             x1=int(best_box["x1"]), y1=int(best_box["y1"]),
             x2=int(best_box["x2"]), y2=int(best_box["y2"]),
         ),
-        confidence=float(best_box.get("confidence") or 1),
+        confidence=float(best_box.get("confidence") or 0),
     )
     persist = bool(save_evidence if save_evidence is not None else getattr(settings, "alpr_save_debug_frames", False))
-    hits = _hits_from_detections(engine, bgr, [detection], save_crops=persist)
+    try:
+        hits = _hits_from_detections(engine, bgr, [detection], save_crops=persist)
+    except Exception as exc:
+        from .redaction import redact_text
+        return {"ok": False, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [],
+                "best": None, "detail": redact_text(str(exc))}
     plates = [hit.as_dict() for hit in hits]
     best = hits[0] if hits else None
     return {
@@ -841,6 +914,8 @@ def recognize_arrival_bytes(
         "count": len(plates),
         "best": best.as_dict() if best else None,
         "detail": "plate cropped, then read" if best else "plate crop was not readable",
+        "latency_ms": round((time.monotonic() - started) * 1000, 1),
+        "detector_ms": meta.get("detector_ms"),
     }
 
 
@@ -1031,7 +1106,7 @@ def recognize_bytes(
         try:
             from PIL import Image
             Image.fromarray(bgr[:, :, ::-1]).save(image, quality=85)
-            image_rel = str(image.relative_to(settings.media_dir))
+            image_rel = image.relative_to(settings.media_dir).as_posix()
             annotated = annotate_image(str(image), hits, dest_name=f"{safe}-latest.jpg")
         except Exception:
             image_rel = ""

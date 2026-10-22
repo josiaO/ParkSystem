@@ -93,7 +93,8 @@ if ($LiveView) {
     if ($isAdmin) {
         $rules = @(
             @{ Name = "SmartPark MediaMTX WebRTC"; Protocol = "TCP"; Port = 8889 },
-            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 }
+            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 },
+            @{ Name = "SmartPark MediaMTX ICE TCP"; Protocol = "TCP"; Port = 8189 }
         )
         foreach ($rule in $rules) {
             if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {

@@ -25,6 +25,163 @@ from app.services.site_cameras import KNOWN_SITE_CAMERAS
 
 
 class WindowsReadyTests(unittest.TestCase):
+    def test_existing_recognition_path_saves_and_serves_snapshot_and_plate_crop(self):
+        from io import BytesIO
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        from PIL import Image
+        from app.models import VehicleCapture
+        from app.services.preview import remember_frame
+        from app.services import preview
+        from app.services.presence import PresenceWatch
+        from app.services.recognition_runtime import runtime
+        runtime.reset()
+        self.addCleanup(runtime.reset)
+        preview._state.clear()
+        self.addCleanup(preview._state.clear)
+        presence = patch("app.api_main.coil_watch", PresenceWatch())
+        presence.start()
+        self.addCleanup(presence.stop)
+        headers = self._login_admin()
+        camera = self.client.post("/cameras", headers=headers, json={"name": "Recognition camera", "ip_address": "10.44.8.23", "adapter_id": "ipcam"}).json()
+        runtime.lane(camera["id"]).visit.reset()
+        frame = BytesIO()
+        Image.new("RGB", (640, 360), "white").save(frame, format="JPEG")
+        remember_frame(camera["id"], frame.getvalue())
+        detection = SimpleNamespace(bounding_box=SimpleNamespace(x1=120, y1=110, x2=300, y2=155), confidence=.95)
+        engine = SimpleNamespace(detector=SimpleNamespace(predict=lambda frame: [detection]),
+                                 ocr=SimpleNamespace(predict=lambda frame: SimpleNamespace(text="T123ABC", confidence=.96)))
+        with TemporaryDirectory() as folder, patch("app.config.default_data_dir", return_value=Path(folder)), \
+             patch("app.services.alpr.fastalpr_installed", return_value=True), \
+             patch("app.services.alpr._load_engine", return_value=engine), \
+             patch("app.services.modules.is_enabled", side_effect=lambda module, db: module != "parking.sessions"), \
+             patch("app.services.ai_review.schedule_capture_review"):
+            response = self.client.post(f"/cameras/{camera['id']}/presence", headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            evidence = response.json()["last_car"]
+            self.assertEqual(evidence["plate"], "T123ABC")
+            for field in ("snapshot_url", "crop_url"):
+                image = self.client.get(evidence[field], headers=headers)
+                self.assertEqual(image.status_code, 200, image.text[:100])
+                self.assertTrue(image.content.startswith(b"\xff\xd8"))
+            snapshot = Image.open(BytesIO(self.client.get(evidence["snapshot_url"], headers=headers).content))
+            crop = Image.open(BytesIO(self.client.get(evidence["crop_url"], headers=headers).content))
+            self.assertLess(crop.width, snapshot.width)
+            self.assertLess(crop.height, snapshot.height)
+            with self.Session() as db:
+                captures = list(db.scalars(select(VehicleCapture)).all())
+                self.assertEqual(len(captures), 1)
+                captures[0].snapshot_path = captures[0].snapshot_path.replace("/", "\\")
+                captures[0].crop_path = captures[0].crop_path.replace("/", "\\")
+                db.commit()
+            response = self.client.get(f"/cameras/{camera['id']}/plates", headers=headers)
+            saved = response.json()["evidence"]
+            for field in ("snapshot_url", "crop_url"):
+                self.assertNotIn("\\", saved[field])
+                image = self.client.get(saved[field], headers=headers)
+                self.assertEqual(image.status_code, 200)
+                self.assertTrue(image.content.startswith(b"\xff\xd8"))
+
+    def test_last_evidence_is_available_after_vehicle_presence_clears(self):
+        from app.models import VehicleCapture
+        from app.services.recognition_runtime import runtime
+        headers = self._login_admin()
+        response = self.client.post("/cameras", headers=headers, json={"name": "Evidence camera", "ip_address": "10.44.8.23"})
+        camera_id = response.json()["id"]
+        with self.Session() as db:
+            db.add(VehicleCapture(camera_id=camera_id, plate="T123ABC", snapshot_path=r"snapshots\car.jpg", crop_path=r"crops\plate.jpg"))
+            db.commit()
+        runtime.lane(camera_id).visit.reset()
+        with patch("app.api_main._native_capture_for_camera", new=AsyncMock(return_value={})), \
+             patch("app.api_main.coil_watch.occupied", return_value=False):
+            response = self.client.get(f"/cameras/{camera_id}/plates", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["clear_last_car"])
+        self.assertFalse(body["vehicle_present"])
+        self.assertIsNone(body["current_plate"])
+        self.assertEqual(body["evidence"]["snapshot_url"], "/media/snapshots/car.jpg")
+        self.assertEqual(body["evidence"]["crop_url"], "/media/crops/plate.jpg")
+
+    def test_confirmed_production_seed_is_editable_and_preserves_existing_cameras(self):
+        headers = self._login_admin()
+        with patch.object(settings, "deployment_profile", "PRODUCTION"):
+            for confirmation in (False, "true", 1):
+                response = self.client.post("/cameras/seed-site", headers=headers, json={"confirm_test_data": confirmation})
+                self.assertEqual(response.status_code, 409)
+            response = self.client.post("/cameras/seed-site", headers=headers, json={"confirm_test_data": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(len(response.json()["created"]), 4)
+            camera_id = response.json()["created"][0]["id"]
+            gate = self.client.post("/gates", headers=headers, json={"name": "Warehouse West"}).json()
+            with self.Session() as db:
+                camera = db.get(Camera, camera_id)
+                camera.name = "Admin configured exit"
+                camera.gate_id = gate["id"]
+                camera.lane_direction = "EXIT"
+                camera.controller_ip = "10.44.8.60"
+                db.commit()
+            for profile in ("DEVELOPMENT", "PRODUCTION"):
+                with patch.object(settings, "deployment_profile", profile):
+                    repeated = self.client.post("/cameras/seed-site", headers=headers, json={"confirm_test_data": True})
+                self.assertEqual(repeated.status_code, 200, repeated.text)
+                self.assertEqual(repeated.json()["created"], [])
+                self.assertTrue(all(not row["updated"] for row in repeated.json()["skipped"]))
+            saved = next(row for row in self.client.get("/cameras", headers=headers).json() if row["id"] == camera_id)
+            self.assertEqual(saved["name"], "Admin configured exit")
+            self.assertEqual(saved["gate_id"], gate["id"])
+            self.assertEqual(saved["lane_direction"], "EXIT")
+            self.assertEqual(saved["controller_ip"], "10.44.8.60")
+            with self.Session() as db:
+                camera = db.get(Camera, camera_id)
+                camera.ip_address = "10.44.8.23"
+                db.commit()
+            saved = next(row for row in self.client.get("/cameras", headers=headers).json() if row["id"] == camera_id)
+            self.assertEqual(saved["ip_address"], "10.44.8.23")
+
+    def test_production_never_seeds_or_invents_camera_addresses(self):
+        headers = self._login_admin()
+        from app.services.site_cameras import camera_spec_for_ip, load_site_lanes, site_controller_ips
+        with patch.object(settings, "deployment_profile", "PRODUCTION"):
+            response = self.client.post("/cameras/seed-site", headers=headers, json={})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(load_site_lanes(), ())
+            self.assertEqual(site_controller_ips(), ())
+            spec = camera_spec_for_ip("192.168.1.144")
+            self.assertEqual(spec["name"], "Camera 192.168.1.144")
+            self.assertEqual(spec["gate_name"], "")
+            self.assertEqual(spec["controller_ip"], "")
+            with patch("app.api_main.HVXHostClient") as host, patch("app.api_main.probe_ips", new=AsyncMock(return_value={})) as probe:
+                host.return_value.discover = AsyncMock(return_value={"ok": True, "ips": []})
+                discovered = self.client.get("/cameras/discover", headers=headers)
+                self.assertEqual(discovered.json()["cameras"], [])
+                self.assertEqual(probe.call_args.args[0], [])
+            with patch("app.api_main._discover_cameras", new=AsyncMock(return_value={"cameras": []})):
+                response = self.client.post("/cameras/import-discovered", headers=headers, json={"connect": False})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["created"], [])
+            self.assertEqual(self.client.get("/cameras", headers=headers).json(), [])
+            self.assertEqual(self.client.get("/gates", headers=headers).json(), [])
+
+    def test_production_discovery_uses_real_addresses_and_preserves_admin_metadata(self):
+        headers = self._login_admin()
+        with patch.object(settings, "deployment_profile", "PRODUCTION"):
+            gate = self.client.post("/gates", headers=headers, json={"name": "Warehouse West"}).json()
+            camera = self.client.post("/cameras", headers=headers, json={"name": "Replacement exit", "ip_address": "10.44.8.23", "lane_direction": "EXIT", "gate_id": gate["id"], "controller_ip": "10.44.8.60"}).json()
+            with patch("app.api_main.HVXHostClient") as host, patch("app.api_main.probe_ips", new=AsyncMock(return_value={"10.44.8.23": True})) as probe:
+                host.return_value.discover = AsyncMock(return_value={"ok": True, "ips": ["10.44.8.24"]})
+                response = self.client.get("/cameras/discover", headers=headers)
+                self.assertEqual({row["ip_address"] for row in response.json()["cameras"]}, {"10.44.8.23", "10.44.8.24"})
+                self.assertEqual(set(probe.call_args.args[0]), {"10.44.8.23", "10.44.8.24"})
+            response = self.client.post("/cameras/import-discovered", headers=headers, json={"ips": ["10.44.8.23"], "connect": False})
+            self.assertEqual(response.status_code, 200, response.text)
+            saved = self.client.get("/cameras", headers=headers).json()[0]
+            self.assertEqual(saved["id"], camera["id"])
+            self.assertEqual(saved["name"], "Replacement exit")
+            self.assertEqual(saved["lane_direction"], "EXIT")
+            self.assertEqual(saved["controller_ip"], "10.44.8.60")
+            self.assertEqual(saved["gate_id"], gate["id"])
+
     def setUp(self):
         self.engine = create_engine(
             "sqlite://",
@@ -235,7 +392,7 @@ class WindowsReadyTests(unittest.TestCase):
     def test_preview_shows_native_plate_without_fastalpr(self):
         headers = self._login_admin()
         cam_id = self.client.post("/cameras", headers=headers, json={
-            "name": "1# Entry", "ip_address": "192.168.1.144",
+            "name": "1# Entry", "ip_address": "192.168.1.144", "recognition_mode": "NATIVE_ONLY",
         }).json()["id"]
         with self.Session() as db:
             camera = db.get(Camera, cam_id)
@@ -243,7 +400,7 @@ class WindowsReadyTests(unittest.TestCase):
             camera.sdk_handle = 4
             db.commit()
         grabbed = {"ok": False, "error": "No live JPEG"}
-        native = {"plate": "T285DQP", "confidence": 0.91, "source": "qy_Net_RegImageRecvEx"}
+        native = {"plate": "T285DQP", "confidence": 0.91, "source": "qy_Net_RegImageRecvEx", "have_vehicle": True}
         with patch("app.api_main.snapshot_for_camera", new=AsyncMock(return_value=grabbed)):
             with patch("app.api_main._native_capture_for_camera", new=AsyncMock(return_value=native)):
                 preview = self.client.get(f"/cameras/{cam_id}/preview", headers=headers)

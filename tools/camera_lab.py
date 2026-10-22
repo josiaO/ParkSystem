@@ -140,13 +140,25 @@ def run_attach(args: argparse.Namespace) -> int:
     buckets: dict[int, list[dict[str, Any]]] = {}
     mediamtx: dict[str, Any] = {}
     deadline = time.monotonic() + float(args.duration)
-    camera_filter = None if args.all else int(args.camera)
+    camera_filter = None if args.all or args.gate else int(args.camera)
+    selected = None
+    if args.gate:
+        cameras = get_json(args.url, "/cameras", token)
+        selected = {int(row["id"]) for row in cameras if int(row.get("gate_id") or 0) == args.gate}
+        if not selected:
+            print("FAIL\nNo cameras assigned to this gate.")
+            return 1
+    realtime = {}
     while True:
         try:
             rows, mediamtx = sample_running(args.url, token, camera_filter)
+            if args.latency:
+                realtime = get_json(args.url, "/health/realtime", token)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError):
             rows = []
         for row in rows:
+            if selected is not None and int(row.get("camera_id") or 0) not in selected:
+                continue
             buckets.setdefault(int(row.get("camera_id") or 0), []).append(row)
         if time.monotonic() >= deadline:
             break
@@ -154,6 +166,30 @@ def run_attach(args: argparse.Namespace) -> int:
     code = _report(buckets, mediamtx, names, duration_s=float(args.duration), mode="attach")
     if args.recognition:
         _print_recognition(args, token, camera_filter)
+    if args.latency:
+        worker = realtime.get("worker") or {}
+        print("\nLatency: worker measurements, most recent 200 samples per camera/stage")
+        print(f"  warmup: {scrub(worker.get('warmup') or {})}")
+        print(f"  resources: {scrub(worker.get('resources') or {})}")
+        for row in worker.get("cameras") or []:
+            camera_id = int(row.get("camera_id") or 0)
+            if camera_filter is not None and camera_id != camera_filter:
+                continue
+            if selected is not None and camera_id not in selected:
+                continue
+            print(json.dumps(scrub({key: row.get(key) for key in (
+                "camera_id", "state", "decoder_first_frame_ms", "input_frame_age_ms", "sampled_fps",
+                "queue_depth", "decoder_pid", "reconnects", "latency_ms", "consensus", "timeline", "last_error",
+            )}), indent=2))
+        if not worker.get("ok"):
+            print("  No healthy worker: recognition timings are unmeasured.")
+        for row in realtime.get("cameras") or []:
+            camera_id = int(row.get("camera_id") or 0)
+            if camera_filter is not None and camera_id != camera_filter:
+                continue
+            if selected is not None and camera_id not in selected:
+                continue
+            print(f"  camera {camera_id} vehicle-to-business stage latency ms: {row.get('visit_latency_ms') or 'unmeasured'}")
     return code
 
 
@@ -324,11 +360,10 @@ def _resolution(summary: dict[str, Any]) -> str:
 
 def _print_recognition(args: argparse.Namespace, token: str, camera_filter: int | None) -> None:
     """Worker health plus a bounded detect/crop/OCR sample. Never a parking event."""
-    from app.recognition_worker import worker_health
 
     print("\nRecognition")
     print("No parking session, receipt, gate command, or payment is created.")
-    health = worker_health()
+    health = (get_json(args.url, "/health/realtime", token) or {}).get("worker") or {}
     if not health.get("ok"):
         print("  worker: not running (software reads stay with Site Service until the heartbeat is fresh)")
     else:
@@ -379,9 +414,9 @@ def _snapshot_jpeg(base: str, token: str, camera_id: int) -> bytes:
 
 def benchmark_frame(jpeg: bytes) -> dict[str, Any]:
     """One detect → crop → OCR pass. The result is not published."""
-    from app.services.alpr import recognize_bytes
+    from app.services.alpr import recognize_arrival_bytes
 
-    result = recognize_bytes(jpeg, camera_label="camera-lab", save_evidence=False)
+    result = recognize_arrival_bytes(jpeg, camera_label="camera-lab", save_evidence=False)
     best = result.get("best") if isinstance(result.get("best"), dict) else {}
     bbox = best.get("bbox") if isinstance(best.get("bbox"), dict) else {}
     crop = bbox.get("crop") if isinstance(bbox.get("crop"), dict) else {}
@@ -389,7 +424,9 @@ def benchmark_frame(jpeg: bytes) -> dict[str, Any]:
         "pipeline": result.get("pipeline") or "",
         "latency_ms": result.get("latency_ms"),
         "normalized_plate": best.get("plate_normalized") or "",
-        "confidence": best.get("plate_confidence"),
+        "confidence": best.get("confidence"),
+        "detector_ms": result.get("detector_ms"),
+        "timings": best.get("timings") or {},
         "crop_width": (int(crop["x2"]) - int(crop["x1"])) if crop else None,
         "crop_height": (int(crop["y2"]) - int(crop["y1"])) if crop else None,
         "detail": result.get("detail") or "",
@@ -402,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--camera", type=int, help="Camera id to sample")
     target.add_argument("--all", action="store_true", help="Sample every configured camera")
+    target.add_argument("--gate", type=int, help="Observe the assigned ENTRY and EXIT cameras")
     parser.add_argument("--duration", type=float, required=True, help="Seconds to sample")
     parser.add_argument("--interval", type=float, default=0.5, help="Seconds between samples")
     parser.add_argument("--url", default="http://127.0.0.1:8760")
@@ -422,6 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also report the recognition worker and benchmark a few frames. Does not publish a parking event.",
     )
+    parser.add_argument("--latency", action="store_true", help="Collect worker stage p50/p95/max and visit timelines without publishing events")
     return parser
 
 
@@ -429,6 +468,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.duration <= 0:
         print("FAIL\nreason: duration must be greater than 0")
+        return 1
+    if args.direct and (args.gate or args.latency or args.recognition):
+        print("FAIL\nGate/recognition/latency diagnostics require a running Site Service; omit --direct.")
         return 1
     up = service_up(args.url)
     if args.direct and up and not args.force:

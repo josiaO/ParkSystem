@@ -63,3 +63,23 @@ def slot_cameras(cameras, left_id=None, right_id=None):
     left = camera_by_id(cameras, left_id)
     right = camera_by_id(cameras, right_id)
     return left, right
+
+
+def reconcile_slots(cameras, left_id=None, right_id=None, gate_id=None):
+    """Keep valid picks, independently fill missing slots from the selected gate."""
+    rows = list(cameras or [])
+    left, right = slot_cameras(rows, left_id, right_id)
+    if gate_id is not None:
+        rows = [row for row in rows if str(row.get("gate_id")) == str(gate_id)]
+    preferred = [row for row in pair_lane_cameras(rows, gate_id) if row]
+    remaining = preferred + [row for row in rows if row not in preferred]
+    for side in ("left", "right"):
+        if (left if side == "left" else right) is not None:
+            continue
+        used = {str(row["id"]) for row in (left, right) if row}
+        chosen = next((row for row in remaining if str(row["id"]) not in used), None)
+        if side == "left":
+            left = chosen
+        else:
+            right = chosen
+    return left, right
