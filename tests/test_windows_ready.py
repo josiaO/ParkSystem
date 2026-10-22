@@ -357,7 +357,7 @@ class WindowsReadyTests(unittest.TestCase):
         self.assertEqual(body["connected"], 4)
         self.assertEqual(body["attempted"], 4)
         self.assertEqual(body.get("skipped") or 0, 0)
-        self.assertIn("camera IPs only", body["note"])
+        self.assertIn("cameras assigned to this PC", body["note"])
         listed = self.client.get("/cameras", headers=headers).json()
         self.assertEqual(
             {row["ip_address"] for row in listed},

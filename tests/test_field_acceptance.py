@@ -122,8 +122,8 @@ class FieldAcceptanceScoringTests(unittest.TestCase):
         self.assertEqual(by_id["P1"]["status"], PASS)
         self.assertEqual(by_id["P3"]["status"], PASS)
         self.assertEqual(by_id["P5"]["status"], PASS)
-        self.assertEqual(by_id["P4b"]["status"], WARN)
-        self.assertEqual(overall_status(checks), WARN)
+        self.assertEqual(by_id["P4b"]["status"], PASS)
+        self.assertEqual(overall_status(checks), PASS)
 
         failed = evaluate_preflight(
             live=None, ready=None, cameras=None, realtime=None, login_ok=False, login_error="refused", windows=True,
@@ -141,6 +141,15 @@ class FieldAcceptanceScoringTests(unittest.TestCase):
     def test_collect_tracks_empty_lane_plate(self):
         buckets = collect_cameras([_snap(_cam(vehicle_present=False, last_plate="ABC123"))])
         self.assertEqual(buckets[1]["empty_with_plate"], 1)
+
+    def test_provider_name_alone_does_not_prove_live_video(self):
+        rows = evaluate_soak([_snap(_cam(live_connected=False, estimated_frame_age_ms=None))], connected_ids={1})
+        self.assertEqual(next(row for row in rows if row["id"] == "S2")["status"], FAIL)
+
+    def test_native_player_uses_mediamtx_byte_progress_without_jpeg_decode(self):
+        samples = [_snap(_cam(live_connected=False, media_ready=True, media_bytes_received=total)) for total in (100, 200)]
+        rows = evaluate_soak(samples, connected_ids={1})
+        self.assertEqual(next(row for row in rows if row["id"] == "S2")["status"], PASS)
 
     def test_windows_field_script_is_ascii(self):
         path = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Run-FieldAcceptanceTest.ps1"

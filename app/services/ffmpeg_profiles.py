@@ -17,12 +17,11 @@ _PROFILES: dict[str, dict[str, str]] = {
     },
     "LOW_LATENCY_LAN": {
         "rtsp_transport": "tcp",
-        "fflags": "nobuffer+discardcorrupt",
+        "fflags": "+genpts",
         "flags": "low_delay",
-        "probesize": "32",
-        "analyzeduration": "0",
+        "probesize": "1000000",
+        "analyzeduration": "1000000",
         "max_delay": "100000",
-        "avioflags": "direct",
     },
     "LOSSY_NETWORK": {
         "rtsp_transport": "tcp",

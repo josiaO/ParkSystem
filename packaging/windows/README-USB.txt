@@ -31,13 +31,15 @@ Cameras:  Add site cameras  then  Connect all
 Camera login: admin / admin   SDK port 30000
 Onboard wizard: Live Gates → IPs → Onboard wizard (HVX first, then ONVIF/RTSP)
 
-MediaMTX (optional, bundled, OFF by default)
+MediaMTX (bundled for RTSP cameras)
 --------------------------------------------
-The kit includes vendor\mediamtx\mediamtx.exe. Three background tasks start
+The kit includes vendor\mediamtx\mediamtx.exe. Four background tasks start
 at logon: Site Service (API), HVX Host (SDK), Media Service (MediaMTX
-supervisor). MediaMTX does nothing until you enable it.
+supervisor), and Recognition Worker. The installer enables the media pipeline.
+SDK cameras keep their SDK JPEG path; generic RTSP cameras use MediaMTX.
+Assign this PC to the gate whose entry and exit it must recognize.
 
-Staged rollout (one camera first — 2# Entry = camera id 3):
+Optional RTSP commissioning example (replace camera id 3 with your device ID):
 
   1. Install + Connect all as usual (native HVX plates unchanged).
   2. Probe RTSP on camera 3: Live Gates → IPs → RTSP probe (optional).

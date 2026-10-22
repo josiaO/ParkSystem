@@ -25,6 +25,7 @@ REQUIRED_MODELS = (
 REQUIRED_HOST = (
     "hvx_host.py",
     "hvx_sdk.py",
+    "check_runtime.py",
     "run_hvx_host.bat",
     "hvx_bindings.json",
 )
@@ -45,6 +46,9 @@ REQUIRED_DISTS = {
     "argon2-cffi",
     "shiboken6",
     "pyside6-essentials",
+    "psycopg",
+    "psycopg-binary",
+    "tzdata",
     "pillow",
     "numpy",
     "opencv-python-headless",

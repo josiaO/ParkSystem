@@ -65,7 +65,7 @@ class MediaMTXPathTests(unittest.TestCase):
             return Resp()
 
         mediamtx._sources[4] = {"uri": "rtsp://cam/live", "detect_uri": "rtsp://cam/detect"}
-        with patch.object(mediamtx, "running", return_value=True), patch("urllib.request.urlopen", urlopen):
+        with patch.object(mediamtx, "running", return_value=True), patch("urllib.request.OpenerDirector.open", side_effect=urlopen):
             self.assertTrue(mediamtx.sync_paths())
         self.assertTrue(any(url.endswith("/v3/config/paths/add/cam4") for url in urls))
         self.assertTrue(any(url.endswith("/v3/config/paths/add/cam4_detect") for url in urls))
@@ -118,6 +118,8 @@ class DesktopMediaMTXTests(unittest.TestCase):
         config = {"media_gateway_enabled": True, "live_view_provider": "MEDIAMTX", "webrtc_live_enabled": False}
         with patch.object(registry, "_migration_flags", return_value=config), \
              patch.object(registry, "_camera_enabled", return_value=True), \
+             patch.object(registry, "_sdk_camera", return_value=False), \
+             patch.object(registry, "media_telemetry", return_value={"roles": {"LIVE": {"registered": True}}}), \
              patch.object(registry.mediamtx, "running", return_value=True), \
              patch.object(registry.gateway, "get_live_endpoint", AsyncMock(return_value={"kind": "mjpeg", "path": "/cameras/9/live.mjpeg"})):
             self.assertTrue(registry.mediamtx_live_active(9))

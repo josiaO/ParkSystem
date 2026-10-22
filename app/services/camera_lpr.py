@@ -214,7 +214,10 @@ def live_plate_overlay(native: dict | None, local: dict | None, held: dict | Non
 def native_from_sdk_capture(capture: dict | None) -> dict:
     """Map a camera capture (HVX callback or vendor-neutral payload) to a plate hit."""
     capture = capture or {}
+    from app.core.plate import is_camera_no_plate
     raw = str(capture.get("plate") or "").strip()
+    if is_camera_no_plate(raw):
+        raw = ""
     box = capture.get("plate_box") or capture.get("bbox")
     rect = bbox_from_lp_box(box)
     source = str(capture.get("source") or "").strip() or "qy_Net_RegImageRecvEx"

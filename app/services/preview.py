@@ -496,6 +496,11 @@ def ensure_mjpeg_source(spec: CameraLiveSpec) -> None:
         row.last_view_at = time.monotonic()
         gateway.ensure_producer(spec)
         return
+    row = gateway.session(spec.id)
+    if row is not None and row.producer is not None and not row.producer.done():
+        row.viewers = viewers_for(spec.id)
+        row.last_view_at = time.monotonic()
+        return
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
         from app.services.mediamtx_live import ensure_live_consumer

@@ -155,19 +155,39 @@ def start_api() -> None:
     uvicorn.run(app, host="127.0.0.1", port=8760, log_level="warning", access_log=False, reload=False, workers=1)
 
 
+def start_pipeline_services(root: Path) -> None:
+    """Launch service owners; their instance locks reject duplicate launches."""
+    python = root / "python64" / "python.exe"
+    if not python.is_file():
+        python = Path(sys.executable)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root)
+    env["SMARTPARK_HOME"] = str(root)
+    for module, name in (("app.media_service", "media-service"), ("app.recognition_worker", "recognition-worker")):
+        with (_log_dir() / f"{name}-launch.log").open("ab") as output:
+            subprocess.Popen(
+                [str(python), "-m", module], cwd=str(root), env=env,
+                creationflags=(0x00000200 | 0x08000000) if os.name == "nt" else 0,
+                stdout=output, stderr=output, start_new_session=os.name != "nt",
+            )
+
+
 def ensure_background_services(root: Path | None = None) -> None:
     root = root or install_root()
     start_hvx_host(root)
     if _port_open(8760):
+        start_pipeline_services(root)
         return
     start_site_service(root)
     try:
         wait_for_api(timeout=12.0)
+        start_pipeline_services(root)
         return
     except RuntimeError:
         pass
     threading.Thread(target=start_api, name="smartpark-api", daemon=True).start()
     wait_for_api()
+    start_pipeline_services(root)
 
 
 def _fail(exc: BaseException) -> int:

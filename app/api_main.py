@@ -231,6 +231,11 @@ def web_app():
     )
 
 
+@app.get("/assets/mediamtx-reader.js", include_in_schema=False)
+def mediamtx_reader():
+    return FileResponse(WEB_DIR / "mediamtx-reader.js", media_type="application/javascript")
+
+
 @app.get("/health")
 def health():
     from .services.health import live
@@ -269,12 +274,14 @@ def health_diagnostics(db: Session = Depends(get_db), _: User = Depends(require(
 async def health_realtime(request: Request, db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
     """Per-camera live/recognition snapshot for field diagnosis. No credentials."""
     from .services.recognition_runtime import runtime
-    from app.infrastructure.media.registry import get_live_endpoint, live_provider_label
+    from app.infrastructure.media.registry import get_live_endpoint, live_provider_label, media_telemetry
     from .services.preview import viewer_live_provider
     from .services.health import camera_stats
     from .services.lane_timing import timeline_metrics
 
     cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
+    from app.services.node_scope import camera_in_recognition_scope
+    cameras = [camera for camera in cameras if camera_in_recognition_scope(camera, db=db)]
     rows = []
     for camera in cameras:
         endpoint = await get_live_endpoint(int(camera.id), db)
@@ -286,6 +293,9 @@ async def health_realtime(request: Request, db: Session = Depends(get_db), _: Us
         rec = runtime.lane(int(camera.id)).snapshot()
         media = _camera_media_brief(int(camera.id)) or {}
         extra = camera_stats(int(camera.id))
+        source = (media_telemetry(camera.id).get("roles") or {}).get("LIVE") or {}
+        state = get_state(camera.id)
+        fresh_jpeg = bool(state.jpeg[:2] == b"\xff\xd8" and state.captured_at and time.monotonic() - state.captured_at < settings.stale_stream_seconds)
         rows.append({
             "camera_id": int(camera.id),
             "camera_name": camera.name,
@@ -614,6 +624,8 @@ async def import_discovered_cameras(
 @app.post("/cameras/sdk/connect-all")
 async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     rows = db.scalars(select(Camera).where(Camera.enabled == True).order_by(Camera.id)).all()
+    from .services.node_scope import camera_in_recognition_scope
+    rows = [camera for camera in rows if camera_in_recognition_scope(camera, db=db)]
     results = []
     connected = 0
     skipped = 0
@@ -630,7 +642,7 @@ async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(re
         "skipped": skipped,
         "results": results,
         "note": (
-            "Connect all logs in camera IPs only (NetSDK port 30000 for HVX). "
+            "Connect lane logs in only the cameras assigned to this PC (NetSDK port 30000 for HVX). "
             "Generic IP cameras (rtsp/dahua/hikvision) use HTTP snapshot or RTSP and FastALPR — not SDK_CONNECTED. "
             "Unreachable HVX cameras are skipped after a short TCP probe so one slow camera cannot stall the rest."
         ),
@@ -1236,28 +1248,29 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
     live = state
     lane = runtime.lane(camera.id)
     rec = lane.snapshot()
+    # Keep evidence during an active visit. Cached display data cannot
+    # establish occupancy: only current recognition, coil or native evidence can.
+    last = fresh_last_car(camera.id)
+    held_box = held_plate_box(camera.id)
     occupied = bool(
         rec.get("vehicle_present")
         or coil_watch.occupied(camera.id)
         or (native or {}).get("have_vehicle")
         or fresh_overlay
     )
-    last = fresh_last_car(camera.id) if occupied else None
-    if not occupied:
-        remember_last_car(camera.id, None)
-        if not fresh_overlay:
-            remember_plate_box(camera.id, None)
-        last = None
     overlay = live_plate_overlay(
-        native, local, held_plate_box(camera.id), occupied=occupied or bool(fresh_overlay),
+        native, local, held_box, occupied=occupied,
     )
+    if not occupied:
+        last = None
+        remember_last_car(camera.id, None)
+        remember_plate_box(camera.id, None)
     current_plate = str((last or {}).get("plate") or rec.get("last_plate") or "")
+    fused_dict = fused.as_dict()
     if not occupied:
         current_plate = ""
-        fused_dict = fused.as_dict()
         fused_dict["resolved_plate"] = ""
     else:
-        fused_dict = fused.as_dict()
         current_plate = current_plate or str(fused_dict.get("resolved_plate") or "")
     viewer = viewer_live_provider(camera.id)
     current_video = live_is_current(camera.id)
@@ -1276,8 +1289,12 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "resolved_plate": current_plate,
         "current_plate": current_plate or None,
         "overlay": overlay,
+        "plate_crop_url": (
+            (last or {}).get("crop_url")
+            or ((alpr or {}).get("best") or {}).get("crop_url")
+        ) if occupied else None,
         "last_car": last,
-        "clear_last_car": last is None,
+        "clear_last_car": not occupied,
         "vehicle_present": occupied,
         "recognition_state": rec.get("recognition_state") or IDLE,
         "visit_id": rec.get("visit_id") or "",
@@ -1412,6 +1429,9 @@ async def _run_local_alpr(
             timeout=float(getattr(settings, "alpr_timeout_seconds", 15.0) or 15.0),
         )
         return alpr
+    except asyncio.CancelledError:
+        runtime.finish(ticket, plate="")
+        raise
     except asyncio.TimeoutError:
         runtime.recover(int(camera.id))
         runtime.lane(int(camera.id)).last_error = "FastALPR crop recognition timed out."
@@ -1455,6 +1475,7 @@ async def _run_local_alpr_locked(
     plate_crop: bytes = b"",
     ticket=None,
 ) -> dict | None:
+    from app.services.inference_thread import run_inference
     native = native or {}
     from .services.media_gateway import gateway
     from .services.queues import AI_FRAMES
@@ -1465,7 +1486,7 @@ async def _run_local_alpr_locked(
     started = time.perf_counter()
     if plate_crop[:2] == b"\xff\xd8":
         from .services.alpr import recognize_plate_crop_bytes
-        alpr = await asyncio.to_thread(
+        alpr = await run_inference(
             recognize_plate_crop_bytes,
             plate_crop,
             camera_label=f"cam-{camera.id}-{camera.ip_address}-native-crop",
@@ -1486,7 +1507,7 @@ async def _run_local_alpr_locked(
             )
             if fitted:
                 boxes = [fitted]
-        alpr = await asyncio.to_thread(
+        alpr = await run_inference(
             recognize_arrival_bytes, jpeg,
             camera_label=f"cam-{camera.id}-{camera.ip_address}",
             detect_roi=framing["detect_roi"] or None,
@@ -1701,6 +1722,16 @@ async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = De
         results.append(r.__dict__)
         if r.ok:
             c.rtsp_url=url
+            from app.services.stream_roles import default_capabilities, recommend_roles
+            c.stream_profiles = recommend_roles([{
+                "uri": url,
+                "protocol": "rtsp",
+                "codec": r.codec or "",
+                "width": r.width or 0,
+                "height": r.height or 0,
+                "fps": r.fps or 0,
+            }])
+            c.media_capabilities = default_capabilities(native_alpr=c.sdk_handle is not None, sdk=c.sdk_handle is not None, rtsp=True)
             if c.status == CameraStatus.SDK_CONNECTED.value:
                 c.status=CameraStatus.VIDEO_CONNECTED.value
             db.commit()
@@ -1713,9 +1744,8 @@ async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = De
     return {
         "camera_id": c.id,
         "note": (
-            "Live view is SDK JPEG on port 30000, not RTSP. "
-            "ffprobe is optional. HTTP stills use camera port 80. "
-            "Close any other SDK client if sessions conflict."
+            "MediaMTX uses the detected RTSP stream for live video and FastALPR. "
+            "The vendor SDK remains connected for camera events, configuration, and gate I/O."
         ),
         "sdk": sdk,
         "http": {k: v for k, v in http.items() if k != "jpeg"},
@@ -2345,13 +2375,17 @@ async def camera_live(camera_id: int, role: str = "LIVE", _: User = Depends(requ
         for i in range(80):
             if live_is_current(spec.id):
                 break
-            if i == 16:
-                # MediaMTX JPEG consumer can take a moment. If the cache is still
-                # empty, start the SDK/direct producer so desktop panes show video.
+            if i == 60:
+                # Give the MediaMTX path three seconds to negotiate.  A camera
+                # with a bad/unregistered RTSP path may still use the SDK/direct
+                # producer so an operator is not left with a blank pane.
                 from .services.media_gateway import gateway
                 from .services.preview import ensure_mjpeg_source, start_idle_watch
                 start_idle_watch()
-                ensure_mjpeg_source(spec)
+                from .services.mediamtx_live import stop_live_consumer
+                consumer = stop_live_consumer(spec.id)
+                if consumer is not None:
+                    await asyncio.gather(consumer, return_exceptions=True)
                 gateway.ensure_producer(spec)
             await asyncio.sleep(0.05)
         if not live_is_current(spec.id):
@@ -2570,11 +2604,19 @@ async def _read_presence_now(camera_id: int, handle: int) -> None:
 
 
 @app.get("/media/{kind}/{name}")
-def serve_media(kind: str, name: str, _: User = Depends(require("cameras.view"))):
+def serve_media(kind: str, name: str, _: User = Depends(require("cameras.view")), v: str | None = None):
     path = media_path(kind, name)
     if path is None:
         raise HTTPException(404, "Media not found")
-    return FileResponse(path, media_type="image/jpeg")
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        raise HTTPException(404, "Media not found")
+    if name.startswith("live-") and v:
+        import hashlib
+        if hashlib.blake2s(content, digest_size=8).hexdigest() != v:
+            raise HTTPException(410, "Live evidence was superseded; refresh plate status")
+    return Response(content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/gates")
@@ -2766,6 +2808,59 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     return capture_dict(latest) if latest else None
 
 
+def _publish_live_still(camera_id: int, kind: str, jpeg: bytes) -> str:
+    """One JPEG per camera so the live pane can show the camera crop without a new file per frame."""
+    if jpeg[:2] != b"\xff\xd8":
+        return ""
+    relative = f"{kind}/live-{int(camera_id)}.jpg"
+    path = settings.media_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import hashlib
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as tmp:
+        tmp.write(jpeg)
+        temporary = tmp.name
+    try:
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return f"/media/{relative}?v={hashlib.blake2s(jpeg, digest_size=8).hexdigest()}"
+
+
+def _show_camera_read(
+    camera_id: int,
+    *,
+    plate: str,
+    confidence: float,
+    jpeg: bytes,
+    crop: bytes,
+    overlay: dict | None,
+) -> None:
+    """Put the camera's plate, crop, and box on the live lane immediately.
+
+    FastALPR may still refine the plate. The operator should see the same
+    crop ParkWatch paints on the picture as soon as the camera callback arrives.
+    """
+    if not plate and not overlay:
+        return
+    if overlay:
+        remember_plate_box(camera_id, overlay)
+    snapshot_url = _publish_live_still(camera_id, "snapshots", jpeg)
+    crop_url = _publish_live_still(camera_id, "crops", crop)
+    if not plate and not snapshot_url and not crop_url:
+        return
+    remember_last_car(camera_id, {
+        "plate": plate,
+        "confidence": confidence,
+        "snapshot_url": snapshot_url or None,
+        "crop_url": crop_url or None,
+        "bbox": overlay,
+        "source": "camera",
+    })
+
+
 async def _drain_camera_events(camera_id: int, handle: int) -> None:
     hvx = HVXHostClient()
     try:
@@ -2783,27 +2878,71 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         if native_callbacks.seen(camera_id=camera_id, plate=plate, image_id=image_id):
             # A second callback can carry the box the first one missed. Remember
             # it for the live view, but do not open another session.
+            from .core.plate import is_camera_no_plate
+            if is_camera_no_plate(plate):
+                continue
             late = native_from_sdk_capture(capture)
             late_box = choose_overlay_box(late)
             if late_box:
                 remember_plate_box(camera_id, late_box)
             continue
         try:
-            jpeg = await hvx.event_jpeg(handle, image_id=image_id or None)
-            crop = await hvx.event_crop(handle, image_id=image_id or None)
+            media_key = {"image_id": image_id}
+            if capture.get("capture_token"):
+                media_key = {"capture_token": capture["capture_token"]}
+            jpeg, crop = await asyncio.gather(
+                hvx.event_jpeg(handle, **media_key), hvx.event_crop(handle, **media_key),
+            )
         except Exception:
-            continue
+            jpeg, crop = b"", b""
         # Do not inject event stills into live preview — that freezes the UI on the car snap.
         # Live frames come only from the media gateway producer (Net_GetJpgBuffer / RTSP / HTTP).
+        from .core.plate import is_camera_no_plate, is_empty_scene_ocr
+        from .services.captures import camera_crop_usable
+        raw_plate = str(capture.get("plate") or "")
+        if is_camera_no_plate(raw_plate):
+            capture = {**capture, "plate": "", "score": 0}
         native = native_from_sdk_capture(capture)
-        from .core.plate import is_empty_scene_ocr
+        if is_camera_no_plate(raw_plate):
+            # 无车牌 is the camera saying it did not read a plate. That includes
+            # an empty lane. It is not evidence that a car is there.
+            native = {**native, "plate": "", "plate_raw": "", "bbox": None, "confidence": 0.0, "have_vehicle": False}
+            crop = b""
+        elif not camera_crop_usable(crop, jpeg, raw_plate):
+            crop = b""
         native_plate = str(native.get("plate") or "")
         real_native = bool(native_plate) and not is_empty_scene_ocr(
             native_plate, confidence=float(native.get("confidence") or 0),
         )
+        if not real_native and not choose_overlay_box(native):
+            from .services.alpr import locate_plate_boxes
+            from .services.inference_thread import run_inference
+            boxes, located = await run_inference(locate_plate_boxes, jpeg)
+            found = boxes if located.get("available") else []
+            if not found:
+                continue
+            box = found[0]
+            native = {
+                **native,
+                "bbox": box,
+                "have_vehicle": True,
+                "image_width": int(box.get("image_width") or 0),
+                "image_height": int(box.get("image_height") or 0),
+            }
+            from .services.captures import _crop_from_bbox
+            crop = _crop_from_bbox(jpeg, box) or b""
         plate_overlay = choose_overlay_box(native)
         if plate_overlay:
             remember_plate_box(camera_id, plate_overlay)
+        if crop[:2] != b"\xff\xd8" and plate_overlay and jpeg[:2] == b"\xff\xd8":
+            fitted = fit_plate_box(
+                plate_overlay, jpeg,
+                src_w=int(native.get("image_width") or 0),
+                src_h=int(native.get("image_height") or 0),
+            )
+            if fitted:
+                from .services.captures import _crop_from_bbox
+                crop = _crop_from_bbox(jpeg, fitted)
         # A camera plate rectangle is a vehicle even when the plate text is empty.
         # Empty-scene OCR (ZC…) is not.
         presence = bool(native.get("have_vehicle") or real_native or plate_overlay)
@@ -2818,6 +2957,16 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             row = db.get(Camera, camera_id)
             if row is None:
                 return
+            from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+            local_only = camera_recognition_mode(row) == LOCAL_ONLY
+            _show_camera_read(
+                camera_id,
+                plate=native_plate if real_native and not local_only else "",
+                confidence=float(native.get("confidence") or 0) if not local_only else 0,
+                jpeg=jpeg,
+                crop=crop,
+                overlay={**plate_overlay, "label": ""} if local_only and plate_overlay else plate_overlay,
+            )
             from .services import hybrid_fusion
             if presence and real_native and hybrid_fusion.routes_camera(row, db):
                 # HYBRID with a live Recognition Worker: the native reading is one
@@ -2831,7 +2980,7 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             # Software and hybrid modes must reach their FastALPR/fusion
             # decision before native text can create a session or open a gate.
             from .recognition_worker import worker_owns_software_reads
-            if not worker_owns_software_reads(camera_id) and should_run_local(
+            if presence and not worker_owns_software_reads(camera_id) and should_run_local(
                 native_plate=str(native.get("plate") or ""),
                 native_confidence=float(native.get("confidence") or 0),
                 presence=True,
@@ -2869,10 +3018,7 @@ async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
         if edge.rising:
             rising = True
             break
-    reports = await hvx.drain_reports(handle)
-    if reports and not coil_watch.occupied(camera_id):
-        last_edge = coil_watch.observe(camera_id, True, source="sdk-report")
-        rising = rising or last_edge.rising
+    await hvx.drain_reports(handle)
     if last_edge is not None:
         from .services.health import note_camera
         note_camera(
@@ -2893,6 +3039,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     once. HVX snaps and coil triggers do not use this gate; they already
     mean the car has arrived.
     """
+    from app.services.inference_thread import run_inference
     from .services.alpr import locate_plate_boxes
     from .services.camera_framing import framing_from_profiles, gate_for
     from .services.recognition_runtime import runtime
@@ -2901,7 +3048,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         return False
     _mark_detect(int(camera.id))
     framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-    boxes, located = await asyncio.to_thread(
+    boxes, located = await run_inference(
         locate_plate_boxes,
         jpeg,
         detect_roi=framing["detect_roi"] or None,
@@ -2918,6 +3065,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     if phase == "ready":
         return True
     if phase == "absent":
+        remember_plate_box(int(camera.id), None)
         lane.visit.observe(presence=False, plate="")
         if lane.visit.state == "IDLE":
             gate.reset()
@@ -3188,6 +3336,9 @@ async def _payments_reconcile_loop():
     from .services.health import note_worker_failure
     from .services.modules import is_enabled
 
+    if settings.node_role == "CLIENT":
+        return
+
     while True:
         delay = max(5.0, float(settings.payments_reconcile_seconds or 60.0))
         try:
@@ -3306,11 +3457,7 @@ async def _camera_event_loop():
                 rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
                 active = [c for c in rows if camera_in_recognition_scope(c, db=db)]
                 active_ids = {int(c.id) for c in active}
-                idle_hvx = [
-                    (int(c.id), int(c.sdk_handle))
-                    for c in rows
-                    if c.sdk_handle is not None and int(c.id) not in active_ids
-                ]
+                idle_camera_ids = [int(c.id) for c in rows if int(c.id) not in active_ids]
                 hvx_specs = [
                     (int(c.id), int(c.sdk_handle))
                     for c in active
@@ -3356,11 +3503,7 @@ async def _camera_event_loop():
                 finally:
                     note_camera(camera_id, event_latency_ms=int((time.perf_counter() - started_one) * 1000))
 
-            async def discard_hvx(camera_id: int, handle: int) -> None:
-                try:
-                    await HVXHostClient().drain_events(handle)
-                except Exception:
-                    pass
+            async def clear_inactive_camera(camera_id: int) -> None:
                 remember_last_car(camera_id, None)
                 remember_plate_box(camera_id, None)
                 from .services.recognition_runtime import runtime
@@ -3378,8 +3521,8 @@ async def _camera_event_loop():
                 for camera_id, handle in hvx_specs
             )
             jobs.extend(
-                asyncio.create_task(discard_hvx(camera_id, handle), name=f"hvx-idle-{camera_id}")
-                for camera_id, handle in idle_hvx
+                asyncio.create_task(clear_inactive_camera(camera_id), name=f"camera-idle-{camera_id}")
+                for camera_id in idle_camera_ids
             )
             jobs.extend(
                 asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
