@@ -10,6 +10,7 @@ import threading
 import hashlib
 import logging
 import time
+import uuid
 
 
 class HVXSDKError(RuntimeError):
@@ -252,6 +253,9 @@ def _decode_plate(raw: bytes) -> str:
     return ""
 
 
+EVENT_MEDIA_MAX_BYTES = 64 * 1024 * 1024
+
+
 class HVXSDK:
     def __init__(self, vendor_dir: Path):
         if os.name != "nt":
@@ -479,6 +483,7 @@ class HVXSDK:
                 width, height = jpeg_pixel_size(jpeg)
         row = {
             "image_id": int(image_id),
+            "capture_token": uuid.uuid4().hex,
             "captured_at_epoch": time.time(),
             "plate": plate or None,
             "score": score,
@@ -492,7 +497,8 @@ class HVXSDK:
         }
         key = int(handle)
         with self._lock:
-            row = retain_plate_box(self._last_capture.get(key), row)
+            # Every callback owns its geometry; a matching plate string
+            # does not mean the car stayed in the same pixel position.
             self._last_capture[key] = row
             if jpeg[:2] == b"\xff\xd8":
                 self._last_event_jpeg[key] = jpeg
@@ -500,9 +506,12 @@ class HVXSDK:
                 self._last_event_crop[key] = crop
             queue = self._pending_events.setdefault(key, deque(maxlen=64))
             queue.append(dict(row))
-            self._event_media[(key, int(image_id))] = (jpeg, crop)
-            while len(self._event_media) > 128:
-                self._event_media.pop(next(iter(self._event_media)))
+            # Vendor ID 0 is a realtime result type, not a unique image.
+            self._event_media[(key, row["capture_token"])] = (int(image_id), jpeg, crop)
+            media_bytes = sum(len(item[1]) + len(item[2]) for item in self._event_media.values())
+            while len(self._event_media) > 128 or media_bytes > EVENT_MEDIA_MAX_BYTES:
+                removed = self._event_media.pop(next(iter(self._event_media)))
+                media_bytes -= len(removed[1]) + len(removed[2])
         return 0
 
     def _register_report(self, handle: int) -> int:
@@ -692,21 +701,24 @@ class HVXSDK:
             queue.clear()
             return items
 
-    def event_jpeg_for(self, handle: int, image_id: int | None = None) -> bytes:
+    def _event_image(self, handle, image_id, capture_token, index):
         with self._lock:
+            if capture_token is not None:
+                record = self._event_media.get((int(handle), str(capture_token)))
+                return record[index] if record else b""
             if image_id is not None:
-                pair = self._event_media.get((int(handle), int(image_id)))
-                if pair and pair[0][:2] == b"\xff\xd8":
-                    return pair[0]
-            return self._last_event_jpeg.get(int(handle), b"")
+                # Compatibility for old clients: ambiguous IDs must fail closed.
+                records = [value for (camera, _), value in self._event_media.items()
+                           if camera == int(handle) and value[0] == int(image_id)]
+                return records[0][index] if len(records) == 1 else b""
+            latest = self._last_event_jpeg if index == 1 else self._last_event_crop
+            return latest.get(int(handle), b"")
 
-    def event_crop_for(self, handle: int, image_id: int | None = None) -> bytes:
-        with self._lock:
-            if image_id is not None:
-                pair = self._event_media.get((int(handle), int(image_id)))
-                if pair and pair[1][:2] == b"\xff\xd8":
-                    return pair[1]
-            return self._last_event_crop.get(int(handle), b"")
+    def event_jpeg_for(self, handle: int, image_id: int | None = None, *, capture_token=None) -> bytes:
+        return self._event_image(handle, image_id, capture_token, 1)
+
+    def event_crop_for(self, handle: int, image_id: int | None = None, *, capture_token=None) -> bytes:
+        return self._event_image(handle, image_id, capture_token, 2)
 
     def _refresh_recognition(self, handle: int, observed_state=None) -> dict:
         """Re-arm existing callbacks after an observed SDK reconnect.

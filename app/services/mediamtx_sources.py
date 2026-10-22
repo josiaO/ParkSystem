@@ -10,6 +10,9 @@ from app.services.stream_roles import ROLE_DETECT, ROLE_EVIDENCE, ROLE_LIVE, ROL
 
 def _pick_hvx_sub(candidates: list[str]) -> str:
     for url in candidates:
+        if "/subvideo" in url.lower():
+            return url
+    for url in candidates:
         if "av0_1" in url:
             return url
     if len(candidates) > 1:
@@ -18,6 +21,9 @@ def _pick_hvx_sub(candidates: list[str]) -> str:
 
 
 def _pick_hvx_main(candidates: list[str]) -> str:
+    for url in candidates:
+        if url.lower().split("?", 1)[0].endswith("/video"):
+            return url
     for url in candidates:
         if "av0_0" in url:
             return url
@@ -55,19 +61,27 @@ def upstream_role_uris(
     reuses the live path for evidence snapshots.
     """
     profiles = stream_profiles or {}
+
+    def rtsp_role(role: str, fallback: str = "") -> str:
+        resolved = uri_for_role(profiles, role, fallback)
+        return resolved if str(resolved).lower().startswith("rtsp://") else fallback
+
     explicit = str(rtsp_url or "").strip()
     if explicit.startswith("rtsp://"):
-        live = uri_for_role(profiles, ROLE_LIVE, explicit) or explicit
-        detect = uri_for_role(profiles, ROLE_DETECT, live) or live
-        evidence = uri_for_role(profiles, ROLE_EVIDENCE, "")
+        live = rtsp_role(ROLE_LIVE, explicit) or explicit
+        detect = rtsp_role(ROLE_DETECT, live) or live
+        evidence = rtsp_role(ROLE_EVIDENCE, "")
         return live, detect, evidence
 
     candidates = vendor_candidates(ip, username, password, explicit)
     sub = _pick_hvx_sub(candidates)
     main = _pick_hvx_main(candidates)
-    live = uri_for_role(profiles, ROLE_LIVE, sub or main)
-    detect = uri_for_role(profiles, ROLE_DETECT, sub or live)
-    evidence = uri_for_role(profiles, ROLE_EVIDENCE, main if main and main != (live or sub) else "")
+    # SDK role rows describe callbacks/JPEG buffers and are not playable RTSP
+    # sources.  Keep them for control/recognition metadata while MediaMTX uses
+    # the video and subvideo paths recovered from ParkWatch.
+    live = rtsp_role(ROLE_LIVE, sub or main)
+    detect = rtsp_role(ROLE_DETECT, sub or live)
+    evidence = rtsp_role(ROLE_EVIDENCE, main if main and main != (live or sub) else "")
     return live or sub or main, detect or sub or main, evidence
 
 
@@ -109,12 +123,12 @@ def sync_camera(camera, *, db=None) -> dict[str, Any]:
 
     cfg = source_config_for_camera(camera)
     if not str(cfg.get("uri") or "").startswith("rtsp://"):
-        # HVX/QY live video is Net_StartVideo + GetJpgBuffer (OcxConfig PlaySdk).
-        # A leftover MediaMTX RTSP pull is a second camera client and is how one
-        # lane stays live while the next stacks or drops.
+        # A camera with no usable RTSP source remains on the bounded SDK/direct
+        # fallback.  Do not register a publisher-shaped path that looks healthy
+        # while no process can publish to it.
         try:
             unregister_camera_source(int(camera.id))
         except Exception:
             pass
-        return {"registered": False, "reason": "HVX uses SDK JPEG, not MediaMTX RTSP"}
+        return {"registered": False, "reason": "No playable RTSP source was resolved"}
     return register_camera_source(int(camera.id), cfg, db=db)

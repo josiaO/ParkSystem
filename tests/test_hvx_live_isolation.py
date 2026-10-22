@@ -1,4 +1,4 @@
-"""HVX live video must stay OcxConfig-shaped: one stream per camera, isolated pumps."""
+"""HVX control stays in OcxConfig while MediaMTX owns continuous RTSP video."""
 
 from __future__ import annotations
 

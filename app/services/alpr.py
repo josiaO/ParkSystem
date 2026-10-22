@@ -236,6 +236,15 @@ def _load_engine():
         return _engine
 
 
+def warmup_engine() -> None:
+    """Initialize both models before accepting live recognition frames."""
+    import numpy as np
+
+    engine = _load_engine()
+    engine.detector.predict(np.zeros((540, 960, 3), dtype=np.uint8))
+    engine.ocr.predict(_prepare_ocr_crop(np.zeros((80, 320, 3), dtype=np.uint8)))
+
+
 def unload_engine() -> None:
     """Drop the loaded reader so the next frame picks up a new model pack."""
     global _engine, _warm_engine

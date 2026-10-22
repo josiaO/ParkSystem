@@ -91,10 +91,11 @@ def ensure_live_consumer(spec: "CameraLiveSpec") -> None:
     _consumers[camera_id] = loop.create_task(_consume(spec), name=f"mediamtx-live-{camera_id}")
 
 
-def stop_live_consumer(camera_id: int) -> None:
+def stop_live_consumer(camera_id: int) -> asyncio.Task | None:
     task = _consumers.pop(int(camera_id), None)
     if task is not None and not task.done():
         task.cancel()
+    return task
 
 
 def stop_all() -> None:

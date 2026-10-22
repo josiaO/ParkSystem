@@ -539,7 +539,7 @@
       </div>
 
       <div id="page-cameras" class="hidden">
-        <div class="notice">Pick a lane to process that gate's entry and exit on this computer. The other gate is not recognized until you select it. Leaving this page only stops the picture.</div>
+        <div class="notice">Assign this PC to one gate's entry and exit under Devices. Viewing another camera does not change recognition ownership. Leaving this page only stops the picture.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">Devices</button>
@@ -2324,12 +2324,29 @@
       const plate = emptyLane ? "" : (shown.plate || shown.plate_raw || (data && data.current_plate) || "");
       const chars = shown.characters || (plate ? plate.split("").join(" ") : "—");
       els.plate.textContent = chars;
-      els.snap.innerHTML = shown.snapshot_url
-        ? `<img alt="snapshot" src="${mediaUrl(shown.snapshot_url)}">`
-        : `<p class="muted">Waiting for a car</p>`;
-      els.crop.innerHTML = shown.crop_url
-        ? `<img alt="cropped plate" src="${mediaUrl(shown.crop_url)}">`
-        : `<p class="muted">—</p>`;
+      const setEvidence = (container, url, label, empty) => {
+        const next = url ? mediaUrl(url) : "";
+        if (container.dataset.evidenceUrl === next) return;
+        container.dataset.evidenceUrl = next;
+        container.replaceChildren();
+        if (next) {
+          const img = document.createElement("img");
+          img.alt = label;
+          img.onerror = () => {
+            if (container.dataset.evidenceUrl === next) container.dataset.evidenceUrl = "";
+          };
+          img.src = next;
+          container.appendChild(img);
+        } else {
+          const text = document.createElement("p");
+          text.className = "muted";
+          text.textContent = empty;
+          container.appendChild(text);
+        }
+      };
+      setEvidence(els.snap, shown.snapshot_url, "Vehicle snapshot", "Waiting for a vehicle");
+      const cropUrl = emptyLane ? "" : (shown.crop_url || (data && data.plate_crop_url) || "");
+      setEvidence(els.crop, cropUrl, "Plate crop used for recognition", "Waiting for a plate crop");
       const cam = liveCameras[slot] || {};
       const pct = confidencePercent(shown.confidence);
       const conf = pct != null ? `${pct}%` : "";
