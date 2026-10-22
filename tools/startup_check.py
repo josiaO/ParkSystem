@@ -136,8 +136,11 @@ def evaluate_video(samples: list[dict], connected_ids: set[int]) -> list[dict[st
         changed = _increased(_series(samples, camera_id, "frame_seq")) or _increased(
             _series(samples, camera_id, "frames_changed")
         )
+        media_flowing = _increased(_series(samples, camera_id, "media_bytes_received"))
         label = name or f"camera {camera_id}"
-        if not any(live):
+        if media_flowing:
+            moving += 1
+        elif not any(live):
             details.append(f"{label}: no JPEG")
         elif not changed:
             reason = "frozen" if frozen and all(frozen) else "picture did not change"
@@ -145,7 +148,7 @@ def evaluate_video(samples: list[dict], connected_ids: set[int]) -> list[dict[st
         else:
             moving += 1
     if moving == len(connected_ids):
-        checks.append(_check("V1", "Live picture changes", PASS, f"{moving} camera(s) delivered new frames"))
+        checks.append(_check("V1", "Live media advances", PASS, f"{moving} camera(s) delivered new frames or MediaMTX stream bytes"))
     else:
         checks.append(_check("V1", "Live picture changes", FAIL, "; ".join(details) or "picture did not change"))
 
@@ -452,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cameras = get_json(args.url, "/cameras", token)
         gates = get_json(args.url, "/gates", token)
+        scope = get_json(args.url, "/runtime/recognition-scope", token)
+        local_ids = {int(row["id"]) for row in scope.get("cameras", [])}
+        cameras = [row for row in cameras if int(row["id"]) in local_ids]
+        gates = [row for row in gates if row.get("id") == scope.get("gate_id")]
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
         checks.append(_check("P4", "Site configuration", FAIL, str(exc)))
         report = {"started_at": started, "seconds": args.seconds, "samples": 0, "overall": FAIL, "checks": checks}

@@ -24,5 +24,6 @@ markupsafe
 typing_extensions
 python-dotenv
 greenlet
-# PostgreSQL later: psycopg[binary]
+psycopg[binary]==3.3.6
+tzdata
 # Do not add watchfiles — it is only used by uvicorn --reload and conflicts with production.

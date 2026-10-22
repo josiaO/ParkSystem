@@ -122,6 +122,22 @@ def sample_running(base: str, token: str, camera_id: int | None) -> tuple[list[d
         if isinstance(row, dict) and _wanted(camera_id, int(row.get("camera_id") or 0)):
             rows.append(row)
     mediamtx = body.get("mediamtx") if isinstance(body.get("mediamtx"), dict) else {}
+    for name, path in (body.get("mediamtx_paths") or {}).items():
+        if not isinstance(path, dict) or not name.startswith("cam") or not name[3:].isdigit():
+            continue
+        path_camera_id = int(name[3:])
+        if not _wanted(camera_id, path_camera_id):
+            continue
+        rows = [row for row in rows if int(row.get("camera_id") or 0) != path_camera_id]
+        rows.append({
+            "camera_id": path_camera_id,
+            "source": "mediamtx",
+            "measurement": "transport",
+            "connection_state": "STREAMING" if path.get("ready") else "DISCONNECTED",
+            "bytes_received": path.get("bytes_received", 0),
+            "codec": path.get("codec", ""),
+            "reconnects": path.get("reconnects", 0),
+        })
     return rows, mediamtx
 
 
@@ -137,6 +153,8 @@ def run_attach(args: argparse.Namespace) -> int:
         print(r"If you already changed it, run: Run-CameraLab.bat -Password <the password you use in SmartPark>")
         return 1
     names = _camera_names(args.url, token)
+    scope = get_json(args.url, "/runtime/recognition-scope", token)
+    local_ids = {int(row["id"]) for row in scope.get("cameras", [])}
     buckets: dict[int, list[dict[str, Any]]] = {}
     mediamtx: dict[str, Any] = {}
     deadline = time.monotonic() + float(args.duration)
@@ -247,6 +265,9 @@ def _load_camera_rows(camera_id: int | None) -> list[dict[str, Any]]:
         if camera_id is not None:
             stmt = stmt.where(Camera.id == int(camera_id))
         for cam in db.scalars(stmt):
+            from app.services.node_scope import camera_in_recognition_scope
+            if not camera_in_recognition_scope(cam, db=db):
+                continue
             if not bool(getattr(cam, "enabled", True)):
                 continue
             rows.append({
@@ -280,6 +301,11 @@ def _report(
     if mtx:
         running = "running" if mtx.get("running") else "not running"
         print(f"MediaMTX: {running}")
+        if mtx.get("control_api_error"):
+            print(f"Control API: {mtx['control_api_error']}")
+        if mtx.get("last_error"):
+            print(f"MediaMTX error: {mtx['last_error']}")
+        print(f"Registered paths: {', '.join(mtx.get('paths') or []) or 'none in API process'}")
     elif mode == "attach":
         print("MediaMTX: not reported")
     else:
@@ -316,6 +342,8 @@ def _print_camera(summary: dict[str, Any], state: str, reasons: list[str]) -> No
         ("LIVE role", summary.get("live_role")),
         ("DETECT role", summary.get("detect_role")),
         ("connection", summary.get("connection_state")),
+        ("measurement", summary.get("measurement")),
+        ("stream bytes received", summary.get("bytes_received")),
         ("source FPS", summary.get("source_fps")),
         ("decoded FPS", summary.get("live_fps")),
         ("frames received", summary.get("frames_received")),

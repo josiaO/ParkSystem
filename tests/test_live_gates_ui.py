@@ -39,7 +39,7 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn("/live/watch", html)
         self.assertIn("function startDualLive", html)
         self.assertIn('data-layout="all"', html)
-        self.assertIn("The other gate is not recognized", html)
+        self.assertIn("Viewing another camera does not change recognition ownership", html)
         self.assertIn("/runtime/recognition-scope", html)
         self.assertIn("function pairLaneCameras", html)
 

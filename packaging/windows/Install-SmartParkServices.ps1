@@ -121,9 +121,7 @@ if ($mediaBat) {
     Write-Host "Media Service skipped: vendor\mediamtx\mediamtx.exe not in this kit."
 }
 if ($failed.Count -gt 0) {
-    Write-Host ("WARNING: {0}" -f ($failed -join "; "))
-    Write-Host "The desktop and browser will still open. Site Service starts with the desktop if a task did not."
-    exit 0
+    throw ($failed -join "; ")
 }
 
 Write-Host ""

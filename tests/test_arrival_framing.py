@@ -1,4 +1,4 @@
-"""Live recognition waits for a still plate, then crops and reads it once."""
+"""The visit gate still limits repeat reads. Live lanes crop the camera box or the first plate box."""
 
 from __future__ import annotations
 

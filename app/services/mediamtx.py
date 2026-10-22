@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import time
@@ -21,6 +22,7 @@ _removed_sources: set[int] = set()
 _last_error: str = ""
 _external_checked_at: float = 0.0
 _external_running_cache: bool = False
+_external_error: str = ""
 
 CONTROL_API = "http://127.0.0.1:9997"
 METRICS_ADDRESS = "127.0.0.1:9998"
@@ -93,6 +95,11 @@ def all_path_names(camera_id: int) -> tuple[str, ...]:
     return (live_path_name(camera_id), detect_path_name(camera_id), evidence_path_name(camera_id))
 
 
+def registered_camera_ids() -> tuple[int, ...]:
+    """Process-local configured camera ids; used by the owning media service."""
+    return tuple(sorted(_sources))
+
+
 def mediamtx_bin() -> Path | None:
     env = os.environ.get("SMARTPARK_MEDIAMTX_BIN")
     candidates = []
@@ -154,7 +161,7 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
             lines.append(f"  {item['name']}:")
             lines.append(f"    # roles: {', '.join(item['roles'])}")
             if uri.startswith("rtsp://"):
-                lines.append(f"    source: {uri}")
+                lines.append(f"    source: {json.dumps(uri)}")
                 lines.append(f"    sourceOnDemand: {'yes' if item['on_demand'] else 'no'}")
                 lines.append(f"    rtspTransport: {item.get('transport') or 'tcp'}")
             else:
@@ -173,17 +180,19 @@ def _external_running() -> bool:
     Process-local globals cannot tell the Site Service whether another process
     owns MediaMTX, so probe the local control API with a short cached check.
     """
-    global _external_checked_at, _external_running_cache
+    global _external_checked_at, _external_running_cache, _external_error
     now = time.monotonic()
     if now - _external_checked_at < 1.0:
         return _external_running_cache
     _external_checked_at = now
     try:
         import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:9997/v3/config/global/get", timeout=0.25) as resp:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(f"{CONTROL_API}/v3/config/global/get", timeout=1.0) as resp:
             _external_running_cache = 200 <= int(resp.status) < 300
-    except Exception:
+            _external_error = ""
+    except Exception as exc:
         _external_running_cache = False
+        _external_error = str(exc)[:200]
     return _external_running_cache
 
 
@@ -274,7 +283,7 @@ def _control_api(method: str, path: str, body: dict[str, Any] | None = None) -> 
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2.0) as resp:
             return int(resp.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
@@ -326,8 +335,10 @@ def register_source(camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
     if _sources.get(camera_id) == incoming:
         return live_endpoint(camera_id)
     _sources[camera_id] = incoming
-    write_config()
-    if running():
+    active = running()
+    if not active or (_process is not None and _process.poll() is None):
+        write_config()
+    if active:
         sync_paths()
     return live_endpoint(camera_id)
 
@@ -337,13 +348,40 @@ def reload_paths() -> bool:
     return sync_paths()
 
 
+def reconcile_paths() -> bool:
+    import urllib.request
+
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"{CONTROL_API}/v3/config/paths/list?itemsPerPage=1000", timeout=2.0) as response:
+            existing = {row["name"]: row for row in json.load(response).get("items", [])}
+    except Exception:
+        return False
+    desired = {item["name"]: item for camera_id in _sources for item in path_plan(camera_id)}
+    ok = True
+    for name, item in desired.items():
+        conf = _path_conf(item["uri"], on_demand=item["on_demand"], transport=item.get("transport") or "tcp")
+        if all(existing.get(name, {}).get(key) == value for key, value in conf.items()):
+            continue
+        status = _upsert_path(name, item["uri"], on_demand=item["on_demand"], transport=item.get("transport") or "tcp")
+        ok = ok and status is not None and status < 400
+    for name in existing:
+        base = name.split("_", 1)[0]
+        if base.startswith("cam") and base[3:].isdigit() and name not in desired:
+            status = _control_api("DELETE", f"/v3/config/paths/delete/{name}")
+            ok = ok and status is not None and status < 400
+    return ok
+
+
 def unregister_source(camera_id: int) -> None:
     camera_id = int(camera_id)
     if camera_id in _removed_sources and camera_id not in _sources:
         return
     _sources.pop(camera_id, None)
-    write_config()
-    if running():
+    active = running()
+    if not active or (_process is not None and _process.poll() is None):
+        write_config()
+    if active:
         for name in all_path_names(camera_id):
             _control_api("DELETE", f"/v3/config/paths/delete/{name}")
         _removed_sources.add(camera_id)
@@ -399,12 +437,15 @@ def health() -> dict[str, Any]:
         "sources": sorted(_sources),
         "paths": [item["name"] for cid in sorted(_sources) for item in path_plan(cid)],
         "control_api": CONTROL_API,
+        "control_api_error": _external_error,
         "telemetry": paths_summary,
         "uptime_seconds": round(time.monotonic() - _started_at, 1) if (_process is not None and _process.poll() is None) else 0,
         "owned_by_this_process": bool(_process is not None and _process.poll() is None),
         "metrics_enabled": True,
         "metrics_address": METRICS_ADDRESS,
         "last_error": _last_error,
+        "exit_code": _process.poll() if _process is not None else None,
+        "log_path": str(settings.data_dir / "logs" / "mediamtx.log"),
         "note": (
             "MediaMTX is optional. HVX native ALPR and LocalMediaGateway stay up if this sidecar is missing."
         ),

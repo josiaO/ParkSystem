@@ -21,6 +21,11 @@ _DENYLIST = frozenset({
 # empty lanes (bollards, barrier arms, glare). Not a country denylist.
 _EMPTY_SCENE_PREFIXES = ("ZC", "ZH", "ZJ", "ZL")
 _EMPTY_SCENE_EXACT = frozenset({"ZC", "ZH", "ZJ", "ZL", "NOPLATE", "NOPLAT", "NOPLATEY"})
+# QY cameras left on 全国 Chinese plate types paint this instead of a registration.
+_CAMERA_NO_PLATE = ("无车牌", "无牌车", "无车牌照", "无牌照", "无牌", "未识别")
+_CAMERA_NO_PLATE_ASCII = frozenset({
+    "NOPLATE", "NOPLAT", "NOPLATEY", "NOLICENSE", "NOLICENCE", "NOLICENSEPLATE",
+})
 # OCR pairs seen on Tanzanian plates (digit/letter lookalikes).
 _CONFUSION_PAIRS = (("O", "0"), ("I", "1"), ("B", "8"), ("S", "5"))
 
@@ -140,6 +145,22 @@ def _force_tz_positions(plate: str) -> str:
         else:
             body[i] = letter_map.get(ch, ch)
     return "T" + "".join(body)
+
+
+def is_camera_no_plate(value: str | None) -> bool:
+    """True when the camera sent a no-plate message, not a registration.
+
+    HVX/QY firmware set to Chinese plate types returns 无车牌 and a blue
+    result card. That is not a plate, and it must not replace detection.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    compact = raw.replace(" ", "")
+    if any(phrase in compact for phrase in _CAMERA_NO_PLATE):
+        return True
+    ascii_plate = normalize_plate(raw)
+    return ascii_plate in _CAMERA_NO_PLATE_ASCII
 
 
 def is_empty_scene_ocr(value: str | None, *, confidence: float = 0.0) -> bool:

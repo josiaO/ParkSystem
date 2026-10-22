@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PathPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.sources = patch.object(mediamtx, "_sources", {})
+        self.sources.start()
+        self.addCleanup(self.sources.stop)
+
     def tearDown(self):
         for cid in (30, 31, 32):
             mediamtx._sources.pop(cid, None)
@@ -84,7 +89,7 @@ class PathPlanTests(unittest.TestCase):
         self.assertIn("  cam30:\n", body)
         self.assertNotIn("cam30_detect:", body)
         self.assertIn("cam30_evidence:", body)
-        self.assertEqual(body.count("source: rtsp://cam/only"), 1)
+        self.assertEqual(body.count('source: "rtsp://cam/only"'), 1)
         evidence_block = body.split("cam30_evidence:")[1]
         self.assertIn("sourceOnDemand: yes", evidence_block)
         live_block = body.split("  cam30:")[1].split("cam30_evidence:")[0]

@@ -11,7 +11,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QKeyS
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog, QGroupBox
+    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget, QInputDialog, QGroupBox
 )
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras

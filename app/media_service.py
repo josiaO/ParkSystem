@@ -65,17 +65,31 @@ def _sync_cameras_from_db() -> list[dict]:
     from app.services.mediamtx_sources import sync_camera
 
     synced: list[dict] = []
+    wanted_ids: set[int] = set()
     with SessionLocal() as db:
         cfg = flags(db)
         if not cfg.get("media_gateway_enabled"):
             return synced
         for camera in db.query(Camera).filter(Camera.enabled == True).all():
+            from app.services.node_scope import camera_in_recognition_scope
+            if not camera_in_recognition_scope(camera, db=db):
+                continue
             if not media_mtx_for_camera(int(camera.id), db):
                 continue
+            wanted_ids.add(int(camera.id))
             try:
                 synced.append(sync_camera(camera, db=db))
             except Exception as exc:
                 synced.append({"camera_id": camera.id, "registered": False, "error": str(exc)[:200]})
+    # A lane reassignment must release old camera pulls.  Otherwise the node
+    # keeps serving both lanes even though recognition correctly changed scope.
+    from app.services import mediamtx
+    for camera_id in mediamtx.registered_camera_ids():
+        if int(camera_id) not in wanted_ids:
+            mediamtx.unregister_source(int(camera_id))
+    if mediamtx.running() and not mediamtx.reconcile_paths():
+        import logging
+        logging.getLogger(__name__).warning("MediaMTX path reconciliation failed; local Control API is unavailable or rejected the assigned camera paths")
     return synced
 
 

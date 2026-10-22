@@ -147,11 +147,14 @@ class NodeScopeTests(unittest.TestCase):
         self.assertTrue(camera_in_recognition_scope(self.cam1x))
         self.assertFalse(camera_in_recognition_scope(self.cam2e))
 
-    def test_all_cameras_processes_every_gate(self):
+    def test_clearing_scope_does_not_invent_a_production_gate(self):
         self.client.post("/runtime/recognition-scope", headers=self.headers, json={"gate_id": self.gate1["id"]})
         body = self.client.post("/runtime/recognition-scope", headers=self.headers, json={"gate_id": None})
-        self.assertEqual(body.json()["mode"], "all")
-        self.assertTrue(camera_in_recognition_scope(self.cam2e))
+        self.assertIsNone(body.json()["gate_id"])
+        with self.Session() as db:
+            from app.config import settings
+            with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_all_gates_enabled", False):
+                self.assertFalse(camera_in_recognition_scope(self.cam2e, db=db))
 
     def test_zx5188_is_not_a_bundled_plate(self):
         hits = []
@@ -177,6 +180,29 @@ class NodeScopeTests(unittest.TestCase):
                 json={"gate_id": self.gate2["id"]},
             )
         self.assertEqual(res.status_code, 409)
+
+    def test_shared_database_keeps_assignments_per_computer(self):
+        from app.config import settings
+        from app.services.node_scope import recognition_gate_id
+
+        with self.Session() as db:
+            with patch.object(settings, "node_id", "lane-server"):
+                set_recognition_gate_id(self.gate1["id"], db)
+            reset_recognition_scope()
+            with patch.object(settings, "node_id", "lane-client"):
+                set_recognition_gate_id(self.gate2["id"], db)
+            reset_recognition_scope()
+            with patch.object(settings, "node_id", "lane-server"):
+                self.assertEqual(recognition_gate_id(db), self.gate1["id"])
+            with patch.object(settings, "node_id", "lane-client"):
+                self.assertEqual(recognition_gate_id(db), self.gate2["id"])
+
+    def test_viewing_another_gate_does_not_change_recognition_assignment(self):
+        set_recognition_gate_id(self.gate1["id"])
+        response = self.client.get(f"/cameras/{self.cam2e['id']}/live/endpoint", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        from app.services.node_scope import recognition_gate_id
+        self.assertEqual(recognition_gate_id(), self.gate1["id"])
 
 
 if __name__ == "__main__":

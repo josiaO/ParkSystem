@@ -38,7 +38,7 @@ _reconnects: dict[str, int] = {}
 def _get_json(path: str) -> Any | None:
     req = urllib.request.Request(f"{mediamtx.CONTROL_API}{path}", method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=TIMEOUT_SECONDS) as resp:
             if not (200 <= int(resp.status) < 300):
                 return None
             return json.loads(resp.read().decode("utf-8") or "null")
@@ -210,7 +210,18 @@ def camera_telemetry(camera_id: int) -> dict[str, Any]:
     snap = refresh()
     paths = snap.get("paths", {})
     roles: dict[str, Any] = {}
-    for item in mediamtx.path_plan(camera_id):
+    plan = mediamtx.path_plan(camera_id)
+    if camera_id not in mediamtx.registered_camera_ids():
+        live_name = mediamtx.live_path_name(camera_id)
+        detect_name = mediamtx.detect_path_name(camera_id)
+        evidence_name = mediamtx.evidence_path_name(camera_id)
+        plan = [{"name": live_name, "roles": [mediamtx.ROLE_LIVE], "on_demand": False}]
+        for name, role in ((detect_name, mediamtx.ROLE_DETECT), (evidence_name, mediamtx.ROLE_EVIDENCE)):
+            if name in paths:
+                plan.append({"name": name, "roles": [role], "on_demand": role == mediamtx.ROLE_EVIDENCE})
+            else:
+                plan[0]["roles"].append(role)
+    for item in plan:
         row = paths.get(item["name"])
         for role in item["roles"]:
             roles[role] = {

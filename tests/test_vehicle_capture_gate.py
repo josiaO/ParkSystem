@@ -36,8 +36,14 @@ class VehicleCaptureGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "no-vehicle-no-plate")
 
-    def test_accepts_native_vehicle_even_without_plate_yet(self):
+    def test_empty_lane_flag_is_not_a_capture(self):
         ok, reason = should_persist_vehicle_capture({"plate": "", "have_vehicle": True, "score": 0})
+        self.assertFalse(ok)
+        self.assertEqual(reason, "empty-scene")
+        ok, reason = should_persist_vehicle_capture({
+            "plate": "", "have_vehicle": True, "score": 0,
+            "bbox": {"x1": 100, "y1": 200, "x2": 280, "y2": 240},
+        })
         self.assertTrue(ok)
         self.assertEqual(reason, "native-vehicle")
 

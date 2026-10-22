@@ -5,8 +5,7 @@ a recognition consumer: one lightweight FFmpeg decoder per lane reads
 ``rtsp://127.0.0.1:8554/<detect-path>``, keeps the newest JPEG, and samples
 a few frames per second. The detector watches the camera's zone. OCR runs
 only after the plate holds still, on the cropped plate, then pauses until
-the vehicle leaves. The Site Service camera-event loop stays authoritative
-until ``fastalpr_new_pipeline_enabled`` is turned on.
+the vehicle leaves. SDK cameras remain on the Site Service camera-event loop.
 """
 
 from __future__ import annotations
@@ -223,6 +222,7 @@ async def _infer_camera(
     stats: dict,
     inference_limiter: asyncio.Semaphore | None = None,
 ) -> None:
+    from app.services.inference_thread import run_inference
     from app.infrastructure.recognition import recognition_provider_for
     from app.services.recognition_decoder import iter_jpegs, require_local_mediamtx
     from app.infrastructure.media.registry import get_detect_endpoint
@@ -375,7 +375,7 @@ async def _infer_camera(
                 from app.services.alpr import plate_still_present
 
                 async def _probe_present():
-                    return await _with_limiter(asyncio.to_thread(
+                    return await _with_limiter(run_inference(
                         plate_still_present, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
                     ), ticket.captured_at)
 
@@ -452,7 +452,7 @@ async def _infer_camera(
             stats["recognition_frame_seq"] = ticket.frame_seq
             from app.services.alpr import locate_plate_boxes
 
-            locate_task = asyncio.create_task(_with_limiter(asyncio.to_thread(
+            locate_task = asyncio.create_task(_with_limiter(run_inference(
                 locate_plate_boxes, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
             ), ticket.captured_at))
             try:
@@ -615,7 +615,7 @@ async def _infer_camera(
                 event["visit_id"] = lane.visit.visit_id
                 event["frame_seq"] = ticket.frame_seq
                 event["generation"] = ticket.generation
-                await asyncio.to_thread(_publish_frame, event, ticket.jpeg)
+                await run_inference(_publish_frame, event, ticket.jpeg)
                 mark("event_persisted", timeline)
                 stats["published"] = int(stats.get("published") or 0) + 1
                 lane.note_published()

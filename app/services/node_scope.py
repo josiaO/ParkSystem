@@ -15,6 +15,13 @@ from app.config import settings
 
 NODE_SETTING_KEY = "node"
 
+
+def node_setting_key() -> str:
+    import hashlib
+
+    identity = str(settings.node_id).strip().lower()
+    return f"node:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+
 _ui_gate_id: int | None = None
 _ui_set = False
 
@@ -45,8 +52,10 @@ def recognition_gate_id(db=None) -> int | None:
         return _ui_gate_id
     if db is not None:
         try:
-            from app.models import SiteSetting
-            row = db.get(SiteSetting, NODE_SETTING_KEY)
+            from app.models import Camera, SiteSetting
+            row = db.get(SiteSetting, node_setting_key())
+            if row is None and str(settings.resolved_database_url).startswith("sqlite"):
+                row = db.get(SiteSetting, NODE_SETTING_KEY)
             raw = (row.value or {}).get("recognition_gate_id") if row and isinstance(row.value, dict) else None
             if raw not in (None, "", 0, "0"):
                 return int(raw)
@@ -90,14 +99,15 @@ def set_recognition_gate_id(gate_id: int | None, db=None) -> dict[str, Any]:
     _ui_set = True
     if db is not None:
         from app.models import SiteSetting
-        row = db.get(SiteSetting, NODE_SETTING_KEY)
+        key = node_setting_key()
+        row = db.get(SiteSetting, key)
         body = dict(row.value) if row and isinstance(row.value, dict) else {}
-        if chosen is None:
-            body.pop("recognition_gate_id", None)
-        else:
+        if chosen is not None:
             body["recognition_gate_id"] = chosen
+        else:
+            body["recognition_gate_id"] = None
         if row is None:
-            db.add(SiteSetting(key=NODE_SETTING_KEY, value=body))
+            db.add(SiteSetting(key=key, value=body))
         else:
             row.value = body
         db.commit()
@@ -130,6 +140,8 @@ def describe_recognition_scope(db=None) -> dict[str, Any]:
             if camera_in_recognition_scope(c, db=db)
         ]
     return {
+        "node_id": settings.node_id,
+        "node_role": settings.node_role,
         "gate_id": gate_id,
         "gate_name": gate_name,
         "mode": "gate" if gate_id is not None else ("all" if camera_in_recognition_scope(db=db) else "unassigned"),
