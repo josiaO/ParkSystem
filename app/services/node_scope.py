@@ -41,7 +41,7 @@ def recognition_gate_id(db=None) -> int | None:
     pinned = env_recognition_gate_id()
     if pinned is not None:
         return pinned
-    if _ui_set:
+    if db is None and _ui_set:
         return _ui_gate_id
     if db is not None:
         try:
@@ -50,8 +50,8 @@ def recognition_gate_id(db=None) -> int | None:
             raw = (row.value or {}).get("recognition_gate_id") if row and isinstance(row.value, dict) else None
             if raw not in (None, "", 0, "0"):
                 return int(raw)
-        except (TypeError, ValueError, Exception):
-            return _ui_gate_id
+        except Exception:
+            return None
     return None
 
 
@@ -73,7 +73,7 @@ def camera_gate_id(camera) -> int | None:
 def camera_in_recognition_scope(camera=None, *, gate_id: int | None = None, db=None) -> bool:
     wanted = recognition_gate_id(db)
     if wanted is None:
-        return True
+        return settings.deployment_profile == "DEVELOPMENT" or settings.recognition_all_gates_enabled
     cam_gate = gate_id if gate_id is not None else camera_gate_id(camera)
     return cam_gate is not None and int(cam_gate) == int(wanted)
 
@@ -132,12 +132,14 @@ def describe_recognition_scope(db=None) -> dict[str, Any]:
     return {
         "gate_id": gate_id,
         "gate_name": gate_name,
-        "mode": "gate" if gate_id is not None else "all",
+        "mode": "gate" if gate_id is not None else ("all" if camera_in_recognition_scope(db=db) else "unassigned"),
+        "deployment_profile": settings.deployment_profile,
         "pinned": pinned,
         "cameras": cameras,
         "detail": (
             f"This PC processes {gate_name or f'gate {gate_id}'} entry and exit only."
             if gate_id is not None
-            else "This PC processes every connected gate (heavy). Pick a lane for development."
+            else ("This PC processes every connected gate (explicit all-gates mode or development)."
+                  if camera_in_recognition_scope(db=db) else "NODE NOT ASSIGNED TO GATE")
         ),
     }

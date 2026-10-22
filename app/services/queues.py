@@ -162,6 +162,7 @@ class SQLiteOutbox:
             # Business-event idempotency that survives a crash between "processed"
             # and "acknowledged": the ack and the processed mark commit together.
             db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY, ts REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS published (key TEXT PRIMARY KEY, event_id TEXT NOT NULL)")
             db.execute("BEGIN IMMEDIATE")
             if not db.execute("SELECT 1 FROM metadata WHERE key = 'legacy_imported'").fetchone():
                 if legacy_path is not None and legacy_path.is_file():
@@ -185,6 +186,15 @@ class SQLiteOutbox:
     def enqueue(self, kind: str, payload: dict) -> str:
         item_id = uuid.uuid4().hex
         with self._connect() as db:
+            identity = str(payload.get("dedupe_key") or payload.get("event_id") or "")
+            if identity:
+                identity = f"{kind}:{identity}"
+                db.execute("BEGIN IMMEDIATE")
+                existing = db.execute("SELECT event_id FROM published WHERE key = ?", (identity,)).fetchone()
+                if existing:
+                    self.duplicates += 1
+                    return existing[0]
+                db.execute("INSERT INTO published (key, event_id) VALUES (?, ?)", (identity, item_id))
             db.execute("INSERT INTO events (id, kind, payload, ts) VALUES (?, ?, ?, ?)",
                        (item_id, kind, json.dumps(payload, default=str), time.time()))
         return item_id

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from app.domain.parking_engine import (
@@ -327,10 +328,19 @@ class EntryLaneController:
                 "open_command_uuid": existing_command,
             }
         if not row.open_command_uuid:
-            row.open_command_uuid = command_uuid
+            claimed = db.execute(update(ParkingSession).where(
+                ParkingSession.id == row.id,
+                or_(ParkingSession.open_command_uuid == "", ParkingSession.open_command_uuid.is_(None)),
+            ).values(open_command_uuid=command_uuid))
             db.commit()
             db.refresh(row)
+            if claimed.rowcount != 1:
+                return {"ok": True, "action": "ENTRY", "reason": "gate_command_in_progress",
+                        "duplicate": True, "barrier_opened": False, "session": snapshot(row)}
         opened = None
+        from app.services.lane_timing import mark
+        if gate is not None:
+            mark("gate_requested", command_uuid=command_uuid)
         if gate is not None and self.opener is not None:
             cameras = _cameras(gate, camera)
             opened = await self.opener(

@@ -282,8 +282,10 @@ class BrowserLiveViewTests(unittest.TestCase):
         self.assertIn("whepStop(slot)", stop_fn)
         self.assertIn("srcObject = null", stop_fn)
         whep_stop = self.html.split("function whepStop(")[1].split("\n    }\n")[0]
-        self.assertIn("pc.close()", whep_stop)
-        self.assertIn('method: "DELETE"', whep_stop)
+        self.assertIn("whepClose(session)", whep_stop)
+        whep_close = self.html.split("function whepClose(")[1].split("\n    }\n")[0]
+        self.assertIn("pc.close()", whep_close)
+        self.assertIn('method: "DELETE"', whep_close)
 
     def test_webrtc_pane_never_also_starts_mjpeg_or_snapshot_polling(self):
         start_fn = self.html.split("async function startLiveSlot(")[1].split("\n    }\n")[0]

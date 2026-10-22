@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -130,26 +130,33 @@ async def print_entry_receipt(
     """Print for an existing session. Never creates a second session."""
     policy = policy or LanePolicy(receipt_required_before_open=True)
     printer = printer or receipt_printer_for()
-    if _job_state(row) == JOB_TAKEN:
-        return {"session_id": row.id, "print_job_id": row.print_job_id, "status": JOB_TAKEN, "created_session": False}
+    db.refresh(row)
+    if _job_state(row) in {JOB_TAKEN, JOB_PRESENTED, JOB_PRINTING}:
+        receipt = db.scalar(select(Receipt).where(Receipt.print_job_id == row.print_job_id)) if row.print_job_id else None
+        return {"session_id": row.id, "print_job_id": row.print_job_id, "status": _job_state(row),
+                "created_session": False, "duplicate": True,
+                "qr_payload": receipt.qr_payload if receipt else "", "human_reference": row.human_reference}
     first = not row.print_job_id
-    if first:
-        row.print_job_id = new_print_job_id()
-        row.print_retry_count = 0
-        row.print_job_status = JOB_QUEUED
-    else:
-        row.print_retry_count = int(row.print_retry_count or 0) + 1
-    if _job_state(row) == JOB_FAILED:
-        _set_job(row, JOB_QUEUED)
-    if _job_state(row) != JOB_PRINTING:
-        _set_job(row, JOB_PRINTING)
+    job_id = row.print_job_id or new_print_job_id()
+    claimed = db.execute(update(ParkingSession).where(
+        ParkingSession.id == row.id,
+        or_(ParkingSession.print_job_status.is_(None), ParkingSession.print_job_status.not_in([JOB_TAKEN, JOB_PRESENTED, JOB_PRINTING])),
+    ).values(print_job_id=job_id, print_job_status=JOB_PRINTING,
+             print_retry_count=0 if first else int(row.print_retry_count or 0) + 1))
+    db.commit()
+    db.refresh(row)
+    if claimed.rowcount != 1:
+        return {"session_id": row.id, "print_job_id": row.print_job_id, "status": _job_state(row), "created_session": False, "duplicate": True}
     row.receipt_status = "PRINTING"
     if first:
         current = row.lifecycle or ""
         if current in {"SESSION_CREATED", ""}:
             advance(db, row, RECEIPT_PRINTING, policy=policy)
     document = _document_for(db, row)
+    from app.services.lane_timing import mark
+    mark("receipt_requested", print_job_id=row.print_job_id)
     outcome = await printer.print_entry_receipt(document, job_id=row.print_job_id)
+    mark("receipt_printed" if outcome.ok else "receipt_failed")
     _record_receipt(db, row, document, outcome, job_id=row.print_job_id)
     if not outcome.ok:
         row.printer_error = outcome.error

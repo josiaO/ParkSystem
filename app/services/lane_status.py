@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.i18n import t
+from app.config import settings
 from app.infrastructure.hardware.registry import camera_adapter_id
 from app.models import Camera, CameraStatus, Gate
 from app.services.captures import latest_for_camera
@@ -36,7 +37,7 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
     live = media.live.latest() if media else None
     pumping = bool(media and media.producer is not None and not media.producer.done())
     camera_ok = camera.status in ONLINE_CAMERA or pumping or bool(live)
-    live_ok = pumping or bool(live)
+    live_ok = bool(live and live.age_ms() <= settings.stale_stream_seconds * 1000)
     canonical = camera_recognition_mode(camera)
     if canonical == LOCAL_ONLY:
         recog_mode = "FASTALPR_ONLY"
@@ -48,6 +49,10 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
         recog = _label(language, "status.ready", "Ready")
     else:
         recog = _label(language, "status.offline", "Offline")
+    from app.services.node_scope import camera_in_recognition_scope, describe_recognition_scope
+    if not camera_in_recognition_scope(camera, db=db):
+        scope = describe_recognition_scope(db)
+        recog = "NODE NOT ASSIGNED TO GATE" if scope["mode"] == "unassigned" else "OTHER GATE"
     barrier = _label(language, "status.ready", "Ready") if camera.gate and camera.gate.enabled else _label(language, "status.unknown", "Unknown")
     live_state = media.state if media else "DISCONNECTED"
     if live_state == "DEGRADED":

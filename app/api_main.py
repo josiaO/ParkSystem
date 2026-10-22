@@ -49,15 +49,15 @@ from .services.site_policy import site_policy
 from .services.preview import (
     MJPEG_BOUNDARY, CameraLiveSpec, acquire_detect, acquire_live, get_state, media_path, mjpeg_from_cache, mjpeg_parts,
     pumping_spec, release_detect, release_live, remember_alpr, remember_frame, remember_last_car, remember_plate_box, held_plate_box, remember_viewer_transport, fresh_alpr, fresh_last_car, snapshot_for_camera, start_idle_watch,
-    watch_live,
+    watch_live, live_is_current,
     start_live_pump, stop_live_pump, stop_live_pumps, touch_live, viewers_for,
 )
 from .services.http_snapshot import grab_http_snapshot
 from .services.ipcam_discover import generic_discovery_row, scan_lan_devices
 from .services.rtsp_probe import probe, vendor_candidates
 from .services.site_cameras import (
-    KNOWN_SITE_CAMERAS, KNOWN_SITE_GATES, camera_spec_for_ip, discovery_row,
-    probe_ips, side_label, site_camera_defaults, tcp_open,
+    KNOWN_SITE_CAMERAS, camera_spec_for_ip, discovery_row,
+    probe_ips, side_label, site_camera_defaults, tcp_open, seed_site_lanes, flatten_site_cameras,
 )
 from .services.simulation import (
     handle_exit, handle_plate_event, mark_paid, parking_settings,
@@ -118,6 +118,8 @@ async def lifespan(app: FastAPI):
     set_startup_state("STARTING")
     install_asyncio_exception_filter()
     ensure_schema()
+    from .db import engine
+    log.info("Site database ready: %s", engine.url.render_as_string(hide_password=True))
     with SessionLocal() as db:
         ensure_roles(db)
         ensure_bootstrap_admin(db)
@@ -158,6 +160,8 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, return_exceptions=True)
         await onvif_runtime.shutdown()
         stop_live_pumps()
+        from .services.hvx_client import close_host_clients
+        await close_host_clients()
         # Do not stop MediaMTX here; SmartParkMediaService owns that process.
         set_startup_state("OFFLINE")
 
@@ -262,17 +266,20 @@ def health_diagnostics(db: Session = Depends(get_db), _: User = Depends(require(
 
 
 @app.get("/health/realtime")
-async def health_realtime(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+async def health_realtime(request: Request, db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
     """Per-camera live/recognition snapshot for field diagnosis. No credentials."""
     from .services.recognition_runtime import runtime
     from app.infrastructure.media.registry import get_live_endpoint, live_provider_label
     from .services.preview import viewer_live_provider
     from .services.health import camera_stats
+    from .services.lane_timing import timeline_metrics
 
     cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
     rows = []
     for camera in cameras:
         endpoint = await get_live_endpoint(int(camera.id), db)
+        from app.services.whep import browser_endpoint
+        endpoint = browser_endpoint(endpoint, request)
         negotiated = viewer_live_provider(int(camera.id))
         if negotiated:
             endpoint = {**endpoint, "viewer_transport": negotiated}
@@ -282,10 +289,11 @@ async def health_realtime(db: Session = Depends(get_db), _: User = Depends(requi
         rows.append({
             "camera_id": int(camera.id),
             "camera_name": camera.name,
+            "visit_latency_ms": timeline_metrics(camera.id),
             "live_provider": live_provider_label(endpoint),
             "configured_transport": endpoint.get("transport"),
             "viewer_transport": negotiated or "",
-            "live_connected": bool(get_state(camera.id).jpeg[:2] == b"\xff\xd8"),
+            "live_connected": live_is_current(camera.id),
             "last_frame_at": rec.get("last_frame_at"),
             "frame_seq": rec.get("frame_seq"),
             "fps": media.get("fps") or get_state(camera.id).fps,
@@ -326,8 +334,8 @@ async def health_realtime(db: Session = Depends(get_db), _: User = Depends(requi
 
 
 @app.get("/cameras/{camera_id}/realtime")
-async def camera_realtime(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
-    body = await health_realtime(db)
+async def camera_realtime(camera_id: int, request: Request, db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
+    body = await health_realtime(request, db)
     row = next((item for item in body["cameras"] if item["camera_id"] == int(camera_id)), None)
     if row is None:
         raise HTTPException(404, "Camera not found")
@@ -518,13 +526,15 @@ def list_cameras(db: Session = Depends(get_db), _: User = Depends(require("camer
 async def discover_cameras(
     scan_lan: bool = False,
     db: Session = Depends(get_db),
-    _: User = Depends(require("cameras.view")),
+    _: User = Depends(require("cameras.manage")),
 ):
     return await _discover_cameras(db, scan_lan=scan_lan)
 
 
 @app.post("/cameras/seed-site")
-def seed_site_cameras(db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
+def seed_site_cameras(payload: dict | None = Body(default=None), db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
+    if settings.deployment_profile != "DEVELOPMENT" and (payload or {}).get("confirm_test_data") is not True:
+        raise HTTPException(409, "Confirm loading example camera records with confirm_test_data=true, or discover/manually add cameras.")
     created, skipped, gates = _import_site_layout(db, user)
     return {
         "created": [camera_dict(c) for c in created],
@@ -532,8 +542,8 @@ def seed_site_cameras(db: Session = Depends(get_db), user: User = Depends(requir
         "gates": [gate_dict(g) for g in gates],
         "cameras": [camera_dict(c) for c in db.scalars(select(Camera).order_by(Camera.id)).all()],
         "note": (
-            "Each numbered lane (1# / 2#) is entry + exit. Each side has camera, controller (Board*), "
-            "and display (IpAddr*). Only camera IPs are SDK-connected. Press Connect all for a real NetSDK login."
+            "Example setup records only. Review and edit addresses, names and gate assignments before use. "
+            "Existing cameras are preserved. No cameras are connected and recognition ownership is unchanged."
         ),
     }
 
@@ -572,7 +582,7 @@ async def import_discovered_cameras(
             spec["username"] = username
             spec["password"] = password
             specs.append(spec)
-        if not specs:
+        if not specs and settings.deployment_profile == "DEVELOPMENT":
             specs = [camera_spec_for_ip(row["ip_address"]) for row in KNOWN_SITE_CAMERAS]
     for spec in specs:
         spec["username"] = spec.get("username") or username
@@ -832,7 +842,9 @@ async def _native_capture_for_camera(camera: Camera) -> dict:
 async def _discover_cameras(db: Session, *, scan_lan: bool = False) -> dict:
     defaults = site_camera_defaults()
     existing = {c.ip_address: camera_dict(c) for c in db.scalars(select(Camera)).all()}
-    ips = [row["ip_address"] for row in KNOWN_SITE_CAMERAS]
+    ips = list(existing)
+    if settings.deployment_profile == "DEVELOPMENT":
+        ips.extend(row["ip_address"] for row in KNOWN_SITE_CAMERAS if row["ip_address"] not in ips)
     hvx = {"ok": False, "ips": [], "error": None, "note": "32-bit HVX host not queried yet"}
     try:
         hvx = await HVXHostClient().discover(wait_seconds=2.0)
@@ -890,9 +902,9 @@ async def _discover_cameras(db: Session, *, scan_lan: bool = False) -> dict:
     }
 
 
-def _ensure_known_gates(db: Session) -> dict[str, Gate]:
+def _ensure_known_gates(db: Session, lanes: tuple[dict, ...]) -> dict[str, Gate]:
     by_name: dict[str, Gate] = {}
-    for spec in KNOWN_SITE_GATES:
+    for spec in lanes:
         gate = db.scalar(select(Gate).where(Gate.name == spec["name"]))
         if gate is None:
             gate = Gate(name=spec["name"], mode=GateMode.COMMISSIONING.value)
@@ -903,22 +915,23 @@ def _ensure_known_gates(db: Session) -> dict[str, Gate]:
 
 
 def _import_site_layout(db: Session, user: User) -> tuple[list[Camera], list[dict], list[Gate]]:
-    gates = _ensure_known_gates(db)
+    lanes = seed_site_lanes()
+    gates = _ensure_known_gates(db, lanes)
     specs = []
-    for row in KNOWN_SITE_CAMERAS:
-        spec = camera_spec_for_ip(row["ip_address"])
+    for row in flatten_site_cameras(lanes):
+        spec = dict(row)
         gate = gates.get(row["gate_name"])
         if gate is not None:
             spec["gate_id"] = gate.id
             spec["gate_name"] = gate.name
         specs.append(spec)
-    created, skipped = _import_camera_specs(db, user, specs)
-    names = [spec["name"] for spec in KNOWN_SITE_GATES]
+    created, skipped = _import_camera_specs(db, user, specs, preserve_existing=True)
+    names = [spec["name"] for spec in lanes]
     gates_list = list(db.scalars(select(Gate).where(Gate.name.in_(names)).order_by(Gate.id)).all())
     return created, skipped, gates_list
 
 
-def _import_camera_specs(db: Session, user: User, specs: list[dict]) -> tuple[list[Camera], list[dict]]:
+def _import_camera_specs(db: Session, user: User, specs: list[dict], *, preserve_existing: bool = False) -> tuple[list[Camera], list[dict]]:
     existing_ips = {c.ip_address: c for c in db.scalars(select(Camera)).all()}
     existing_names = {c.name for c in existing_ips.values()}
     created: list[Camera] = []
@@ -928,6 +941,9 @@ def _import_camera_specs(db: Session, user: User, specs: list[dict]) -> tuple[li
         ip = spec["ip_address"]
         if ip in existing_ips:
             camera = existing_ips[ip]
+            if preserve_existing or settings.deployment_profile != "DEVELOPMENT":
+                skipped.append({"ip_address": ip, "reason": "already added", "camera_id": camera.id, "updated": False})
+                continue
             if spec.get("gate_id") is not None:
                 camera.gate_id = spec["gate_id"]
             if spec.get("controller_ip") is not None:
@@ -1195,13 +1211,16 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
 
 def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session | None = None) -> dict:
     from .services.flags import native_alpr_enabled
+    from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
     from .services.recognition_runtime import IDLE, runtime
     from app.infrastructure.media.registry import live_provider_label
     from .services.preview import viewer_live_provider
     state = get_state(camera.id)
     if alpr is state.alpr:
         alpr = fresh_alpr(camera.id)
-    if not native_alpr_enabled():
+    if camera_recognition_mode(camera) == LOCAL_ONLY:
+        native = {}
+    elif not native_alpr_enabled():
         native = {**(native or {}), "plate": "", "confidence": 0.0}
     local = local_from_fastalpr(alpr)
     fused = resolve_readings(
@@ -1241,10 +1260,11 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         fused_dict = fused.as_dict()
         current_plate = current_plate or str(fused_dict.get("resolved_plate") or "")
     viewer = viewer_live_provider(camera.id)
+    current_video = live_is_current(camera.id)
     live_endpoint = {
         "provider": live.source or "",
-        "transport": "MJPEG" if live.jpeg[:2] == b"\xff\xd8" else "",
-        "state": "LIVE" if live.jpeg[:2] == b"\xff\xd8" else "OFFLINE",
+        "transport": "MJPEG" if current_video else "",
+        "state": "LIVE" if current_video else "OFFLINE",
         "viewer_transport": viewer,
     }
     return {
@@ -1261,7 +1281,8 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "vehicle_present": occupied,
         "recognition_state": rec.get("recognition_state") or IDLE,
         "visit_id": rec.get("visit_id") or "",
-        "live": bool(live.jpeg[:2] == b"\xff\xd8"),
+        "live": current_video,
+        "error": None if current_video else "Waiting for fresh live video. Recognition evidence is shown separately.",
         "live_source": live.source,
         "live_fps": live.fps,
         "url_redacted": live.url_redacted,
@@ -1328,7 +1349,7 @@ def _crop_from_alpr(alpr: dict | None, jpeg: bytes = b"") -> bytes:
     if not rel:
         from .services.captures import _crop_from_bbox
         return _crop_from_bbox(jpeg, best.get("bbox")) if jpeg else b""
-    path = settings.media_dir / rel
+    path = settings.media_dir / rel.replace("\\", "/")
     try:
         data = path.read_bytes()
     except Exception:
@@ -1357,6 +1378,10 @@ async def _run_local_alpr(
     if jpeg[:2] != b"\xff\xd8":
         return None
     native = native or {}
+    from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+    if camera_recognition_mode(camera) == LOCAL_ONLY:
+        native = {}
+        plate_crop = b""
     from .services.node_scope import camera_in_recognition_scope
     if not force and not camera_in_recognition_scope(camera, db=db):
         return None
@@ -1389,11 +1414,13 @@ async def _run_local_alpr(
         return alpr
     except asyncio.TimeoutError:
         runtime.recover(int(camera.id))
+        runtime.lane(int(camera.id)).last_error = "FastALPR crop recognition timed out."
         from .services.health import note_worker_failure
         note_worker_failure("alpr", f"camera {camera.id} recognition timed out")
         return {"ok": False, "backend": "fastalpr", "plates": [], "detail": "recognition timeout", "error": "timeout"}
     except Exception as exc:
         runtime.finish(ticket, plate="")
+        runtime.lane(int(camera.id)).last_error = redact_text(str(exc))
         from .services.health import note_worker_failure
         note_worker_failure("alpr", str(exc))
         return {"ok": False, "backend": "fastalpr", "plates": [], "detail": str(exc), "error": str(exc)}
@@ -1467,13 +1494,16 @@ async def _run_local_alpr_locked(
             detected_boxes=boxes,
         )
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
+    if alpr.get("ok") is False:
+        runtime.lane(int(camera.id)).last_error = redact_text(str(alpr.get("detail") or "FastALPR crop recognition failed"))
     local = local_from_fastalpr(alpr)
     plate = str(local.get("plate") or "")
     accepted = True
     if ticket is not None:
         accepted = runtime.finish(ticket, plate=plate)
         if not accepted:
-            return alpr
+            runtime.lane(int(camera.id)).last_error = "Recognition result expired; retrying a fresh frame."
+            return {**(alpr or {}), "persist_skipped": "stale recognition result"}
     if plate:
         runtime.lane(int(camera.id)).visit.observe(presence=True, plate=plate, native_event=bool(native.get("plate")))
     else:
@@ -2150,19 +2180,8 @@ async def camera_live_endpoint(
     get_camera_or_404(db, camera_id)
     from app.infrastructure.media import registry as media_registry
     endpoint = await media_registry.get_live_endpoint(camera_id, db)
-    if endpoint.get("provider") == "MEDIAMTX" and endpoint.get("transport") == "WEBRTC":
-        # MediaMTX's internal endpoint is localhost because Site Service and the
-        # recognition worker are local. The browser must connect to the same LAN
-        # host it used to reach SmartPark.
-        host = request.url.hostname or "127.0.0.1"
-        display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-        path = str(endpoint.get("mediamtx_path") or f"cam{int(camera_id)}")
-        endpoint = {
-            **endpoint,
-            "webrtc": f"http://{display_host}:8889/{path}",
-            "whep": f"http://{display_host}:8889/{path}/whep",
-            "browser_host": host,
-        }
+    from app.services.whep import browser_endpoint
+    endpoint = browser_endpoint(endpoint, request)
     from .services.preview import viewer_live_provider
     negotiated = viewer_live_provider(camera_id)
     if negotiated:
@@ -2171,6 +2190,19 @@ async def camera_live_endpoint(
     else:
         endpoint.setdefault("live_provider", media_registry.live_provider_label(endpoint))
     return endpoint
+
+
+@app.api_route("/cameras/{camera_id}/live/whep", methods=["OPTIONS", "POST"])
+@app.api_route("/cameras/{camera_id}/live/whep/{session_id}", methods=["OPTIONS", "PATCH", "DELETE"])
+async def camera_whep_signaling(
+    camera_id: int, request: Request, session_id: str = "",
+    db: Session = Depends(get_db), _: User = Depends(require("cameras.view")),
+):
+    get_camera_or_404(db, camera_id)
+    from app.services.mediamtx import live_endpoint
+    from app.services.whep import proxy_signaling
+    path = live_endpoint(camera_id)["mediamtx_path"]
+    return await proxy_signaling(request, camera_id, path, session_id)
 
 
 _snapshot_status_checked: set[int] = set()
@@ -2190,7 +2222,7 @@ async def camera_snapshot(camera_id: int, _: User = Depends(require_media("camer
             headers["X-Frame-Seq"] = str(seq)
         return Response(content=jpeg, media_type="image/jpeg", headers=headers)
 
-    if row.jpeg[:2] == b"\xff\xd8":
+    if live_is_current(camera_id):
         touch_live(spec)
         # Promote DISCOVERED→VIDEO_CONNECTED once; never open SQLite on every 40ms poll.
         if camera_id not in _snapshot_status_checked:
@@ -2208,7 +2240,7 @@ async def camera_snapshot(camera_id: int, _: User = Depends(require_media("camer
         for _ in range(24):
             await asyncio.sleep(0.05)
             row = get_state(camera_id)
-            if row.jpeg[:2] == b"\xff\xd8":
+            if live_is_current(camera_id):
                 return Response(
                     content=row.jpeg,
                     media_type="image/jpeg",
@@ -2311,7 +2343,7 @@ async def camera_live(camera_id: int, role: str = "LIVE", _: User = Depends(requ
     acquire_live(spec)
     try:
         for i in range(80):
-            if get_state(spec.id).jpeg[:2] == b"\xff\xd8":
+            if live_is_current(spec.id):
                 break
             if i == 16:
                 # MediaMTX JPEG consumer can take a moment. If the cache is still
@@ -2322,8 +2354,7 @@ async def camera_live(camera_id: int, role: str = "LIVE", _: User = Depends(requ
                 ensure_mjpeg_source(spec)
                 gateway.ensure_producer(spec)
             await asyncio.sleep(0.05)
-        if get_state(spec.id).jpeg[:2] != b"\xff\xd8":
-            release_live(spec.id)
+        if not live_is_current(spec.id):
             raise HTTPException(409, "No live video yet. Connect the camera, then wait a second.")
 
         async def parts():
@@ -2343,9 +2374,7 @@ async def camera_live(camera_id: int, role: str = "LIVE", _: User = Depends(requ
                 "X-Accel-Buffering": "no",
             },
         )
-    except HTTPException:
-        raise
-    except Exception:
+    except BaseException:
         release_live(spec.id)
         raise
 
@@ -2359,7 +2388,7 @@ async def camera_preview(
 ):
     c = get_camera_or_404(db, camera_id)
     cached = get_state(c.id)
-    live = bool(cached.jpeg and cached.jpeg[:2] == b"\xff\xd8")
+    live = live_is_current(c.id)
     grabbed = {"ok": live, "jpeg": cached.jpeg, "url_redacted": cached.url_redacted}
     if not live:
         grabbed = await live_snapshot(c)
@@ -2401,8 +2430,15 @@ async def camera_preview(
 @app.get("/cameras/{camera_id}/plates")
 async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     c = get_camera_or_404(db, camera_id)
-    native = await _native_capture_for_camera(c)
-    return _plate_payload(c, native, fresh_alpr(c.id), db)
+    from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+    native = {} if camera_recognition_mode(c) == LOCAL_ONLY else await _native_capture_for_camera(c)
+    payload = _plate_payload(c, native, fresh_alpr(c.id), db)
+    from .services.node_scope import camera_in_recognition_scope
+    if not camera_in_recognition_scope(c, db=db):
+        payload["recognition"]["last_error"] = "View only: assign this PC to this camera's gate under Devices to enable recognition."
+    latest = latest_for_camera(db, c.id)
+    payload["evidence"] = capture_dict(latest) if latest else None
+    return payload
 
 
 @app.post("/cameras/{camera_id}/plate-corrections")
@@ -2510,6 +2546,9 @@ async def post_camera_presence(
 
 async def _read_presence_now(camera_id: int, handle: int) -> None:
     coil_watch.mark_triggered(camera_id)
+    with short_session() as db:
+        previous = latest_for_camera(db, camera_id)
+        previous_key = (previous.id, previous.image_id, previous.plate) if previous else None
     hvx = HVXHostClient()
     try:
         await hvx.snapshot_trigger(handle)
@@ -2522,7 +2561,7 @@ async def _read_presence_now(camera_id: int, handle: int) -> None:
         if camera is None:
             return
         latest = latest_for_camera(db, camera.id)
-        if latest and latest.plate:
+        if latest and latest.plate and (latest.id, latest.image_id, latest.plate) != previous_key:
             return
         jpeg = await hvx.live_jpeg(handle)
         if jpeg[:2] != b"\xff\xd8":
@@ -2549,6 +2588,26 @@ def get_recognition_scope(db: Session = Depends(get_db), _: User = Depends(requi
     return describe_recognition_scope(db)
 
 
+@app.put("/runtime/recognition-owner")
+def put_recognition_owner(
+    payload: RecognitionScopeUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    """Explicit administrator assignment; browsing video never changes ownership."""
+    from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    pinned = env_recognition_gate_id()
+    if pinned is not None and payload.gate_id != pinned:
+        raise HTTPException(409, "This computer is pinned by SMARTPARK_RECOGNITION_GATE_ID.")
+    if payload.gate_id is None or payload.gate_id <= 0:
+        raise HTTPException(422, "Assign this PC to one gate with entry and exit cameras.")
+    if db.get(Gate, payload.gate_id) is None:
+        raise HTTPException(404, "Gate not found")
+    body = set_recognition_gate_id(payload.gate_id, db)
+    write_audit(db, user, "recognition.owner", "gate", str(payload.gate_id), body.get("detail") or "")
+    return body
+
+
 @app.post("/runtime/recognition-scope")
 def post_recognition_scope(
     payload: RecognitionScopeUpdate,
@@ -2557,6 +2616,8 @@ def post_recognition_scope(
 ):
     """This PC processes one gate's entry+exit. Other gates stay idle until chosen."""
     from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    if settings.deployment_profile == "PRODUCTION":
+        raise HTTPException(409, "Production ownership is configured by SMARTPARK_RECOGNITION_GATE_ID or the persisted node setting, not the browser lane selector.")
     if env_recognition_gate_id() is not None and payload.gate_id not in (None, env_recognition_gate_id()):
         raise HTTPException(409, "This computer is pinned to one gate by SMARTPARK_RECOGNITION_GATE_ID.")
     if payload.gate_id is not None:
@@ -2573,6 +2634,12 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     from .services.node_scope import camera_in_recognition_scope
     if not camera_in_recognition_scope(camera, db=db):
         return None
+    from .services.recognition_runtime import runtime
+    lane = runtime.lane(int(camera.id))
+    capture = dict(capture or {})
+    if not capture.get("visit_id"):
+        lane.visit.observe(presence=True, native_event=True)
+        capture["visit_id"] = lane.visit.visit_id
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None
     previous_plate = str(previous.plate or "") if previous else ""
@@ -2842,7 +2909,9 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     )
     gate = gate_for(int(camera.id))
     if not located.get("available"):
+        runtime.lane(int(camera.id)).last_error = str(located.get("detail") or located.get("reason") or "Plate detector unavailable")
         return False
+    runtime.lane(int(camera.id)).last_error = ""
     gate.prepared = (hash(jpeg), boxes)
     phase = gate.observe(boxes[0] if boxes else None, time.monotonic())
     lane = runtime.lane(int(camera.id))
@@ -2857,16 +2926,32 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     return False
 
 
-def _note_arrival_result(camera_id: int, alpr: dict | None) -> None:
+def _note_arrival_result(camera_id: int, alpr: dict | None) -> bool:
     from .services.camera_framing import gate_for
 
     if alpr is None:
         gate_for(int(camera_id)).rearm()
-        return
+        return False
     best = (alpr or {}).get("best") or {}
     plate = str(best.get("plate_normalized") or best.get("plate") or "")
     kept = bool(plate) and not alpr.get("persist_skipped")
     gate_for(int(camera_id)).note_ocr(published=kept)
+    return kept
+
+
+def _current_recognition_jpeg(camera_id: int) -> bytes:
+    from .services.media_gateway import gateway
+
+    now = time.monotonic()
+    maximum_age = float(settings.stale_stream_seconds)
+    for read in (gateway.peek_detect, gateway.peek_live):
+        sample = read(camera_id)
+        if sample is not None and 0 <= now - sample.received_at <= maximum_age:
+            return sample.jpeg
+    cached = get_state(camera_id)
+    if cached.jpeg[:2] == b"\xff\xd8" and 0 <= now - cached.captured_at <= maximum_age:
+        return cached.jpeg
+    return b""
 
 
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
@@ -2886,8 +2971,7 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         if camera is None or not software_ocr_enabled(camera):
             return
     from .services.media_gateway import gateway
-    sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
-    jpeg = sample.jpeg if sample else get_state(camera_id).jpeg
+    jpeg = _current_recognition_jpeg(camera_id)
     if jpeg[:2] != b"\xff\xd8":
         from app.infrastructure.media.registry import mediamtx_detect_active
         with short_session() as db:
@@ -2927,8 +3011,7 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         # The zone already saw a still plate. Read that crop even if the coil
         # has not pulsed; a moving frame never reaches this call.
         alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True)
-        _note_arrival_result(camera.id, alpr)
-        if alpr is not None:
+        if _note_arrival_result(camera.id, alpr):
             _alpr_fp[camera_id] = fp
 
 
@@ -2997,7 +3080,7 @@ async def _outbox_loop():
                                     continue
                             capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
                                        "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
-                            await _persist_capture_event(db, camera, capture, jpeg, b"")
+                            await _persist_capture_event(db, camera, capture, jpeg, crop)
                             box.ack(item["id"], processed_key=event_key)
                             continue
                         gate = db.get(Gate, int(payload.get("gate_id") or 0)) if payload.get("gate_id") else None
@@ -3039,7 +3122,7 @@ async def _outbox_loop():
             raise
         except Exception:
             pass
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(settings.parking_event_poll_seconds)
 
 
 async def _fusion_flush_loop():
@@ -3119,6 +3202,30 @@ async def _payments_reconcile_loop():
         await asyncio.sleep(delay)
 
 
+_hvx_restore_attempts: dict[int, float] = {}
+
+
+async def _restore_hvx_sessions(info: dict) -> None:
+    if not info.get("available") or not isinstance(info.get("connections"), list):
+        return
+    connected = {int(row["handle"]): str(row.get("ip") or "") for row in info["connections"]}
+    with short_session() as db:
+        cameras = list(db.scalars(select(Camera).where(Camera.enabled == True, Camera.sdk_handle.is_not(None))).all())
+    for camera in cameras:
+        if connected.get(int(camera.sdk_handle)) == camera.ip_address:
+            _hvx_restore_attempts.pop(camera.id, None)
+            continue
+        now = time.monotonic()
+        if now - _hvx_restore_attempts.get(camera.id, float("-inf")) < 30.0:
+            continue
+        _hvx_restore_attempts[camera.id] = now
+        log.info("Restoring SDK session: camera=%s address=%s previous_handle=%s", camera.id, camera.ip_address, camera.sdk_handle)
+        with short_session() as db:
+            current = db.get(Camera, camera.id)
+            if current is not None and current.enabled and current.sdk_handle is not None:
+                await apply_sdk_connect(current, db, None, raise_on_host_error=False)
+
+
 async def _hvx_watch_loop():
     from .services.circuit import breaker
     from .services.runtime import mark_hardware
@@ -3127,12 +3234,14 @@ async def _hvx_watch_loop():
     while True:
         try:
             info = await asyncio.wait_for(HVXHostClient().info(), timeout=1.0)
-            ok = bool(info)
+            ok = bool(info.get("available"))
             if ok:
                 hvx_breaker.success()
             else:
                 hvx_breaker.failure()
             mark_hardware(ok)
+            if ok:
+                await _restore_hvx_sessions(info)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3149,29 +3258,28 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
         stop_detect_consumer(camera_id)
         return
     from .services.media_gateway import gateway
-    sample = gateway.peek_detect(camera_id) or gateway.peek_live(camera_id)
-    jpeg = sample.jpeg if sample else get_state(camera_id).jpeg
+    jpeg = _current_recognition_jpeg(camera_id)
     if jpeg[:2] != b"\xff\xd8":
         from app.infrastructure.media.registry import mediamtx_detect_active
         if mediamtx_detect_active(camera_id):
             from app.services.mediamtx_detect import ensure_detect_consumer
             with short_session() as db:
                 camera = db.get(Camera, camera_id)
-                if camera is None or adapter_has_native_plates(camera):
+                if camera is None or not software_ocr_enabled(camera):
                     return
                 ensure_detect_consumer(_live_spec(camera, need_detect=True))
             return
         with short_session() as db:
             camera = db.get(Camera, camera_id)
-            if camera is None or adapter_has_native_plates(camera):
+            if camera is None or not software_ocr_enabled(camera):
                 return
             acquire_detect(_live_spec(camera, need_detect=True))
         return
     with short_session() as db:
         camera = db.get(Camera, camera_id)
-        if camera is None or adapter_has_native_plates(camera):
+        if camera is None or not software_ocr_enabled(camera):
             return
-        fp = get_state(camera_id).fingerprint
+        fp = hash(jpeg)
         if fp and _alpr_fp.get(camera_id) == fp:
             gateway.note_ai_sample(camera_id, dropped=True)
             return
@@ -3179,8 +3287,7 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
             gateway.note_ai_sample(camera_id, dropped=True)
             return
         alpr = await _run_local_alpr(db, camera, jpeg, presence=True, force=False)
-        _note_arrival_result(camera.id, alpr)
-        if alpr is not None:
+        if _note_arrival_result(camera.id, alpr):
             _alpr_fp[camera_id] = fp
 
 

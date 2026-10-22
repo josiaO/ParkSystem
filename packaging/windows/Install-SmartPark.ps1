@@ -63,6 +63,7 @@ function Stop-SmartParkProcesses {
             $cmd -like "*app.desktop.main*" -or
             $cmd -like "*app.site_service*" -or
             $cmd -like "*app.media_service*" -or
+            $cmd -like "*app.recognition_worker*" -or
             $cmd -like "*mediamtx.exe*" -or
             ($root -and $cmd -like "*$root*")
         )) -or ($root -and $exe -and $exe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase))
@@ -299,6 +300,12 @@ $checkDesk.WorkingDirectory = $InstallDir
 $checkDesk.Description = "Check video, recognition, and a gate dry-run. Does not open the barrier."
 $checkDesk.Save()
 
+$logsShortcut = $Wsh.CreateShortcut((Join-Path $Desktop "SmartPark logs.lnk"))
+$logsShortcut.TargetPath = Join-Path $InstallDir "Open-SmartParkLogs.bat"
+$logsShortcut.WorkingDirectory = $InstallDir
+$logsShortcut.Description = "Open SmartPark service and camera logs"
+$logsShortcut.Save()
+
 # Background tasks own parking. Do not auto-launch the heavier desktop UI.
 $Startup = [Environment]::GetFolderPath("Startup")
 Remove-Item (Join-Path $Startup "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
@@ -350,6 +357,7 @@ if (`$userPath) {
 Remove-Item (Join-Path `$env:APPDATA 'Microsoft\Windows\Start Menu\Programs\SmartPark') -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark startup check.lnk') -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark logs.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'SmartPark Edge Web.url') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) 'SmartPark Edge.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item `$root -Recurse -Force
@@ -361,7 +369,7 @@ $svcScript = Join-Path $KitRoot "Install-SmartParkServices.ps1"
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
-foreach ($helper in @("Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
+foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
     $src = Join-Path $KitRoot $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force

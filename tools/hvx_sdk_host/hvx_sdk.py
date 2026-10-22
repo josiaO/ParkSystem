@@ -7,6 +7,8 @@ from pathlib import Path
 import queue
 import struct
 import threading
+import hashlib
+import logging
 import time
 
 
@@ -266,8 +268,14 @@ class HVXSDK:
         self._report_cbs = {}
         self._image_cbs = {}
         self._recognition_sessions = {}
+        self._connection_locks = {}
+        self._connection_results = {}
         self._last_capture = {}
         self._last_live_jpeg = {}
+        self._live_received_at = {}
+        self._live_requested_at = {}
+        self._video_streams = {}
+        self._video_locks = {}
         self._last_event_jpeg = {}
         self._last_event_crop = {}
         self._pending_events = {}
@@ -281,6 +289,7 @@ class HVXSDK:
         self._video_running = False
         self._ui_thread = None
         self._hwnd_queue = queue.Queue()
+        self._ui_commands = queue.Queue(maxsize=8)
         self._hwnd_ready = {}
         self._wndproc = None
         self._wndclass = None
@@ -516,6 +525,31 @@ class HVXSDK:
         return rc
 
     def add_and_connect(self, ip: str, port: int, timeout: int, username: str, password: str):
+        with self._lock:
+            connection_lock = self._connection_locks.setdefault(ip, threading.RLock())
+        signature = hashlib.sha256(repr((port, username, password)).encode()).digest()
+        with connection_lock:
+            previous = self._connection_results.get(ip)
+            if previous is not None:
+                try:
+                    state = int(self.dll.Net_QueryConnState(previous["result"]["handle"]))
+                    if previous["signature"] == signature and state in {CONN_STATE_UNKNOW, CONN_STATE_TRYING, CONN_STATE_SUCC}:
+                        return {**previous["result"], "reused": True}
+                except Exception:
+                    pass
+                self.disconnect(int(previous["result"]["handle"]))
+            result = self._add_and_connect(ip, port, timeout, username, password)
+            logging.getLogger("smartpark.hvx").info("Camera connection: ip=%s handle=%s connected=%s rc=%s", ip, result.get("handle"), result.get("connected"), result.get("connect_rc"))
+            if result.get("connected"):
+                self._connection_results[ip] = {"signature": signature, "result": dict(result)}
+            return result
+
+    def connection_sessions(self) -> list[dict]:
+        with self._lock:
+            return [{"handle": handle, "ip": session["ip"], "state": session["state"]}
+                    for handle, session in self._recognition_sessions.items() if session.get("ip")]
+
+    def _add_and_connect(self, ip: str, port: int, timeout: int, username: str, password: str):
         steps = []
         handle = self.dll.Net_AddCamera(ip.encode("ascii"))
         steps.append({"api": "Net_AddCamera", "handle": int(handle)})
@@ -561,15 +595,21 @@ class HVXSDK:
             steps.append({"api": "Net_RegImageRecvEx", "rc": image_rc, "name": describe_rc(image_rc)})
             with self._lock:
                 self._recognition_sessions[int(handle)] = {
+                    "ip": ip,
                     "lock": threading.Lock(), "closed": False, "state": state,
                     "pending": image_rc != DC_NO_ERROR, "image_recv_rc": image_rc,
                     "next_check": 0.0, "retry_at": 0.0, "backoff": 1.0,
                     "rearms": 0, "last_error": "",
                 }
-            video = self.start_video(handle)
+            try:
+                video = self.start_video(handle)
+            except HVXSDKError as exc:
+                video = {"ok": False, "error": str(exc)}
+                logging.getLogger("smartpark.hvx").warning("Video setup unavailable: handle=%s error=%s", handle, exc)
             steps.append({"api": "Net_StartVideo", **{k: v for k, v in video.items() if k != "hwnd"}})
-            snap_rc = int(self.snapshot_trigger(handle))
-            steps.append({"api": "Net_ImageSnap", "rc": snap_rc, "name": describe_rc(snap_rc)})
+            if video.get("ok"):
+                snap_rc = int(self.snapshot_trigger(handle))
+                steps.append({"api": "Net_ImageSnap", "rc": snap_rc, "name": describe_rc(snap_rc)})
 
         return {
             "connected": connected,
@@ -622,10 +662,15 @@ class HVXSDK:
     def jpeg_for(self, handle: int) -> bytes:
         """Live video frame from Net_GetJpgBuffer only. Never the last car still."""
         with self._lock:
+            received_at = self._live_received_at.get(int(handle), 0.0)
+            if time.monotonic() - received_at > 5.0:
+                return b""
             live = self._last_live_jpeg.get(int(handle), b"")
             return live if live[:2] == b"\xff\xd8" else b""
 
     def live_jpeg_for(self, handle: int) -> bytes:
+        with self._lock:
+            self._live_requested_at[int(handle)] = time.monotonic()
         return self.jpeg_for(handle)
 
     def drain_events(self, handle: int) -> list[dict]:
@@ -726,6 +771,9 @@ class HVXSDK:
                 "recognition": recognition}
 
     def disconnect(self, handle: int):
+        for ip, connection in list(self._connection_results.items()):
+            if int(connection["result"]["handle"]) == int(handle):
+                self._connection_results.pop(ip, None)
         with self._lock:
             session = self._recognition_sessions.pop(int(handle), None)
         if session is not None:
@@ -738,6 +786,9 @@ class HVXSDK:
         with self._lock:
             self._last_capture.pop(handle, None)
             self._last_live_jpeg.pop(handle, None)
+            self._live_received_at.pop(handle, None)
+            self._live_requested_at.pop(handle, None)
+            self._video_streams.pop(handle, None)
             self._last_event_jpeg.pop(handle, None)
             self._last_event_crop.pop(handle, None)
             self._pending_events.pop(handle, None)
@@ -791,6 +842,8 @@ class HVXSDK:
         existing = self._hwnds.get(handle)
         if existing:
             return existing
+        if threading.current_thread() is self._ui_thread:
+            return self._create_hidden_hwnd(handle)
         self._video_running = True
         self._ensure_ui_thread()
         ready = self._hwnd_ready.get(handle)
@@ -861,8 +914,33 @@ class HVXSDK:
         self._hwnds[int(handle)] = hwnd or None
         return hwnd or None
 
-    def start_video(self, handle: int, stream_type: int = 1) -> dict:
-        """Net_StartVideo then JPEG frames via Net_GetJpgBuffer. Stream 1=sub (live), 0=main fallback."""
+    def start_video(self, handle: int, stream_type: int = 0) -> dict:
+        """Use the legacy player's main stream, with the substream as fallback."""
+        with self._video_lock(handle):
+            return self._call_video_ui(lambda: self._start_video(handle, stream_type))
+
+    def _call_video_ui(self, operation):
+        if threading.current_thread() is self._ui_thread:
+            return operation()
+        self._ensure_ui_thread()
+        ready = threading.Event()
+        result = {}
+        try:
+            self._ui_commands.put_nowait((operation, ready, result))
+        except queue.Full:
+            raise HVXSDKError("Video control is busy")
+        if not ready.wait(5.0):
+            result["cancelled"] = True
+            raise HVXSDKError("Video control timed out; see hvx-host.log")
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _video_lock(self, handle: int):
+        with self._lock:
+            return self._video_locks.setdefault(int(handle), threading.RLock())
+
+    def _start_video(self, handle: int, stream_type: int) -> dict:
         if not hasattr(self.dll, "Net_StartVideo"):
             return {"ok": False, "error": "Net_StartVideo not exported"}
         hwnd = self._hidden_hwnd(handle)
@@ -876,11 +954,14 @@ class HVXSDK:
             rc = int(self.dll.Net_StartVideo(int(handle), used, None))
         region_rc = None
         if rc == DC_NO_ERROR and hasattr(self.dll, "Net_ShowPlateRegion"):
-            region_rc = int(self.dll.Net_ShowPlateRegion(int(handle), 1))
-        if rc == DC_NO_ERROR:
-            with self._lock:
-                self._video_handles.add(int(handle))
-            self._ensure_camera_pump(int(handle))
+            region_rc = int(self.dll.Net_ShowPlateRegion(int(handle), 0))
+        if rc != DC_NO_ERROR:
+            logging.getLogger("smartpark.hvx").warning("Video start failed: handle=%s stream=%s rc=%s", handle, used, rc)
+        with self._lock:
+            self._video_streams[int(handle)] = used
+            self._video_handles.add(int(handle))
+            self._live_requested_at[int(handle)] = time.monotonic()
+        self._ensure_camera_pump(int(handle))
         return {
             "ok": rc == DC_NO_ERROR,
             "rc": rc,
@@ -891,25 +972,42 @@ class HVXSDK:
         }
 
     def stop_video(self, handle: int) -> int:
-        with self._lock:
-            self._video_handles.discard(int(handle))
-        if hasattr(self.dll, "Net_StopVideo"):
-            try:
-                return int(self.dll.Net_StopVideo(int(handle)))
-            except Exception:
-                return -1
-        return 0
+        with self._video_lock(handle):
+            with self._lock:
+                self._video_handles.discard(int(handle))
+                self._last_live_jpeg.pop(int(handle), None)
+                self._live_received_at.pop(int(handle), None)
+                self._live_requested_at.pop(int(handle), None)
+            if hasattr(self.dll, "Net_StopVideo"):
+                try:
+                    return self._call_video_ui(lambda: int(self.dll.Net_StopVideo(int(handle))))
+                except Exception:
+                    return -1
+            return 0
 
     def _ensure_ui_thread(self):
         """OcxConfig PlaySdk needs a thread that owns HWNDs and pumps messages."""
-        if self._ui_thread and self._ui_thread.is_alive():
-            return
-        self._video_running = True
-        self._ui_thread = threading.Thread(target=self._ui_loop, name="hvx-play-ui", daemon=True)
-        self._ui_thread.start()
+        with self._lock:
+            if self._ui_thread and self._ui_thread.is_alive():
+                return
+            self._video_running = True
+            self._ui_thread = threading.Thread(target=self._ui_loop, name="hvx-play-ui", daemon=True)
+            self._ui_thread.start()
 
     def _ui_loop(self):
         while self._video_running or not self._hwnd_queue.empty():
+            try:
+                operation, ready, result = self._ui_commands.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                try:
+                    if not result.get("cancelled"):
+                        result["value"] = operation()
+                except Exception as exc:
+                    result["error"] = exc
+                finally:
+                    ready.set()
             while True:
                 try:
                     handle = int(self._hwnd_queue.get_nowait())
@@ -928,19 +1026,20 @@ class HVXSDK:
     def _ensure_camera_pump(self, handle: int):
         """One GetJpgBuffer thread per camera so a stalled lane cannot freeze the others."""
         handle = int(handle)
-        existing = self._video_threads.get(handle)
-        if existing is not None and existing.is_alive():
-            return
-        self._video_running = True
         self._ensure_ui_thread()
-        thread = threading.Thread(
-            target=self._camera_video_loop,
-            args=(handle,),
-            name=f"hvx-live-{handle}",
-            daemon=True,
-        )
-        self._video_threads[handle] = thread
-        thread.start()
+        with self._lock:
+            existing = self._video_threads.get(handle)
+            if existing is not None and existing.is_alive():
+                return
+            self._video_running = True
+            thread = threading.Thread(
+                target=self._camera_video_loop,
+                args=(handle,),
+                name=f"hvx-live-{handle}",
+                daemon=True,
+            )
+            self._video_threads[handle] = thread
+            thread.start()
 
     def _ensure_video_thread(self):
         """Compatibility wrapper — live video is now one pump per camera."""
@@ -970,7 +1069,7 @@ class HVXSDK:
                     pass
         return data if data[:2] == b"\xff\xd8" else b""
 
-    def _latest_jpg_buffer(self, handle: int) -> tuple[bytes, bool]:
+    def _latest_jpg_buffer(self, handle: int, on_frame=None) -> tuple[bytes, bool]:
         """Pull queued JPEGs and keep the newest.
 
         Returns ``(jpeg, backlog)``. ``backlog`` is true when the pull hit the
@@ -986,6 +1085,8 @@ class HVXSDK:
                 backlog = False
                 break
             latest = jpeg
+            if on_frame is not None:
+                on_frame(jpeg)
         return latest, backlog
 
     def _pump_messages(self):
@@ -1009,28 +1110,53 @@ class HVXSDK:
             user32.DispatchMessageW(ctypes.byref(m))
 
     def _camera_video_loop(self, handle: int):
-        """Drain this camera's JPEG queue only. Latest-frame-wins; never wait on another lane."""
+        """Sample the SDK's current frame at a bounded rate, not as a frame queue."""
         handle = int(handle)
         idle = 0
+        retry_at = time.monotonic() + 5.0
+        interval = 1.0 / max(1.0, min(20.0, float(os.environ.get("SMARTPARK_HVX_JPEG_FPS", "10"))))
+        def publish(jpeg):
+            with self._lock:
+                if handle in self._video_handles:
+                    self._last_live_jpeg[handle] = jpeg
+                    self._live_received_at[handle] = time.monotonic()
         while self._video_running:
+            started = time.monotonic()
             with self._lock:
                 if handle not in self._video_handles:
                     break
-            jpeg, backlog = self._latest_jpg_buffer(handle)
+                requested = self._live_requested_at.get(handle, started)
+            if started - requested > 5.0:
+                retry_at = started + 5.0
+                time.sleep(.25)
+                continue
+            jpeg = self._get_jpg_buffer(handle)
             if jpeg:
+                publish(jpeg)
                 idle = 0
-                with self._lock:
-                    previous = self._last_live_jpeg.get(handle, b"")
-                if jpeg != previous:
-                    with self._lock:
-                        self._last_live_jpeg[handle] = jpeg
-                if backlog:
-                    continue
-                time.sleep(0.01)
+                retry_at = time.monotonic() + 5.0
             else:
                 idle = min(idle + 1, 8)
-                time.sleep(0.04 if idle < 3 else 0.10)
-        self._video_threads.pop(handle, None)
+                if time.monotonic() >= retry_at:
+                    retry_at = time.monotonic() + 30.0
+                    try:
+                        with self._video_lock(handle):
+                            with self._lock:
+                                active = handle in self._video_handles
+                            if not active:
+                                break
+                            logging.getLogger("smartpark.hvx").warning("Restarting empty video decoder: handle=%s", handle)
+                            def restart():
+                                if hasattr(self.dll, "Net_StopVideo"):
+                                    self.dll.Net_StopVideo(handle)
+                                return self._start_video(handle, 0 if self._video_streams.get(handle, 0) == 1 else 1)
+                            self._call_video_ui(restart)
+                    except Exception:
+                        pass
+            time.sleep(max(0.002, interval - (time.monotonic() - started)))
+        with self._lock:
+            if self._video_threads.get(handle) is threading.current_thread():
+                self._video_threads.pop(handle, None)
 
     def _video_loop(self):
         """Legacy single-thread pump kept for tests that patch this name."""

@@ -20,11 +20,13 @@
 [CmdletBinding()]
 param(
     [int]$Camera = 0,
+    [int]$Gate = 0,
     [int]$Duration = 900,
     [string]$Url = "http://127.0.0.1:8760",
     [string]$Username = "admin",
     [string]$Password = "",
-    [switch]$Recognition
+    [switch]$Recognition,
+    [switch]$Latency
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,7 +70,9 @@ Write-Host "  $log"
 Write-Host ""
 
 $argsList = @($Script, "--duration", "$Duration", "--url", $Url, "--username", $Username)
-if ($Camera -gt 0) {
+if ($Gate -gt 0) {
+    $argsList += @("--gate", "$Gate")
+} elseif ($Camera -gt 0) {
     $argsList += @("--camera", "$Camera")
 } else {
     $argsList += "--all"
@@ -78,6 +82,7 @@ if ($Recognition) {
     $argsList += "--recognition"
     Write-Host "Recognition benchmark is on. It does not create a parking session."
 }
+if ($Latency) { $argsList += "--latency" }
 
 & $Py @argsList 2>&1 | Tee-Object -FilePath $log
 $code = $LASTEXITCODE

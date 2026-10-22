@@ -127,7 +127,7 @@ class DesktopMediaMTXTests(unittest.TestCase):
         self.assertNotIn("webrtc", endpoint)
 
     def test_desktop_mjpeg_failure_does_not_poll_snapshots(self):
-        text = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        text = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "app" / "desktop").glob("*.py"))
         fail = text.split("def _mjpeg_fail", 1)[1].split("def _retry_mjpeg", 1)[0]
         self.assertNotIn("_snap_timer.start()", fail)
         self.assertIn("_retry_mjpeg", fail)
@@ -138,7 +138,7 @@ class DesktopMediaMTXTests(unittest.TestCase):
         from types import SimpleNamespace
         from app.desktop.api import stream_http_error
 
-        text = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        text = (ROOT / "app" / "desktop" / "streams.py").read_text(encoding="utf-8")
         run = text.split("class MjpegStream", 1)[1].split("class ", 1)[0]
         self.assertIn("stream_http_error", run)
         self.assertNotIn("response.text", run)

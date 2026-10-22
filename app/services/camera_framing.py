@@ -170,7 +170,6 @@ class ArrivalGate:
         if self._ocr_count >= self.max_ocr:
             self._retry_at = getattr(self, "_observed_at", 0) + 1.0
         self._announced = False
-        self._stable_since = None
 
     def rearm(self) -> None:
         """The ready frame was not read. Allow the next check to try again."""

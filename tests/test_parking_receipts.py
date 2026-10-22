@@ -193,7 +193,8 @@ class ParkingReceiptPersistenceTests(unittest.TestCase):
                 db.refresh(row)
                 self.assertEqual(second["session_id"], session_id)
                 self.assertEqual(second["print_job_id"], job_id)
-                self.assertEqual(row.print_retry_count, 1)
+                self.assertEqual(row.print_retry_count, 0)
+                self.assertTrue(second["duplicate"])
                 self.assertEqual(db.scalar(select(func.count()).select_from(ParkingSession)), 1)
                 self.assertEqual(
                     db.scalar(select(func.count()).select_from(Receipt).where(Receipt.session_id == row.id)),

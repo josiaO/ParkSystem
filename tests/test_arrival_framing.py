@@ -31,14 +31,13 @@ class ArrivalGateTests(unittest.TestCase):
         self.assertEqual(gate.observe(None, 1.6), "absent")
         self.assertEqual(gate.observe(moving, 1.7), "moving")
 
-    def test_failed_reads_cool_down_then_retry_without_a_departure(self):
+    def test_settled_plate_retries_fresh_frame_without_another_settle_delay(self):
         gate = ArrivalGate(stable_seconds=0.2, max_ocr=2)
         box = _box(20, 90)
         self.assertEqual(gate.observe(box, 0.0), "moving")
         self.assertEqual(gate.observe(box, 0.3), "ready")
         gate.note_ocr(published=False)
-        self.assertEqual(gate.observe(box, 0.35), "moving")
-        self.assertEqual(gate.observe(box, 0.6), "ready")
+        self.assertEqual(gate.observe(box, 0.35), "ready")
         gate.note_ocr(published=False)
         self.assertEqual(gate.observe(box, 1.2), "cooldown")
         self.assertEqual(gate.observe(box, 1.7), "moving")

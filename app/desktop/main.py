@@ -18,134 +18,13 @@ from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
 from .api import api, BASE, stream_http_error
 from .desk import ReportsPage, health_sentences
-from .theme import DARK, LIGHT
+from .theme import APPEARANCES, apply_appearance
+from .presentation import configure_table, label_for, page_viewport, prepare_page
+from .shell import DesktopShell
 
 
-def action_label(name: str, shortcut: str) -> str:
-    return f"{name} ({shortcut})"
-
-
-def available_screen():
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:
-        return None
-    return screen.availableGeometry()
-
-
-def fit_window_to_screen(window, preferred=(1120, 720), min_size=(720, 480)):
-    avail = available_screen()
-    if avail is None:
-        window.resize(*preferred)
-        return False
-    margin = 24
-    max_w = max(320, avail.width() - margin)
-    max_h = max(240, avail.height() - margin)
-    width = min(preferred[0], max_w)
-    height = min(preferred[1], max_h)
-    window.setMaximumSize(max_w, max_h)
-    window.setMinimumSize(min(min_size[0], max_w), min(min_size[1], max_h))
-    window.resize(width, height)
-    window.move(avail.x() + (avail.width() - width) // 2, avail.y() + (avail.height() - height) // 2)
-    return width >= max_w * 0.92 or height >= max_h * 0.92
-
-
-def configure_table(table: QTableWidget):
-    table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-    table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
-    table.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
-    table.setWordWrap(False)
-    table.verticalHeader().setVisible(False)
-    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-    header = table.horizontalHeader()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-    header.setStretchLastSection(True)
-
-
-def is_technician():
-    return api.can("hardware.view")
-
-
-def deployment_kind():
-    profile = str((api.modules or {}).get("profile") or "")
-    enabled = set((api.modules or {}).get("enabled") or [])
-    if profile == "LPR_ONLY":
-        return "lpr"
-    if profile == "SECURITY":
-        return "security"
-    if profile == "ACCESS_CONTROL":
-        return "access"
-    if profile in {"PARKING_LITE", "PARKING_PRO", "ENTERPRISE"}:
-        return "parking"
-    if "parking.sessions" in enabled or "payments.core" in enabled:
-        return "parking"
-    if "security.watchlists" in enabled or "security.alerts" in enabled:
-        return "security"
-    if "access.gates" in enabled:
-        return "access"
-    if "recognition.alpr" in enabled:
-        return "lpr"
-    return "parking"
-
-
-def source_label(source):
-    text = str(source or "").lower()
-    if not text or text == "—":
-        return "—"
-    if "operator" in text:
-        return "Operator"
-    if "hybrid" in text or "fusion" in text:
-        return "Camera + SmartPark"
-    if "fast" in text or "local" in text:
-        return "SmartPark AI"
-    if "native" in text or "camera" in text or "sdk" in text:
-        return "Camera"
-    return str(source) if is_technician() else "Recognition"
-
-
-def money_label(amount, currency=""):
-    try:
-        number = float(amount or 0)
-    except (TypeError, ValueError):
-        number = 0
-    text = f"{number:,.0f}" if number == int(number) else f"{number:,.2f}"
-    cur = str(currency or "").strip()
-    return f"{cur} {text}".strip()
-
-
-def method_label(method):
-    text = str(method or "").lower()
-    if not text:
-        return "—"
-    if "cash" in text:
-        return "Cash"
-    if "card" in text:
-        return "Card"
-    if "mobile" in text or "mpesa" in text or "m-pesa" in text or "wallet" in text:
-        return "Mobile Money"
-    return str(method) if is_technician() else "Other"
-
-
-class Worker(QThread):
-    done=Signal(object)
-    failed=Signal(str)
-    def __init__(self, fn): super().__init__(); self.fn=fn
-    def run(self):
-        try: self.done.emit(self.fn())
-        except Exception as e: self.failed.emit(str(e))
-
-
-def _stop_thread(thread, wait_ms=3000):
-    """Stop a QThread without aborting the process if the camera stream is slow."""
-    if thread is None:
-        return
-    try:
-        thread.stop()
-    except Exception:
-        pass
-    if thread.isRunning() and not thread.wait(wait_ms):
-        thread.terminate()
-        thread.wait(400)
+from .common import (Worker, _stop_thread, action_label, available_screen, fit_window_to_screen,
+                     is_technician, deployment_kind, source_label, money_label, method_label)
 
 
 def _qr_png_from_sources(qr_url="", qr_payload=""):
@@ -248,130 +127,7 @@ def show_printable_receipt(parent, body, path="", qr_url="", qr_payload=""):
     dlg.exec()
 
 
-from .frame_mailbox import DisplayMailbox
-
-
-class MjpegStream(QThread):
-    """Read /live.mjpeg and emit only the newest JPEG. Old frames in the pipe are dropped."""
-    frame=Signal()
-    failed=Signal(str)
-    def __init__(self, camera_id):
-        super().__init__()
-        self.camera_id=camera_id
-        self.mailbox=DisplayMailbox()
-        self._stop=False
-        self._client=None
-    def stop(self):
-        self._stop=True
-        client=self._client
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
-    def run(self):
-        client=httpx.Client(timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0))
-        self._client=client
-        try:
-            with client.stream(
-                "GET",
-                f"{BASE}/cameras/{self.camera_id}/live.mjpeg",
-                headers=api._headers(),
-            ) as response:
-                if response.status_code >= 400:
-                    if not self._stop:
-                        self.failed.emit(stream_http_error(response))
-                    return
-                buf=b""
-                last_emit=0.0
-                pending=None
-                chunks=response.iter_bytes()
-                while not self._stop:
-                    try:
-                        chunk=next(chunks)
-                    except StopIteration:
-                        break
-                    except Exception as e:
-                        if self._stop:
-                            return
-                        if isinstance(e, httpx.ReadTimeout):
-                            continue
-                        raise
-                    buf += chunk
-                    if len(buf) > 2_500_000:
-                        start=buf.rfind(b"\xff\xd8")
-                        buf = buf[start:] if start>=0 else buf[-120_000:]
-                    latest, buf = pop_latest_mjpeg(buf)
-                    if latest is not None:
-                        pending=latest
-                    now=time.monotonic()
-                    if pending is not None and (now-last_emit) >= 0.025:
-                        if self.mailbox.offer(pending):
-                            self.frame.emit()
-                        pending=None
-                        last_emit=now
-                if pending is not None and not self._stop:
-                    if self.mailbox.offer(pending):
-                        self.frame.emit()
-        except Exception as e:
-            if not self._stop:
-                self.failed.emit(str(e))
-        finally:
-            self._client=None
-            try:
-                client.close()
-            except Exception:
-                pass
-
-
-def pop_latest_mjpeg(buf: bytes) -> tuple[bytes | None, bytes]:
-    """Pull complete MJPEG parts from buf; keep only the newest JPEG."""
-    latest = None
-    boundary = b"--smartparkframe"
-    while True:
-        mark = buf.find(boundary)
-        if mark < 0:
-            jpeg, rest = _pop_raw_jpegs(buf)
-            if jpeg:
-                latest = jpeg
-            return latest, rest
-        header_end = buf.find(b"\r\n\r\n", mark)
-        if header_end < 0:
-            return latest, buf[mark:]
-        headers = buf[mark:header_end]
-        body = buf[header_end + 4:]
-        length = None
-        for line in headers.split(b"\r\n"):
-            if line.lower().startswith(b"content-length:"):
-                try:
-                    length = int(line.split(b":", 1)[1].strip())
-                except ValueError:
-                    length = None
-                break
-        if length is None:
-            jpeg, rest = _pop_raw_jpegs(body)
-            if jpeg:
-                latest = jpeg
-            return latest, rest
-        if len(body) < length:
-            return latest, buf[mark:]
-        latest = body[:length]
-        buf = body[length:]
-        if buf.startswith(b"\r\n"):
-            buf = buf[2:]
-
-
-def _pop_raw_jpegs(buf: bytes) -> tuple[bytes | None, bytes]:
-    latest = None
-    while True:
-        start = buf.find(b"\xff\xd8")
-        if start < 0:
-            return latest, (buf[-1:] if buf.endswith(b"\xff") else b"")
-        end = buf.find(b"\xff\xd9", start + 2)
-        if end < 0:
-            return latest, buf[start:]
-        latest = buf[start:end + 2]
-        buf = buf[end + 2:]
+from .streams import MjpegStream, pop_latest_mjpeg, _pop_raw_jpegs
 
 
 class Login(QDialog):
@@ -381,16 +137,21 @@ class Login(QDialog):
         l=QVBoxLayout(self); l.setContentsMargins(28,28,28,28); l.setSpacing(8)
         brand=QLabel("SmartPark Edge"); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
         tag=QLabel("Vehicle intelligence · edge platform")
-        tag.setStyleSheet("font-size:10px;font-weight:600;color:#8A94A2;letter-spacing:0.08em;text-transform:uppercase")
+        tag.setObjectName("muted")
         title=QLabel("Sign in"); title.setStyleSheet("font-size:22px;font-weight:700;margin-top:10px")
         self.sub=QLabel("Sign in with the first-run admin password shown at setup")
         self.sub.setObjectName("muted"); self.sub.setWordWrap(True)
         self.user=QLineEdit("admin"); self.user.setPlaceholderText("Username")
         self.pwd=QLineEdit(); self.pwd.setPlaceholderText("Password"); self.pwd.setEchoMode(QLineEdit.Password)
-        btn=QPushButton("Sign in"); btn.clicked.connect(self.login)
+        btn=QPushButton("&Sign in"); btn.clicked.connect(self.login)
+        btn.setDefault(True); btn.setProperty("primary", True)
         l.addWidget(brand); l.addWidget(tag); l.addWidget(title); l.addWidget(self.sub)
-        l.addSpacing(8); l.addWidget(self.user); l.addWidget(self.pwd); l.addSpacing(6); l.addWidget(btn)
-        fit_window_to_screen(self, (400, 320), min_size=(340, 260))
+        l.addSpacing(8)
+        l.addWidget(label_for("&Username", self.user)); l.addWidget(self.user)
+        l.addWidget(label_for("&Password", self.pwd)); l.addWidget(self.pwd)
+        l.addSpacing(6); l.addWidget(btn)
+        self.user.setFocus()
+        fit_window_to_screen(self, (420, 420), min_size=(360, 360))
         QTimer.singleShot(0, self._prefill)
     def _prefill(self):
         try:
@@ -422,542 +183,8 @@ class Login(QDialog):
             QMessageBox.critical(self,"Sign in failed",text)
 
 
-class ClickLabel(QLabel):
-    clicked=Signal()
-    pressed=Signal(object)
-    moved=Signal(object)
-    released=Signal(object)
-    def mousePressEvent(self, event):
-        self.pressed.emit(event.pos())
-        self.clicked.emit()
-        super().mousePressEvent(event)
-    def mouseMoveEvent(self, event):
-        self.moved.emit(event.pos())
-        super().mouseMoveEvent(event)
-    def mouseReleaseEvent(self, event):
-        self.released.emit(event.pos())
-        super().mouseReleaseEvent(event)
-
-
-class CameraLivePane(QFrame):
-    """One live camera: video on top, last-car stills and plate details below."""
-    armed=Signal(object)
-    def __init__(self, slot_title="Camera"):
-        super().__init__()
-        self.setObjectName("card")
-        self.slot_title=slot_title
-        self.camera=None
-        self._all=[]
-        l=QVBoxLayout(self)
-        self.picker=QComboBox()
-        self.picker.addItem("Choose camera…", None)
-        self.picker.currentIndexChanged.connect(self._picked)
-        self.picker.activated.connect(lambda *_: self.armed.emit(self))
-        l.addWidget(self.picker)
-        self.video=ClickLabel("Click to choose a camera.")
-        self.video.setObjectName("video")
-        self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video.setMinimumHeight(280)
-        self.video.setMaximumHeight(480)
-        self.video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video.clicked.connect(self._on_video)
-        self.video.pressed.connect(self._zone_press)
-        self.video.moved.connect(self._zone_move)
-        self.video.released.connect(self._zone_release)
-        l.addWidget(self.video, 3)
-        self.status=QLabel("Click this view or the list to choose a camera.")
-        self.status.setWordWrap(True)
-        l.addWidget(self.status)
-        zone_row=QHBoxLayout()
-        self.zone_btn=QPushButton("Set detection zone")
-        self.zone_btn.setToolTip("Drag on the picture to choose where the car must stop. The plate is cropped from this box, then read.")
-        self.zone_btn.clicked.connect(self._toggle_zone)
-        self.zoom_label=QLabel("Zoom 1.0")
-        self.zoom=QSlider(Qt.Orientation.Horizontal)
-        self.zoom.setRange(10, 40)
-        self.zoom.setValue(10)
-        self.zoom.setToolTip("Digital zoom inside the detection zone, from 1× to 4×")
-        self.zoom.valueChanged.connect(self._zoom_changed)
-        self.zone_save=QPushButton("Save zone")
-        self.zone_save.clicked.connect(self._save_zone)
-        zone_row.addWidget(self.zone_btn)
-        zone_row.addWidget(self.zoom_label)
-        zone_row.addWidget(self.zoom, 1)
-        zone_row.addWidget(self.zone_save)
-        l.addLayout(zone_row)
-        stills=QHBoxLayout()
-        snap_col=QVBoxLayout(); snap_col.addWidget(QLabel("Snapshot"))
-        self.last_snap=QLabel("Waiting for a car")
-        self.last_snap.setObjectName("video")
-        self.last_snap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.last_snap.setMinimumHeight(80)
-        self.last_snap.setMaximumHeight(110)
-        snap_col.addWidget(self.last_snap)
-        crop_col=QVBoxLayout(); crop_col.addWidget(QLabel("Plate crop"))
-        self.crop=QLabel("—")
-        self.crop.setObjectName("video")
-        self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.crop.setMinimumHeight(80)
-        self.crop.setMaximumHeight(110)
-        crop_col.addWidget(self.crop)
-        stills.addLayout(snap_col, 1); stills.addLayout(crop_col, 1)
-        l.addLayout(stills)
-        self.plate=QLabel("—"); self.plate.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.plate.setStyleSheet("font-size:22px;font-weight:700;letter-spacing:4px")
-        l.addWidget(self.plate)
-        self.details=QLabel("No vehicle yet. Add a camera on Devices, then wait for a vehicle.")
-        self.details.setWordWrap(True)
-        l.addWidget(self.details)
-        self.decision=QLabel("")
-        self.decision.setWordWrap(True)
-        l.addWidget(self.decision)
-        self.target_chip=QLabel("")
-        self.target_chip.setWordWrap(True)
-        l.addWidget(self.target_chip)
-        self.open_btn=QPushButton(action_label("Manual open", "F8"))
-        self.open_btn.setToolTip("Open this barrier (F8)")
-        self.open_btn.clicked.connect(self.open_this_side)
-        self.close_btn=QPushButton(action_label("Manual close", "F9"))
-        self.close_btn.setToolTip("Close this barrier (F9)")
-        self.close_btn.clicked.connect(self.close_this_side)
-        barrier_row=QHBoxLayout()
-        barrier_row.addWidget(self.open_btn)
-        barrier_row.addWidget(self.close_btn)
-        l.addLayout(barrier_row)
-        self.correct_btn=QPushButton("Correct plate")
-        self.correct_btn.clicked.connect(self.correct_plate)
-        l.addWidget(self.correct_btn)
-        self.hold_label=QLabel("")
-        self.hold_label.setWordWrap(True)
-        l.addWidget(self.hold_label)
-        self._workers=[]
-        self._snap_busy=False
-        self._alpr_busy=False
-        self._last_jpeg=b""
-        self._last_overlay=None
-        self._mjpeg=None
-        self._live_gen=0
-        self._mjpeg_retry_ms=1000
-        self._snap_timer=QTimer(self); self._snap_timer.setInterval(200); self._snap_timer.timeout.connect(self._tick_snapshot)
-        self._alpr_timer=QTimer(self); self._alpr_timer.setInterval(2000); self._alpr_timer.timeout.connect(self._tick_alpr)
-        self._paint_busy=False
-        self._shown_jpeg=b""
-        self._pending_live=b""
-        self._held_car=None
-        self._watching=None
-        self._zone=(0.06, 0.18, 0.94, 0.92)
-        self._zone_edit=False
-        self._zone_drag=None
-    def _on_video(self):
-        if self._zone_edit:
-            return
-        self.armed.emit(self)
-        self.picker.showPopup()
-    def _toggle_zone(self):
-        self._zone_edit=not self._zone_edit
-        self.zone_btn.setText("Done drawing" if self._zone_edit else "Set detection zone")
-        self.video.setText("Drag a box on the picture. The plate is read from that crop." if self._zone_edit and not self._last_jpeg else self.video.text())
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _zoom_changed(self, value):
-        self.zoom_label.setText(f"Zoom {value/10:.1f}")
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _load_zone(self, camera):
-        framing=(camera or {}).get("framing") or {}
-        roi=str(framing.get("detect_roi") or "")
-        parts=[part.strip() for part in roi.split(",")]
-        self._zone=(0.06, 0.18, 0.94, 0.92)
-        if len(parts)==4:
-            try:
-                vals=tuple(float(part) for part in parts)
-            except ValueError:
-                vals=None
-            if vals and vals[2]-vals[0] >= 0.08 and vals[3]-vals[1] >= 0.08:
-                self._zone=vals
-        zoom=float(framing.get("detect_zoom") or 1)
-        self.zoom.blockSignals(True)
-        self.zoom.setValue(int(round(max(1.0, min(4.0, zoom))*10)))
-        self.zoom.blockSignals(False)
-        self.zoom_label.setText(f"Zoom {self.zoom.value()/10:.1f}")
-    def _norm_at(self, pos):
-        pix=self.video.pixmap()
-        if pix is None or pix.isNull():
-            return None
-        rect=self.video.contentsRect()
-        x0=rect.x()+max(0, (rect.width()-pix.width())//2)
-        y0=rect.y()+max(0, (rect.height()-pix.height())//2)
-        nx=(float(pos.x())-x0)/max(pix.width(), 1)
-        ny=(float(pos.y())-y0)/max(pix.height(), 1)
-        return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
-    def _zone_press(self, pos):
-        if not self._zone_edit:
-            return
-        point=self._norm_at(pos)
-        if point is None:
-            return
-        self._zone_drag=point
-        self._zone=(point[0], point[1], point[0], point[1])
-    def _zone_move(self, pos):
-        if not self._zone_edit or self._zone_drag is None:
-            return
-        point=self._norm_at(pos)
-        if point is None:
-            return
-        x1,y1=self._zone_drag
-        x2,y2=point
-        self._zone=(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _zone_release(self, pos):
-        if not self._zone_edit:
-            return
-        self._zone_move(pos)
-        self._zone_drag=None
-    def _save_zone(self):
-        cid=self.camera_id()
-        if cid is None:
-            self.status.setText("Choose a camera before saving the zone.")
-            return
-        x1,y1,x2,y2=self._zone
-        if (x2-x1) < 0.08 or (y2-y1) < 0.08:
-            self.status.setText("Draw a larger box. The zone needs to cover the plate.")
-            return
-        roi=f"{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}"
-        zoom=self.zoom.value()/10
-        try:
-            data=api.put(f"/cameras/{cid}/framing", {"detect_roi": roi, "detect_zoom": zoom})
-        except Exception as exc:
-            self.status.setText(str(exc))
-            return
-        framing=(data or {}).get("framing") or {}
-        if self.camera is not None:
-            self.camera["framing"]=framing
-        self._zone_edit=False
-        self.zone_btn.setText("Set detection zone")
-        self.status.setText("Zone saved. The live gate crops the plate from this box, then reads that crop.")
-    def mousePressEvent(self, event):
-        self.armed.emit(self)
-        super().mousePressEvent(event)
-    def fill_cameras(self, rows):
-        self._all=list(rows or [])
-        current=self.camera_id()
-        self.picker.blockSignals(True)
-        self.picker.clear()
-        self.picker.addItem("Choose camera…", None)
-        for cam in self._all:
-            self.picker.addItem(camera_label(cam), cam.get("id"))
-        if current is not None:
-            idx=self.picker.findData(current)
-            if idx>=0: self.picker.setCurrentIndex(idx)
-        self.picker.blockSignals(False)
-    def _picked(self, _index=None):
-        cid=self.picker.currentData()
-        cam=next((c for c in self._all if c.get("id")==cid), None)
-        self.set_camera(cam)
-        self.armed.emit(self)
-    def _sync_picker(self):
-        cid=self.camera_id()
-        self.picker.blockSignals(True)
-        idx=self.picker.findData(cid) if cid is not None else 0
-        if idx>=0: self.picker.setCurrentIndex(idx)
-        else: self.picker.setCurrentIndex(0)
-        self.picker.blockSignals(False)
-    def _keep(self, worker):
-        self._workers.append(worker)
-        worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
-    def camera_id(self):
-        return None if not self.camera else self.camera.get("id")
-    def set_camera(self, camera):
-        cid=(camera or {}).get("id") if camera else None
-        same=self.camera and cid and self.camera.get("id")==cid
-        self.camera=camera
-        self._sync_picker()
-        if not same:
-            self._load_zone(camera)
-        if not camera:
-            self.status.setText("Click this view or the list to choose a camera.")
-            self.details.setText("Any added camera can go on the left or the right.")
-            self.plate.setText("—")
-            self.decision.setText("")
-            self.stop_live()
-            self.video.setText("Click to choose a camera")
-            return
-        if same and ((self._mjpeg is not None and self._mjpeg.isRunning()) or self._snap_timer.isActive()):
-            if not self._alpr_timer.isActive(): self._alpr_timer.start()
-            return
-        self.start_live()
-    def stop_live(self):
-        self._live_gen += 1
-        self._snap_timer.stop(); self._alpr_timer.stop(); self._stop_mjpeg()
-        watching=self._watching
-        self._watching=None
-        if watching is not None:
-            try: api.post(f"/cameras/{watching}/live/unwatch", {}, timeout=4)
-            except Exception: pass
-    def shutdown(self):
-        self.stop_live()
-    def start_live(self):
-        cid=self.camera_id()
-        if cid is None:
-            self.stop_live(); return
-        if self._watching==cid and self._mjpeg is not None and self._mjpeg.isRunning():
-            if not self._alpr_timer.isActive(): self._alpr_timer.start()
-            return
-        self._live_gen += 1
-        self._snap_timer.stop()
-        self._stop_mjpeg()
-        if self._watching not in {None, cid}:
-            try: api.post(f"/cameras/{self._watching}/live/unwatch", {}, timeout=4)
-            except Exception: pass
-        self._watching=cid
-        self.status.setText("Opening live view…")
-        try: api.post(f"/cameras/{cid}/live/watch", {}, timeout=8)
-        except Exception: pass
-        stream=MjpegStream(cid)
-        stream.frame.connect(self._consume_live_frame)
-        stream.failed.connect(self._mjpeg_fail)
-        self._mjpeg=stream
-        stream.start()
-        if not self._alpr_timer.isActive(): self._alpr_timer.start()
-        self._tick_alpr()
-    def _stop_mjpeg(self):
-        stream=self._mjpeg
-        self._mjpeg=None
-        _stop_thread(stream)
-    def _mjpeg_fail(self, err):
-        self._live_fail(err)
-        # Stay on the MJPEG stream. snapshot.jpg grabs one FFmpeg frame per
-        # request, so polling it as live video restarts a decoder every tick.
-        if self.camera_id() is None:
-            return
-        self._snap_timer.stop()
-        gen = self._live_gen
-        text=str(err or "").lower()
-        reset = any(token in text for token in ("10054", "forcibly closed", "connection reset", "connectionreset", "winerror"))
-        if reset:
-            delay = 250
-            self._mjpeg_retry_ms = 1000
-        else:
-            delay = self._mjpeg_retry_ms
-            self._mjpeg_retry_ms = min(8000, max(1000, delay * 2))
-        self.status.setText("Reconnecting live view…")
-        QTimer.singleShot(delay, lambda g=gen: self._retry_mjpeg(g))
-    def _retry_mjpeg(self, gen):
-        if gen != self._live_gen or self.camera_id() is None:
-            return
-        if self._mjpeg is not None and self._mjpeg.isRunning():
-            return
-        self.start_live()
-    def _set_pixmap(self, label, jpeg, overlay=None):
-        image=QImage.fromData(jpeg)
-        if image.isNull(): return False
-        if label is self.video:
-            image=self._paint_zone(image)
-        if overlay and label is self.video:
-            image=self._paint_overlay(image, overlay)
-        pix=QPixmap.fromImage(image)
-        box=label.contentsRect().size()
-        max_h=label.maximumHeight()
-        if max_h and 0 < max_h < 16777215:
-            box.setHeight(min(box.height() or max_h, max_h))
-        if box.width() < 16 or box.height() < 16:
-            box=QSize(max(label.width(), 480), max_h if max_h and max_h < 16777215 else 360)
-        label.setPixmap(pix.scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
-        return True
-    def _paint_zone(self, image):
-        zone=getattr(self, "_zone", None)
-        if not zone:
-            return image
-        x1, y1, x2, y2 = zone
-        width, height = image.width(), image.height()
-        ax1, ay1 = int(x1 * width), int(y1 * height)
-        ax2, ay2 = int(x2 * width), int(y2 * height)
-        painted=image.copy()
-        painter=QPainter(painted)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(255, 196, 0), max(2, width // 240)))
-        painter.drawRect(ax1, ay1, max(1, ax2 - ax1), max(1, ay2 - ay1))
-        zoom=self.zoom.value() / 10 if hasattr(self, "zoom") else 1
-        if zoom > 1.01 and ax2 > ax1 and ay2 > ay1:
-            cx, cy = (ax1 + ax2) / 2, (ay1 + ay2) / 2
-            zw, zh = max(8, (ax2 - ax1) / zoom), max(8, (ay2 - ay1) / zoom)
-            painter.setPen(QPen(QColor(255, 196, 0), 1, Qt.PenStyle.DashLine))
-            painter.drawRect(int(cx - zw / 2), int(cy - zh / 2), int(zw), int(zh))
-        painter.end()
-        return painted
-    def _paint_overlay(self, image, overlay):
-        src_w=int(overlay.get("image_width") or 0) or image.width()
-        src_h=int(overlay.get("image_height") or 0) or image.height()
-        sx=image.width()/src_w if src_w else 1
-        sy=image.height()/src_h if src_h else 1
-        x1,y1=int(overlay["x1"]*sx), int(overlay["y1"]*sy)
-        x2,y2=int(overlay["x2"]*sx), int(overlay["y2"]*sy)
-        painted=image.copy()
-        painter=QPainter(painted)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(0, 220, 90), max(2, painted.width()//240)))
-        painter.drawRect(x1, y1, max(1, x2-x1), max(1, y2-y1))
-        label=str(overlay.get("label") or "")
-        if label:
-            painter.setFont(QFont("Sans Serif", max(10, painted.width()//48)))
-            painter.setPen(QPen(QColor(0, 220, 90)))
-            painter.drawText(x1, max(12, y1-6), label)
-        painter.end()
-        return painted
-    def _tick_snapshot(self):
-        cid=self.camera_id()
-        if cid is None or self._snap_busy: return
-        self._snap_busy=True
-        w=Worker(lambda: api.get_bytes(f"/cameras/{cid}/snapshot.jpg", timeout=3))
-        w.done.connect(self._queue_live_frame); w.failed.connect(self._live_fail); w.finished.connect(lambda: setattr(self,"_snap_busy",False)); self._keep(w); w.start()
-    def _consume_live_frame(self):
-        stream = self.sender()
-        # A queued signal may arrive after teardown, when both references are None.
-        if stream is None or stream is not self._mjpeg:
-            return
-        jpeg = stream.mailbox.take()
-        if jpeg:
-            self._queue_live_frame(jpeg)
-    def _queue_live_frame(self, jpeg):
-        self._pending_live=jpeg
-        if not self._paint_busy:
-            self._flush_live_frame()
-    def _flush_live_frame(self):
-        jpeg=self._pending_live
-        if not jpeg or jpeg==self._shown_jpeg:
-            return
-        self._paint_busy=True
-        try:
-            self._last_jpeg=jpeg
-            self._shown_jpeg=jpeg
-            if not self._set_pixmap(self.video, jpeg, self._last_overlay):
-                self.video.setText("Waiting for a JPEG frame")
-            else:
-                self.status.setText("Live")
-                self._mjpeg_retry_ms = 1000
-        finally:
-            self._paint_busy=False
-        if self._pending_live and self._pending_live != jpeg:
-            QTimer.singleShot(0, self._flush_live_frame)
-    def _live_fail(self, err):
-        text=str(err or "")
-        if "409" in text or "ffmpeg" in text.lower() or "ffprobe" in text.lower() or "no live video" in text.lower():
-            if is_technician():
-                self.video.setText("Waiting for a camera JPEG.\nHVX: SDK login on port 30000. Generic IP: HTTP snapshot or RTSP + FastALPR.")
-            else:
-                self.video.setText("Waiting for the first frame.\nPlate recognition can continue while this picture reconnects.")
-            self.status.setText("Waiting for live video")
-            return
-        self.status.setText(text)
-        self.video.setText(text)
-    def _tick_alpr(self):
-        cid=self.camera_id()
-        if cid is None or self._alpr_busy: return
-        self._alpr_busy=True
-        w=Worker(lambda: api.get(f"/cameras/{cid}/plates", timeout=8))
-        w.done.connect(self._show_alpr); w.failed.connect(lambda e: self.status.setText(e)); w.finished.connect(lambda: setattr(self,"_alpr_busy",False)); self._keep(w); w.start()
-    def _show_alpr(self, data):
-        payload=data if isinstance(data, dict) else {}
-        if payload.get("clear_last_car"):
-            self._held_car=None
-            self._last_overlay=None
-        last=payload.get("last_car") or payload.get("capture") or {}
-        if last.get("snapshot_url") or last.get("crop_url") or last.get("plate"):
-            self._held_car=last
-        shown=self._held_car or last
-        fusion=payload.get("fusion") or {}
-        native=payload.get("native") or {}
-        resolved=payload.get("resolved_plate") or fusion.get("resolved_plate") or shown.get("plate") or native.get("plate") or ""
-        stored=shown.get("bbox") if isinstance(shown.get("bbox"), dict) else None
-        self._last_overlay=payload.get("overlay") or native.get("bbox") or stored
-        if isinstance(self._last_overlay, dict) and "x1" in self._last_overlay:
-            width=int(self._last_overlay.get("image_width") or native.get("image_width") or (stored or {}).get("image_width") or 0)
-            height=int(self._last_overlay.get("image_height") or native.get("image_height") or (stored or {}).get("image_height") or 0)
-            self._last_overlay={**self._last_overlay, "label": self._last_overlay.get("label") or resolved or native.get("plate") or "", "image_width": width, "image_height": height}
-            if self._last_jpeg:
-                self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-        plate=resolved or shown.get("plate") or shown.get("plate_raw") or ""
-        chars=shown.get("characters") or (" ".join(list(plate)) if plate else "—")
-        self.plate.setText(chars)
-        src=payload.get("live_source") or ""
-        fps=payload.get("live_fps")
-        age=payload.get("live_frame_age_ms")
-        live_bits=[]
-        if src: live_bits.append(str(src))
-        if fps: live_bits.append(f"{fps:g} fps")
-        if age is not None: live_bits.append(f"{int(round(age))} ms")
-        if payload.get("live"):
-            if is_technician():
-                self.status.setText("Live" + ((" · " + " · ".join(live_bits)) if live_bits else ""))
-            else:
-                self.status.setText("Video is live.")
-        elif payload.get("error"):
-            self.status.setText(str(payload.get("error")) if is_technician() else "Video unavailable. The camera may still be reading plates.")
-        conf=shown.get("confidence")
-        pct=None
-        if conf is not None:
-            number=float(conf)
-            pct=int(round(number*100 if number<=1 else number))
-        conf_txt=f"{pct}%" if pct is not None else ""
-        source=source_label(shown.get("source") or fusion.get("method") or "")
-        side=shown.get("lane_direction") or (self.camera or {}).get("side") or (self.camera or {}).get("lane_direction") or ""
-        when=str(shown.get("created_at") or "")[:19].replace("T"," ")
-        held=bool(shown.get("pending_confirmation") or shown.get("needs_review") or fusion.get("needs_review"))
-        low=pct is not None and pct < 80
-        if plate:
-            bits=[bit for bit in (when, side, source if is_technician() else "") if bit]
-            self.details.setText("  ·  ".join(bits) or "Plate read")
-            self.decision.setText("Check plate" if held or low else "Plate read")
-            if conf_txt:
-                self.plate.setText(f"{chars}    {conf_txt}")
-            self.hold_label.setText("Confirm or correct this plate before the barrier decides." if held else "")
-        else:
-            self.details.setText("No vehicle yet. Add a camera on Devices, then wait for a vehicle.")
-            self.decision.setText("")
-            self.hold_label.setText("")
-        snap=shown.get("snapshot_url")
-        if snap:
-            w=Worker(lambda: api.get_bytes(snap, timeout=8))
-            w.done.connect(lambda jpeg: self._set_pixmap(self.last_snap, jpeg)); self._keep(w); w.start()
-        crop=shown.get("crop_url")
-        if crop:
-            w=Worker(lambda: api.get_bytes(crop, timeout=8))
-            w.done.connect(lambda jpeg: self._set_pixmap(self.crop, jpeg)); self._keep(w); w.start()
-    def open_this_side(self):
-        self.command_barrier("open")
-    def close_this_side(self):
-        self.command_barrier("close")
-    def command_barrier(self, action="open"):
-        cam=self.camera
-        verb="close" if action=="close" else "open"
-        title="Close this side" if verb=="close" else "Open this side"
-        if not cam:
-            QMessageBox.information(self,title,"No camera on this side."); return
-        side=cam.get("side") or cam.get("lane_direction") or "this side"
-        prompt=f"{'Close' if verb=='close' else 'Pulse'} only {cam.get('name') or side} — not the other side of this lane?"
-        if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
-        reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
-        if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
-            except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
-
-    def correct_plate(self):
-        cam=self.camera
-        if not cam:
-            QMessageBox.information(self,"Correct plate","No camera on this side."); return
-        shown=self._held_car or {}
-        current=str(shown.get("plate") or "")
-        text,ok=QInputDialog.getText(self,"Correct plate","Plate (leave as-is to confirm)", text=current)
-        if not ok:
-            return
-        try:
-            body={"plate": text.strip() or current, "capture_id": shown.get("id"), "confirm": True}
-            data=api.post(f"/cameras/{cam['id']}/plate-corrections", body, timeout=20)
-            QMessageBox.information(self,"Plate",str((data or {}).get("message") or data))
-            self._tick_alpr()
-        except Exception as e:
-            QMessageBox.critical(self,"Correct plate",str(e))
+from .live_pane import CameraLivePane
+from .video import VideoCanvas as ClickLabel
 
 
 class Dashboard(QWidget):
@@ -984,8 +211,9 @@ class Dashboard(QWidget):
         frame=QFrame(); frame.setObjectName("card")
         box=QVBoxLayout(frame)
         val=QLabel(str(value)); val.setStyleSheet("font-size:28px;font-weight:700")
-        cap=QLabel(label); cap.setStyleSheet("color:#5b6b82")
+        cap=QLabel(label); cap.setObjectName("muted")
         box.addWidget(val); box.addWidget(cap)
+        prepare_page(frame, label)
         return frame, val
     def refresh(self):
         w=Worker(lambda: api.get("/dashboard"))
@@ -1084,508 +312,7 @@ class Dashboard(QWidget):
         self._load_backup()
 
 
-class CameraDialog(QDialog):
-    def __init__(self, camera=None):
-        super().__init__(); self.camera=camera; self.setWindowTitle("Edit Camera" if camera else "Add Camera")
-        self.setMinimumWidth(360); self.setMaximumWidth(520)
-        form=QFormLayout(self)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.name=QLineEdit(); self.ip=QLineEdit(); self.port=QLineEdit("30000"); self.username=QLineEdit("admin")
-        self.password=QLineEdit(); self.password.setEchoMode(QLineEdit.Password)
-        if camera: self.password.setPlaceholderText("Leave blank to keep current password")
-        else: self.password.setText("admin")
-        self.direction=QComboBox()
-        self.direction.addItem("Entry", "ENTRY")
-        self.direction.addItem("Exit", "EXIT")
-        self.direction.addItem("Bidirectional", "BOTH")
-        self.adapter=QComboBox()
-        for key, label in (
-            ("hvx", "hvx"),
-            ("rtsp", "rtsp"),
-            ("dahua", "dahua"),
-            ("hikvision", "hikvision"),
-            ("onvif", "onvif"),
-            ("simulated", "simulated"),
-        ):
-            self.adapter.addItem(label, key)
-        self.rtsp=QLineEdit()
-        self.rtsp.setPlaceholderText("Leave blank to discover")
-        self.ffmpeg_profile=QComboBox(); self.ffmpeg_profile.addItems(["LOW_LATENCY_LAN","COMPATIBLE","LOSSY_NETWORK","VENDOR_SPECIAL"])
-        self.transport=QComboBox(); self.transport.addItems(["TCP","UDP","AUTO"])
-        self.recognition=QComboBox()
-        self.recognition.addItem("Use the site default", "")
-        for key, label in (
-            ("NATIVE_ONLY", "Use camera recognition"),
-            ("FASTALPR_ONLY", "Use SmartPark AI recognition"),
-            ("HYBRID", "Use both"),
-            ("VIDEO_ONLY", "Video only"),
-        ):
-            self.recognition.addItem(label, key)
-        self.controller=QLineEdit(); self.display=QLineEdit()
-        self.gate=QComboBox(); self.gate.addItem("No gate — monitoring only", None)
-        try:
-            for g in api.get("/gates"): self.gate.addItem(g["name"], g["id"])
-        except Exception:
-            pass
-        if camera:
-            self.name.setText(camera["name"]); self.ip.setText(camera["ip_address"]); self.port.setText(str(camera["sdk_port"]))
-            self.username.setText(camera["username"])
-            dir_idx=self.direction.findData(str(camera.get("lane_direction") or "ENTRY"))
-            if dir_idx>=0: self.direction.setCurrentIndex(dir_idx)
-            self.rtsp.setText(camera.get("rtsp_url") or "")
-            self.controller.setText(camera.get("controller_ip") or "")
-            self.display.setText(camera.get("display_ip") or "")
-            if camera.get("adapter_id"):
-                idx=self.adapter.findData(str(camera.get("adapter_id")))
-                if idx>=0: self.adapter.setCurrentIndex(idx)
-            if camera.get("ffmpeg_profile"):
-                idx=self.ffmpeg_profile.findText(str(camera.get("ffmpeg_profile")))
-                if idx>=0: self.ffmpeg_profile.setCurrentIndex(idx)
-            if camera.get("rtsp_transport"):
-                idx=self.transport.findText(str(camera.get("rtsp_transport")))
-                if idx>=0: self.transport.setCurrentIndex(idx)
-            if camera.get("recognition_mode"):
-                idx=self.recognition.findData(str(camera.get("recognition_mode")))
-                if idx>=0: self.recognition.setCurrentIndex(idx)
-            idx=self.gate.findData(camera.get("gate_id")); 
-            if idx>=0: self.gate.setCurrentIndex(idx)
-        for label,w in [("Name",self.name),("Camera address",self.ip),("Username",self.username),("Password",self.password),("Direction",self.direction),("Gate",self.gate),("Recognition",self.recognition)]: form.addRow(label,w)
-        advanced=QGroupBox("Advanced")
-        advanced_form=QFormLayout(advanced)
-        for label,w in [("SDK port",self.port),("Adapter",self.adapter),("Controller IP",self.controller),("Display IP",self.display),("RTSP URI",self.rtsp),("FFmpeg profile",self.ffmpeg_profile),("RTSP transport",self.transport)]:
-            advanced_form.addRow(label,w)
-        advanced.setVisible(is_technician())
-        form.addRow(advanced)
-        save=QPushButton("Save Camera"); save.clicked.connect(self.accept); form.addRow(save)
-    def payload(self):
-        data={"name":self.name.text().strip(),"ip_address":self.ip.text().strip(),"sdk_port":int(self.port.text() or "30000"),"username":self.username.text(),"lane_direction":self.direction.currentData() or "ENTRY","adapter_id":self.adapter.currentData(),"recognition_mode":self.recognition.currentData() or "","controller_ip":self.controller.text().strip(),"display_ip":self.display.text().strip(),"rtsp_url":self.rtsp.text().strip(),"ffmpeg_profile":self.ffmpeg_profile.currentText(),"rtsp_transport":self.transport.currentText(),"gate_id":self.gate.currentData()}
-        if self.password.text() or not self.camera:
-            data["password"]=self.password.text()
-        return data
-
-
-class Cameras(QWidget):
-    def __init__(self):
-        super().__init__(); l=QVBoxLayout(self)
-        title=QLabel("Live Gates"); title.setStyleSheet("font-size:24px;font-weight:700")
-        l.addWidget(title)
-        hint=QLabel("Pick a lane to process that gate's entry and exit on this PC. The other gate is not recognized until you select it (or until another computer owns it). Leaving this page only stops the picture.")
-        hint.setWordWrap(True); l.addWidget(hint)
-        self.tabs=QTabWidget()
-        live=QWidget(); live_l=QVBoxLayout(live)
-        lane_row=QHBoxLayout()
-        lane_row.addWidget(QLabel("Show"))
-        self.layout_mode=QComboBox()
-        self.layout_mode.addItems(["1 camera", "2 cameras", "All cameras"])
-        self.layout_mode.setCurrentIndex(1)
-        self.layout_mode.currentIndexChanged.connect(self._on_layout)
-        lane_row.addWidget(self.layout_mode)
-        lane_row.addWidget(QLabel("Lane preset"))
-        self.lane=QComboBox(); self.lane.currentIndexChanged.connect(self._lane_changed)
-        lane_row.addWidget(self.lane, 1)
-        fill_lane=QPushButton("Fill both from lane"); fill_lane.clicked.connect(lambda: self._start_pair(True))
-        lane_row.addWidget(fill_lane)
-        self.scope_hint=QLabel(""); self.scope_hint.setWordWrap(True)
-        lane_row.addWidget(self.scope_hint, 1)
-        refresh_live=QPushButton(action_label("Refresh live", "F5")); refresh_live.clicked.connect(lambda: self._start_pair(False))
-        lane_row.addWidget(refresh_live)
-        live_l.addLayout(lane_row)
-        self.live_grid=QGridLayout()
-        self.pane_a=CameraLivePane("Left")
-        self.pane_b=CameraLivePane("Right")
-        self.extra_panes=[]
-        self._armed_pane=None
-        self.pane_a.armed.connect(self.arm_pane)
-        self.pane_b.armed.connect(self.arm_pane)
-        for i in range(1, 10):
-            sc=QShortcut(QKeySequence(str(i)), live)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(lambda n=i: self.arm_visible(n))
-        self.live_grid.addWidget(self.pane_a, 0, 0)
-        self.live_grid.addWidget(self.pane_b, 0, 1)
-        live_host=QWidget(); live_host.setLayout(self.live_grid)
-        live_scroll=QScrollArea(); live_scroll.setWidgetResizable(True); live_scroll.setWidget(live_host)
-        live_l.addWidget(live_scroll, 1)
-
-        ips=QWidget(); ips_l=QVBoxLayout(ips)
-        tools=QHBoxLayout()
-        add=QPushButton(action_label("Add Camera", "Ctrl+N")); add.clicked.connect(self.add_camera); add.setVisible(api.can("cameras.manage")); add.setToolTip("Add Camera (Ctrl+N)")
-        seed=QPushButton("Add site cameras"); seed.clicked.connect(self.seed_site); seed.setVisible(api.can("cameras.manage"))
-        discover=QPushButton("Discover"); discover.clicked.connect(self.discover)
-        onboard=QPushButton("Onboard wizard"); onboard.clicked.connect(self.onboard); onboard.setVisible(api.can("cameras.manage"))
-        connect_all=QPushButton("Connect all"); connect_all.clicked.connect(self.connect_all)
-        edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_camera); edit.setVisible(api.can("cameras.manage")); edit.setToolTip("Edit (Ctrl+E)")
-        delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_camera); delete.setVisible(api.can("cameras.manage")); delete.setToolTip("Delete (Del)")
-        refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
-        for w in (add, seed, discover, onboard, connect_all, edit, delete, refresh): tools.addWidget(w)
-        tools.addStretch(); ips_l.addLayout(tools)
-        ips_hint=QLabel("Cameras on this site. Add one to start live monitoring and plate recognition.")
-        ips_hint.setWordWrap(True); ips_l.addWidget(ips_hint)
-        self.table=QTableWidget(0,10); self.table.setHorizontalHeaderLabels(["ID","Name","Location","Direction","Address","Controller","Display","Health","SDK","Detail"])
-        configure_table(self.table); ips_l.addWidget(self.table, 1)
-        self.empty_devices=QLabel("")
-        self.empty_devices.setWordWrap(True)
-        ips_l.addWidget(self.empty_devices)
-        self.stream_info=QLabel("Stream profiles appear after Connect. Live and recognition share one gateway producer.")
-        self.stream_info.setWordWrap(True)
-        self.stream_info.setVisible(is_technician())
-        ips_l.addWidget(self.stream_info)
-        actions=QHBoxLayout()
-        tech=is_technician()
-        self.connect_btn=QPushButton("Connect"); self.connect_btn.clicked.connect(self.sdk_connect); self.connect_btn.setVisible(tech)
-        self.probe_btn=QPushButton("Test Video"); self.probe_btn.clicked.connect(self.rtsp_probe); self.probe_btn.setVisible(tech)
-        self.onvif_btn=QPushButton("Discover Streams"); self.onvif_btn.clicked.connect(self.onvif_discover); self.onvif_btn.setVisible(tech)
-        self.alpr_btn=QPushButton("Test Recognition"); self.alpr_btn.clicked.connect(self.fastalpr); self.alpr_btn.setVisible(tech)
-        self.disconnect_btn=QPushButton("Disconnect camera"); self.disconnect_btn.clicked.connect(self.sdk_disconnect); self.disconnect_btn.setVisible(tech)
-        self.open_side_btn=QPushButton(action_label("Manual open", "F8")); self.open_side_btn.clicked.connect(self.open_this_side); self.open_side_btn.setToolTip("Open this barrier (F8)")
-        self.close_side_btn=QPushButton(action_label("Manual close", "F9")); self.close_side_btn.clicked.connect(self.close_this_side); self.close_side_btn.setToolTip("Close this barrier (F9)")
-        self.snap_btn=QPushButton("Capture snapshot"); self.snap_btn.clicked.connect(self.capture_snapshot)
-        for w in (self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.snap_btn, self.disconnect_btn, self.open_side_btn, self.close_side_btn):
-            actions.addWidget(w)
-        actions.addStretch(); ips_l.addLayout(actions)
-        if not tech:
-            for col in (0, 4, 5, 6, 8, 9):
-                self.table.setColumnHidden(col, True)
-
-        self.tabs.addTab(live, "Live")
-        self.tabs.addTab(ips, "Devices")
-        self.tabs.currentChanged.connect(self._on_tab)
-        l.addWidget(self.tabs, 1)
-        self.rows=[]
-        self.table.itemSelectionChanged.connect(self._on_select)
-        self._workers=[]
-        self._ready=False
-        if not hasattr(self, "extra_panes"):
-            self.extra_panes=[]
-    def selected_id(self):
-        row=self.table.currentRow()
-        if row<0: return None
-        return int(self.table.item(row,0).text())
-    def refresh(self):
-        try: rows=api.get("/cameras")
-        except Exception as e: QMessageBox.warning(self,"Cameras",str(e)); return
-        self.rows=rows
-        self.table.setRowCount(len(rows))
-        for r,c in enumerate(rows):
-            vals=[
-                c["id"], c["name"],
-                c.get("lane_name") or c.get("gate_name") or "—",
-                c.get("side") or c.get("lane_direction") or "—",
-                c.get("ip_address") or "—",
-                c.get("controller_ip") or "—",
-                c.get("display_ip") or "—",
-                c["status"],
-                "handle="+str(c["sdk_handle"]) if c["sdk_handle"] is not None else "—",
-                (c.get("last_error") or "—")[:80],
-            ]
-            for col,v in enumerate(vals): self.table.setItem(r,col,QTableWidgetItem(str(v)))
-        self.empty_devices.setText("" if rows else "No cameras configured. Add a camera to start live monitoring and plate recognition.")
-        self._fill_lanes()
-        self._maybe_start_pair()
-    def selected_camera(self):
-        row=self.table.currentRow()
-        if row<0 or row>=len(self.rows): return None
-        return self.rows[row]
-    def seed_site(self):
-        w=Worker(api.seed_site); w.done.connect(lambda data:(QMessageBox.information(self,"Site cameras",f"Added {len(data.get('created') or [])} camera(s)."),self.refresh())); w.failed.connect(lambda e:QMessageBox.critical(self,"Site cameras",e)); self._keep(w); w.start()
-    def discover(self):
-        w=Worker(lambda: api.get("/cameras/discover?scan_lan=true", timeout=45)); w.done.connect(self._show_discover); w.failed.connect(lambda e:QMessageBox.critical(self,"Discover",e)); self._keep(w); w.start()
-    def onboard(self):
-        ip, ok = QInputDialog.getText(self, "Add Camera", "Camera address")
-        if not ok or not str(ip).strip():
-            return
-        payload={"ip_address": str(ip).strip(), "username": "admin", "password": "admin"}
-        w=Worker(lambda: api.post("/cameras/onboard/probe", payload, timeout=20))
-        w.done.connect(self._show_onboard); w.failed.connect(lambda e:QMessageBox.critical(self,"Onboard",e)); self._keep(w); w.start()
-    def _show_onboard(self, data):
-        data=data or {}
-        QMessageBox.information(self, "Onboard", json.dumps({k: data.get(k) for k in ("ok","recommended_adapter","camera_type","recognition_mode","capabilities","note") if k in data}, indent=2))
-        dlg=CameraDialog()
-        dlg.ip.setText(str((data.get("ip") or "")))
-        if data.get("recommended_adapter"):
-            idx=dlg.adapter.findData(str(data.get("recommended_adapter")))
-            if idx>=0: dlg.adapter.setCurrentIndex(idx)
-        if data.get("recognition_mode"):
-            idx=dlg.recognition.findData(str(data.get("recognition_mode")))
-            if idx>=0: dlg.recognition.setCurrentIndex(idx)
-        if dlg.exec()==QDialog.DialogCode.Accepted and api.can("cameras.manage"):
-            w=Worker(lambda: api.post("/cameras", dlg.payload())); w.done.connect(lambda _: self.refresh()); w.failed.connect(lambda e:QMessageBox.critical(self,"Add Camera",e)); self._keep(w); w.start()
-    def _show_discover(self, data):
-        rows=data.get("cameras") or []
-        lines=[
-            f"{r.get('ip_address')}  {r.get('kind') or r.get('adapter_id') or 'hvx'}  "
-            f"{'reachable' if r.get('reachable') else 'no'}  "
-            f"{'added' if r.get('already_added') else 'new'}  {r.get('note') or ''}"
-            for r in rows
-        ] or ["No cameras listed."]
-        ipcams=[r for r in rows if (r.get("adapter_id") or "hvx") != "hvx" and r.get("reachable")]
-        QMessageBox.information(self,"Discover","\n".join(lines)[:1800])
-        if not ipcams: return
-        if QMessageBox.question(self,"IP cameras",f"Add and connect {len(ipcams)} web/RTSP camera(s)? HVX cameras stay on NetSDK.")!=QMessageBox.Yes: return
-        user,ok=QInputDialog.getText(self,"IP cameras","Camera username", text="admin")
-        if not ok: return
-        password,ok=QInputDialog.getText(self,"IP cameras","Camera password", text="admin", echo=QLineEdit.Password)
-        if not ok: return
-        payload={
-            "username": user.strip() or "admin",
-            "password": password,
-            "connect": True,
-            "cameras": [
-                {
-                    "ip_address": r["ip_address"],
-                    "adapter_id": r.get("adapter_id") or "rtsp",
-                    "name": r.get("name"),
-                    "lane_direction": r.get("lane_direction") or "ENTRY",
-                }
-                for r in ipcams
-            ],
-        }
-        w=Worker(lambda: api.post("/cameras/import-discovered", payload, timeout=60))
-        w.done.connect(lambda body: (
-            QMessageBox.information(self,"IP cameras", f"Added {len(body.get('created') or [])}. Connected {sum(1 for x in (body.get('connected') or []) if x.get('status')=='VIDEO_CONNECTED')}. HVX unchanged."),
-            self.refresh(),
-            self._maybe_start_pair(),
-        ))
-        w.failed.connect(lambda e: QMessageBox.critical(self,"IP cameras", e))
-        self._keep(w); w.start()
-    def connect_all(self):
-        w=Worker(api.connect_all)
-        w.done.connect(self._after_connect_all)
-        w.failed.connect(lambda e:QMessageBox.critical(self,"Connect all",e))
-        self._keep(w); w.start()
-    def _after_connect_all(self, data):
-        data=data or {}
-        lines=[f"Connected {data.get('connected') or 0} / {data.get('attempted') or 0}"]
-        skipped=data.get("skipped") or 0
-        if skipped:
-            lines.append(f"Skipped {skipped} unreachable camera(s).")
-        for item in data.get("results") or []:
-            err=item.get("last_error") or (item.get("sdk_result") or {}).get("error")
-            if err:
-                lines.append(f"{item.get('name') or item.get('id')}: {err}")
-        QMessageBox.information(self,"Connect all","\n".join(lines)[:2000])
-        self.refresh(); self._maybe_start_pair()
-    def add_camera(self):
-        d=CameraDialog()
-        if d.exec():
-            try: api.post("/cameras",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Add camera",str(e))
-    def edit_camera(self):
-        cam=self.selected_camera()
-        if not cam: QMessageBox.information(self,"Edit camera","Select a camera first."); return
-        d=CameraDialog(cam)
-        if d.exec():
-            try: api.patch(f"/cameras/{cam['id']}",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Edit camera",str(e))
-    def delete_camera(self):
-        cam=self.selected_camera()
-        if not cam: QMessageBox.information(self,"Delete camera","Select a camera first."); return
-        if QMessageBox.question(self,"Delete camera",f"Delete {cam['name']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/cameras/{cam['id']}"); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete camera",str(e))
-    def _run(self, fn, title):
-        cid=self.selected_id()
-        if cid is None: QMessageBox.information(self,title,"Select a camera first."); return
-        w=Worker(lambda: fn(cid)); w.done.connect(lambda data:(self._after_connect(data,title),self.refresh())); w.failed.connect(lambda e:QMessageBox.critical(self,title,e)); self._keep(w); w.start()
-    def _after_connect(self, data, title):
-        QMessageBox.information(self,title,str(data)[:1200])
-        self._maybe_start_pair()
-        cid=self.selected_id()
-        if cid is not None: self._load_streams(cid)
-    def sdk_connect(self): self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/connect", timeout=25),"Connect")
-    def sdk_disconnect(self):
-        if QMessageBox.question(self, "Disconnect camera", "Disconnect this camera? Live video for it stops until someone connects it again.") != QMessageBox.Yes:
-            return
-        self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/disconnect"), "Disconnect camera")
-    def rtsp_probe(self): self._run(lambda cid: api.post(f"/cameras/{cid}/rtsp/probe"),"RTSP Probe")
-    def onvif_discover(self): self._run(lambda cid: api.post(f"/cameras/{cid}/onvif/discover", timeout=20),"ONVIF profiles")
-    def fastalpr(self): self._run(lambda cid: api.post(f"/cameras/{cid}/alpr/recognize", timeout=30),"FastALPR")
-    def capture_snapshot(self): self._run(lambda cid: api.post(f"/cameras/{cid}/snapshot/capture", timeout=12),"Snapshot")
-    def open_this_side(self):
-        self.command_barrier("open")
-    def close_this_side(self):
-        self.command_barrier("close")
-    def command_barrier(self, action="open"):
-        cam=self.selected_camera()
-        verb="close" if action=="close" else "open"
-        title="Close this side" if verb=="close" else "Open this side"
-        if not cam: QMessageBox.information(self,title,"Select 1# Entry, 1# Exit, 2# Entry, or 2# Exit first."); return
-        side=cam.get("side") or cam.get("lane_direction") or "this side"
-        prompt=f"{'Close' if verb=='close' else 'Pulse'} only {cam.get('name') or side} — not the other side of this lane?"
-        if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
-        reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
-        if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
-            except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
-    def _keep(self, worker):
-        self._workers.append(worker)
-        worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
-    def _live_visible(self):
-        return self.isVisible() and self.tabs.currentIndex()==0
-    def _fill_lanes(self):
-        previous=self.lane.currentText() if self.lane.count() else ""
-        self.lane.blockSignals(True)
-        self.lane.clear()
-        for gid, name in lane_options(self.rows):
-            self.lane.addItem(name, gid)
-        idx=self.lane.findText(previous) if previous else -1
-        if idx>=0:
-            self.lane.setCurrentIndex(idx)
-        elif self.lane.count() > 1:
-            self.lane.setCurrentIndex(1)
-        self.lane.blockSignals(False)
-        self._push_recognition_scope()
-    def _push_recognition_scope(self):
-        gid=self.lane.currentData() if self.lane.count() else None
-        def work():
-            return api.post("/runtime/recognition-scope", {"gate_id": gid}, timeout=8)
-        w=Worker(work)
-        w.done.connect(self._show_recognition_scope)
-        self._keep(w); w.start()
-    def _show_recognition_scope(self, data):
-        body=data if isinstance(data, dict) else {}
-        text=str(body.get("detail") or "")
-        if hasattr(self, "scope_hint"):
-            self.scope_hint.setText(text)
-    def _lane_changed(self):
-        self._push_recognition_scope()
-        self._start_pair(True)
-    def _all_panes(self):
-        return [self.pane_a, self.pane_b, *getattr(self, "extra_panes", [])]
-    def _stop_panes(self):
-        for pane in self._all_panes():
-            pane.stop_live()
-    def _on_layout(self):
-        self._sync_layout()
-        self._start_pair(False)
-    def _sync_layout(self):
-        mode=self.layout_mode.currentIndex() if hasattr(self, "layout_mode") else 1
-        self.pane_b.setVisible(mode != 0)
-        if mode == 0:
-            self.pane_b.stop_live()
-        needed=max(0, len(self.rows) - 2) if mode == 2 else 0
-        while len(self.extra_panes) < needed:
-            pane=CameraLivePane(f"Camera {len(self.extra_panes)+3}")
-            pane.armed.connect(self.arm_pane)
-            self.extra_panes.append(pane)
-            index=len(self.extra_panes) + 1
-            self.live_grid.addWidget(pane, index // 2, index % 2)
-        for i, pane in enumerate(self.extra_panes):
-            show=i < needed
-            pane.setVisible(show)
-            if not show:
-                pane.stop_live()
-    def arm_pane(self, pane):
-        self._armed_pane=pane
-        for p in self._all_panes():
-            if p is pane:
-                p.setStyleSheet("CameraLivePane { border: 2px solid #0E7C72; }")
-                p.target_chip.setText("F8 / F9 pulse this camera only")
-            else:
-                p.setStyleSheet("")
-                p.target_chip.setText("")
-    def arm_visible(self, n):
-        panes=[p for p in self._all_panes() if p.isVisible()]
-        if not (1 <= n <= len(panes)):
-            return
-        self.arm_pane(panes[n-1])
-    def shortcut_pane(self):
-        def usable(pane):
-            return pane is not None and pane.isVisible() and pane.camera
-        if usable(self._armed_pane):
-            return self._armed_pane
-        w=QApplication.focusWidget()
-        for candidate in self._all_panes():
-            if usable(candidate) and w is not None and (candidate is w or candidate.isAncestorOf(w)):
-                self.arm_pane(candidate)
-                return candidate
-        return None
-    def _on_tab(self, index):
-        if index==0:
-            self._start_pair(False)
-        else:
-            self._stop_panes()
-    def _maybe_start_pair(self):
-        if self._live_visible():
-            self._start_pair(False)
-        else:
-            self._stop_panes()
-    def _start_pair(self, from_lane=False):
-        if not self._live_visible():
-            self._stop_panes(); return
-        self._sync_layout()
-        mode=self.layout_mode.currentIndex() if hasattr(self, "layout_mode") else 1
-        if mode == 2:
-            visible=[self.pane_a, self.pane_b] + [pane for pane in self.extra_panes if pane.isVisible()]
-            for pane in visible:
-                pane.fill_cameras(self.rows)
-            for pane, cam in zip(visible, self.rows):
-                pane.set_camera(cam)
-            for pane in visible[len(self.rows):]:
-                pane.set_camera(None)
-            return
-        self.pane_a.fill_cameras(self.rows)
-        self.pane_b.fill_cameras(self.rows)
-        if from_lane:
-            left, right=pair_lane_cameras(self.rows, self.lane.currentData())
-            self.pane_a.set_camera(left)
-            if mode != 0:
-                self.pane_b.set_camera(right)
-            return
-        if self.pane_a.camera_id() is None and self.pane_b.camera_id() is None and self.rows:
-            self.pane_a.set_camera(self.rows[0])
-            if mode != 0:
-                self.pane_b.set_camera(self.rows[1] if len(self.rows)>1 else None)
-            return
-        self.pane_a.start_live()
-        if mode != 0:
-            self.pane_b.start_live()
-    def _on_select(self):
-        cid=self.selected_id()
-        if cid is not None:
-            self._load_streams(cid)
-    def hideEvent(self, event):
-        self._stop_panes()
-        super().hideEvent(event)
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._ready:
-            self._ready=True
-            self.refresh()
-        else:
-            self._maybe_start_pair()
-    def shutdown(self):
-        for pane in self._all_panes():
-            pane.shutdown()
-    def _load_streams(self, cid):
-        s=Worker(lambda: api.get(f"/cameras/{cid}/streams", timeout=8))
-        s.done.connect(self._show_streams); self._keep(s); s.start()
-    def _show_streams(self, data):
-        payload=data if isinstance(data, dict) else {}
-        profiles=payload.get("stream_profiles") or {}
-        media=payload.get("media") or {}
-        lines=[]
-        for role in ("MAIN","SUB","LIVE","DETECT","EVIDENCE"):
-            row=profiles.get(role) or {}
-            if not row: continue
-            bits=[role]
-            if row.get("codec"): bits.append(str(row.get("codec")).upper())
-            if row.get("width") and row.get("height"): bits.append(f"{row.get('width')}x{row.get('height')}")
-            if row.get("fps"): bits.append(f"{row.get('fps')} FPS")
-            if row.get("gop"): bits.append(f"GOP {row.get('gop')}")
-            if row.get("transport"): bits.append(str(row.get("transport")))
-            if row.get("source"): bits.append(f"Source {row.get('source')}")
-            if row.get("ai_fps"): bits.append(f"AI {row.get('ai_fps')} FPS")
-            lines.append(" ".join(str(b) for b in bits))
-        age=[]
-        if media.get("live_frame_age_ms") is not None: age.append(f"live {int(round(media.get('live_frame_age_ms')))} ms")
-        if media.get("ai_frame_age_ms") is not None: age.append(f"AI {int(round(media.get('ai_frame_age_ms')))} ms")
-        if media.get("connection_state"): age.append(str(media.get("connection_state")))
-        warns=payload.get("warnings") or media.get("warnings") or []
-        text="\n".join(lines) or "No stream profiles yet. Probe video or ONVIF after Connect."
-        if age: text += "\n" + " · ".join(age)
-        if warns: text += "\n" + "; ".join(str(w) for w in warns)
-        self.stream_info.setText(text)
+from .live_cameras import CameraDialog, Cameras
 
 
 class GateDialog(QDialog):
@@ -1639,7 +366,7 @@ class Gates(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Gates"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Open barrier is per side: 1# Entry, 1# Exit, 2# Entry, or 2# Exit. It does not pulse both barriers on a numbered lane. Select a lane, press 1 for entry or 2 for exit, then F8 / F9.")
+        note=QLabel("Manual commands apply to one selected camera side, never both barriers. Select a configured gate, press 1 for entry or 2 for exit, then F8 / F9.")
         note.setWordWrap(True); l.addWidget(note)
         self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["ID","Lane","Mode","Enabled","Sides (camera / controller / display)","Action"])
         configure_table(self.table); l.addWidget(self.table, 1)
@@ -1857,11 +584,13 @@ class Sessions(QWidget):
         self.query=QLineEdit(); self.query.setPlaceholderText("Scan QR, paste the receipt link, or type the plate")
         self.query.returnPressed.connect(self.lookup)
         find_btn=QPushButton("Find visit"); find_btn.clicked.connect(self.lookup)
-        find.addWidget(self.query, 1); find.addWidget(find_btn); l.addLayout(find)
+        find.addWidget(label_for("&Find visit", self.query)); find.addWidget(self.query, 1); find.addWidget(find_btn); l.addLayout(find)
         card=QFrame(); card.setObjectName("card"); card_l=QHBoxLayout(card)
         photos=QVBoxLayout()
-        self.photo=QLabel("No entry photo stored."); self.photo.setMinimumSize(240, 140); self.photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.photo=QLabel("No entry photo stored."); self.photo.setMinimumSize(200, 140); self.photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.photo.setObjectName("video"); self.photo.setAccessibleName("Selected visit entry photograph")
         self.crop=QLabel(""); self.crop.setMinimumHeight(80); self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.crop.setObjectName("video"); self.crop.setAccessibleName("Selected visit plate crop")
         photos.addWidget(self.photo); photos.addWidget(self.crop)
         detail=QVBoxLayout()
         self.kiosk_plate=QLabel("—"); self.kiosk_plate.setStyleSheet("font-size:28px;font-weight:700;letter-spacing:2px")
@@ -1870,16 +599,16 @@ class Sessions(QWidget):
         self.kiosk_due=QLabel(""); self.kiosk_due.setStyleSheet("font-size:18px;font-weight:700")
         self.kiosk_note=QLabel(""); self.kiosk_note.setWordWrap(True)
         self.correct=QLineEdit(); self.correct.setPlaceholderText("Correct plate")
-        actions=QHBoxLayout()
+        actions=QVBoxLayout()
         save_plate=QPushButton("Save corrected plate"); save_plate.clicked.connect(self.correct_plate)
         self.pay_btn=QPushButton("Record payment"); self.pay_btn.clicked.connect(self.pay_visit); self.pay_btn.setEnabled(False)
         self.mobile_btn=QPushButton("Pay with mobile on this computer"); self.mobile_btn.clicked.connect(self.pay_mobile); self.mobile_btn.setEnabled(False)
         can_pay=api.can("payments.create") or api.can("kiosk.use")
         self.pay_btn.setVisible(can_pay)
         self.mobile_btn.setVisible(can_pay)
-        actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn); actions.addStretch()
+        actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn)
         detail.addWidget(self.kiosk_plate); detail.addWidget(self.kiosk_stay); detail.addWidget(self.kiosk_due); detail.addWidget(self.kiosk_note)
-        detail.addWidget(self.correct); detail.addLayout(actions)
+        detail.addWidget(label_for("&Correct plate", self.correct)); detail.addWidget(self.correct); detail.addLayout(actions)
         card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
         l.addWidget(card)
         self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Kind","Status","Receipt","Entry","Due","Paid","Gate"])
@@ -2880,7 +1609,9 @@ class SettingsPage(QWidget):
         super().__init__(); self.window=window; l=QVBoxLayout(self)
         title=QLabel("Settings"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
         form=QFormLayout()
-        combo=QComboBox(); combo.addItems(["Light","Dark"]); combo.currentTextChanged.connect(self.change)
+        combo=QComboBox(); combo.addItems(APPEARANCES); combo.setCurrentText(window.appearance)
+        combo.currentTextChanged.connect(self.change)
+        window.appearanceChanged.connect(lambda name: self._sync_appearance(combo, name))
         form.addRow("Appearance", combo)
         self.timezone=QLineEdit("UTC")
         self.currency=QLineEdit()
@@ -2917,6 +1648,10 @@ class SettingsPage(QWidget):
             self.park_status=QLabel(""); self.park_status.setWordWrap(True); l.addWidget(self.park_status)
         web=QPushButton("Open web UI"); web.clicked.connect(self.open_web); l.addWidget(web)
         l.addStretch()
+    def _sync_appearance(self, combo, name):
+        previous = combo.blockSignals(True)
+        combo.setCurrentText(name)
+        combo.blockSignals(previous)
     def showEvent(self, event):
         super().showEvent(event)
         if api.can("simulation.run") and not getattr(self, "_loaded", False):
@@ -3004,21 +1739,12 @@ class SettingsPage(QWidget):
         webbrowser.open(BASE + "/")
 
 
-class MainWindow(QMainWindow):
+class MainWindow(DesktopShell):
     def __init__(self):
         super().__init__()
         import platform
         system = platform.system() or "desktop"
         self.setWindowTitle(f"SmartPark  ·  {system}")
-        central=QWidget(); self.setCentralWidget(central)
-        root=QHBoxLayout(central); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-        self.nav=QListWidget()
-        avail=available_screen()
-        nav_w=160 if avail is not None and avail.width()<1366 else 190
-        self.nav.setFixedWidth(nav_w)
-        self.stack=QStackedWidget()
-        self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        root.addWidget(self.nav); root.addWidget(self.stack,1)
         self.pages=[]
         self._makers=[]
         if api.nav_page("dashboard"):
@@ -3054,9 +1780,8 @@ class MainWindow(QMainWindow):
         if api.nav_page("sim"):
             self.add_page(api.nav_label("sim", "Testing & Simulation"), SimPage)
         self.nav.currentRowChanged.connect(self._show_page)
-        self.apply_theme("Light")
-        self.statusBar().showMessage("SmartPark Edge")
-        self.setMinimumSize(960, 640)
+        self._filter_navigation("")
+        self.statusBar().showMessage("Choose a workspace page")
         self._install_shortcuts()
         # Do not setGeometry() to the full screen rect. On Windows the frame is
         # taller than the client area, Qt retries, and the window grows forever.
@@ -3069,6 +1794,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
     def add_page(self, name, factory):
         self.nav.addItem(name)
+        self.nav.item(self.nav.count() - 1).setToolTip(name)
         self.stack.addWidget(QWidget())
         self._makers.append(factory)
         self.pages.append(None)
@@ -3080,10 +1806,11 @@ class MainWindow(QMainWindow):
             page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             old=self.stack.widget(index)
             self.stack.removeWidget(old)
-            self.stack.insertWidget(index, page)
+            self.stack.insertWidget(index, page_viewport(page, self.nav.item(index).text()))
             old.deleteLater()
             self.pages[index]=page
         self.stack.setCurrentIndex(index)
+        self.show_page_context(index)
     def _current_page(self):
         idx=self.stack.currentIndex()
         if 0<=idx<len(self.pages):
@@ -3110,9 +1837,12 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(add_act("Open gate", "F8", lambda: self._shortcut_barrier("open"), "Open the selected barrier"))
         menu.addAction(add_act("Close gate", "F9", lambda: self._shortcut_barrier("close"), "Close the selected barrier"))
-        menu.addAction(add_act("Refresh", ["F5", "Ctrl+R"], self._shortcut_refresh, "Reload this page"))
+        refresh_action=add_act("Refresh", ["F5", "Ctrl+R"], self._shortcut_refresh, "Reload this page")
+        menu.addAction(refresh_action)
         menu.addSeparator()
-        menu.addAction(add_act("Keyboard shortcuts", ["F1", "Ctrl+/"], self._shortcut_help))
+        help_action=add_act("Keyboard shortcuts", ["F1", "Ctrl+/"], self._shortcut_help)
+        menu.addAction(help_action)
+        self.finish_shell(refresh_action, help_action)
     def _call_page(self, names):
         page=self._current_page()
         if page is None:
@@ -3171,16 +1901,19 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Keyboard shortcuts",
+            "Ctrl+K    Find a workspace page\n"
+            "Ctrl++ / Ctrl+-    Resize text (Ctrl+0 to reset)\n"
             "Ctrl+N    Add camera, gate, vehicle, or user\n"
             "Ctrl+E    Edit the selected row\n"
             "Delete    Delete the selected row\n"
             "F5        Refresh this page\n"
+            "F11       Focus workspace / restore navigation\n"
+            "Ctrl+M    Hide / restore menu bar\n"
             "F8        Open only the highlighted camera or armed gate side\n"
             "F9        Close only the highlighted camera or armed gate side\n"
             "1 / 2     Select live camera 1 or 2, or gate entry / exit\n"
             "F1        This help",
         )
-    def apply_theme(self,name): QApplication.instance().setStyleSheet(DARK if name=="Dark" else LIGHT)
 
 
 def main():
@@ -3188,7 +1921,7 @@ def main():
     font = QFont()
     font.setPointSize(10)
     app.setFont(font)
-    app.setStyleSheet(LIGHT)
+    apply_appearance(app, "Light")
     try:
         from app.desktop.launch import ensure_background_services
         ensure_background_services()
@@ -3198,7 +1931,10 @@ def main():
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()
-    w.showMaximized()
+    if w.restored_geometry:
+        w.show()
+    else:
+        w.showMaximized()
     if w.nav.count():
         w.nav.setCurrentRow(0)
         w._show_page(0)

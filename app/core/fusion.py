@@ -21,7 +21,7 @@ DEFAULT_FUSION = {
 }
 
 NATIVE_MODES = {"NATIVE", "NATIVE_ONLY"}
-LOCAL_MODES = {"LOCAL", "LOCAL_ONLY", "FASTALPR"}
+LOCAL_MODES = {"LOCAL", "LOCAL_ONLY", "FASTALPR", "FASTALPR_ONLY"}
 
 
 @dataclass
@@ -108,6 +108,8 @@ def resolve_readings(
         )
 
     chosen_mode = (mode or "HYBRID").upper()
+    if chosen_mode in LOCAL_MODES:
+        native, n_conf = "", 0.0
     if operator:
         conf = max(n_conf, l_conf, 1.0)
         return _finish(operator, conf, "OPERATOR_CORRECTED", "operator correction")
@@ -123,8 +125,6 @@ def resolve_readings(
         if local:
             method = "LOCAL_ONLY" if not native else "LOCAL_SELECTED"
             return _finish(local, l_conf, method, "local FastALPR recognition mode")
-        if native:
-            return _finish(native, n_conf, "NATIVE_ONLY", "local mode fallback to native", needs_review=True)
         return _finish("", 0.0, "LOCAL_ONLY", "no plate", needs_review=True)
 
     if native and not local:

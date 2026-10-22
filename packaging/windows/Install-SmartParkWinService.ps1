@@ -32,6 +32,9 @@ function Register-WithNssm {
     & $Nssm set $Name AppDirectory $WorkDir
     & $Nssm set $Name Start SERVICE_AUTO_START
     & $Nssm set $Name AppRestartDelay 5000
+    $profile = [Environment]::GetEnvironmentVariable("SMARTPARK_DEPLOYMENT_PROFILE", "User")
+    if (-not $profile) { $profile = "PRODUCTION" }
+    & $Nssm set $Name AppEnvironmentExtra "SMARTPARK_DEPLOYMENT_PROFILE=$profile" "SMARTPARK_HOME=$InstallDir" "PYTHONPATH=$InstallDir" "SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor"
     & $Nssm start $Name
 }
 
@@ -52,6 +55,10 @@ if (-not (Test-Path $Py64)) {
 
 Write-Host "Registering optional Windows services via nssm (scheduled tasks are not removed)."
 Register-WithNssm -Name "SmartParkSiteService" -Exe $Py64 -Args "-m app.site_service" -WorkDir $InstallDir
+Register-WithNssm -Name "SmartParkRecognitionWorker" -Exe $Py64 -Args "-m app.recognition_worker" -WorkDir $InstallDir
+if (Test-Path (Join-Path $InstallDir "vendor\mediamtx\mediamtx.exe")) {
+    Register-WithNssm -Name "SmartParkMediaService" -Exe $Py64 -Args "-m app.media_service" -WorkDir $InstallDir
+}
 if (Test-Path $Py32) {
     Register-WithNssm -Name "SmartParkHvxHost" -Exe $Py32 -Args "`"$HostPy`"" -WorkDir (Join-Path $InstallDir "tools\hvx_sdk_host")
 } else {

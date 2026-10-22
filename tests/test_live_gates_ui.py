@@ -44,7 +44,7 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn("function pairLaneCameras", html)
 
     def test_desktop_live_gates_replaces_old_lanes_page(self):
-        desktop = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        desktop = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "app" / "desktop").glob("*.py"))
         self.assertIn('add_page(api.nav_label("cameras", "Live Gates"), Cameras)', desktop)
         self.assertNotIn('add_page("Cameras", Cameras)', desktop)
         self.assertNotIn('add_page("Live Gates", Lanes)', desktop)
@@ -55,13 +55,12 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn("Choose camera", desktop)
         self.assertIn("Onboard wizard", desktop)
         self.assertIn("Fill both from lane", desktop)
-        self.assertIn("showPopup", desktop)
         self.assertIn("pair_lane_cameras", desktop)
         self.assertIn("Correct plate", desktop)
         self.assertIn("Manual close", desktop)
         self.assertIn("/cameras/{cam['id']}/plate-corrections", desktop)
         self.assertIn("All cameras", desktop)
-        self.assertIn("The other gate is not recognized", desktop)
+        self.assertIn("videoWorkspace", desktop)
         self.assertIn("/runtime/recognition-scope", desktop)
         self.assertIn("Find visit", desktop)
         self.assertIn("Save tariff", desktop)

@@ -58,11 +58,29 @@ def _camera_enabled(camera_id: int, db=None) -> bool:
     return bool(cfg.get("media_gateway_enabled")) and media_mtx_for_camera(int(camera_id), db)
 
 
+def _sdk_camera(camera_id: int, db=None) -> bool:
+    from app.db import short_session
+    from app.models import Camera
+
+    if db is None:
+        with short_session() as session:
+            return _sdk_camera(camera_id, session)
+    camera = db.get(Camera, int(camera_id))
+    if camera is None:
+        return False
+    profiles = camera.stream_profiles or {}
+    return camera.sdk_handle is not None or any(
+        str(profile.get("protocol") or "").lower() == "sdk"
+        for profile in profiles.values() if isinstance(profile, dict)
+    )
+
+
 def mediamtx_live_active(camera_id: int, db=None) -> bool:
     """True only when MediaMTX is the selected and healthy live-view provider."""
     cfg = _migration_flags(db)
     return (
         _camera_enabled(camera_id, db)
+        and not _sdk_camera(camera_id, db)
         and str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX
         and mediamtx.running()
     )
@@ -70,7 +88,7 @@ def mediamtx_live_active(camera_id: int, db=None) -> bool:
 
 def mediamtx_detect_active(camera_id: int, db=None) -> bool:
     """Use MediaMTX as the detect source only while its local control API is alive."""
-    return _camera_enabled(camera_id, db) and mediamtx.running()
+    return _camera_enabled(camera_id, db) and not _sdk_camera(camera_id, db) and mediamtx.running()
 
 
 def register_camera_source(camera_id: int, source_config: dict[str, Any], db=None) -> dict[str, Any]:
@@ -108,6 +126,12 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
     MJPEG endpoint so operators still have a picture.
     """
     camera_id = int(camera_id)
+    if _sdk_camera(camera_id, db):
+        endpoint = await gateway.get_live_endpoint(camera_id)
+        return {**endpoint, "provider": LIVE_VIEW_DIRECT_LEGACY, "camera_id": camera_id,
+                "transport": "MJPEG", "live_provider": LIVE_PROVIDER_DIRECT_MJPEG,
+                "state": "DIRECT", "mediamtx_selected": False, "mediamtx_running": None,
+                "reason": "SDK camera uses direct JPEG video"}
     if mediamtx_live_active(camera_id, db):
         if not _migration_flags(db).get("webrtc_live_enabled"):
             endpoint = await gateway.get_live_endpoint(camera_id)
@@ -145,16 +169,21 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
 
     endpoint = await gateway.get_live_endpoint(camera_id)
     cfg = _migration_flags(db)
+    sdk_camera = _sdk_camera(camera_id, db) if _camera_enabled(camera_id, db) else False
     return {
         "provider": LIVE_VIEW_DIRECT_LEGACY,
         "camera_id": camera_id,
         **endpoint,
+        "transport": "MJPEG",
         "live_provider": LIVE_PROVIDER_DIRECT_MJPEG if endpoint else LIVE_PROVIDER_OFFLINE,
         "mediamtx_selected": (
             str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX
             and _camera_enabled(camera_id, db)
+            and not sdk_camera
         ),
         "mediamtx_running": mediamtx.running(),
+        "state": "DIRECT" if sdk_camera else ("DEGRADED" if str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX else "DIRECT"),
+        "reason": "SDK camera uses direct JPEG video" if sdk_camera else ("MEDIA PATH OFFLINE: MediaMTX unavailable; using fallback" if str(cfg.get("live_view_provider") or "").upper() == LIVE_VIEW_MEDIAMTX else ""),
     }
 
 
@@ -198,6 +227,9 @@ def media_telemetry(camera_id: int) -> dict[str, Any]:
     Control API is the health source, never a process handle in another service.
     """
     camera_id = int(camera_id)
+    if _sdk_camera(camera_id):
+        return {"camera_id": camera_id, "control_api_ok": None, "state": "DIRECT", "codec": "JPEG",
+                "webrtc": {"compatible": False, "reason": "SDK JPEG source, not a MediaMTX path"}, "roles": {}}
     if not mediamtx.running():
         return {"camera_id": camera_id, "control_api_ok": False, "state": "OFFLINE", "codec": "",
                 "webrtc": {"compatible": None, "reason": "MediaMTX not running"}, "roles": {}}

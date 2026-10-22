@@ -20,6 +20,7 @@ from app.domain.recognition import (
 from app.infrastructure.hardware.receipt_printers import receipt_printer_for
 from app.models import Camera, Gate, VehicleCapture
 from app.services.simulation import parking_settings
+from app.services.lane_timing import timed_capture
 
 
 def _confidence_class(value: float) -> str:
@@ -37,6 +38,8 @@ def event_from_capture(camera: Camera, row: VehicleCapture, *, source: str = "ca
     needs_review = bool(box.get("needs_review") or box.get("pending_confirmation"))
     klass = _confidence_class(confidence)
     event_id = str(row.event_id or f"capture-{row.id}")
+    snapshot = (row.snapshot_path or "").replace("\\", "/")
+    crop = (row.crop_path or "").replace("\\", "/")
     return NormalizedRecognitionEvent(
         event_id=event_id,
         site_id=int(camera.site_id),
@@ -49,8 +52,8 @@ def event_from_capture(camera: Camera, row: VehicleCapture, *, source: str = "ca
         confidence=confidence,
         bbox=box or None,
         vehicle_detected=True,
-        image_ref=f"/media/{row.snapshot_path}" if row.snapshot_path else None,
-        plate_crop_ref=f"/media/{row.crop_path}" if row.crop_path else None,
+        image_ref=f"/media/{snapshot}" if snapshot else None,
+        plate_crop_ref=f"/media/{crop}" if crop else None,
         confidence_class=klass,
         needs_review=needs_review,
         accepted=bool(row.plate) and not needs_review and klass != CONF_LOW,
@@ -60,6 +63,7 @@ def event_from_capture(camera: Camera, row: VehicleCapture, *, source: str = "ca
     )
 
 
+@timed_capture
 async def handle_live_entry(
     db: Session,
     *,
@@ -87,6 +91,7 @@ async def handle_live_entry(
     )
 
 
+@timed_capture
 async def handle_live_exit(
     db: Session,
     *,

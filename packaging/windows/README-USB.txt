@@ -5,9 +5,10 @@ This kit is the SmartPark Edge Windows install.
 Copy this whole folder onto a USB stick. On the parking PC:
 
   1. Open the USB folder
-  2. If this PC already ran SmartPark, wipe data first (not only close the window):
-       double-click  Wipe-SmartPark.bat
-     Type YES. That deletes the database, media, logs, FastALPR cache, and the old app.
+  2. If this PC already ran SmartPark, keep its database and configuration.
+     Do NOT run Wipe-SmartPark.bat for an upgrade. Wiping deletes cameras,
+     gate assignment, parking records, media and logs. Use it only for a
+     deliberate reset after backing up the site.
   3. Double-click  Install-SmartPark.bat
   4. Open the Desktop shortcut  SmartPark Edge
 
@@ -15,6 +16,8 @@ The installer copies the app, then sets user environment variables
 (SMARTPARK_HOME, PATH for Python/Qt/SDK DLLs, QT_PLUGIN_PATH).
 It also places a Startup shortcut so the app opens at Windows logon.
 Re-run Install-SmartPark.bat if a previous install did not start.
+The Desktop shortcut "SmartPark logs" opens the service and camera logs.
+You can also double-click Open-SmartParkLogs.bat in this USB folder.
 
 If the window never opens, run Start-SmartPark.bat from the install
 folder and check %ProgramData%\SmartParkEdge\logs\launch.log

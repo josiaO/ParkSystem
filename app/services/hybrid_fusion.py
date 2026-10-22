@@ -109,6 +109,9 @@ async def _apply(camera, outcome: FusionOutcome, evidence: _Evidence, db) -> dic
     capture = capture_from_readings(native, local, outcome.decision, image_id=int(native.get("image_id") or 0))
     capture["fusion"] = {**capture.get("fusion", {}), "paired": outcome.paired, "coordinator": "site-service"}
     capture["source"] = "hybrid"
+    for key in ("visit_id", "timeline", "frame_seq", "generation", "detector_confidence", "frame_confidence", "timings"):
+        if local.get(key) is not None:
+            capture[key] = local[key]
     event_id = str(local.get("event_id") or native.get("event_id") or "")
     if event_id:
         capture["event_id"] = event_id

@@ -678,7 +678,6 @@
           <button class="secondary" type="button" id="onboard-camera">Onboard wizard</button>
           <button class="secondary" type="button" id="discover-cameras">Discover</button>
           <button class="secondary" type="button" id="add-ip-cameras">Add IP cameras &amp; connect</button>
-          <button class="secondary" type="button" id="seed-site">Add site cameras</button>
           <button class="secondary" type="button" id="connect-all">Connect all</button>
           <button class="secondary" type="button" id="refresh-cameras">Refresh <kbd>F5</kbd></button>
           <button class="secondary tech-only" type="button" id="sdk-connect">Connect</button>
@@ -1390,20 +1389,60 @@
     // One WHEP session per pane. Closed before any other transport starts.
     const whepSessions = [null, null];
     const liveGenerations = [0, 0];
+    const plateRequests = new Set();
+    const liveRetryCounts = {};
 
-    async function whepStart(video, whepUrl, onState) {
+    function whepFetch(url, options) {
+      const target = new URL(url, window.location.href);
+      const headers = { ...(options.headers || {}) };
+      if (target.origin === window.location.origin && state.token) headers.Authorization = `Bearer ${state.token}`;
+      return fetch(target, { ...options, headers });
+    }
+
+    function whepClose(session) {
+      if (!session) return;
+      session.closed = true;
+      if (session.abort) session.abort.abort();
+      clearTimeout(session.signalingTimer);
+      clearTimeout(session.videoTimer);
+      clearTimeout(session.disconnectTimer);
+      clearTimeout(session.statsTimer);
+      try { session.pc.ontrack = null; session.pc.onconnectionstatechange = null; session.pc.close(); } catch (_) {}
+      if (session.location && !session.deletedLocation) {
+        session.deletedLocation = true;
+        whepFetch(session.location, { method: "DELETE", signal: AbortSignal.timeout(3000) }).catch(() => {});
+      }
+    }
+
+    async function whepStart(video, whepUrl, onState, onSession) {
       if (typeof RTCPeerConnection === "undefined") throw new Error("WebRTC unavailable in this browser");
       const pc = new RTCPeerConnection({ iceServers: [] });
-      const session = { pc, location: null, closed: false, whepUrl };
+      const session = { pc, location: null, closed: false, whepUrl, abort: new AbortController() };
+      if (onSession) onSession(session);
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.addTransceiver("audio", { direction: "recvonly" });
       pc.ontrack = (evt) => {
         if (session.closed) return;
-        if (evt.streams && evt.streams[0]) video.srcObject = evt.streams[0];
-        else if (!video.srcObject) video.srcObject = new MediaStream([evt.track]);
+        if (evt.track.kind !== "video") return;
+        session.videoTrack = evt.track;
+        video.srcObject = new MediaStream([evt.track]);
         video.play().catch(() => {});
       };
-      pc.onconnectionstatechange = () => { if (!session.closed && onState) onState(pc.connectionState, session); };
+      video.onloadeddata = () => {
+        if (!session.closed && session.videoTrack && video.videoWidth > 0) {
+          session.videoReady = true;
+          clearTimeout(session.videoTimer);
+          onState("video", session);
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        if (session.closed || !onState) return;
+        clearTimeout(session.disconnectTimer);
+        onState(pc.connectionState, session);
+        if (pc.connectionState === "disconnected") session.disconnectTimer = setTimeout(() => {
+          if (!session.closed) onState("failed", session);
+        }, 4000);
+      };
       try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -1414,23 +1453,50 @@
           if (pc.iceGatheringState === "complete") { clearTimeout(timer); resolve(); }
         };
       });
-      const res = await fetch(whepUrl, {
+      session.signalingTimer = setTimeout(() => session.abort.abort(), 8000);
+      const res = await whepFetch(whepUrl, {
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
         body: pc.localDescription.sdp,
-        signal: AbortSignal.timeout(8000),
+        signal: session.abort.signal,
       });
-      if (!res.ok) throw new Error(`WHEP ${res.status}`);
+      if (!res.ok) throw new Error(`WHEP SIGNALING FAILED (${res.status})`);
       session.location = res.headers.get("Location");
       if (session.location && !/^https?:/i.test(session.location)) {
-        session.location = new URL(session.location, whepUrl).toString();
+        session.location = new URL(session.location, new URL(whepUrl, window.location.href)).toString();
       }
       await pc.setRemoteDescription({ type: "answer", sdp: await res.text() });
+      clearTimeout(session.signalingTimer);
+      if (session.closed) { whepClose(session); throw new Error("WHEP session closed"); }
+      if (!session.videoReady) session.videoTimer = setTimeout(() => {
+        if (!session.closed && !session.videoReady) onState(session.videoTrack ? "no-frames" : "no-video-track", session);
+      }, 10000);
+      if (typeof pc.getStats === "function") {
+        let lastFrames = 0;
+        let lastProgress = performance.now();
+        const checkFrames = async () => {
+          if (session.closed) return;
+          try {
+            const stats = await pc.getStats();
+            if (session.closed) return;
+            stats.forEach((report) => {
+              if (report.type === "inbound-rtp" && (report.kind === "video" || report.mediaType === "video") && report.framesDecoded > lastFrames) {
+                lastFrames = report.framesDecoded;
+                lastProgress = performance.now();
+              }
+            });
+            if (performance.now() - lastProgress > 8000) {
+              onState("no-frames", session);
+              return;
+            }
+          } catch (_) {}
+          if (!session.closed) session.statsTimer = setTimeout(checkFrames, 2000);
+        };
+        session.statsTimer = setTimeout(checkFrames, 2000);
+      }
       return session;
       } catch (error) {
-        session.closed = true;
-        pc.close();
-        if (session.location) fetch(session.location, { method: "DELETE" }).catch(() => {});
+        whepClose(session);
         throw error;
       }
     }
@@ -1439,10 +1505,7 @@
       const session = whepSessions[slot];
       whepSessions[slot] = null;
       if (!session) return;
-      session.closed = true;
-      try { session.pc.ontrack = null; session.pc.onconnectionstatechange = null; session.pc.close(); } catch (_) {}
-      // Release the MediaMTX reader promptly so reader counts settle after a switch.
-      if (session.location) fetch(session.location, { method: "DELETE" }).catch(() => {});
+      whepClose(session);
     }
 
     function whepCodec(session) {
@@ -1885,6 +1948,7 @@
       if (prev) { try { URL.revokeObjectURL(prev); } catch (_) {} liveObjectUrls[slot] = ""; }
       // Continuous MJPEG stream — smoother than 40ms snapshot polling.
       els.img.onload = () => {
+        liveRetryCounts[slot] = 0;
         if (els.status) els.status.textContent = "Live";
         drawLiveOverlay(slot);
       };
@@ -1892,13 +1956,14 @@
         if (els.img.dataset.cameraId !== String(id)) return;
         if (els.status) els.status.textContent = "Reconnecting live stream…";
         if (snapshotTimers[slot]) clearTimeout(snapshotTimers[slot]);
+        liveRetryCounts[slot] = (liveRetryCounts[slot] || 0) + 1;
         // Retry the persistent MJPEG stream. Never switch to 120 ms snapshot
         // polling: that restarts/loads decoders and is exactly the backlog path
         // that made live video progressively slow.
         snapshotTimers[slot] = setTimeout(() => {
           snapshotTimers[slot] = null;
           if (els.img.dataset.cameraId === String(id)) startMjpegLive(slot, id);
-        }, 1000);
+        }, Math.min(10000, 1000 * (2 ** Math.min(liveRetryCounts[slot] - 1, 4))));
       };
       els.img.src = mediaUrl(`/cameras/${id}/live.mjpeg`) + "&t=" + Date.now();
     }
@@ -1944,7 +2009,7 @@
       liveWatchIds[slot] = id;
       els.status.textContent = "Opening live view…";
       els.img.dataset.cameraId = String(id);
-      watchCamera(id);
+      if (prev !== id) watchCamera(id);
       let ep = null;
       try { ep = await api(`/cameras/${id}/live/endpoint`); } catch (_) {}
       if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) return; // switched while resolving
@@ -1955,28 +2020,27 @@
         els.img.style.display = "none";
         els.webrtc.style.display = "block";
         const codec = ep.codec ? ` · ${ep.codec}` : "";
-        const stateLabel = ep.state && ep.state !== "LIVE" ? ep.state : "LIVE";
+        const stateLabel = ep.state && ep.state !== "LIVE" ? ep.state : "CONNECTING";
         els.status.textContent = `${stateLabel} (WebRTC${codec})`;
         try {
           const session = await whepStart(els.webrtc, ep.whep || `${ep.webrtc.replace(/\/$/, "")}/whep`, (connState, activeSession) => {
             if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) return;
-            if (connState === "connected") {
+            if (connState === "video") {
               const seen = whepCodec(activeSession) || ep.codec || "";
               els.status.textContent = `LIVE (WebRTC${seen ? " · " + seen : ""})`;
               reportViewerTransport(id, "WEBRTC");
             } else if (connState === "disconnected") {
               els.status.textContent = "DEGRADED (WebRTC reconnecting)";
-            } else if (connState === "failed" || connState === "closed") {
-              els.status.textContent = "OFFLINE (WebRTC lost) · retrying…";
+            } else if (["failed", "closed", "no-frames", "no-video-track"].includes(connState)) {
+              const reason = connState === "no-video-track" ? "MEDIA RECEIVED BUT VIDEO TRACK MISSING" : connState === "no-frames" ? "CODEC UNSUPPORTED OR NO VIDEO FRAMES" : "ICE FAILED";
+              els.status.textContent = `${reason} · retrying…`;
+              whepClose(activeSession);
               whepStop(slot);
               setTimeout(() => { if (liveWatchIds[slot] === id && liveGenerations[slot] === generation) startLiveSlot(slot, camera, true); }, 3000);
             }
-          });
-          if (liveWatchIds[slot] !== id) { session.closed = true; try { session.pc.close(); } catch (_) {} return; }
+          }, (openingSession) => { whepSessions[slot] = openingSession; });
           if (liveWatchIds[slot] !== id || liveGenerations[slot] !== generation) {
-            session.closed = true;
-            session.pc.close();
-            if (session.location) fetch(session.location, {method: "DELETE"}).catch(() => {});
+            whepClose(session);
             return;
           }
           whepSessions[slot] = session;
@@ -1990,8 +2054,9 @@
           whepStop(slot);
           els.status.textContent = `DEGRADED (WebRTC unavailable: ${err.message}) · DIRECT_MJPEG`;
           reportViewerTransport(id, "MJPEG");
+          setTimeout(() => { if (liveWatchIds[slot] === id && liveGenerations[slot] === generation) startLiveSlot(slot, camera, true); }, 5000);
         }
-      } else if (ep && ep.provider === "MEDIAMTX" && ep.state === "DEGRADED" && ep.reason) {
+      } else if (ep && ep.reason) {
         els.status.textContent = `DEGRADED · ${ep.reason}`;
       }
       if (els.webrtc) {
@@ -2144,9 +2209,11 @@
 
     function pushRecognitionScope(gateId) {
       const hint = document.getElementById("recognition-scope-hint");
-      api("/runtime/recognition-scope", {
-        method: "POST",
-        body: JSON.stringify({ gate_id: gateId ? Number(gateId) : null }),
+      api("/runtime/recognition-scope").then((body) => {
+        if (body.deployment_profile === "DEVELOPMENT" && !body.pinned) return api("/runtime/recognition-scope", {
+          method: "POST", body: JSON.stringify({ gate_id: gateId ? Number(gateId) : null }),
+        });
+        return body;
       }).then((body) => {
         if (hint) hint.textContent = (body && body.detail) || "";
       }).catch((err) => {
@@ -2295,14 +2362,15 @@
     async function refreshPlates(slot) {
       const camera = liveCameras[slot];
       const els = paneEls(slot);
-      if (!camera) return;
+      if (!camera || plateRequests.has(slot)) return;
+      plateRequests.add(slot);
       try {
         if (alprInstalled === null) {
-          try { alprInstalled = Boolean((await api("/alpr/status")).installed); }
+          try { alprInstalled = Boolean((await api("/alpr/status", { timeoutMs: 5000 })).installed); }
           catch (_) { alprInstalled = false; }
         }
-        const data = await api(`/cameras/${camera.id}/plates`);
-        if (liveCameras[slot] && liveCameras[slot].id !== camera.id) return;
+        const data = await api(`/cameras/${camera.id}/plates`, { timeoutMs: 5000 });
+        if (!liveCameras[slot] || liveCameras[slot].id !== camera.id) return;
         const camName = (camera.name || "Camera");
         if (els.bizCamera) els.bizCamera.textContent = camName;
         if (els.online) {
@@ -2329,7 +2397,9 @@
         }
         renderSlotCar(slot, data);
       } catch (err) {
-        if (els.status) els.status.textContent = err.message;
+        if (els.status && liveCameras[slot] && liveCameras[slot].id === camera.id) els.status.textContent = err.message;
+      } finally {
+        plateRequests.delete(slot);
       }
     }
 
@@ -3109,9 +3179,10 @@
 
     function setManageVisibility() {
       document.getElementById("add-camera").style.display = can("cameras.manage") ? "" : "none";
+      document.getElementById("discover-cameras").style.display = can("cameras.manage") ? "" : "none";
+      document.getElementById("add-ip-cameras").style.display = can("cameras.manage") ? "" : "none";
       const onboardBtn = document.getElementById("onboard-camera");
       if (onboardBtn) onboardBtn.style.display = can("cameras.manage") ? "" : "none";
-      document.getElementById("seed-site").style.display = can("cameras.manage") ? "" : "none";
       document.getElementById("add-gate").style.display = can("gates.manage") ? "" : "none";
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
       const paySession = document.getElementById("pay-session");
@@ -4591,45 +4662,6 @@
         result.textContent = `Added ${data.created.length}. Connected ${connected.length} for live video + FastALPR.\nHVX cameras are unchanged — use Connect all for NetSDK login.`;
         await loadCameras();
         if (liveTabVisible()) startDualLive(true);
-      } catch (err) {
-        error.textContent = err.message;
-      }
-    });
-    document.getElementById("seed-site").addEventListener("click", async () => {
-      const error = document.getElementById("camera-error");
-      const result = document.getElementById("camera-result");
-      error.textContent = "";
-      const site = [
-        { name: "1# Entry", ip_address: "192.168.1.144", lane_direction: "ENTRY", controller_ip: "192.168.1.61", display_ip: "192.168.1.62" },
-        { name: "1# Exit", ip_address: "192.168.1.145", lane_direction: "EXIT", controller_ip: "192.168.1.69", display_ip: "192.168.1.70" },
-        { name: "2# Entry", ip_address: "192.168.1.49", lane_direction: "ENTRY", controller_ip: "192.168.1.65", display_ip: "192.168.1.66" },
-        { name: "2# Exit", ip_address: "192.168.1.50", lane_direction: "EXIT", controller_ip: "192.168.1.67", display_ip: "192.168.1.68" },
-      ];
-      try {
-        let data;
-        try {
-          data = await api("/cameras/seed-site", { method: "POST", body: "{}" });
-        } catch (err) {
-          if (!/405|404/.test(err.message) && err.status !== 404 && err.status !== 405) throw err;
-          const created = [];
-          const skipped = [];
-          for (const row of site) {
-            try {
-              created.push(await api("/cameras", { method: "POST", body: JSON.stringify({
-                name: row.name, ip_address: row.ip_address, sdk_port: 30000,
-                username: "admin", password: "admin", lane_direction: row.lane_direction,
-                controller_ip: row.controller_ip, display_ip: row.display_ip,
-              }) }));
-            } catch (addErr) {
-              if (addErr.status === 409) skipped.push(row);
-              else throw addErr;
-            }
-          }
-          data = { created, skipped, note: "Added through POST /cameras (older API)." };
-        }
-        result.classList.remove("hidden");
-        result.textContent = `Added ${data.created.length} site camera(s). Skipped ${data.skipped.length}.\n${data.note || ""}`;
-        loadCameras();
       } catch (err) {
         error.textContent = err.message;
       }

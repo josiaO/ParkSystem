@@ -380,6 +380,8 @@ def start_entry(
         return dup, False
     _commit_transition(db, row, IDENTITY_RESOLVED, policy)
     _commit_transition(db, row, SESSION_CREATED, policy)
+    from app.services.lane_timing import mark
+    mark("session_created", session_id=row.id)
     return row, True
 
 

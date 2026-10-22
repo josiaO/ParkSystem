@@ -1,4 +1,7 @@
-"""Site lane layout: each numbered lane is entry + exit.
+"""Opt-in setup fixtures and shared camera discovery helpers.
+
+Production camera identity and topology come from administrator-managed records,
+not these test addresses or legacy INI defaults.
 
 Each side has three devices. Only the camera is an SDK device:
 
@@ -16,7 +19,7 @@ from pathlib import Path
 
 from app.config import settings
 
-# Canonical IPs when a site INI is not shipped with the USB kit.
+# Development fixture addresses; production uses admin-managed camera records.
 _CANONICAL_LANES = (
     {
         "name": "1#",
@@ -163,6 +166,13 @@ def _lanes_from_ini(path: Path) -> tuple[dict, ...] | None:
 
 
 def load_site_lanes(ini_path: Path | None = None) -> tuple[dict, ...]:
+    if settings.deployment_profile != "DEVELOPMENT":
+        return ()
+    return seed_site_lanes(ini_path)
+
+
+def seed_site_lanes(ini_path: Path | None = None) -> tuple[dict, ...]:
+    """Load setup examples only for explicit seeding or development defaults."""
     parsed = _lanes_from_ini(ini_path or site_ini_path())
     if parsed is not None:
         return parsed
@@ -198,14 +208,20 @@ KNOWN_SITE_CAMERAS = flatten_site_cameras()
 
 
 def site_camera_ips() -> tuple[str, ...]:
+    if settings.deployment_profile != "DEVELOPMENT":
+        return ()
     return tuple(row["ip_address"] for row in KNOWN_SITE_CAMERAS)
 
 
 def site_controller_ips() -> tuple[str, ...]:
+    if settings.deployment_profile != "DEVELOPMENT":
+        return ()
     return tuple(row["controller_ip"] for row in KNOWN_SITE_CAMERAS if row["controller_ip"])
 
 
 def site_display_ips() -> tuple[str, ...]:
+    if settings.deployment_profile != "DEVELOPMENT":
+        return ()
     return tuple(row["display_ip"] for row in KNOWN_SITE_CAMERAS if row["display_ip"])
 
 
@@ -219,7 +235,7 @@ def side_label(lane_direction: str | None) -> str:
 
 def site_layout() -> dict:
     lanes = []
-    for lane in KNOWN_SITE_LANES:
+    for lane in (KNOWN_SITE_LANES if settings.deployment_profile == "DEVELOPMENT" else ()):
         entry = next(side for side in lane["sides"] if side["lane_direction"] == "ENTRY")
         exit_side = next(side for side in lane["sides"] if side["lane_direction"] == "EXIT")
         lanes.append(
@@ -355,6 +371,8 @@ async def lan_sdk_candidates(port: int) -> list[str]:
 
 
 def match_known(ip: str) -> dict | None:
+    if settings.deployment_profile != "DEVELOPMENT":
+        return None
     for row in KNOWN_SITE_CAMERAS:
         if row["ip_address"] == ip:
             return dict(row)

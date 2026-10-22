@@ -99,6 +99,7 @@ class StreamSession:
     live: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("live", maxsize=1))
     detect: LatestFrameBuffer = field(default_factory=lambda: LatestFrameBuffer("detect", maxsize=1))
     producer: asyncio.Task | None = None
+    producer_spec: CameraLiveSpec | None = None
     viewers: int = 0
     detect_consumers: int = 0
     last_view_at: float = 0.0
@@ -367,11 +368,12 @@ class LocalMediaGateway:
         self.start_watchers()
         row = self._session_for(spec)
         existing = row.producer
-        if existing is not None and not existing.done() and row.spec == spec:
+        if existing is not None and not existing.done() and row.producer_spec is not None and replace(row.producer_spec, need_detect=spec.need_detect) == spec:
             return
         if existing is not None and not existing.done():
             existing.cancel()
         row.spec = spec
+        row.producer_spec = spec
         try:
             row.producer = asyncio.get_running_loop().create_task(
                 self._produce(row), name=f"media-{spec.id}",
