@@ -41,6 +41,7 @@ smartpark.db
 data/
 logs/
 media/
+!app/infrastructure/media/
 *.log
 
 # FastALPR models (downloaded by packaging/make_windows_kit.sh)

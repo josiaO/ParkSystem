@@ -39,8 +39,21 @@ def note_reading(
     return track.observe(plate, now, confidence=confidence).publish
 
 
-def note_reading_detail(track: PlateTrack, plate: str, now: float, *, confidence: float = 1.0) -> TrackDecision:
-    return track.observe(plate, now, confidence=confidence)
+def note_reading_detail(track: PlateTrack, plate: str, now: float, *, confidence: float = 1.0, allow_single: bool = True) -> TrackDecision:
+    return track.observe(plate, now, confidence=confidence, allow_single=allow_single)
+
+
+def strong_read(event: dict, plate_policy: dict) -> bool:
+    from app.core.plate import apply_site_plate
+
+    box = event.get("bbox") or {}
+    crop = box.get("crop") or {}
+    valid = apply_site_plate(str(event.get("normalized_plate") or ""),
+                             validation=str(plate_policy.get("plate_validation") or "NONE"))
+    return (float(event.get("detector_confidence") or 0) >= 0.85
+            and int(crop.get("x2", 0)) - int(crop.get("x1", 0)) >= 80
+            and int(crop.get("y2", 0)) - int(crop.get("y1", 0)) >= 20
+            and bool(valid.get("validation_ok")))
 
 
 _owns_cache: dict[int, tuple[float, bool]] = {}
@@ -95,9 +108,11 @@ def worker_owns_software_reads(camera_id: int) -> bool:
     with SessionLocal() as db:
         from app.models import Camera
         camera = db.get(Camera, camera_id)
+        health = worker_health()
+        claimed = health.get("ok") and camera_id in health.get("claimed_camera_ids", [])
         enabled = (bool(flags(db).get("fastalpr_new_pipeline_enabled"))
                    and camera is not None and _software_camera(camera, db)
-                   and mediamtx_detect_active(camera_id, db) and _worker_ready(camera_id))
+                   and mediamtx_detect_active(camera_id, db) and (claimed or _worker_ready(camera_id)))
     _owns_cache[camera_id] = (now, enabled)
     return enabled
 
@@ -157,11 +172,14 @@ def _camera_rows() -> list[dict]:
     from app.db import SessionLocal
     from app.models import Camera
     from app.services.flags import media_mtx_for_camera
+    from app.infrastructure.media.registry import _sdk_camera
     from app.services.site_policy import site_policy
 
     rows: list[dict] = []
     with SessionLocal() as db:
         for camera in db.query(Camera).filter(Camera.enabled == True).all():  # noqa: E712
+            if _sdk_camera(int(camera.id), db):
+                continue
             if not media_mtx_for_camera(int(camera.id), db) or not _software_camera(camera, db):
                 continue
             from app.services.node_scope import camera_in_recognition_scope
@@ -190,6 +208,8 @@ def _camera_rows() -> list[dict]:
 def _write_health(body: dict) -> None:
     from app.config import settings
 
+    from app.services.process_metrics import snapshot
+    body["resources"] = {**snapshot(), "decoder_count": sum(bool(row.get("decoder_pid")) for row in body.get("cameras", []))}
     path = settings.data_dir / "recognition-worker.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
@@ -243,6 +263,7 @@ async def _infer_camera(
         high_confidence=rec_policy.high_min,
     )
     from app.services.recognition_runtime import runtime
+    from app.services.lane_timing import mark, observe_duration
     lane = runtime.lane(camera_id)
     lane.inflight = None
     runtime.scheduler.release(camera_id)
@@ -266,18 +287,25 @@ async def _infer_camera(
         nonlocal backoff
         while not stop.is_set():
             stream = None
+            decoder_started = time.monotonic()
+            first_frame = True
+            stats["decoder_started_at"] = time.time()
             try:
                 stream = iter_jpegs(url, sample_fps=sample_fps, scale=960, on_pid=_note_pid)
                 async for jpeg in stream:
                     if stop.is_set():
                         break
                     lane.offer_frame(jpeg, source="mediamtx")
+                    if first_frame:
+                        stats["decoder_first_frame_ms"] = round((time.monotonic() - decoder_started) * 1000, 1)
+                        first_frame = False
                     ready.set()
                     if stats.get("state") not in {"READY", "DEGRADED"}:
                         stats["state"] = "STREAMING"
                     sampled = int(stats.get("frames_sampled") or 0) + 1
                     elapsed = max(time.time() - float(stats.get("started_at") or time.time()), 0.001)
                     stats.update(
+                        decoder_uptime_seconds=round(time.monotonic() - decoder_started, 1),
                         last_frame_at=time.time(),
                         frame_buffer=frames.snapshot(),
                         frame_seq=frames.seq,
@@ -307,11 +335,20 @@ async def _infer_camera(
     probe_failures = 0
     confirmed_visit_id = lane.visit.visit_id if lane.visit.state == "EVENT_PUBLISHED" else ""
 
-    async def _with_limiter(call):
-        if inference_limiter is None:
+    async def _with_limiter(call, captured_at: float = 0.0):
+        async def fresh_call():
+            if captured_at and (time.monotonic() - captured_at) * 1000 > rec_policy.stale_frame_ms:
+                call.close()
+                stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
+                raise ValueError("stale-input-frame")
             return await call
-        async with inference_limiter:
-            return await call
+        try:
+            if inference_limiter is None:
+                return await fresh_call()
+            async with inference_limiter:
+                return await fresh_call()
+        finally:
+            call.close()
 
     async def _infer() -> None:
         nonlocal last_probe, probe_failures, confirmed_visit_id
@@ -340,7 +377,7 @@ async def _infer_camera(
                 async def _probe_present():
                     return await _with_limiter(asyncio.to_thread(
                         plate_still_present, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
-                    ))
+                    ), ticket.captured_at)
 
                 probe = asyncio.create_task(_probe_present())
                 try:
@@ -417,7 +454,7 @@ async def _infer_camera(
 
             locate_task = asyncio.create_task(_with_limiter(asyncio.to_thread(
                 locate_plate_boxes, ticket.jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
-            )))
+            ), ticket.captured_at))
             try:
                 boxes, located = await asyncio.shield(locate_task)
             except asyncio.CancelledError:
@@ -435,14 +472,27 @@ async def _infer_camera(
                 continue
             if not located.get("available"):
                 # Do not OCR the live frame when the detector cannot crop a plate.
-                stats.update(state="READY", last_inference_at=time.time(), recognition_inflight=False)
+                stats.update(state="DEGRADED", last_inference_at=time.time(), recognition_inflight=False,
+                             last_error="plate detector unavailable")
                 stats["arrival"] = "detector-wait"
                 runtime.finish(ticket, plate="")
                 await asyncio.sleep(interval)
                 continue
+            if ticket.frame_age_ms() > rec_policy.stale_frame_ms:
+                runtime.finish(ticket, plate="", stale_frame_ms=rec_policy.stale_frame_ms)
+                stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
+                stats["last_inference_at"] = time.time()
+                continue
             # A healthy empty-lane detector is progress, even without OCR.
             # Otherwise the supervisor restarts idle lanes every few seconds.
             stats.update(state="READY", last_inference_at=time.time())
+            observe_duration(stats, "detector", located.get("detector_ms", 0))
+            if boxes:
+                lane.visit.observe(presence=True)
+                if stats.get("timeline", {}).get("visit_id") != lane.visit.visit_id:
+                    stats["timeline"] = {"visit_id": lane.visit.visit_id, "camera_id": camera_id,
+                                         "direction": camera.get("lane_direction", "ENTRY")}
+                    mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
             phase = arrival.observe(boxes[0] if boxes else None, time.monotonic())
             stats["arrival"] = phase
             if phase == "absent":
@@ -464,6 +514,11 @@ async def _infer_camera(
                 await asyncio.sleep(interval)
                 continue
             started = time.monotonic()
+            timeline = stats.get("timeline", {})
+            mark("frame_decoded", timeline, at=ticket.captured_at)
+            mark("frame_selected", timeline, at=ticket.recognition_started_at)
+            mark("detector_started", timeline, at=located.get("detector_started_at", ticket.recognition_started_at))
+            mark("detector_complete", timeline, at=located.get("detector_finished_at"))
             try:
                 event = await asyncio.wait_for(
                     _with_limiter(provider.process({
@@ -476,7 +531,7 @@ async def _infer_camera(
                         "detect_roi": detect_roi,
                         "detect_zoom": detect_zoom,
                         "plate_boxes": boxes if located.get("available") else None,
-                    })),
+                    }), ticket.captured_at),
                     timeout=stall,
                 )
             except asyncio.TimeoutError:
@@ -504,12 +559,21 @@ async def _infer_camera(
                 arrival.rearm()
                 stats["stale_dropped"] = int(stats.get("stale_dropped", 0)) + 1
                 continue
+            timing = event.get("timings") or {}
+            for stage in ("crop", "ocr"):
+                if timing.get(f"{stage}_ms") is not None:
+                    observe_duration(stats, stage, timing[f"{stage}_ms"])
+            for stage, key in (("crop_ready", "crop_ready_at"), ("ocr_started", "ocr_started_at"), ("ocr_complete", "ocr_finished_at")):
+                if timing.get(key) is not None:
+                    mark(stage, timeline, at=timing[key])
+            observe_duration(stats, "recognition", lane.last_infer_ms)
+            strong = strong_read(event, camera.get("plate_policy") or {})
             if event.get("ok") is False and not plate:
                 arrival.rearm()
                 await asyncio.sleep(interval)
                 continue
             decision = note_reading_detail(
-                track, plate, time.monotonic(), confidence=float(event.get("confidence") or 0),
+                track, plate, time.monotonic(), confidence=float(event.get("confidence") or 0), allow_single=strong,
             )
             stats["consensus"] = decision.as_dict()
             if not plate:
@@ -530,7 +594,14 @@ async def _infer_camera(
                 arrival.note_ocr(published=False)
                 await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
                 continue
+            if lane.visit.event_published:
+                lane.note_duplicate()
+                confirmed_visit_id = lane.visit.visit_id
+                continue
             try:
+                mark("consensus_confirmed", timeline)
+                observe_duration(stats, "vehicle_to_plate", timeline["stages_ms"]["consensus_confirmed"])
+                event["timeline"] = timeline
                 event["frame_plate"] = event.get("normalized_plate")
                 event["frame_confidence"] = event.get("confidence")
                 event["normalized_plate"] = decision.plate
@@ -545,6 +616,7 @@ async def _infer_camera(
                 event["frame_seq"] = ticket.frame_seq
                 event["generation"] = ticket.generation
                 await asyncio.to_thread(_publish_frame, event, ticket.jpeg)
+                mark("event_persisted", timeline)
                 stats["published"] = int(stats.get("published") or 0) + 1
                 lane.note_published()
                 lane.visit.mark_published(decision.plate)
@@ -568,6 +640,7 @@ async def _infer_camera(
         infer_task.cancel()
         stop_task.cancel()
         await asyncio.gather(decode_task, infer_task, stop_task, return_exceptions=True)
+        runtime.scheduler.release(camera_id)
 
 
 async def _loop() -> None:
@@ -582,11 +655,38 @@ async def _loop() -> None:
     # avoiding CPU oversubscription.
     inference_limiter = asyncio.Semaphore(int(settings.recognition_max_concurrency))
     from app.services.recognition_runtime import runtime
+    retiring: dict[int, asyncio.Task] = {}
+    warmup_task: asyncio.Task | None = None
+    warmup_status: dict = {"ready": False}
+    from sqlalchemy.exc import OperationalError
     try:
         while True:
-            with SessionLocal() as db:
-                enabled = bool(flags(db).get("fastalpr_new_pipeline_enabled"))
-            wanted = _camera_rows() if enabled else []
+            try:
+                with SessionLocal() as db:
+                    enabled = bool(flags(db).get("fastalpr_new_pipeline_enabled"))
+                    from app.services.node_scope import describe_recognition_scope
+                    scope = describe_recognition_scope(db)
+                wanted = _camera_rows() if enabled else []
+            except OperationalError:
+                _write_health({"enabled": False, "state": "WAITING_FOR_DATABASE", "cameras": []})
+                await asyncio.sleep(1.0)
+                continue
+            claimed_camera_ids = [int(row["id"]) for row in wanted]
+            if wanted and warmup_task is None:
+                from app.services.alpr import warmup
+                warmup_task = asyncio.create_task(asyncio.to_thread(warmup))
+            if warmup_task is not None and warmup_task.done():
+                try:
+                    warmup_status = warmup_task.result()
+                except Exception as exc:
+                    warmup_status = {"ready": False, "error": type(exc).__name__}
+                    warmup_task = None
+            if not warmup_status.get("ready"):
+                wanted = []
+            for camera_id, old_task in list(retiring.items()):
+                if old_task.done():
+                    await asyncio.gather(old_task, return_exceptions=True)
+                    retiring.pop(camera_id)
             wanted_by_id = {int(row["id"]): row for row in wanted}
             now_wall = time.time()
             for camera_id in list(tasks):
@@ -610,9 +710,9 @@ async def _loop() -> None:
                     configurations.pop(camera_id)
                     stop.set()
                     task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+                    retiring[camera_id] = task
             for camera_id, row in wanted_by_id.items():
-                if camera_id in tasks:
+                if camera_id in tasks or camera_id in retiring:
                     continue
                 stop = asyncio.Event()
                 stats = {
@@ -627,13 +727,22 @@ async def _loop() -> None:
                     asyncio.create_task(_infer_camera(row, stop, stats, inference_limiter), name=f"worker-cam-{camera_id}"),
                     stats,
                 )
-            _write_health({"enabled": enabled, "cameras": [tasks[cid][2] for cid in sorted(tasks)]})
+            _write_health({"enabled": enabled, "warmup": warmup_status, "scope": scope,
+                           "claimed_camera_ids": claimed_camera_ids,
+                           "state": ("DISABLED" if not enabled else "NODE NOT ASSIGNED TO GATE" if scope["mode"] == "unassigned"
+                                     else "IDLE" if not claimed_camera_ids else "DEGRADED" if not tasks
+                                     else "READY" if warmup_status.get("ready") else "WARMING"),
+                           "retiring_cameras": sorted(retiring),
+                           "cameras": [{key: value for key, value in tasks[cid][2].items() if key != "latency_samples"} for cid in sorted(tasks)]})
             await asyncio.sleep(2.0)
     finally:
         for stop, task, _stats in tasks.values():
             stop.set()
             task.cancel()
         await asyncio.gather(*(task for _, task, _ in tasks.values()), return_exceptions=True)
+        await asyncio.gather(*retiring.values(), return_exceptions=True)
+        if warmup_task is not None:
+            await asyncio.gather(warmup_task, return_exceptions=True)
         _write_health({"enabled": False, "cameras": [], "state": "STOPPED"})
 
 

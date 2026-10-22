@@ -33,6 +33,7 @@ __all__ = [
     "fresh_last_car",
     "get_state",
     "live_metrics",
+    "live_is_current",
     "media_path",
     "mjpeg_from_cache",
     "mjpeg_parts",
@@ -92,6 +93,13 @@ def get_state(camera_id: int) -> PreviewState:
         row = PreviewState()
         _state[camera_id] = row
     return row
+
+
+def live_is_current(camera_id: int) -> bool:
+    row = get_state(camera_id)
+    session = gateway.session(camera_id)
+    received_at = session.last_received_at if session and session.last_received_at else row.captured_at
+    return bool(row.jpeg[:2] == JPEG_SOI and received_at and time.monotonic() - received_at <= 5.0)
 
 
 def _notify(row: PreviewState) -> None:
@@ -349,7 +357,7 @@ async def snapshot_for_camera(
                 grabbed["url"] = local
                 return grabbed
     cached = await gateway.snapshot(camera_id)
-    if cached[:2] == JPEG_SOI:
+    if cached[:2] == JPEG_SOI and live_is_current(camera_id):
         row = get_state(camera_id)
         return {
             "ok": True,

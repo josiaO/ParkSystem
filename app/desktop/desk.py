@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import api
+from .presentation import label_for
 
 
 REPORTS = (
@@ -125,13 +126,20 @@ class ReportsPage(QWidget):
         download = QPushButton("Download this report")
         download.clicked.connect(self.download)
         for widget in (
-            QLabel("Report"), self.kind, QLabel("From"), self.start, QLabel("To"), self.end,
-            show, print_one, print_all, download,
+            label_for("&Report", self.kind), self.kind,
+            label_for("&From", self.start), self.start,
+            label_for("&To", self.end), self.end,
         ):
             row.addWidget(widget)
-        row.addStretch()
         layout.addLayout(row)
+        report_actions = QHBoxLayout()
+        for widget in (show, print_one, print_all, download):
+            report_actions.addWidget(widget)
+        report_actions.addStretch()
+        layout.addLayout(report_actions)
         self.body = QPlainTextEdit()
+        self.body.setAccessibleName("Report contents")
+        self.body.setPlaceholderText("Choose a report and date range, then select Show report.")
         self.body.setReadOnly(True)
         layout.addWidget(self.body, 1)
         backup_title = QLabel("Backup")

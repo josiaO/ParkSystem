@@ -140,7 +140,7 @@ class ConsensusTrack:
         self.visit_started_at = now
         self.streak = 0
 
-    def observe(self, plate: str, now: float, *, confidence: float = 1.0) -> TrackDecision:
+    def observe(self, plate: str, now: float, *, confidence: float = 1.0, allow_single: bool = True) -> TrackDecision:
         from app.core.plate import plate_similarity
 
         plate = normalize_plate(plate)
@@ -162,6 +162,7 @@ class ConsensusTrack:
         self.last_read_at = now
         self.streak = self.streak + 1 if plate == self.last_plate else 1
         self.last_plate = plate
+        self.readings[:] = [reading for reading in self.readings if now - reading.at <= self.window_seconds]
         self.readings.append(Reading(plate, max(0.0, min(1.0, float(confidence or 0.0))), now))
         if len(self.readings) > self.max_reads:
             del self.readings[: len(self.readings) - self.max_reads]
@@ -178,7 +179,7 @@ class ConsensusTrack:
                     if sim >= self.similarity:
                         score += r.confidence * sim
             candidates[candidate] = score
-        winner = max(candidates, key=lambda c: (candidates[c], sum(1 for r in self.readings if r.plate == c)))
+        winner = max(candidates, key=lambda candidate: (candidates[candidate], sum(1 for reading in self.readings if reading.plate == candidate), candidate))
         exact = [r for r in self.readings if r.plate == winner]
         share = min(1.0, candidates[winner] / total)
         confidence = sum(r.confidence for r in exact) / max(1, len(exact))
@@ -186,7 +187,7 @@ class ConsensusTrack:
             False, winner, confidence, reads=len(self.readings), agreeing=len(exact), share=share, candidates=candidates,
         )
         best_exact = max((item.confidence for item in exact), default=0.0)
-        single_ok = best_exact >= float(self.high_confidence) and len(exact) >= 1
+        single_ok = allow_single and best_exact >= float(self.high_confidence) and len(exact) >= 1
         if not single_ok and (len(self.readings) < self.min_reads or len(exact) < self.min_agreeing):
             # Similar reads raise the winner's share but do not replace an exact
             # agreeing read; two identical texts are still required unless one

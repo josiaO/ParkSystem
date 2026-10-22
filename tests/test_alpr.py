@@ -167,7 +167,7 @@ class PlateFusionTests(unittest.TestCase):
 
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         bbox = SimpleNamespace(x1=100, y1=200, x2=220, y2=240)
-        detection = SimpleNamespace(bounding_box=bbox)
+        detection = SimpleNamespace(bounding_box=bbox, confidence=0.95)
         ocr = SimpleNamespace(text="T285DQP____", confidence=0.91)
         seen = {}
 
@@ -450,7 +450,7 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()["best"]["plate"], "T123ABC")
         self.assertEqual(res.json()["camera_id"], cam_id)
-        self.assertEqual(res.json()["fusion"]["method"], "LOCAL_SELECTED")
+        self.assertEqual(res.json()["fusion"]["method"], "LOCAL_ONLY")
         self.assertEqual(res.json()["fusion"]["resolved_plate"], "T123ABC")
         self.assertEqual(res.json()["last_car"]["plate"], "T123ABC")
         self.assertTrue(res.json()["last_car"]["snapshot_url"])

@@ -154,34 +154,8 @@ class ApiClient:
         return r.json()
 
     def seed_site(self):
-        """Add the four site cameras. Works even if the API is an older build without /cameras/seed-site."""
-        try:
-            return self.post("/cameras/seed-site")
-        except ApiError as exc:
-            if exc.status_code not in (404, 405):
-                raise
-        from app.services.site_cameras import KNOWN_SITE_CAMERAS, site_camera_defaults
-        defaults = site_camera_defaults()
-        created, skipped = [], []
-        for row in KNOWN_SITE_CAMERAS:
-            payload = {
-                "name": row["name"],
-                "ip_address": row["ip_address"],
-                "sdk_port": defaults["sdk_port"],
-                "username": defaults["username"],
-                "password": defaults["password"],
-                "lane_direction": row["lane_direction"],
-                "controller_ip": row.get("controller_ip") or "",
-                "display_ip": row.get("display_ip") or "",
-            }
-            try:
-                created.append(self.post("/cameras", payload))
-            except ApiError as err:
-                if err.status_code == 409:
-                    skipped.append({"ip_address": row["ip_address"], "reason": "already added"})
-                else:
-                    raise
-        return {"created": created, "skipped": skipped, "cameras": self.get("/cameras")}
+        """Explicit example import after administrator confirmation; no fallback creation."""
+        return self.post("/cameras/seed-site", {"confirm_test_data": True})
 
     def connect_all(self):
         """Connect cameras one by one so a slow/dead camera cannot abort the rest."""

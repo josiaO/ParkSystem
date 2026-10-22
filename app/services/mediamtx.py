@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import time
+import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from app.services.rtsp_probe import redact_url
 _process: subprocess.Popen | None = None
 _started_at: float = 0.0
 _sources: dict[int, dict[str, Any]] = {}
+_removed_sources: set[int] = set()
 _last_error: str = ""
 _external_checked_at: float = 0.0
 _external_running_cache: bool = False
@@ -130,6 +133,7 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
         # on the LAN. MediaMTX gathers interface IPs into ICE candidates.
         "webrtcAddress: :8889",
         "webrtcLocalUDPAddress: :8189",
+        "webrtcLocalTCPAddress: :8189",
         "webrtcIPsFromInterfaces: yes",
         # v1.11.x uses the singular key. Keep this aligned with the pinned
         # MediaMTX binary in scripts/install_mediamtx.sh.
@@ -184,8 +188,23 @@ def _external_running() -> bool:
 
 
 def running() -> bool:
+    global _last_error
+    if _process is not None and _process.poll() is not None:
+        _last_error = f"MediaMTX exited with code {_process.returncode}; see media-service.log"
     owned = _process is not None and _process.poll() is None
     return owned or _external_running()
+
+
+def _read_process_output(process) -> None:
+    from app.services.redaction import redact_text
+
+    if process.stdout is None:
+        return
+    try:
+        for line in process.stdout:
+            logging.getLogger("smartpark").warning("MediaMTX: %s", redact_text(line.rstrip()[:2000]))
+    finally:
+        process.stdout.close()
 
 
 def start() -> dict[str, Any]:
@@ -201,9 +220,14 @@ def start() -> dict[str, Any]:
         _process = subprocess.Popen(
             [str(binary), str(cfg)],
             cwd=str(cfg.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=0x08000000 if os.name == "nt" else 0,
         )
+        threading.Thread(target=_read_process_output, args=(_process,), name="mediamtx-output", daemon=True).start()
         _started_at = time.monotonic()
         _last_error = ""
     except Exception as exc:
@@ -297,6 +321,7 @@ def sync_paths() -> bool:
 
 def register_source(camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
     camera_id = int(camera_id)
+    _removed_sources.discard(camera_id)
     incoming = dict(source)
     if _sources.get(camera_id) == incoming:
         return live_endpoint(camera_id)
@@ -314,11 +339,14 @@ def reload_paths() -> bool:
 
 def unregister_source(camera_id: int) -> None:
     camera_id = int(camera_id)
+    if camera_id in _removed_sources and camera_id not in _sources:
+        return
     _sources.pop(camera_id, None)
     write_config()
     if running():
         for name in all_path_names(camera_id):
             _control_api("DELETE", f"/v3/config/paths/delete/{name}")
+        _removed_sources.add(camera_id)
 
 
 def _endpoint(camera_id: int, role: str, kind: str) -> dict[str, Any]:

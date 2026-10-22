@@ -77,7 +77,7 @@ class ProductUiTests(unittest.TestCase):
         self.assertIn("Ctrl+N", HTML)
         self.assertIn("F8", HTML)
         self.assertIn("F9", HTML)
-        desktop = (ROOT / "app" / "desktop" / "main.py").read_text(encoding="utf-8")
+        desktop = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "app" / "desktop").glob("*.py"))
         self.assertIn("def _install_shortcuts(self):", desktop)
         self.assertIn('"Ctrl+N"', desktop)
         self.assertIn('"F8"', desktop)

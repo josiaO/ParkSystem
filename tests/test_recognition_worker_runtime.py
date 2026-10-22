@@ -254,6 +254,8 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "normalized_plate": "ABC123",
                 "camera_id": 1,
                 "confidence": 0.95,
+                "detector_confidence": 0.96,
+                "bbox": {"crop": {"x1": 0, "y1": 0, "x2": 160, "y2": 40}},
             }
 
         stats = {}

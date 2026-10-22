@@ -29,6 +29,10 @@ def recognition_from_outbox(item: dict[str, Any]) -> dict[str, Any] | None:
 
 def publish(event: dict[str, Any], *, dedupe_key: str | None = None) -> dict[str, Any]:
     kind = str(event.get("kind") or "domain-event")
+    inner = event.get("payload") or {}
+    if not dedupe_key and inner.get("visit_id") and inner.get("camera_id"):
+        dedupe_key = f"{kind}:camera:{inner['camera_id']}:visit:{inner['visit_id']}"
+    dedupe_key = dedupe_key or event.get("event_id")
     payload = {
         "kind": kind,
         "event_id": event.get("event_id"),

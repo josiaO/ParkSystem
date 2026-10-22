@@ -41,9 +41,11 @@ function Write-SmartParkLauncher {
     @"
 @echo off
 setlocal
+cd /d "$InstallDir"
 set "SMARTPARK_HOME=$InstallDir"
 set "PYTHONPATH=%SMARTPARK_HOME%"
 set "SMARTPARK_HVX_VENDOR_DIR=%SMARTPARK_HOME%\vendor"
+if not defined SMARTPARK_DEPLOYMENT_PROFILE set "SMARTPARK_DEPLOYMENT_PROFILE=PRODUCTION"
 $mtxLine
 set "PATH=%SMARTPARK_HOME%\python64;%SMARTPARK_HOME%\python64\Scripts;%SMARTPARK_HOME%\vendor;%PATH%"
 "$PythonExe" $Arguments
@@ -78,6 +80,7 @@ function Register-SmartParkTask {
 }
 
 $siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
+$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker"
 $hostBat = ""
 if (Test-Path $Py32) {
     $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`""
@@ -93,6 +96,11 @@ try {
     Register-SmartParkTask -Name "SmartPark Site Service" -Launcher $siteBat -WorkingDirectory $InstallDir
 } catch {
     $failed += "Site Service: $_"
+}
+try {
+    Register-SmartParkTask -Name "SmartPark Recognition Worker" -Launcher $recognitionBat -WorkingDirectory $InstallDir
+} catch {
+    $failed += "Recognition Worker: $_"
 }
 if ($hostBat) {
     try {
@@ -121,6 +129,7 @@ if ($failed.Count -gt 0) {
 Write-Host ""
 Write-Host "Background tasks:"
 Write-Host "  SmartPark Site Service   (API + camera events, port 8760)"
+Write-Host "  SmartPark Recognition Worker (warm models and local MediaMTX decoders)"
 Write-Host "  SmartPark HVX Host       (32-bit NetSDK, port 8765)"
 if (Test-Path $MediaMtx) {
     Write-Host "  SmartPark Media Service  (MediaMTX realtime gateway when enabled by effective site flags)"
