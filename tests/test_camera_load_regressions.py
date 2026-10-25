@@ -129,14 +129,14 @@ def test_sdk_endpoint_and_telemetry_never_probe_mediamtx():
     assert telemetry["state"] == "DIRECT"
 
 
-def test_sdk_unregistration_does_not_repeat_twelve_missing_path_deletions_every_cycle():
+def test_sdk_unregistration_does_not_issue_missing_path_deletions_every_cycle():
     with patch.object(mediamtx, "_sources", {}), patch.object(mediamtx, "_removed_sources", set()), \
          patch.object(mediamtx, "write_config") as write, \
          patch.object(mediamtx, "running", return_value=True), \
          patch.object(mediamtx, "_control_api", return_value=404) as request:
         for _ in range(10):
             mediamtx.unregister_source(7)
-        assert request.call_count == 3
+        assert request.call_count == 0
         assert write.call_count <= 1
 
 

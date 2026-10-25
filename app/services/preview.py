@@ -292,7 +292,13 @@ async def resolve_playable(ip: str, username: str, password: str, explicit: str 
     http = await grab_http_snapshot(ip, username, password)
     if http.get("ok"):
         return http
-    grabbed = await grab_camera_frame(ip, username, password, explicit or cached)
+    grabbed = await grab_camera_frame(
+        ip,
+        username,
+        password,
+        explicit or cached,
+        prefer_qy=sdk_handle is not None,
+    )
     if grabbed.get("ok"):
         grabbed["source"] = grabbed.get("source") or "rtsp"
         return grabbed
@@ -522,6 +528,8 @@ def release_live(camera_id: int) -> None:
 def acquire_detect(spec: CameraLiveSpec) -> None:
     from app.infrastructure.media.registry import mediamtx_detect_active
     if mediamtx_detect_active(spec.id):
+        # Drop a direct fallback lease before handing DETECT to MediaMTX.
+        gateway.release_detect(spec.id)
         from app.services.mediamtx_detect import ensure_detect_consumer
         ensure_detect_consumer(spec)
         return

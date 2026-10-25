@@ -30,6 +30,30 @@ def _spec(camera_id: int, *, handle: int | None = None, need_detect: bool = Fals
 
 
 class AcquisitionContractTests(unittest.TestCase):
+    def test_sdk_camera_without_configured_url_never_falls_back_to_rtsp(self):
+        async def scenario():
+            gw = LocalMediaGateway()
+            gw.publish(91, JPEG, source="sdk")
+            row = gw.session(91)
+            row.spec = _spec(91, handle=0)
+            row.viewers = 1
+
+            async def sdk(session):
+                session.viewers = 0
+                return False
+
+            with patch.object(gw, "_sdk_frames", new=AsyncMock(side_effect=sdk)) as sdk_reader, \
+                    patch.object(gw, "_rtsp_frames", new=AsyncMock()) as video, \
+                    patch.object(gw, "_http_stills", new=AsyncMock()) as stills:
+                await gw._produce(row)
+                sdk_reader.assert_awaited_once()
+                video.assert_not_awaited()
+                stills.assert_not_awaited()
+            self.assertEqual(row.spec.sdk_handle, 0)
+            self.assertEqual(gw.peek_live(91).source, "sdk")
+
+        asyncio.run(scenario())
+
     def test_latest_frame_replaces_stale_and_stays_bounded(self):
         gw = LocalMediaGateway()
         for i in range(50):
@@ -187,6 +211,8 @@ class AcquisitionContractTests(unittest.TestCase):
         )
         with patch("app.services.media_gateway.HVXHostClient") as host_cls, \
                 patch("app.services.media_gateway.settings", fake_settings), \
+                patch.object(gw, "_rtsp_frames", new=AsyncMock(return_value=False)), \
+                patch.object(gw, "_http_stills", new=AsyncMock(return_value=False)), \
                 patch("app.services.circuit.ReconnectPolicy.record_failure", return_value=0.01):
             host_cls.return_value.live_jpeg = AsyncMock(side_effect=live_jpeg)
             gw.ensure_producer(_spec(1, handle=1, need_detect=True))
@@ -236,6 +262,8 @@ class AcquisitionContractTests(unittest.TestCase):
         )
         with patch("app.services.media_gateway.HVXHostClient") as host_cls, \
                 patch("app.services.media_gateway.settings", fake_settings), \
+                patch.object(gw, "_rtsp_frames", new=AsyncMock(return_value=False)), \
+                patch.object(gw, "_http_stills", new=AsyncMock(return_value=False)), \
                 patch("app.services.circuit.ReconnectPolicy.record_failure", return_value=0.01):
             host_cls.return_value.live_jpeg = AsyncMock(side_effect=live_jpeg)
             gw.ensure_producer(_spec(1, handle=1, need_detect=True))

@@ -52,6 +52,7 @@ def upstream_role_uris(
     password: str,
     rtsp_url: str = "",
     stream_profiles: dict | None = None,
+    adapter_id: str = "",
 ) -> tuple[str, str, str]:
     """Return (live, detect, evidence) upstream RTSP URIs.
 
@@ -73,7 +74,8 @@ def upstream_role_uris(
         evidence = rtsp_role(ROLE_EVIDENCE, "")
         return live, detect, evidence
 
-    candidates = vendor_candidates(ip, username, password, explicit)
+    prefer_qy = str(adapter_id or "").strip().lower() in {"hvx", "qy", "native"}
+    candidates = vendor_candidates(ip, username, password, explicit, prefer_qy=prefer_qy)
     sub = _pick_hvx_sub(candidates)
     main = _pick_hvx_main(candidates)
     # SDK role rows describe callbacks/JPEG buffers and are not playable RTSP
@@ -87,12 +89,19 @@ def upstream_role_uris(
 
 def source_config_for_camera(camera) -> dict[str, Any]:
     profiles = dict(getattr(camera, "stream_profiles", None) or {})
+    adapter_id = str(getattr(camera, "adapter_id", None) or "").strip().lower()
     protocol = str(
         (profiles.get(ROLE_SUB) or profiles.get(ROLE_LIVE) or profiles.get("MAIN") or {}).get("protocol") or ""
     )
-    if protocol == "sdk" or getattr(camera, "sdk_handle", None) is not None:
+    if (
+        protocol == "sdk"
+        or getattr(camera, "sdk_handle", None) is not None
+        or adapter_id in {"hvx", "qy", "native"}
+    ):
         # OcxConfig/NetSDK already owns the live stream. Do not invent an RTSP
         # client — QY cameras have few stream slots and a second pull stacks.
+        # Apply this before SDK login too: a failed/reconnecting native session
+        # must not be competed for by MediaMTX on port 40000.
         return {
             "uri": "",
             "detect_uri": "",
@@ -107,6 +116,7 @@ def source_config_for_camera(camera) -> dict[str, Any]:
         password=camera.password_secret,
         rtsp_url=getattr(camera, "rtsp_url", None) or "",
         stream_profiles=profiles,
+        adapter_id=str(getattr(camera, "adapter_id", None) or ""),
     )
     return {
         "uri": live_uri,

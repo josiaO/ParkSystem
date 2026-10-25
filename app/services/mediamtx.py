@@ -294,7 +294,7 @@ def _control_api(method: str, path: str, body: dict[str, Any] | None = None) -> 
 def _upsert_path(name: str, uri: str, *, on_demand: bool = False, transport: str = "tcp") -> int | None:
     conf = _path_conf(uri, on_demand=on_demand, transport=transport)
     status = _control_api("POST", f"/v3/config/paths/add/{name}", conf)
-    if status == 400:
+    if status in {400, 409}:
         status = _control_api("POST", f"/v3/config/paths/replace/{name}", conf)
     return status
 
@@ -319,12 +319,11 @@ def sync_paths() -> bool:
             )
             if status is None or status >= 400:
                 ok = False
-        # Roles that were split earlier but now share an upstream must not leave a
-        # stale second pull running against the camera.
-        planned_names = {item["name"] for item in planned}
-        for name in all_path_names(camera_id):
-            if name not in planned_names:
-                _control_api("DELETE", f"/v3/config/paths/delete/{name}")
+        # Do not blindly DELETE every possible role name here.  Most of those
+        # paths are normally absent (for example, a camera whose LIVE and
+        # DETECT roles share one upstream), and MediaMTX logs each missing
+        # DELETE as an API error.  The generated config is hot-reloaded and the
+        # owning media-service reconciliation removes only paths it can see.
     return ok
 
 
@@ -336,9 +335,13 @@ def register_source(camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
         return live_endpoint(camera_id)
     _sources[camera_id] = incoming
     active = running()
-    if not active or (_process is not None and _process.poll() is None):
+    owned = _process is not None and _process.poll() is None
+    if not active or owned:
         write_config()
-    if active:
+    # SmartParkMediaService is the sole owner of the MediaMTX Control API.
+    # Site Service can still return the endpoint immediately, but must not
+    # race the owner by POSTing the same path from its own process-local map.
+    if active and owned:
         sync_paths()
     return live_endpoint(camera_id)
 
@@ -382,8 +385,11 @@ def unregister_source(camera_id: int) -> None:
     if not active or (_process is not None and _process.poll() is None):
         write_config()
     if active:
-        for name in all_path_names(camera_id):
-            _control_api("DELETE", f"/v3/config/paths/delete/{name}")
+        # The config file is hot-reloaded by the owning MediaMTX process.  Do
+        # not issue blind DELETEs for camN/camN_detect/camN_evidence: absent
+        # paths produce repeated "[API] path not found" log entries.  The
+        # next reconcile_paths() pass lists existing config paths first and
+        # deletes only paths that actually exist.
         _removed_sources.add(camera_id)
 
 

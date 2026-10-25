@@ -17,6 +17,16 @@ HOST="127.0.0.1"
 PORT=8765
 
 
+def _is_peer_disconnect(exc: BaseException) -> bool:
+    """Return true for a client closing an HTTP keep-alive socket normally."""
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    if isinstance(exc, OSError) and int(getattr(exc, "winerror", 0) or 0) == 10054:
+        return True
+    text = str(exc).lower()
+    return "10054" in text or "forcibly closed" in text or "connection reset" in text
+
+
 def resolve_vendor_dir() -> Path:
     env = os.environ.get("SMARTPARK_HVX_VENDOR_DIR")
     if env:
@@ -63,6 +73,17 @@ def reply_jpeg(handler, jpeg: bytes, status=200):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version="SmartParkHVXHost/0.1"
+    def handle_one_request(self):
+        # Browsers and the desktop client can close a keep-alive /info or JPEG
+        # request while the host is writing its response.  socketserver prints
+        # a traceback for that expected RST, which obscures actual SDK errors.
+        try:
+            return super().handle_one_request()
+        except OSError as exc:
+            if _is_peer_disconnect(exc):
+                self.close_connection = True
+                return
+            raise
     def log_message(self, fmt, *args):
         # Live JPEG is polled many times a second. Writing each one to a
         # captured stdout pipe blocks the response until that pipe drains.
@@ -73,6 +94,13 @@ class Handler(BaseHTTPRequestHandler):
             sys.stdout.write("[hvx-host] " + (fmt % args) + "\n")
         except Exception:
             return
+    def log_error(self, fmt, *args):
+        # BaseHTTPRequestHandler logs request failures through this method in
+        # some Python versions, before the outer server loop sees them.
+        text = fmt % args if args else str(fmt)
+        if _is_peer_disconnect(OSError(text)):
+            return
+        super().log_error(fmt, *args)
     def do_GET(self):
         parsed=urlparse(self.path)
         path=parsed.path
@@ -98,9 +126,10 @@ class Handler(BaseHTTPRequestHandler):
                     "Net_RegReportMessEx",
                     "Net_ConnCameraEx then Net_ConnCamera fallback",
                     "Net_QueryConnState",
+                    "Net_FuntionListRsp then capability-selected stream type",
                     "Net_RegOffLineClient",
-                    "Net_RegImageRecvEx2 then Net_RegImageRecvEx",
                     "Net_StartVideo then Net_GetJpgBuffer",
+                    "Net_RegImageRecvEx2 then Net_RegImageRecvEx",
                 ],
             })
         if path == "/captures":
@@ -162,7 +191,8 @@ class Handler(BaseHTTPRequestHandler):
                 handle=int(path.rsplit("/",1)[-1])
                 jpeg=sdk.live_jpeg_for(handle)
                 if not jpeg:
-                    return reply(self,404,{"error":"no live video frame yet — Net_StartVideo / Net_GetJpgBuffer"})
+                    return reply(self,404,{"error":"no live video frame yet — Net_StartVideo / Net_GetJpgBuffer",
+                                           "video": sdk.video_status(handle)})
                 return reply_jpeg(self, jpeg)
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/state/"):
@@ -196,7 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/disconnect/"):
             try:
-                handle=int(path.rsplit("/",1)[-1]); rc=sdk.disconnect(handle)
+                handle=int(path.rsplit("/",1)[-1]); rc=sdk.disconnect(handle, force=bool(data.get("force")))
                 return reply(self,200,{"ok":rc==0,"rc":rc})
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/snapshot-trigger/"):

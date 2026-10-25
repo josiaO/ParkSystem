@@ -13,6 +13,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Keep diagnostics outside the installation tree, which is replaced on upgrades.
+$InstallerLog = Join-Path ([IO.Path]::GetTempPath()) ("SmartPark-install-{0}-{1}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID)
+$TranscriptStarted = $false
+trap {
+    Write-Host ""
+    Write-Host "INSTALLATION FAILED" -ForegroundColor Red
+    Write-Host ($_ | Format-List * -Force | Out-String)
+    Write-Host $_.ScriptStackTrace
+    Write-Host "Installer log: $InstallerLog"
+    if ($TranscriptStarted) { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }
+    # The elevated PowerShell window otherwise closes before the error is readable.
+    Read-Host "Press Enter to close this failed installer"
+    exit 1
+}
+Start-Transcript -Path $InstallerLog -Force | Out-Null
+$TranscriptStarted = $true
+Write-Host "Installer log: $InstallerLog"
+
 # Task registration must succeed before this installation is reported ready.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -99,7 +117,7 @@ Stop-SmartParkProcesses -Root $InstallDir
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-$copyDirs = @("app", "tools", "vendor", "python64", "python32", "wheels", "models")
+$copyDirs = @("app", "tools", "vendor", "python64", "python32", "wheels", "wheels32", "models")
 foreach ($name in $copyDirs) {
     $src = Join-Path $Payload $name
     if (-not (Test-Path $src)) { continue }
@@ -147,6 +165,7 @@ if ($Pth32) {
         "python311.zip",
         ".",
         "..\tools\hvx_sdk_host",
+        "Lib\site-packages",
         "import site"
     )
     Set-Content -Path $Pth32.FullName -Value ($lines32 -join "`r`n") -Encoding ASCII
@@ -192,8 +211,24 @@ if ($LASTEXITCODE -ne 0) { throw "Package install failed." }
 & $Py64 -m pip check
 if ($LASTEXITCODE -ne 0) { throw "Installed Python dependencies are incompatible. Rebuild the offline wheel bundle." }
 
+$Py32 = Join-Path $InstallDir "python32\python.exe"
+$Wheels32 = Join-Path $InstallDir "wheels32"
+if (-not (Test-Path $Py32)) { throw "32-bit Python is missing from the kit (payload\python32)." }
+if (-not (Test-Path $Wheels32)) { throw "32-bit host wheels are missing from the kit (payload\wheels32)." }
+$pillow32 = Get-ChildItem -Path $Wheels32 -Filter "pillow-*-win32.whl" | Select-Object -First 1
+if (-not $pillow32) { throw "32-bit Pillow wheel is missing from the kit." }
+$site32 = Join-Path $InstallDir "python32\Lib\site-packages"
+New-Item -ItemType Directory -Force -Path $site32 | Out-Null
+# The 32-bit host only needs Pillow. Extracting this wheel avoids installing a
+# second pip stack and avoids pulling 64-bit application dependencies into the
+# vendor-compatible interpreter.
+$pillowZip = Join-Path ([IO.Path]::GetTempPath()) ("SmartPark-Pillow32-{0}.zip" -f $PID)
+Copy-Item $pillow32.FullName $pillowZip -Force
+Expand-Archive -LiteralPath $pillowZip -DestinationPath $site32 -Force
+Remove-Item -LiteralPath $pillowZip -Force -ErrorAction SilentlyContinue
+
 $RuntimeCheck = Join-Path $InstallDir "tools\hvx_sdk_host\check_runtime.py"
-& (Join-Path $InstallDir "python32\python.exe") $RuntimeCheck --vendor-dir (Join-Path $InstallDir "vendor")
+& $Py32 $RuntimeCheck --vendor-dir (Join-Path $InstallDir "vendor")
 if ($LASTEXITCODE -ne 0) { throw "Vendor DLL load check failed. Resolve the runtime/dependency error above before starting cameras." }
 
 $StartBat = Join-Path $InstallDir "Start-SmartPark.bat"
@@ -474,3 +509,5 @@ if ($StartApp) {
         Start-SmartParkFromInstaller
     }
 }
+Write-Host "Installer log: $InstallerLog"
+Stop-Transcript | Out-Null
