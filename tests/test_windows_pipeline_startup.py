@@ -27,7 +27,9 @@ def test_api_registration_does_not_overwrite_media_owner_config():
          patch.object(mediamtx, "write_config") as write:
         mediamtx.register_source(1, {"uri": "rtsp://camera/video"})
     write.assert_not_called()
-    sync.assert_called_once()
+    # The Site Service may observe an externally owned MediaMTX process, but
+    # the Media Service is the only process allowed to push paths.
+    sync.assert_not_called()
 
 
 def test_separate_worker_discovers_detect_path_from_control_api():

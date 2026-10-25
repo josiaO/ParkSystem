@@ -145,6 +145,11 @@ not choose between them. Old 32-bit-only PCs are not supported.
 COMMISSIONING mode pulses the live barrier (GPIO + Board* + LED). Confirm the
 lane in the UI before you press Open.
 
-The installer registers Site Service, HVX host, and Media Service as logon tasks
-and starts them immediately. The Desktop is a client. Live video decodes only
-while Cameras is visible; Live Gates shows car snapshots.
+The installer registers Site Service, HVX host, Media Service, and Recognition
+Worker as logon tasks and starts them immediately. The Desktop is a client;
+recognition runs in the background for this PC's assigned gate.
+
+For blank gate-camera video or Dahua video without OCR, see
+documentation\CAMERA-DELIVERY-DIAGNOSTICS.md. The updated SDK host reports
+video return codes, buffer errors and blocked decoder reads separately from
+successful login. Keep existing site data when installing this update.

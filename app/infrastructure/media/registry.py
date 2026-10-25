@@ -94,8 +94,11 @@ def mediamtx_live_active(camera_id: int, db=None) -> bool:
 
 
 def mediamtx_detect_active(camera_id: int, db=None) -> bool:
-    """Use MediaMTX as the detect source only while its local control API is alive."""
-    return _camera_enabled(camera_id, db) and not _sdk_camera(camera_id, db) and mediamtx.running()
+    """Require this camera's registered detect path, not just a running sidecar."""
+    if not _camera_enabled(camera_id, db) or _sdk_camera(camera_id, db) or not mediamtx.running():
+        return False
+    role = (media_telemetry(camera_id).get("roles") or {}).get(mediamtx.ROLE_DETECT) or {}
+    return bool(role.get("registered"))
 
 
 def register_camera_source(camera_id: int, source_config: dict[str, Any], db=None) -> dict[str, Any]:

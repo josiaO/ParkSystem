@@ -65,7 +65,9 @@ Set-Location -LiteralPath $InstallDir
 # SiteSetting overrides environment defaults, so persist the rollout in the DB.
 $liveProvider = if ($LiveView) { "MEDIAMTX" } else { "DIRECT_LEGACY" }
 $webrtc = if ($LiveView) { "True" } else { "False" }
-& $Py64 -c @"
+# Send source on stdin: Windows PowerShell 5.1 strips embedded quotes from
+# native -c arguments, corrupting Python string literals.
+$migrationCode = @"
 from app.db import SessionLocal
 from app.services.flags import save_flags
 from app.desktop.launch import wait_for_api
@@ -83,6 +85,7 @@ with SessionLocal() as db:
     })
 print("Saved migration flags:", out)
 "@
+$migrationCode | & $Py64 -
 if ($LASTEXITCODE -ne 0) {
     throw "Could not persist realtime migration flags."
 }

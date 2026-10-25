@@ -10,6 +10,11 @@ PY64_URL="https://www.python.org/ftp/python/${PY_VER}/python-${PY_VER}-embed-amd
 PY32_URL="https://www.python.org/ftp/python/${PY_VER}/python-${PY_VER}-embed-win32.zip"
 GETPIP_URL="https://bootstrap.pypa.io/get-pip.py"
 
+if [[ -z "$OUT" || "$OUT" == "/" || "$OUT" == "$ROOT" || "$OUT" == "$ROOT/" ]]; then
+  echo "Refusing to delete unsafe output path: '$OUT'" >&2
+  exit 2
+fi
+rm -rf -- "$OUT"
 mkdir -p "$CACHE" "$OUT/payload"
 
 echo "Assembling application payload..."
@@ -114,7 +119,7 @@ mkdir -p "$OUT/payload/python64" "$OUT/payload/python32"
 python3 -m zipfile -e "$CACHE/python-${PY_VER}-embed-amd64.zip" "$OUT/payload/python64"
 python3 -m zipfile -e "$CACHE/python-${PY_VER}-embed-win32.zip" "$OUT/payload/python32"
 printf 'python311.zip\r\n.\r\n..\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python64/python311._pth"
-printf 'python311.zip\r\n.\r\n..\\tools\\hvx_sdk_host\r\nimport site\r\n' > "$OUT/payload/python32/python311._pth"
+printf 'python311.zip\r\n.\r\n..\\tools\\hvx_sdk_host\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python32/python311._pth"
 
 echo "Downloading FastALPR ONNX models (offline, no HuggingFace on site)..."
 MODELS_CACHE="$CACHE/models/fastalpr"
@@ -138,17 +143,23 @@ if [[ ! -x "$PIP" ]]; then PIP="python3 -m pip"; fi
 # Prefer wheels already in cache. A slow PyPI read must not abort the kit if
 # a previous build already downloaded the Windows packages.
 export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-180}"
+PIP_DOWNLOAD_FLAGS=(
+  --dest "$WHEELS"
+  --find-links "$WHEELS"
+  --platform win_amd64
+  --python-version 311
+  --only-binary=:all:
+  --retries 10
+  --timeout 180
+)
+if [[ "${SMARTPARK_BUILD_OFFLINE:-0}" == "1" ]]; then
+  PIP_DOWNLOAD_FLAGS+=(--no-index)
+fi
 set +e
 $PIP download \
   -r "$ROOT/packaging/windows/requirements-windows.txt" \
   pip setuptools wheel \
-  --dest "$WHEELS" \
-  --find-links "$WHEELS" \
-  --platform win_amd64 \
-  --python-version 311 \
-  --only-binary=:all: \
-  --retries 10 \
-  --timeout 180
+  "${PIP_DOWNLOAD_FLAGS[@]}"
 PIP_RC=$?
 set -e
 if [[ $PIP_RC -ne 0 ]]; then
@@ -210,6 +221,31 @@ print(f"Copied {len(best)} unique wheels (newest of each package)")
 PY
 cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
+echo "Downloading 32-bit Windows Pillow for the QY SDK host..."
+WHEELS32="$CACHE/wheels-win32"
+mkdir -p "$WHEELS32"
+if ! compgen -G "$WHEELS32/pillow-*.whl" > /dev/null; then
+  set +e
+  $PIP download pillow \
+    --dest "$WHEELS32" \
+    --platform win32 \
+    --python-version 311 \
+    --implementation cp \
+    --only-binary=:all: \
+    --no-deps \
+    --retries 10 \
+    --timeout 180
+  PILLOW32_RC=$?
+  set -e
+  if [[ $PILLOW32_RC -ne 0 ]]; then
+    echo "ERROR: A CPython 3.11 win32 Pillow wheel is required for the 32-bit QY host."
+    exit "$PILLOW32_RC"
+  fi
+fi
+rm -rf "$OUT/payload/wheels32"
+mkdir -p "$OUT/payload/wheels32"
+cp "$WHEELS32"/pillow-*.whl "$OUT/payload/wheels32/"
+
 cp "$ROOT/packaging/windows/Install-SmartPark.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartPark.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartParkServices.ps1" "$OUT/"
@@ -237,6 +273,7 @@ cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
 cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
 cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
+cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
 if [[ -f "$ROOT/PARKWATCH-LESSONS.md" ]]; then
   cp "$ROOT/PARKWATCH-LESSONS.md" "$OUT/documentation/"
 fi
@@ -248,6 +285,7 @@ ZIP="$ROOT/dist/SmartParkEdge-USB.zip"
 mkdir -p "$ROOT/dist"
 rm -f "$ZIP"
 ( cd "$ROOT/dist" && python3 -m zipfile -c "$(basename "$ZIP")" "SmartParkEdge-Install" )
+sha256sum "$ZIP" > "$ZIP.sha256"
 
 echo
 echo "USB kit ready:"

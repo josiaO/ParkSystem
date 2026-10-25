@@ -16,8 +16,13 @@ _consumers: dict[int, asyncio.Task] = {}
 
 
 def _detect_url(camera_id: int) -> str:
+    from app.infrastructure.media.registry import media_telemetry
     from app.services.mediamtx import detect_endpoint
 
+    role = (media_telemetry(camera_id).get("roles") or {}).get("DETECT") or {}
+    path = role.get("mediamtx_path")
+    if path and role.get("registered"):
+        return f"rtsp://127.0.0.1:8554/{path}"
     return str(detect_endpoint(camera_id).get("rtsp") or "")
 
 
@@ -81,12 +86,18 @@ def ensure_detect_consumer(spec: "CameraLiveSpec") -> None:
     camera_id = int(spec.id)
     if worker_owns_software_reads(camera_id):
         # The recognition worker already decodes this MediaMTX path.
+        gateway.release_detect(camera_id)
         return
     if not mediamtx_detect_active(camera_id):
         return
     task = _consumers.get(camera_id)
     if task is not None and not task.done():
+        # Do not clear the active consumer's lease on every legacy-loop tick;
+        # _consume uses that lease as its keep-running condition.
         return
+    # The site service may have used direct RTSP while MediaMTX was starting.
+    # Release that detector lease before switching to the sidecar path.
+    gateway.release_detect(camera_id)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

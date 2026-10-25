@@ -101,6 +101,16 @@ class RecognitionCommissioningTests(unittest.TestCase):
         self.assertIn("PLATE_TOO_SMALL", codes)
         self.assertEqual(body["recognition"]["strategy"], "CONTINUOUS_DETECT")
 
+    def test_commissioning_exposes_when_viewable_camera_is_outside_recognition_scope(self):
+        with self.Session() as db:
+            camera = self._camera(db)
+            with patch("app.services.recognition_commissioning._worker_row", return_value={}), \
+                 patch("app.services.recognition_commissioning._media_row", return_value={}), \
+                 patch("app.services.node_scope.camera_in_recognition_scope", return_value=False):
+                body = commissioning_snapshot(db, camera)
+        self.assertFalse(body["recognition"]["in_scope"])
+        self.assertIn("module_enabled", body["recognition"])
+
     def test_hvx_hybrid_is_event_verification_not_continuous_worker(self):
         with self.Session() as db:
             camera = self._camera(db, adapter="hvx", mode="HYBRID")

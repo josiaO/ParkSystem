@@ -346,6 +346,11 @@ class LocalMediaGateway:
             return
         row.detect_consumers = 0
         row.spec = replace(row.spec, need_detect=False)
+        # A direct fallback producer is only useful while a detector or viewer
+        # owns it. Once DETECT moves to MediaMTX (or the worker takes over),
+        # release the old FFmpeg/RTSP process instead of leaving it running.
+        if row.producer is not None and not row.wanted():
+            self.stop_producer(camera_id)
 
     def viewers_for(self, camera_id: int) -> int:
         row = self._sessions.get(camera_id)
@@ -653,7 +658,17 @@ class LocalMediaGateway:
                 try:
                     if spec.sdk_handle is not None:
                         ok = await self._sdk_frames(row)
-                    if not ok and (spec.sdk_handle is None or str(spec.rtsp_url).startswith("rtsp://")):
+                    # OcxConfig owns QY video through Net_StartVideo and its
+                    # PlaySdk HWND. Never open a second RTSP/HTTP decoder for
+                    # the same native session: QY firmware closes that second
+                    # connection and the native decoder can then wedge. Generic
+                    # IP cameras still use MediaMTX/RTSP below.
+                    native_sdk = spec.sdk_handle is not None or any(
+                        str(profile.get("protocol") or "").lower() == "sdk"
+                        for profile in (spec.stream_profiles or {}).values()
+                        if isinstance(profile, dict)
+                    )
+                    if not ok and not native_sdk:
                         try:
                             ok = await self._rtsp_frames(row)
                         except asyncio.CancelledError:
@@ -763,12 +778,32 @@ class LocalMediaGateway:
             )
         if role == ROLE_MAIN:
             preferred = uri_for_role(profiles, ROLE_MAIN, preferred)
-        urls = vendor_candidates(spec.ip, spec.username, spec.password, preferred or spec.rtsp_url)
+        qy_source = spec.sdk_handle is not None or any(
+            str(row.get("protocol") or "").lower() == "sdk"
+            for row in profiles.values()
+            if isinstance(row, dict)
+        )
+        urls = vendor_candidates(
+            spec.ip,
+            spec.username,
+            spec.password,
+            preferred or spec.rtsp_url,
+            prefer_qy=qy_source,
+        )
         if preferred.startswith("rtsp://"):
             urls = [preferred] + [url for url in urls if url != preferred]
         # When live view fell back to a main-style URL, try known substream paths first.
         if role not in {ROLE_MAIN, ROLE_EVIDENCE} and not preferred.startswith("rtsp://"):
-            subs = [url for url in vendor_candidates(spec.ip, spec.username, spec.password, "") if "sub" in url.lower() or "102" in url or "av0_1" in url or "subtype=1" in url]
+            subs = [
+                url for url in vendor_candidates(
+                    spec.ip,
+                    spec.username,
+                    spec.password,
+                    "",
+                    prefer_qy=qy_source,
+                )
+                if "sub" in url.lower() or "102" in url or "av0_1" in url or "subtype=1" in url
+            ]
             urls = subs + [url for url in urls if url not in subs]
         profiles_to_try = [normalize_profile(spec.ffmpeg_profile)]
         fallback = fallback_profile(spec.ffmpeg_profile)

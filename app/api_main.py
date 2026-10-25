@@ -1047,6 +1047,22 @@ def _commit_camera(db: Session, camera: Camera) -> None:
 
 
 async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise_on_host_error: bool = True) -> dict:
+    # A lane assignment is an ownership boundary, not only a recognition
+    # filter.  Connect-all already filters its query, but this helper is also
+    # used by the per-camera endpoint and onboarding flow; keep those paths
+    # from opening an SDK/RTSP session for another node's gate.
+    from .services.node_scope import camera_in_recognition_scope, describe_recognition_scope
+    if not camera_in_recognition_scope(camera, db=db):
+        scope = describe_recognition_scope(db)
+        return {
+            **camera_dict(camera),
+            "sdk_result": {
+                "connected": False,
+                "skipped": True,
+                "reason": "Camera belongs to another recognition owner",
+                "scope": scope.get("detail") or "Camera is outside this node's assigned gate",
+            },
+        }
     adapter = camera_adapter_for(camera)
     caps = await adapter.capabilities(camera)
     if not caps.get("sdk_login"):
@@ -1099,22 +1115,30 @@ async def apply_video_connect(camera: Camera, db: Session, user: User, *, raise_
                     url_redacted=str(result.get("url_redacted") or ""),
                     source=str(result.get("source") or "rtsp"),
                 )
-            from .infrastructure.media.registry import mediamtx_detect_active
-            if not mediamtx_detect_active(camera.id, db):
-                acquire_detect(_live_spec(camera, need_detect=True))
-            else:
-                from .services.mediamtx_detect import ensure_detect_consumer
-                ensure_detect_consumer(_live_spec(camera, need_detect=True))
+            # Register the physical source before acquiring a detector. The
+            # previous order could leave a direct FFmpeg pump alive beside the
+            # same camera's MediaMTX path after the sidecar became ready.
+            media_registered = False
             try:
                 from .services.mediamtx_sources import sync_camera
-                sync_camera(camera, db=db)
+                media_registered = bool(sync_camera(camera, db=db).get("registered"))
             except Exception:
-                pass
+                media_registered = False
         else:
             camera.status = CameraStatus.OFFLINE.value
             camera.sdk_handle = None
             camera.last_error = result.get("error") or f"{adapter.id} did not return a live JPEG"
         _commit_camera(db, camera)
+        if result.get("connected"):
+            from .infrastructure.media.registry import mediamtx_detect_active
+            spec = _live_spec(camera, need_detect=True)
+            if media_registered and mediamtx_detect_active(camera.id, db):
+                from .services.mediamtx_detect import ensure_detect_consumer
+                ensure_detect_consumer(spec)
+            else:
+                # MediaMTX is optional; keep the bounded direct fallback only
+                # when its registered detect path is not currently usable.
+                acquire_detect(spec)
         write_audit(db, user, "camera.video_connect", "camera", str(camera.id), str(_connect_audit(result)))
         return {**camera_dict(camera), "sdk_result": _connect_audit(result)}
     except HTTPException:
@@ -1638,10 +1662,35 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
 
 
 @app.delete("/cameras/{camera_id}")
-def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
+async def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
     c = get_camera_or_404(db, camera_id)
     name = c.name
     ref = getattr(c, "credentials_ref", "") or ""
+    # Removing a row must also release its physical/session owners. Otherwise
+    # an SDK handle, decoder, or MediaMTX path can survive as an orphan.
+    try:
+        from .services.mediamtx_detect import stop_detect_consumer
+        from .services.mediamtx_live import stop_live_consumer
+        from .services.media_gateway import gateway
+        detect_task = stop_detect_consumer(c.id)
+        live_task = stop_live_consumer(c.id)
+        await asyncio.gather(
+            *(task for task in (detect_task, live_task) if task is not None),
+            return_exceptions=True,
+        )
+        gateway.stop_producer(c.id, force=True)
+        await gateway.unregister_stream(c.id)
+        if c.sdk_handle is not None:
+            try:
+                await HVXHostClient().disconnect(int(c.sdk_handle), force=True)
+            except Exception as exc:
+                log.warning("camera %s SDK disconnect during delete failed: %s", c.id, exc)
+        from .infrastructure.media.registry import unregister_camera_source
+        unregister_camera_source(c.id)
+    except Exception as exc:
+        # Cleanup is best effort: an unavailable host/sidecar must not prevent
+        # removal of a stale camera record.
+        log.warning("camera %s media cleanup failed during delete: %s", c.id, exc)
     db.delete(c)
     db.commit()
     if ref:
@@ -1695,7 +1744,7 @@ async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: Us
     c=db.get(Camera, camera_id)
     if not c: raise HTTPException(404, "Camera not found")
     if c.sdk_handle is not None:
-        try: await HVXHostClient().disconnect(c.sdk_handle)
+        try: await HVXHostClient().disconnect(c.sdk_handle, force=True)
         except Exception: pass
     release_detect(c.id)
     stop_live_pump(c.id)
@@ -3360,8 +3409,18 @@ async def _restore_hvx_sessions(info: dict) -> None:
     if not info.get("available") or not isinstance(info.get("connections"), list):
         return
     connected = {int(row["handle"]): str(row.get("ip") or "") for row in info["connections"]}
+    from .services.node_scope import camera_in_recognition_scope
     with short_session() as db:
-        cameras = list(db.scalars(select(Camera).where(Camera.enabled == True, Camera.sdk_handle.is_not(None))).all())
+        # sdk_handle is stored with the shared camera record, so it can also
+        # describe a session owned by a different lane PC.  Never restore
+        # those rows on this host; otherwise a restart on lane 2 can log into
+        # lane 1 cameras merely because the shared DB contains their handle.
+        cameras = [
+            camera for camera in db.scalars(
+                select(Camera).where(Camera.enabled == True, Camera.sdk_handle.is_not(None))
+            ).all()
+            if camera_in_recognition_scope(camera, db=db)
+        ]
     for camera in cameras:
         if connected.get(int(camera.sdk_handle)) == camera.ip_address:
             _hvx_restore_attempts.pop(camera.id, None)
@@ -3375,6 +3434,45 @@ async def _restore_hvx_sessions(info: dict) -> None:
             current = db.get(Camera, camera.id)
             if current is not None and current.enabled and current.sdk_handle is not None:
                 await apply_sdk_connect(current, db, None, raise_on_host_error=False)
+
+
+async def _disconnect_out_of_scope_hvx_sessions(info: dict) -> None:
+    """Release local SDK handles that no longer belong to this node's gate.
+
+    Camera rows and SDK handles are shared in the multi-PC database, but the
+    HVX host is local to this process. Disconnect only handles reported by this
+    host and never rewrite the shared ``sdk_handle`` column, which may belong
+    to the other lane PC.
+    """
+    connections = info.get("connections") if isinstance(info, dict) else None
+    if not isinstance(connections, list):
+        return
+    from .services.node_scope import camera_in_recognition_scope
+    ips = {str(row.get("ip") or "") for row in connections if row.get("ip")}
+    if not ips:
+        return
+    with short_session() as db:
+        cameras = {
+            str(camera.ip_address): camera
+            for camera in db.scalars(select(Camera).where(Camera.enabled == True)).all()
+            if str(camera.ip_address or "") in ips
+        }
+        stale_handles = [
+            int(row["handle"])
+            for row in connections
+            if row.get("handle") is not None
+            and str(row.get("ip") or "") in cameras
+            and not camera_in_recognition_scope(cameras[str(row.get("ip") or "")], db=db)
+        ]
+    if not stale_handles:
+        return
+    hvx = HVXHostClient()
+    for handle in stale_handles:
+        try:
+            await hvx.disconnect(handle, force=True)
+            log.info("Released out-of-scope SDK session: handle=%s", handle)
+        except Exception as exc:
+            log.warning("Could not release out-of-scope SDK session handle=%s: %s", handle, exc)
 
 
 async def _hvx_watch_loop():
@@ -3392,6 +3490,7 @@ async def _hvx_watch_loop():
                 hvx_breaker.failure()
             mark_hardware(ok)
             if ok:
+                await _disconnect_out_of_scope_hvx_sessions(info)
                 await _restore_hvx_sessions(info)
         except asyncio.CancelledError:
             raise
@@ -3409,6 +3508,17 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
         stop_detect_consumer(camera_id)
         return
     from .services.media_gateway import gateway
+    # If the optional sidecar became ready after a direct fallback was started,
+    # switch the legacy Site Service reader before consuming its old mailbox.
+    from app.infrastructure.media.registry import mediamtx_detect_active
+    if mediamtx_detect_active(camera_id):
+        with short_session() as db:
+            camera = db.get(Camera, camera_id)
+            if camera is None or not software_ocr_enabled(camera):
+                return
+            gateway.release_detect(camera_id)
+            from app.services.mediamtx_detect import ensure_detect_consumer
+            ensure_detect_consumer(_live_spec(camera, need_detect=True))
     jpeg = _current_recognition_jpeg(camera_id)
     if jpeg[:2] != b"\xff\xd8":
         from app.infrastructure.media.registry import mediamtx_detect_active
@@ -3510,6 +3620,18 @@ async def _camera_event_loop():
                 lane = runtime.lane(camera_id)
                 lane.clear_current_plate()
                 lane.visit.reset()
+                # Scope changes must release local consumers immediately. The
+                # shared database can contain this camera because another lane
+                # PC owns it, so do not leave this process's decoder running
+                # merely because the row is still enabled globally.
+                from .services.mediamtx_detect import stop_detect_consumer
+                from .services.mediamtx_live import stop_live_consumer
+                from .services.media_gateway import gateway
+                live_task = stop_live_consumer(camera_id)
+                stop_detect_consumer(camera_id)
+                gateway.stop_producer(camera_id, force=True)
+                if live_task is not None:
+                    await asyncio.gather(live_task, return_exceptions=True)
 
             # Cameras are independent failure domains. Draining them serially
             # meant one slow OCR/HTTP call could delay every other gate by

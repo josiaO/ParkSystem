@@ -26,6 +26,7 @@ $MediaMtx = Join-Path $InstallDir "vendor\mediamtx\mediamtx.exe"
 if (-not (Test-Path $Py64)) {
     throw "Install SmartPark Edge first. Missing $Py64"
 }
+$TaskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 function Write-SmartParkLauncher {
     param(
@@ -63,7 +64,6 @@ function Register-SmartParkTask {
     # Quote the launcher. "SmartPark Edge" has a space; an unquoted set-chain
     # makes Start-ScheduledTask fail and the installer never opens the app.
     $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument ("/c `"{0}`"" -f $Launcher) -WorkingDirectory $WorkingDirectory
-    $taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
     try {
@@ -72,11 +72,36 @@ function Register-SmartParkTask {
     } catch {
         Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggerLogon -Settings $settings -Force | Out-Null
     }
+}
+
+function Start-SmartParkTask {
+    param([string]$Name)
     try {
         Start-ScheduledTask -TaskName $Name -ErrorAction Stop
     } catch {
-        throw "registered, but Windows did not start it: $($_.Exception.Message)"
+        throw "registered, but Windows did not start '$Name': $($_.Exception.Message)"
     }
+}
+
+function Wait-SmartParkHttp {
+    param(
+        [string]$Url,
+        [string]$Label,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500) {
+                return
+            }
+        } catch {
+            # The process may still be starting. Keep polling until the bounded deadline.
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "$Label did not answer $Url within $TimeoutSeconds seconds. Check the SmartPark logs."
 }
 
 $siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
@@ -92,19 +117,23 @@ if (Test-Path $MediaMtx) {
 
 Write-Host "Registering SmartPark background tasks..."
 $failed = @()
+$registered = @()
 try {
     Register-SmartParkTask -Name "SmartPark Site Service" -Launcher $siteBat -WorkingDirectory $InstallDir
+    $registered += "SmartPark Site Service"
 } catch {
     $failed += "Site Service: $_"
 }
 try {
     Register-SmartParkTask -Name "SmartPark Recognition Worker" -Launcher $recognitionBat -WorkingDirectory $InstallDir
+    $registered += "SmartPark Recognition Worker"
 } catch {
     $failed += "Recognition Worker: $_"
 }
 if ($hostBat) {
     try {
         Register-SmartParkTask -Name "SmartPark HVX Host" -Launcher $hostBat -WorkingDirectory (Join-Path $InstallDir "tools\hvx_sdk_host")
+        $registered += "SmartPark HVX Host"
     } catch {
         $failed += "HVX host: $_"
     }
@@ -114,6 +143,7 @@ if ($hostBat) {
 if ($mediaBat) {
     try {
         Register-SmartParkTask -Name "SmartPark Media Service" -Launcher $mediaBat -WorkingDirectory $InstallDir
+        $registered += "SmartPark Media Service"
     } catch {
         $failed += "Media Service: $_"
     }
@@ -122,6 +152,24 @@ if ($mediaBat) {
 }
 if ($failed.Count -gt 0) {
     throw ($failed -join "; ")
+}
+
+# Start in dependency order. The tasks remain registered with an AtLogOn
+# trigger, so the same sequence is repeated automatically after the next
+# Windows sign-in. The Site Service also has its own duplicate-safe fallback,
+# but starting the explicit host first makes HVX diagnostics deterministic.
+foreach ($name in @("SmartPark HVX Host", "SmartPark Site Service", "SmartPark Media Service", "SmartPark Recognition Worker")) {
+    if ($registered -contains $name) {
+        Write-Host "Starting $name..."
+        Start-SmartParkTask -Name $name
+    }
+}
+
+if ($registered -contains "SmartPark HVX Host") {
+    Wait-SmartParkHttp -Url "http://127.0.0.1:8765/info" -Label "HVX SDK host" -TimeoutSeconds 30
+}
+if ($registered -contains "SmartPark Site Service") {
+    Wait-SmartParkHttp -Url "http://127.0.0.1:8760/health/live" -Label "Site Service" -TimeoutSeconds 45
 }
 
 Write-Host ""
@@ -136,3 +184,4 @@ Write-Host "Desktop is only a client. Parking continues if the UI is closed."
 Write-Host "Fresh installs prefer MediaMTX/WebRTC when the bundled binary is available; upgraded sites keep their stored rollout flags."
 Write-Host "To promote an upgraded site explicitly, run Enable-MediaMTX.ps1 -LiveView."
 Write-Host "Recovery: Windows restarts each task up to 3 times, 1 minute apart."
+Write-Host "Automatic startup: tasks run for $taskUser at Windows logon; no manual Start-SmartPark.bat is required."
