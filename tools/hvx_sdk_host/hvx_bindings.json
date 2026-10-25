@@ -21,6 +21,7 @@
     "Net_ConnCameraEx": {"args": ["int", "ushort", "int", "char*", "char*"], "restype": "int"},
     "Net_DisConnCamera": {"args": ["int"], "restype": "int"},
     "Net_QueryConnState": {"args": ["int"], "restype": "int"},
+    "Net_FuntionListRsp": {"args": ["int", "void*"], "restype": "int"},
     "Net_ImageSnap": {"args": ["int"], "restype": "int"},
     "Net_SaveJpgFile": {"args": ["int", "char*"], "restype": "int"},
     "Net_WriteGPIOState": {"args": ["int", "byte", "byte"], "restype": "int"},

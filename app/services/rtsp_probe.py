@@ -24,17 +24,35 @@ def redact_url(url: str) -> str:
     return re.sub(r"(://[^:/@]+:)[^@]+(@)", r"\1********\2", url)
 
 
-def vendor_candidates(ip: str, username: str, password: str, explicit: str = "") -> list[str]:
+def vendor_candidates(
+    ip: str,
+    username: str,
+    password: str,
+    explicit: str = "",
+    *,
+    prefer_qy: bool = False,
+) -> list[str]:
     out=[]
     if explicit:
         out.append(explicit)
     u=quote(username, safe="")
     p=quote(password, safe="")
+    # OcxConfig/NetSDK negotiates the QY picture service on port 40000 and
+    # builds /video and /subvideo URLs from that negotiated port.  Port 554 is
+    # common for Dahua/Hikvision, but is actively refused by the gate cameras
+    # in the supplied site.  Keep the QY candidates ahead of generic RTSP only
+    # when the caller has identified the native HVX/QY adapter.
+    qy = [
+        f"rtsp://{u}:{p}@{ip}:40000/subvideo",
+        f"rtsp://{u}:{p}@{ip}:40000/video",
+        f"rtsp://{ip}:40000/subvideo",
+        f"rtsp://{ip}:40000/video",
+    ]
     # ParkWatch builds ``RTSP://<ip>:<port>/video`` and ``/subvideo`` for
     # continuous video.  Put credential-bearing variants first so MediaMTX can
     # authenticate without relying on the vendor SDK process.  OcxConfig's
     # av0_0/av0_1 forms remain fallbacks for older QY firmware.
-    out += [
+    generic = [
         f"rtsp://{u}:{p}@{ip}:554/subvideo",
         f"rtsp://{u}:{p}@{ip}:554/video",
         f"rtsp://{ip}:554/subvideo",
@@ -49,6 +67,7 @@ def vendor_candidates(ip: str, username: str, password: str, explicit: str = "")
         f"rtsp://{u}:{p}@{ip}:554/stream1",
         f"rtsp://{u}:{p}@{ip}:554/live",
     ]
+    out += (qy + generic) if prefer_qy else (generic + qy)
     seen=[]
     for x in out:
         if x not in seen:

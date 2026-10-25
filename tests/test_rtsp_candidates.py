@@ -14,6 +14,13 @@ def test_vendor_candidates_include_known_patterns():
     assert any("user=admin" in x and "password=secret" in x for x in xs)
 
 
+def test_qy_candidates_prefer_the_negotiated_picture_port():
+    xs = vendor_candidates("192.168.1.49", "admin", "secret", prefer_qy=True)
+    assert xs[0] == "rtsp://admin:secret@192.168.1.49:40000/subvideo"
+    assert xs[1] == "rtsp://admin:secret@192.168.1.49:40000/video"
+    assert any(":554/subvideo" in x for x in xs)
+
+
 def test_http_snapshot_paths_cover_dahua_and_hikvision():
     assert "/cgi-bin/snapshot.cgi" in SNAPSHOT_PATHS
     assert "/ISAPI/Streaming/channels/101/picture" in SNAPSHOT_PATHS

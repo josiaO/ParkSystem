@@ -106,10 +106,8 @@ class PathPlanTests(unittest.TestCase):
         with patch.object(mediamtx, "running", return_value=True), patch.object(mediamtx, "_control_api", fake_control):
             self.assertTrue(mediamtx.sync_paths())
         added = [p for m, p in calls if m == "POST"]
-        deleted = [p for m, p in calls if m == "DELETE"]
         self.assertEqual(added, ["/v3/config/paths/add/cam30"])
-        self.assertIn("/v3/config/paths/delete/cam30_detect", deleted)
-        self.assertIn("/v3/config/paths/delete/cam30_evidence", deleted)
+        self.assertNotIn("DELETE", [m for m, _ in calls])
 
     def test_upstream_role_uris_resolve_evidence_from_main(self):
         profiles = {

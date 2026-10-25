@@ -107,11 +107,9 @@ def worker_owns_software_reads(camera_id: int) -> bool:
     with SessionLocal() as db:
         from app.models import Camera
         camera = db.get(Camera, camera_id)
-        health = worker_health()
-        claimed = health.get("ok") and camera_id in health.get("claimed_camera_ids", [])
         enabled = (bool(flags(db).get("fastalpr_new_pipeline_enabled"))
                    and camera is not None and _software_camera(camera, db)
-                   and mediamtx_detect_active(camera_id, db) and (claimed or _worker_ready(camera_id)))
+                   and mediamtx_detect_active(camera_id, db) and _worker_ready(camera_id))
     _owns_cache[camera_id] = (now, enabled)
     return enabled
 

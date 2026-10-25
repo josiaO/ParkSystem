@@ -116,9 +116,9 @@ class HVXHostClient:
         except Exception as exc:
             raise HVXHostUnavailable(str(exc)) from exc
 
-    async def disconnect(self, handle: int) -> dict:
+    async def disconnect(self, handle: int, *, force: bool = False) -> dict:
         async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-            r = await client.post(f"{self.base_url}/disconnect/{handle}")
+            r = await client.post(f"{self.base_url}/disconnect/{handle}", json={"force": bool(force)})
             r.raise_for_status()
             _drop_live_client(self.base_url, handle)
             return r.json()

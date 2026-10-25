@@ -84,6 +84,15 @@ class MediaMTXPathTests(unittest.TestCase):
         start.assert_not_called()
         dest.unlink(missing_ok=True)
 
+    def test_site_process_does_not_race_external_media_owner(self):
+        with patch.object(mediamtx, "_process", None), \
+             patch.object(mediamtx, "running", return_value=True), \
+             patch.object(mediamtx, "sync_paths") as sync, \
+             patch.object(mediamtx, "write_config") as write:
+            mediamtx.register_source(3, {"uri": "rtsp://127.0.0.1:40000/subvideo"})
+        sync.assert_not_called()
+        write.assert_not_called()
+
 
 class DesktopMediaMTXTests(unittest.TestCase):
     def test_snapshot_uses_live_cache_instead_of_ffmpeg(self):

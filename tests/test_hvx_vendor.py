@@ -136,6 +136,49 @@ class VendorPackageTests(unittest.TestCase):
         self.assertEqual(hvx_sdk.T_ControlGate._fields_[0][0], "ucState")
         self.assertEqual(hvx_sdk.GATE_STATE_OPEN, 1)
 
+    def test_ocx_function_list_selects_highest_priority_gate_stream(self):
+        import struct
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_sdk
+
+        blob = bytearray(hvx_sdk.FUNCTION_LIST_BYTES)
+        blob[0] = 1
+        struct.pack_into("<I", blob, hvx_sdk.FUNCTION_LIST_FLAGS_OFFSET, 0x20000 | 0x10000 | 0x200)
+        self.assertEqual(hvx_sdk.function_list_flags(blob), 0x30200)
+        self.assertEqual(hvx_sdk.stream_type_from_function_list(blob), 4)
+
+        blob[hvx_sdk.FUNCTION_LIST_FLAGS_OFFSET:hvx_sdk.FUNCTION_LIST_FLAGS_OFFSET + 4] = b"\x00" * 4
+        self.assertEqual(hvx_sdk.stream_type_from_function_list(blob), 0)
+
+    def test_query_function_list_is_cached_as_video_diagnostics(self):
+        import ctypes
+        import sys
+        import threading
+        from pathlib import Path
+        from types import SimpleNamespace
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_sdk
+
+        sdk = hvx_sdk.HVXSDK.__new__(hvx_sdk.HVXSDK)
+        sdk._lock = threading.Lock()
+        sdk._function_lists = {}
+
+        def function_list(handle, pointer):
+            ctypes.memset(pointer, 0, hvx_sdk.FUNCTION_LIST_BYTES)
+            ctypes.memmove(pointer, b"\x01", 1)
+            ctypes.memmove(ctypes.c_void_p(pointer.value + hvx_sdk.FUNCTION_LIST_FLAGS_OFFSET), (0x8000).to_bytes(4, "little"), 4)
+            return 0
+
+        sdk.dll = SimpleNamespace(Net_FuntionListRsp=function_list)
+        result = sdk.query_function_list(17)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stream_type"], 3)
+        self.assertEqual(sdk.selected_stream_type(17), 3)
+
     def test_jpg_drain_keeps_newest_and_reports_backlog(self):
         import hvx_sdk
         sdk = hvx_sdk.HVXSDK.__new__(hvx_sdk.HVXSDK)
@@ -167,6 +210,16 @@ class VendorPackageTests(unittest.TestCase):
         with patch("sys.stdout", buf):
             handler.log_message("%s", "host-info")
         self.assertIn("host-info", buf.getvalue())
+
+    def test_host_classifies_normal_windows_peer_reset_as_benign(self):
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_host
+        self.assertTrue(hvx_host._is_peer_disconnect(ConnectionResetError(10054, "forcibly closed")))
+        self.assertTrue(hvx_host._is_peer_disconnect(OSError("[WinError 10054] An existing connection was forcibly closed by the remote host")))
+        self.assertFalse(hvx_host._is_peer_disconnect(OSError("SDK connection failed")))
 
     def test_vendor_candidates_use_configured_credentials(self):
         xs = vendor_candidates("192.168.1.49", "admin", "secret")

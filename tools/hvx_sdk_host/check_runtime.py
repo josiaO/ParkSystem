@@ -16,6 +16,12 @@ def check(vendor: Path) -> list[str]:
     if not vendor.is_dir():
         return [f'Vendor directory missing: {vendor}']
     errors = []
+    try:
+        from PIL import Image
+        image = Image.new("RGB", (2, 2), "black")
+        image.close()
+    except Exception as exc:
+        errors.append(f"32-bit host image encoder unavailable (Pillow): {exc}")
     loaded = []
     with os.add_dll_directory(str(vendor.resolve())):
         for name in DLLS:

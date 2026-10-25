@@ -190,6 +190,9 @@ def _recommendations(camera: Camera, capture: dict[str, Any] | None, media: dict
 
 def commissioning_snapshot(db: Session, camera: Camera) -> dict[str, Any]:
     """Return a no-side-effect commissioning snapshot for one camera."""
+    from app.services.node_scope import camera_in_recognition_scope
+    from app.services.modules import is_enabled
+
     _row, capture = _latest_capture(db, camera)
     state = get_state(camera.id)
     alpr = dict(state.alpr or {})
@@ -215,6 +218,8 @@ def commissioning_snapshot(db: Session, camera: Camera) -> dict[str, Any]:
         "adapter_id": camera.adapter_id,
         "status": camera.status,
         "recognition": {
+            "in_scope": bool(camera_in_recognition_scope(camera, db=db)),
+            "module_enabled": bool(is_enabled("recognition.alpr", db)),
             "mode": "HYBRID" if mode == "NATIVE_WITH_LOCAL_VERIFY" else ("FASTALPR_ONLY" if mode == "LOCAL_ONLY" else "NATIVE_ONLY"),
             "strategy": strategy,
             "native_capable": native_capable,

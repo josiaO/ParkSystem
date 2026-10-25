@@ -80,6 +80,7 @@ def make_sdk():
     sdk._live_requested_at = {}
     sdk._video_streams = {7: 1, 8: 1}
     sdk._video_locks = {}
+    sdk._video_diagnostics = {}
     sdk._video_handles = {8}
     sdk._video_threads = {}
     sdk._video_running = True
@@ -97,6 +98,9 @@ def test_failed_video_start_keeps_a_recovery_pump_and_retries_only_that_camera()
     sdk.dll.Net_StartVideo.side_effect = [7, 7, 7, 0]
     assert not sdk.start_video(7)["ok"]
     assert 7 in sdk._video_handles
+    # The real clock advances during the native decoder warm-up. This test
+    # controls monotonic time, so allow the first read immediately.
+    sdk._video_diagnostics[7]["jpeg_not_before"] = 0.0
     sdk._ensure_camera_pump.assert_called_once_with(7)
     clock = [100.0]
     reads = []
@@ -109,7 +113,7 @@ def test_failed_video_start_keeps_a_recovery_pump_and_retries_only_that_camera()
         return JPEG
     sdk._get_jpg_buffer = read
     with patch("tools.hvx_sdk_host.hvx_sdk.time.monotonic", side_effect=lambda: clock[0]), \
-         patch("tools.hvx_sdk_host.hvx_sdk.time.sleep"):
+         patch("tools.hvx_sdk_host.hvx_sdk.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + max(float(seconds), 0.1))):
         sdk._camera_video_loop(7)
         assert sdk.live_jpeg_for(7) == JPEG
     assert sdk.dll.Net_StartVideo.call_count == 4

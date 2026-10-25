@@ -93,7 +93,7 @@ def test_repeated_connect_reuses_native_session_instead_of_leaking_stream_slots(
     sdk.disconnect.assert_not_called()
     changed = sdk.add_and_connect("10.3.0.1", 30000, 3, "operator", "new-secret")
     assert changed["handle"] == 8
-    sdk.disconnect.assert_called_once_with(7)
+    sdk.disconnect.assert_called_once_with(7, force=True)
 
 
 @pytest.mark.parametrize("entry_session", [[], [{"handle": 7, "ip": "10.3.0.2", "state": 2}]])
@@ -124,6 +124,35 @@ def test_sdk_host_restart_restores_only_previous_connections_and_checks_ip(tmp_p
             assert connect.await_count == 1
             with factory() as database:
                 assert list(database.scalars(select(Camera.sdk_handle).order_by(Camera.id))) == [9, 8, None, 10]
+    finally:
+        engine.dispose()
+
+
+def test_sdk_host_restart_restores_only_this_nodes_gate(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'site.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as database:
+        database.add_all([
+            Camera(id=1, name="Lane 1 entry", ip_address="10.3.0.1", gate_id=1, sdk_handle=7),
+            Camera(id=2, name="Lane 2 entry", ip_address="10.3.0.2", gate_id=2, sdk_handle=8),
+        ])
+        database.commit()
+
+    async def restore(camera, database, user, **kwargs):
+        camera.sdk_handle = int(camera.id) + 20
+        database.commit()
+
+    from app.config import settings
+    try:
+        with patch.object(api_main, "short_session", factory), \
+             patch.object(api_main, "_hvx_restore_attempts", {}), \
+             patch.object(api_main, "apply_sdk_connect", AsyncMock(side_effect=restore)) as connect, \
+             patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch.object(settings, "recognition_gate_id", 2):
+            asyncio.run(api_main._restore_hvx_sessions({"available": True, "connections": []}))
+            connect.assert_awaited_once()
+            assert connect.call_args.args[0].id == 2
     finally:
         engine.dispose()
 

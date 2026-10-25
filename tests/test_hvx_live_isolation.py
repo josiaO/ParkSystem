@@ -57,6 +57,22 @@ class HvxLiveIsolationTests(unittest.TestCase):
         register.assert_called_once()
         unregister.assert_not_called()
 
+    def test_unconnected_hvx_camera_does_not_open_a_competing_rtsp_source(self):
+        camera = SimpleNamespace(
+            id=9,
+            ip_address="192.168.1.145",
+            username="admin",
+            password_secret="admin",
+            adapter_id="hvx",
+            rtsp_url="",
+            rtsp_transport="TCP",
+            sdk_handle=None,
+            stream_profiles={},
+        )
+        cfg = source_config_for_camera(camera)
+        self.assertEqual(cfg["uri"], "")
+        self.assertEqual(cfg["detect_uri"], "")
+
     def test_live_http_pool_can_serve_four_cameras(self):
         import asyncio
         import httpx
