@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import platform
 import socket
+import uuid
 from typing import Literal
 
 from pydantic import field_validator, model_validator
@@ -21,6 +22,38 @@ def install_directory() -> Path:
     return Path(os.environ.get("SMARTPARK_HOME") or Path(__file__).resolve().parents[1]).resolve()
 
 
+def default_node_id() -> str:
+    """Return a stable per-computer identity for shared-site ownership.
+
+    A cloned Windows installation can retain the same hostname on two lane
+    PCs. Persisting the gate assignment under hostname alone then makes the
+    two PCs overwrite each other's scope, which releases and reconnects live
+    camera sessions every few seconds. The explicit SMARTPARK_NODE_ID setting
+    remains the supported override for administrators.
+    """
+    hostname = socket.gethostname().strip() or "smartpark-node"
+    machine_id = ""
+    if platform.system() == "Windows":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                machine_id = str(winreg.QueryValueEx(key, "MachineGuid")[0] or "")
+        except Exception:
+            machine_id = ""
+    else:
+        try:
+            machine_id = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
+        except Exception:
+            machine_id = ""
+    if not machine_id:
+        machine_id = str(uuid.getnode())
+    import hashlib
+
+    suffix = hashlib.sha256(f"{hostname}:{machine_id}".encode("utf-8")).hexdigest()[:12]
+    return f"{hostname}-{suffix}"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=install_directory() / ".env", extra="ignore")
 
@@ -30,7 +63,7 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8760
     database_url: str | None = None
-    node_id: str = socket.gethostname()
+    node_id: str = default_node_id()
     node_role: Literal["SERVER", "CLIENT"] = "SERVER"
     shared_media_dir: Path | None = None
     db_pool_size: int = 5
@@ -50,6 +83,10 @@ class Settings(BaseSettings):
     detect_fps: float = 5.0
     # Recognition samples a stopped vehicle. This is not the camera or browser FPS.
     recognition_sample_fps: float = 4.0
+    # Latest-frame OCR latency budget. The frame mailbox remains bounded; this
+    # only prevents a valid read from being rejected while inference finishes
+    # on a busy Windows CPU.
+    recognition_stale_frame_ms: float = 2000.0
     # After a plate is confirmed, OCR stops. A detector-only check at this
     # interval notices the vehicle leaving without reading the plate again.
     recognition_departure_check_seconds: float = 1.0
@@ -226,6 +263,14 @@ class Settings(BaseSettings):
         if not 1.0 <= fps <= 10.0:
             raise ValueError("SMARTPARK_RECOGNITION_SAMPLE_FPS must be between 1 and 10")
         return fps
+
+    @field_validator("recognition_stale_frame_ms")
+    @classmethod
+    def _recognition_stale_frame_ms(cls, value: float) -> float:
+        milliseconds = float(value)
+        if not 250.0 <= milliseconds <= 10000.0:
+            raise ValueError("SMARTPARK_RECOGNITION_STALE_FRAME_MS must be between 250 and 10000")
+        return milliseconds
 
     @field_validator("recognition_max_concurrency", "alpr_cpu_threads")
     @classmethod

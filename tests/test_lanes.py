@@ -114,6 +114,7 @@ class LaneViewTests(unittest.TestCase):
             self.assertEqual(count, 1)
             self.assertTrue((self.media / first.snapshot_path).is_file())
             self.assertTrue((self.media / first.crop_path).is_file())
+            self.assertIn("T123ABC", first.crop_path)
             gate_id = camera.gate_id
 
         view = self.client.get(f"/lanes/{gate_id}/view", headers=self.headers).json()

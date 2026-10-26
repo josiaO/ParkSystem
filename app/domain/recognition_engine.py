@@ -95,6 +95,9 @@ def policy_from_settings() -> RecognitionPolicy:
         consensus_window_seconds=float(
             getattr(settings, "recognition_consensus_window_seconds", 2.0) or 2.0
         ),
+        stale_frame_ms=float(
+            getattr(settings, "recognition_stale_frame_ms", 2000.0) or 2000.0
+        ),
         absence_reset_seconds=float(
             getattr(settings, "recognition_absence_reset_seconds", 0.6) or 0.6
         ),

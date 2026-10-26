@@ -118,8 +118,9 @@ SDK_CONNECT_SEQUENCE = [
     "Net_FuntionListRsp(handle, 800-byte buffer)  # choose stream type from +0x04 flags",
     "Net_RegOffLineClient(handle)",
     "Net_StartVideo(handle, selected stream type, HWND)  # OcxConfig PlaySdk path",
+    "Net_SetDrawDataOut(handle, decoded bitmap callback)  # latest frame, no HWND capture",
     "Net_RegImageRecvEx2(handle, cb)  # native plate + JPEG",
-    "Net_GetJpgBuffer(handle, ptr, size)  # live JPEG pump",
+    "Net_GetJpgBuffer(handle, ptr, size)  # compatibility fallback only",
 ]
 
 
@@ -340,6 +341,15 @@ class HVXSDK:
         self._gpio_state = {}
         self._event_media = {}
         self._hwnds = {}
+        # QY exposes the same decoded bitmap that PlaySdk paints through
+        # Net_SetDrawDataOut. Keep the callback alive and copy only the latest
+        # bitmap. This avoids PrintWindow/BitBlt (which is unreliable for
+        # off-screen HWNDs) and avoids polling the vendor JPEG function that
+        # crashes on some gate-camera firmware.
+        self._draw_callbacks = {}
+        self._draw_frames = {}
+        self._draw_frame_seq = {}
+        self._draw_encoded_seq = {}
         self._video_handles = set()
         self._video_threads = {}
         self._video_thread = None
@@ -434,6 +444,13 @@ class HVXSDK:
         if hasattr(self.dll, "Net_AddPlayWindow"):
             self.dll.Net_AddPlayWindow.argtypes = [c_int, c_void_p]
             self.dll.Net_AddPlayWindow.restype = c_int
+        if hasattr(self.dll, "Net_SetDrawDataOut"):
+            callback_factory = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+            self._FDrawDataOut = callback_factory(
+                None, c_int, c_void_p, c_void_p, ctypes.POINTER(ctypes.c_ubyte), c_int, c_int, c_void_p
+            )
+            self.dll.Net_SetDrawDataOut.argtypes = [c_int, self._FDrawDataOut, c_void_p]
+            self.dll.Net_SetDrawDataOut.restype = c_int
         self._FindIpCB = ctypes.WINFUNCTYPE(None, c_char_p, c_void_p)
         if hasattr(self.dll, "Net_FindDeviceIp"):
             self.dll.Net_FindDeviceIp.argtypes = [self._FindIpCB, c_void_p]
@@ -965,6 +982,9 @@ class HVXSDK:
         with self._lock:
             self._last_capture.pop(handle, None)
             self._last_live_jpeg.pop(handle, None)
+            getattr(self, "_draw_frames", {}).pop(handle, None)
+            getattr(self, "_draw_frame_seq", {}).pop(handle, None)
+            getattr(self, "_draw_encoded_seq", {}).pop(handle, None)
             self._live_received_at.pop(handle, None)
             self._live_requested_at.pop(handle, None)
             self._video_streams.pop(handle, None)
@@ -1167,6 +1187,111 @@ class HVXSDK:
             row = self._video_diagnostics.setdefault(int(handle), {})
             row.update(fields)
 
+    def _on_draw_data(self, handle, hdd, bmi, data, width, height, user) -> None:
+        """Copy the decoded PlaySdk bitmap without doing work in the SDK callback.
+
+        The vendor callback supplies a Windows DIB.  The bitmap header tells us
+        its orientation, bit depth and stride; copying that exact byte count is
+        important because the callback buffer is owned by DecodeSdk and is only
+        valid until this function returns.
+        """
+        handle = int(handle)
+        width = int(width or 0)
+        height_arg = int(height or 0)
+        if width <= 0 or height_arg == 0 or not data:
+            return
+        height = abs(height_arg)
+        bit_count = 24
+        compression = 0
+        bmi_height = height_arg
+        image_size = 0
+        try:
+            if bmi:
+                header = ctypes.string_at(bmi, 40)
+                if len(header) >= 40:
+                    _size, bmi_width, bmi_height, _planes, bit_count, compression, image_size, *_ = struct.unpack(
+                        "<IiiHHIIiiII", header
+                    )
+                    width = abs(int(bmi_width or width))
+                    height = abs(int(bmi_height or height))
+        except Exception:
+            # Some SDK builds pass a null/non-standard BITMAPINFO. The callback
+            # dimensions remain sufficient for the common 24-bit DIB layout.
+            bit_count = 24
+            compression = 0
+            bmi_height = height_arg
+            image_size = 0
+        if bit_count not in (24, 32) or compression not in (0, 3):
+            self._note_video(handle, draw_data_error=f"unsupported bitmap {bit_count}bpp compression={compression}")
+            return
+        stride = ((width * bit_count + 31) // 32) * 4
+        size = max(int(image_size or 0), stride * height)
+        if size <= 0 or size > 32 * 1024 * 1024:
+            self._note_video(handle, draw_data_error="invalid bitmap size")
+            return
+        try:
+            raw = ctypes.string_at(data, size)
+        except Exception as exc:
+            self._note_video(handle, draw_data_error=type(exc).__name__)
+            return
+        if len(raw) < stride * height:
+            self._note_video(handle, draw_data_error="short bitmap callback")
+            return
+        with self._lock:
+            seq = int(self._draw_frame_seq.get(handle, 0)) + 1
+            self._draw_frame_seq[handle] = seq
+            self._draw_frames[handle] = (raw, width, height, bit_count, stride, -1 if int(bmi_height) > 0 else 1)
+        self._note_video(
+            handle,
+            capture_mode="sdk_draw_data",
+            draw_data_frames=seq,
+            draw_data_width=width,
+            draw_data_height=height,
+            draw_data_bpp=bit_count,
+            draw_data_error="",
+        )
+
+    def _register_draw_data(self, handle: int) -> int | None:
+        if not hasattr(self.dll, "Net_SetDrawDataOut"):
+            return None
+        handle = int(handle)
+        callback = self._draw_callbacks.get(handle)
+        if callback is None:
+            callback = self._FDrawDataOut(self._on_draw_data)
+            self._draw_callbacks[handle] = callback
+        rc = int(self.dll.Net_SetDrawDataOut(handle, callback, None))
+        self._note_video(handle, draw_data_rc=rc, draw_data_registered_at=time.monotonic())
+        return rc
+
+    def _draw_data_jpeg(self, handle: int) -> bytes:
+        handle = int(handle)
+        with self._lock:
+            frame = self._draw_frames.get(handle)
+            seq = int(self._draw_frame_seq.get(handle, 0))
+            encoded_seq = int(self._draw_encoded_seq.get(handle, 0))
+            cached = self._last_live_jpeg.get(handle, b"")
+        if not frame or seq <= encoded_seq:
+            return cached if cached[:2] == b"\xff\xd8" else b""
+        raw, width, height, bit_count, stride, orientation = frame
+        try:
+            from PIL import Image
+
+            mode = "BGR" if bit_count == 24 else "BGRX"
+            image = Image.frombytes("RGB", (width, height), raw, "raw", mode, stride, orientation)
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=82, optimize=False)
+            jpeg = output.getvalue()
+        except Exception as exc:
+            self._note_video(handle, draw_data_error=type(exc).__name__)
+            return b""
+        with self._lock:
+            if handle in self._video_handles:
+                self._draw_encoded_seq[handle] = seq
+                self._last_live_jpeg[handle] = jpeg
+                self._live_received_at[handle] = time.monotonic()
+        self._note_video(handle, capture_mode="sdk_draw_data", window_capture_rc=None)
+        return jpeg
+
     def video_status(self, handle: int) -> dict:
         now = time.monotonic()
         with self._lock:
@@ -1206,6 +1331,12 @@ class HVXSDK:
         region_rc = None
         if rc == DC_NO_ERROR and hasattr(self.dll, "Net_ShowPlateRegion"):
             region_rc = int(self.dll.Net_ShowPlateRegion(int(handle), 0))
+        draw_data_rc = None
+        if rc == DC_NO_ERROR and hasattr(self.dll, "Net_SetDrawDataOut"):
+            # Register the decoded-frame callback immediately after the
+            # decoder starts. It is independent of the display HWND and keeps
+            # gate-camera video moving even when PrintWindow returns black.
+            draw_data_rc = self._register_draw_data(int(handle))
         play_window_rc = None
         if rc == DC_NO_ERROR and hwnd and hasattr(self.dll, "Net_AddPlayWindow"):
             # OcxConfig adds its display window after Net_StartVideo.  Keep
@@ -1234,6 +1365,7 @@ class HVXSDK:
             "stream_type": used,
             "hwnd": int(hwnd) if hwnd else 0,
             "plate_region_rc": region_rc,
+            "draw_data_rc": draw_data_rc,
             "play_window_rc": play_window_rc,
         }
 
@@ -1243,6 +1375,9 @@ class HVXSDK:
                 with self._lock:
                     self._video_handles.discard(int(handle))
                     self._last_live_jpeg.pop(int(handle), None)
+                    getattr(self, "_draw_frames", {}).pop(int(handle), None)
+                    getattr(self, "_draw_frame_seq", {}).pop(int(handle), None)
+                    getattr(self, "_draw_encoded_seq", {}).pop(int(handle), None)
                     self._live_received_at.pop(int(handle), None)
                     self._live_requested_at.pop(int(handle), None)
                 if hasattr(self.dll, "Net_StopVideo"):
@@ -1433,6 +1568,19 @@ class HVXSDK:
                 logging.getLogger("smartpark.hvx").debug("PlaySdk window capture cleanup failed", exc_info=True)
 
     def _get_jpg_buffer(self, handle: int) -> bytes:
+        # Prefer the decoded-frame callback. It is the same PlaySdk decoder
+        # used by OcxConfig but does not depend on a hidden/off-screen HWND.
+        # Keep the window path as a bounded compatibility fallback for older
+        # vendor DLLs that export no draw-data callback or do not invoke it.
+        if int(handle) in getattr(self, "_draw_callbacks", {}):
+            jpeg = self._draw_data_jpeg(handle)
+            if jpeg:
+                return jpeg
+            with self._lock:
+                registered_at = float(self._video_diagnostics.get(int(handle), {}).get("draw_data_registered_at") or 0.0)
+                received = int(self._video_diagnostics.get(int(handle), {}).get("draw_data_frames") or 0)
+            if received or not registered_at or time.monotonic() - registered_at < 2.0:
+                return b""
         # Native QY video is rendered by PlaySdk into the HWND passed to
         # Net_StartVideo, just as in OcxConfig. Do not call Net_GetJpgBuffer on
         # this path: gate-camera firmware can raise 0xe06d7363 there after a
@@ -1620,7 +1768,7 @@ class HVXSDK:
                 if handle not in self._video_handles:
                     break
                 requested = self._live_requested_at.get(handle, started)
-                not_before = float(self._video_diagnostics.get(handle, {}).get("jpeg_not_before") or 0.0)
+                not_before = float(getattr(self, "_video_diagnostics", {}).get(handle, {}).get("jpeg_not_before") or 0.0)
             if started - requested > 5.0:
                 retry_at = started + 5.0
                 time.sleep(.25)
@@ -1640,7 +1788,7 @@ class HVXSDK:
                 # Net_StopVideo can deadlock inside PlaySdk after this fault,
                 # wedging the shared UI command thread for every other camera.
                 with self._lock:
-                    diagnostics = self._video_diagnostics.get(handle, {})
+                    diagnostics = getattr(self, "_video_diagnostics", {}).get(handle, {})
                     native_fault = diagnostics.get("native_decoder_fault", False)
                     window_capture = diagnostics.get("capture_mode") == "play_sdk_hwnd"
                 if native_fault:

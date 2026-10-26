@@ -169,6 +169,7 @@ class CameraRecognitionLane:
     recognition_stalls: int = 0
     recognition_restarts: int = 0
     native_events_received: int = 0
+    last_native_capture_key: str = ""
     software_reads: int = 0
     published_events: int = 0
     duplicate_events_suppressed: int = 0
@@ -290,6 +291,26 @@ class CameraRecognitionLane:
     def note_native_event(self) -> None:
         with self._lock:
             self.native_events_received += 1
+
+    def note_native_capture(self, capture_key: str) -> bool:
+        """Start a fresh visit when a distinct native camera capture arrives.
+
+        Some gate cameras emit callbacks for consecutive vehicles without an
+        empty-frame callback between them. In that case the absence timer
+        cannot close the previous visit, so a new capture token/image
+        identifier is the vehicle boundary. Repeated callbacks for the same
+        capture remain attached to the current visit.
+        """
+        key = str(capture_key or "")
+        if not key:
+            return False
+        with self._lock:
+            previous = self.last_native_capture_key
+            new_visit = bool(previous and previous != key and self.visit.event_published)
+            self.last_native_capture_key = key
+            if new_visit:
+                self.visit.reset()
+            return new_visit
 
     def note_session_created(self) -> None:
         with self._lock:
