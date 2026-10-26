@@ -1439,7 +1439,9 @@ async def _run_local_alpr(
     runtime.offer_frame(int(camera.id), jpeg, source="site-alpr")
     if not force and not _local_alpr_ready(camera.id):
         return None
-    ticket = runtime.begin_if_idle(int(camera.id))
+    from app.domain.recognition_engine import policy_from_settings
+    stale_frame_ms = policy_from_settings().stale_frame_ms
+    ticket = runtime.begin_if_idle(int(camera.id), stale_frame_ms=stale_frame_ms)
     if ticket is None:
         return None
     _mark_local_alpr(camera.id)
@@ -1504,6 +1506,8 @@ async def _run_local_alpr_locked(
     from .services.media_gateway import gateway
     from .services.queues import AI_FRAMES
     from .services.recognition_runtime import runtime
+    from app.domain.recognition_engine import policy_from_settings
+    stale_frame_ms = policy_from_settings().stale_frame_ms
     sample = gateway.peek_detect(camera.id)
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))
@@ -1545,7 +1549,7 @@ async def _run_local_alpr_locked(
     plate = str(local.get("plate") or "")
     accepted = True
     if ticket is not None:
-        accepted = runtime.finish(ticket, plate=plate)
+        accepted = runtime.finish(ticket, plate=plate, stale_frame_ms=stale_frame_ms)
         if not accepted:
             runtime.lane(int(camera.id)).last_error = "Recognition result expired; retrying a fresh frame."
             return {**(alpr or {}), "persist_skipped": "stale recognition result"}
@@ -2805,7 +2809,10 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     # Barrier open still needs a gate; the session (plate + receipt token) does not.
     should_handle = bool(
         row and row.plate and not hold
-        and (new_capture or side == "EXIT" or registered_auto or needs_session)
+        # Do not route the same persisted exit visit through the controller on
+        # every repeated native callback. A new visit/capture is sufficient to
+        # trigger exit handling; repeated reads stay display-only.
+        and (new_capture or registered_auto or needs_session)
     )
     if should_handle:
         from .services.dedup import camera_events
@@ -2999,6 +3006,11 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         lane = runtime.lane(camera_id)
         lane.note_native_event()
         if presence:
+            capture_token = str(capture.get("capture_token") or "")
+            capture_key = capture_token
+            if image_id:
+                capture_key = f"{capture_token}:image:{image_id}" if capture_token else f"image:{image_id}"
+            lane.note_native_capture(capture_key)
             coil_watch.observe(camera_id, True, source="image-callback")
             lane.visit.observe(presence=True, plate=native_plate if real_native else "", native_event=True)
             capture["visit_id"] = lane.visit.visit_id

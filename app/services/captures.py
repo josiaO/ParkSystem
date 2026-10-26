@@ -148,6 +148,16 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
     return (Path(kind) / name).as_posix()
 
 
+def _plate_crop_name(camera_id: int, image_id: int, capture: dict | None, plate: str = "") -> str:
+    """Use OCR text in the crop filename while keeping evidence unique."""
+    normalized = normalize_plate(plate or (capture or {}).get("plate") or "")
+    label = normalized or "UNREAD"
+    identity = str((capture or {}).get("event_id") or (capture or {}).get("visit_id") or "")
+    identity = re.sub(r"[^A-Za-z0-9_-]+", "", identity)[:24]
+    suffix = f"img{int(image_id)}" if int(image_id or 0) else (identity or f"t{int(time.time() * 1000) % 1_000_000_000}")
+    return f"cam{int(camera_id)}-{label}-{suffix}-plate.jpg"
+
+
 def _jpeg_from_ref(ref: str | None) -> bytes:
     """Load a previously saved crop/snapshot from a relative path or /media URL."""
     text = str(ref or "").strip().split("?", 1)[0]
@@ -496,7 +506,9 @@ def persist_event(
             elif not already:
                 existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
             if plate_jpeg[:2] == b"\xff\xd8":
-                existing.crop_path = _write_jpeg("crops", f"cam{camera.id}-img{image_id}-plate.jpg", plate_jpeg)
+                existing.crop_path = _write_jpeg(
+                    "crops", _plate_crop_name(camera.id, image_id, capture, incoming_plate or existing.plate), plate_jpeg,
+                )
                 updated = True
             if jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
                 existing.snapshot_path = _write_jpeg("snapshots", f"cam{camera.id}-img{image_id}-car.jpg", jpeg)
@@ -527,14 +539,16 @@ def persist_event(
                     latest.bbox = attach_fusion_audit({**(latest.bbox or {}), **incoming}, capture)
                     if plate_jpeg[:2] == b"\xff\xd8":
                         latest.crop_path = _write_jpeg(
-                            "crops", f"cam{camera.id}-img0-plate.jpg", plate_jpeg,
+                            "crops", _plate_crop_name(camera.id, 0, capture, latest.plate), plate_jpeg,
                         )
                     db.commit()
                     db.refresh(latest)
                 return latest
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
     snapshot_path = _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg) if jpeg[:2] == b"\xff\xd8" else ""
-    crop_path = _write_jpeg("crops", f"{stamp}-plate.jpg", plate_jpeg) if plate_jpeg[:2] == b"\xff\xd8" else ""
+    crop_path = _write_jpeg(
+        "crops", _plate_crop_name(camera.id, image_id, capture, native.get("plate")), plate_jpeg,
+    ) if plate_jpeg[:2] == b"\xff\xd8" else ""
     row = VehicleCapture(
         camera_id=camera.id,
         gate_id=camera.gate_id,
