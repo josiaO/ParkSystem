@@ -168,6 +168,20 @@ class StaleAndPhantomPlateTests(unittest.TestCase):
         self.assertFalse(empty.get("best"))
         self.assertEqual(empty.get("plates"), [])
 
+    def test_native_capture_boundary_starts_new_visit_after_published_one(self):
+        rt = RecognitionRuntime(max_concurrency=1)
+        lane = rt.lane(50)
+        lane.visit.observe(presence=True, plate="T111AAA")
+        self.assertTrue(lane.visit.mark_published("T111AAA"))
+        self.assertFalse(lane.note_native_capture("capture-1:image:1"))
+        first_visit = lane.visit.visit_id
+        self.assertTrue(lane.visit.event_published)
+
+        self.assertTrue(lane.note_native_capture("capture-2:image:2"))
+        self.assertNotEqual(lane.visit.visit_id, first_visit)
+        self.assertFalse(lane.visit.event_published)
+        self.assertEqual(lane.visit.state, IDLE)
+
 
 class VisitAndSessionTests(unittest.TestCase):
     def setUp(self):
