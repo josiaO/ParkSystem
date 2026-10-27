@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#F2F4F6">
-  <title>SmartPark Edge</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/assets/zirp-logo.png">
+  <title>Zirp</title>
   <style>
     :root {
       --bg: #F2F4F6; --surface: #FFFFFF; --surface-alt: #F7F9FB; --surface-alt-2: #EDF1F5;
@@ -140,6 +142,7 @@
       border-radius: 14px; box-shadow: var(--shadow-2); padding: 28px;
     }
     .login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+    .login-brand .logo { width: 42px; height: 42px; object-fit: contain; border-radius: 9px; }
     .login-brand .mark {
       width: 34px; height: 34px; border-radius: 8px; background: var(--accent); color: var(--accent-fg);
       display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px;
@@ -452,13 +455,13 @@
     </div>
     <form class="card login-card" id="login-form">
       <div class="login-brand">
-        <div class="mark">SP</div>
+        <img class="logo" src="/assets/zirp-logo.png" alt="Zirp logo">
         <div>
-          <div class="bn">SmartPark Edge</div>
+          <div class="bn">Zirp</div>
           <div class="bv">Vehicle intelligence · edge platform</div>
         </div>
       </div>
-      <h1>SmartPark Edge</h1>
+      <h1>Zirp</h1>
       <p class="muted" id="login-hint">Sign in to operate this site</p>
       <p class="muted" id="login-platform" style="margin-top:8px;font-size:12px"></p>
       <label for="username">Username</label>
@@ -475,7 +478,7 @@
     <header id="hdr">
       <div class="hdr-l">
         <button type="button" class="icobtn" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
-        <span class="brandname">SmartPark Edge</span>
+        <span class="brandname">Zirp</span>
         <span class="healthchip c-mut" id="hdr-health"><span class="dot"></span><span id="hdr-health-label">Checking</span></span>
       </div>
       <div class="hdr-r">
@@ -490,7 +493,7 @@
     </header>
     <div class="shell">
     <nav id="sidebar" aria-label="Primary">
-      <div class="brand">SmartPark Edge</div>
+      <div class="brand">Zirp</div>
       <div class="group">Overview</div>
       <button data-page="dashboard" data-nav-id="dashboard" class="sitem active"><span class="sl-ico" aria-hidden="true">▦</span><span class="sl-label">Dashboard</span></button>
       <button data-page="cameras" data-nav-id="cameras" class="sitem"><span class="sl-ico" aria-hidden="true">▶</span><span class="sl-label">Live Gates</span></button>
@@ -513,7 +516,7 @@
       <button data-page="settings" data-nav-id="settings" id="nav-settings" class="sitem"><span class="sl-ico" aria-hidden="true">⚙</span><span class="sl-label">Settings</span></button>
       <button data-page="hardware" data-nav-id="hardware" id="nav-hardware" class="sitem"><span class="sl-ico" aria-hidden="true">⚒</span><span class="sl-label">Hardware Lab</span></button>
       <button data-page="sim" data-nav-id="sim" id="nav-sim" class="sitem"><span class="sl-ico" aria-hidden="true">◌</span><span class="sl-label">Testing &amp; Simulation</span></button>
-      <div class="side-foot"><b>SmartPark Edge</b><br>Modular edge platform</div>
+      <div class="side-foot"><b>Zirp</b><br>Vehicle intelligence · edge platform</div>
     </nav>
     <main>
       <div class="view-head top">
@@ -1101,7 +1104,7 @@
   <dialog id="camera-dialog">
     <form class="card" id="camera-form">
       <h2 id="camera-dialog-title">Add Camera</h2>
-      <p class="muted">Enter the camera address and sign-in. SmartPark tests the connection and chooses a working video path.</p>
+      <p class="muted">Enter the camera address and sign-in. Zirp tests the connection and chooses a working video path.</p>
       <input type="hidden" name="id">
       <label>Name <input name="name" required placeholder="Gate A entry camera"></label>
       <label>Camera address <input name="ip_address" required placeholder="192.168.1.49"></label>
@@ -1123,7 +1126,7 @@
         <select name="recognition_mode">
           <option value="">Use the site default</option>
           <option value="NATIVE_ONLY">Use camera recognition</option>
-          <option value="FASTALPR_ONLY">Use SmartPark AI recognition</option>
+          <option value="FASTALPR_ONLY">Use Zirp AI recognition</option>
           <option value="HYBRID">Use both</option>
           <option value="VIDEO_ONLY">Video only</option>
         </select>
@@ -1172,7 +1175,7 @@
   <dialog id="onboard-dialog">
     <form class="card" id="onboard-form">
       <h2>Add Camera</h2>
-      <p class="muted">Test the address, then continue. SmartPark tries the known camera type, standard discovery, and a manual video path.</p>
+      <p class="muted">Test the address, then continue. Zirp tries the known camera type, standard discovery, and a manual video path.</p>
       <label>Camera address <input name="ip_address" required placeholder="192.168.1.49"></label>
       <label>Username <input name="username" value="admin"></label>
       <label>Password <input name="password" type="password" value="admin"></label>
@@ -2484,8 +2487,8 @@
       const s = String(source || "").toLowerCase();
       if (!s || s === "—") return "—";
       if (s.includes("operator")) return "Operator";
-      if (s.includes("hybrid") || s.includes("fusion")) return "Camera + SmartPark";
-      if (s.includes("fast") || s.includes("local") || s.includes("smartpark")) return "SmartPark AI";
+      if (s.includes("hybrid") || s.includes("fusion")) return "Camera + Zirp";
+      if (s.includes("fast") || s.includes("local") || s.includes("smartpark")) return "Zirp AI";
       if (s.includes("native") || s.includes("camera") || s.includes("sdk")) return "Camera";
       return isTechnician() ? String(source) : "Recognition";
     }
@@ -2919,7 +2922,7 @@
 
       if (step === 1) {
         const cases = st.use_cases || [];
-        body.innerHTML = `<h1 style="font-size:22px;font-weight:700;letter-spacing:-.02em">Welcome to SmartPark</h1>
+        body.innerHTML = `<h1 style="font-size:22px;font-weight:700;letter-spacing:-.02em">Welcome to Zirp</h1>
           <p class="muted" style="margin:6px 0 22px">What do you want to use this site for? You can change modules later without reinstalling.</p>
           <div class="ob-grid" id="onboard-choices">${cases.map((c) => `
             <button type="button" class="choice ${c.id==='CUSTOM'?'span2':''} ${(draft.use_case||st.use_case||'PARKING')===c.id?'on':''}" data-use-case="${c.id}">
@@ -5102,7 +5105,7 @@
       }
     });
     document.getElementById("print-report").addEventListener("click", () => {
-      openReportPrint(document.getElementById("report-body").innerHTML, "SmartPark report");
+      openReportPrint(document.getElementById("report-body").innerHTML, "Zirp report");
     });
     document.getElementById("print-all-reports").addEventListener("click", () => {
       const sheets = (lastReportPack && lastReportPack.reports) || [];
@@ -5110,7 +5113,7 @@
         document.getElementById("report-error").textContent = "Show a report first, then print all.";
         return;
       }
-      openReportPrint(sheets.map(reportSheetHtml).join(""), "SmartPark audit pack");
+      openReportPrint(sheets.map(reportSheetHtml).join(""), "Zirp audit pack");
     });
     document.getElementById("download-report").addEventListener("click", async () => {
       const kind = document.getElementById("report-kind").value || "payments";
@@ -5225,7 +5228,7 @@
       evidence.innerHTML =
         '<div><span>Latest plate</span><b class="plate">' + commissionEsc(capture.plate || local.plate || native.plate || "—") + '</b></div>' +
         '<div><span>Native reading</span><b>' + commissionEsc(native.plate || capture.native_plate || "—") + ' · ' + conf(native.confidence || fusion.native_confidence) + '</b></div>' +
-        '<div><span>SmartPark reading</span><b>' + commissionEsc(local.plate || capture.local_plate || "—") + ' · ' + conf(local.confidence || fusion.local_confidence) + '</b></div>' +
+        '<div><span>Zirp reading</span><b>' + commissionEsc(local.plate || capture.local_plate || "—") + ' · ' + conf(local.confidence || fusion.local_confidence) + '</b></div>' +
         '<div><span>Fusion</span><b>' + commissionEsc(fusion.method || "—") + (fusion.needs_review ? ' · review' : '') + '</b></div>' +
         '<div><span>Plate width</span><b>' + (quality.plate_width_px ? quality.plate_width_px + ' px' : '—') + ' · ' + commissionEsc(quality.quality || "UNKNOWN") + '</b></div>' +
         '<div><span>OCR latency</span><b>' + ((recognition.latest_local && recognition.latest_local.latency_ms != null) ? Math.round(Number(recognition.latest_local.latency_ms)) + ' ms' : '—') + '</b></div>' +

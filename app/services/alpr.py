@@ -29,6 +29,8 @@ from app.services.camera_lpr import camera_contract
 _lock = threading.Lock()
 _engine = None
 _warm_engine = None
+_fastalpr_error = ""
+_engine_error = ""
 
 
 @dataclass
@@ -143,7 +145,11 @@ def ensure_alpr_model_cache() -> dict:
         detector_src = next((p for p in (src / DETECTOR_ONNX, src / "detector" / DETECTOR_ONNX) if p.is_file()), None)
         ocr_src = next((p for p in (src / OCR_ONNX, src / "ocr" / OCR_ONNX) if p.is_file()), None)
         cfg_src = next((p for p in (src / OCR_CONFIG, src / "ocr" / OCR_CONFIG) if p.is_file()), None)
-    cache_home = Path.home() / ".cache"
+    # Scheduled tasks and service accounts do not necessarily share the
+    # desktop user's profile.  The launcher sets this to the SmartPark data
+    # directory on production installs; keeping the profile fallback makes
+    # development and older direct launches continue to work.
+    cache_home = Path(os.environ.get("SMARTPARK_ALPR_CACHE_DIR") or (Path.home() / ".cache"))
     detector_dest = cache_home / "open-image-models" / DETECTOR_MODEL / DETECTOR_ONNX
     ocr_dest = cache_home / "fast-plate-ocr" / OCR_MODEL / OCR_ONNX
     cfg_dest = cache_home / "fast-plate-ocr" / OCR_MODEL / OCR_CONFIG
@@ -161,23 +167,71 @@ def ensure_alpr_model_cache() -> dict:
 
 
 def fastalpr_installed() -> bool:
+    global _fastalpr_error
     try:
         import fast_alpr  # noqa: F401
 
+        _fastalpr_error = ""
         return True
-    except ImportError:
+    except Exception as exc:
+        # A native DLL/ONNX Runtime load error is not always an ImportError.
+        # Preserve the actionable part for the technician and the live pane.
+        _fastalpr_error = f"{type(exc).__name__}: {str(exc)[:240]}"
         return False
+
+
+def _remember_engine_error(exc: BaseException) -> str:
+    global _engine_error
+    from .redaction import redact_text
+
+    _engine_error = redact_text(f"{type(exc).__name__}: {str(exc)}")[:320]
+    return _engine_error
+
+
+def _availability_detail(models: dict | None = None) -> str:
+    if _fastalpr_error:
+        return f"FastALPR could not load: {_fastalpr_error}"
+    if _engine_error:
+        return f"FastALPR model startup failed: {_engine_error}"
+    models = models or {}
+    missing = []
+    if not models.get("detector"):
+        missing.append(DETECTOR_ONNX)
+    if not models.get("ocr"):
+        missing.append(f"{OCR_ONNX} and {OCR_CONFIG}")
+    if missing:
+        return "FastALPR model files are missing: " + ", ".join(missing)
+    return "FastALPR detector is not available. Check the Site Service log and /alpr/status."
+
+
+def _configure_model_cache(models: dict) -> None:
+    """Point the third-party model hubs at the offline SmartPark model cache."""
+    detector_path = models.get("detector_path")
+    ocr_path = models.get("ocr_path")
+    try:
+        if detector_path:
+            from open_image_models.detection.core import hub as detector_hub
+
+            detector_hub.MODEL_CACHE_DIR = Path(detector_path).parent.parent
+        if ocr_path:
+            from fast_plate_ocr.inference import hub as ocr_hub
+
+            ocr_hub.MODEL_CACHE_DIR = Path(ocr_path).parent.parent
+    except Exception as exc:
+        _remember_engine_error(exc)
 
 
 def status() -> dict:
     installed = fastalpr_installed()
-    models = ensure_alpr_model_cache() if installed else {"bundled_dir": str(bundled_alpr_dir() or ""), "detector": False, "ocr": False}
+    models = ensure_alpr_model_cache()
+    ready = bool(installed and models.get("detector") and models.get("ocr"))
     contract = camera_contract()
     return {
         "backend": "fastalpr" if installed else "none",
         "installed": installed,
         "loaded": _engine is not None,
-        "available": installed,
+        "available": ready,
+        "ready": ready,
         "models": models,
         "country": settings.alpr_country or None,
         "csf": settings.alpr_csf,
@@ -195,44 +249,52 @@ def status() -> dict:
             "then reads only that crop. Country profile: "
             f"{_country_name() or 'neutral'}. "
             "Replace the ONNX pack to retrain, or register another PlateEngine to change libraries."
-            if installed
-            else "FastALPR is not installed in this copy. Install the fast-alpr package and the ONNX model pack."
+            if ready
+            else _availability_detail(models)
         ),
     }
 
 
 def _load_engine():
-    global _engine
+    global _engine, _engine_error
     with _lock:
         if _engine is None:
-            from fast_alpr import ALPR
+            try:
+                from fast_alpr import ALPR
 
-            models = ensure_alpr_model_cache()
-            kwargs = {
-                "detector_model": DETECTOR_MODEL,
-                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
-                "ocr_device": "cpu",
-                "detector_providers": ["CPUExecutionProvider"],
-                "ocr_providers": ["CPUExecutionProvider"],
-            }
-            import onnxruntime as ort
+                models = ensure_alpr_model_cache()
+                if not models.get("detector") or not models.get("ocr"):
+                    raise FileNotFoundError(_availability_detail(models))
+                _configure_model_cache(models)
+                kwargs = {
+                    "detector_model": DETECTOR_MODEL,
+                    "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
+                    "ocr_device": "cpu",
+                    "detector_providers": ["CPUExecutionProvider"],
+                    "ocr_providers": ["CPUExecutionProvider"],
+                }
+                import onnxruntime as ort
 
-            options = ort.SessionOptions()
-            workers = max(1, int(settings.recognition_max_concurrency))
-            automatic = max(1, min(2, ((os.cpu_count() or 2) - 1) // workers))
-            options.intra_op_num_threads = settings.recognition_model_threads or automatic
-            options.inter_op_num_threads = 1
-            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            options.add_session_config_entry("session.inter_op.allow_spinning", "0")
-            kwargs["detector_sess_options"] = options
-            kwargs["ocr_sess_options"] = options
-            if models.get("ocr_path") and models.get("ocr_config_path"):
-                kwargs["ocr_model"] = None
-                kwargs["ocr_model_path"] = models["ocr_path"]
-                kwargs["ocr_config_path"] = models["ocr_config_path"]
-            else:
-                kwargs["ocr_model"] = OCR_MODEL
-            _engine = ALPR(**kwargs)
+                options = ort.SessionOptions()
+                workers = max(1, int(settings.recognition_max_concurrency))
+                automatic = max(1, min(2, ((os.cpu_count() or 2) - 1) // workers))
+                options.intra_op_num_threads = settings.recognition_model_threads or automatic
+                options.inter_op_num_threads = 1
+                options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+                kwargs["detector_sess_options"] = options
+                kwargs["ocr_sess_options"] = options
+                if models.get("ocr_path") and models.get("ocr_config_path"):
+                    kwargs["ocr_model"] = None
+                    kwargs["ocr_model_path"] = models["ocr_path"]
+                    kwargs["ocr_config_path"] = models["ocr_config_path"]
+                else:
+                    kwargs["ocr_model"] = OCR_MODEL
+                _engine = ALPR(**kwargs)
+                _engine_error = ""
+            except Exception as exc:
+                _remember_engine_error(exc)
+                raise
         return _engine
 
 
@@ -801,13 +863,12 @@ def locate_plate_boxes(
     OCR is not called.
     """
     if not jpeg or not fastalpr_installed():
-        return [], {"available": False, "reason": "detector-unavailable"}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _availability_detail()}
     try:
         bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
     except Exception as exc:
-        from .redaction import redact_text
-        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _remember_engine_error(exc)}
     if not hasattr(engine, "detector"):
         return [], {"available": False, "reason": "detector-unavailable"}
     started = time.monotonic()
@@ -815,8 +876,7 @@ def locate_plate_boxes(
         view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
         detections = _shift_detections(engine.detector.predict(view), dx, dy)
     except Exception as exc:
-        from .redaction import redact_text
-        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _remember_engine_error(exc)}
     width, height = int(bgr.shape[1]), int(bgr.shape[0])
     min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     boxes: list[dict] = []
@@ -868,7 +928,7 @@ def recognize_arrival_bytes(
             "plates": [],
             "count": 0,
             "best": None,
-            "detail": "detector unavailable; the live frame was not read",
+            "detail": meta.get("detail") or "detector unavailable; the live frame was not read",
         }
     if not boxes:
         return {

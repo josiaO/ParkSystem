@@ -16,6 +16,13 @@ REQUIRED_DLLS = (
     "DecodeSdk.dll",
 )
 
+REQUIRED_PYTHON64_RUNTIME = (
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
+
 REQUIRED_MODELS = (
     "fastalpr/detector/yolo-v9-t-384-license-plates-end2end.onnx",
     "fastalpr/ocr/cct_xs_v2_global.onnx",
@@ -127,12 +134,19 @@ def verify_payload(payload: Path) -> list[str]:
 
     if not (payload / "python64" / "python.exe").is_file():
         errors.append("64-bit embeddable Python missing: python64/python.exe")
+    for name in REQUIRED_PYTHON64_RUNTIME:
+        if not (payload / "python64" / name).is_file():
+            errors.append(f"64-bit Windows runtime missing: python64/{name}")
     if not (payload / "python32" / "python.exe").is_file():
         errors.append("32-bit embeddable Python missing: python32/python.exe")
     if not (payload / "get-pip.py").is_file():
         errors.append("get-pip.py missing")
     if not (payload / "app" / "web" / "index.html").is_file():
         errors.append("web UI missing: app/web/index.html")
+    if not any((payload / "app" / "assets").glob("*.ico")):
+        errors.append("desktop application icon missing: app/assets/*.ico")
+    if not any((payload / "app" / "web" / "assets").glob("*.ico")):
+        errors.append("browser favicon missing: app/web/assets/*.ico")
     if not (payload / "app" / "desktop" / "main.py").is_file():
         errors.append("desktop UI missing: app/desktop/main.py")
     if not (payload / "tools" / "field_acceptance_test.py").is_file():

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -754,6 +755,23 @@ def main() -> int:
     if not acquire_instance_lock("recognition-worker"):
         print("SmartPark Recognition Worker is already running.", file=sys.stderr)
         return 0
+    from app.deployment import load_deployment_config
+    from app.database_config import apply_runtime_database_config
+    from app.config import settings
+
+    deployment = load_deployment_config()
+    if not deployment.is_server or not deployment.configured:
+        print("Recognition Worker is disabled until a configured Site Server exists.", file=sys.stderr)
+        return 2
+    apply_runtime_database_config(deployment.database)
+    os.environ.setdefault("SMARTPARK_ALPR_CACHE_DIR", str(settings.data_dir / "model-cache"))
+    try:
+        from app.services.alpr import warmup
+
+        result = warmup()
+        print(f"FastALPR preflight ready in {result.get('warmup_ms', 0)}ms.")
+    except Exception as exc:
+        print(f"FastALPR preflight failed: {exc}", file=sys.stderr)
     print("Recognition worker reads MediaMTX cam{id}_detect when fastalpr_new_pipeline_enabled=true.")
     asyncio.run(_loop())
     return 0
