@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.services.frame_grab import grab_camera_frame
 from app.services.http_snapshot import grab_http_snapshot
 from app.services.hvx_client import HVXHostClient
@@ -85,6 +86,7 @@ class PreviewState:
 _state: dict[int, PreviewState] = {}
 _viewers: dict[int, int] = {}
 _last_view: dict[int, float] = {}
+_snapshot_locks: dict[int, asyncio.Lock] = {}
 
 
 def get_state(camera_id: int) -> PreviewState:
@@ -98,8 +100,17 @@ def get_state(camera_id: int) -> PreviewState:
 def live_is_current(camera_id: int) -> bool:
     row = get_state(camera_id)
     session = gateway.session(camera_id)
-    received_at = session.last_received_at if session and session.last_received_at else row.captured_at
-    return bool(row.jpeg[:2] == JPEG_SOI and received_at and time.monotonic() - received_at <= 5.0)
+    # A response containing the same cached JPEG is not a fresh video frame.
+    # Prefer the gateway's unique-frame timestamp so SDK polling cannot keep a
+    # frozen picture looking healthy forever.
+    if session is not None and hasattr(session, "last_fresh_frame_at"):
+        fresh_at = float(getattr(session, "last_fresh_frame_at") or 0.0)
+    else:
+        # Compatibility for lightweight callers/tests that provide the old
+        # session shape. Real StreamSession objects always have the fresh
+        # timestamp above, even when it is zero.
+        fresh_at = float(getattr(session, "last_received_at", 0.0) or row.captured_at)
+    return bool(row.jpeg[:2] == JPEG_SOI and fresh_at and time.monotonic() - fresh_at <= settings.stale_stream_seconds)
 
 
 def _notify(row: PreviewState) -> None:
@@ -320,13 +331,53 @@ async def snapshot_for_camera(
     explicit: str = "",
     sdk_handle: int | None = None,
 ) -> dict:
+    lock = _snapshot_locks.setdefault(int(camera_id), asyncio.Lock())
+    async with lock:
+        return await _snapshot_for_camera_unlocked(
+            camera_id, ip, username, password, explicit, sdk_handle=sdk_handle,
+        )
+
+
+def _fresh_gateway_sample(camera_id: int):
+    session = gateway.session(int(camera_id))
+    sample = gateway.peek_live(int(camera_id))
+    if sample is None or sample.jpeg[:2] != JPEG_SOI:
+        return None
+    fresh_at = (
+        float(getattr(session, "last_fresh_frame_at", 0.0) or 0.0)
+        if session is not None else 0.0
+    ) or sample.received_at
+    stale = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
+    if fresh_at <= 0 or time.monotonic() - fresh_at > stale:
+        return None
+    return sample
+
+
+async def _wait_for_fresh_gateway_sample(camera_id: int, *, timeout: float = 1.25):
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        sample = _fresh_gateway_sample(camera_id)
+        if sample is not None:
+            return sample
+        await asyncio.sleep(0.05)
+    return _fresh_gateway_sample(camera_id)
+
+
+async def _snapshot_for_camera_unlocked(
+    camera_id: int,
+    ip: str,
+    username: str,
+    password: str,
+    explicit: str = "",
+    sdk_handle: int | None = None,
+) -> dict:
     from app.infrastructure.media.registry import mediamtx_live_active
     from app.services import mediamtx
 
     if mediamtx_live_active(camera_id):
         local = mediamtx.live_endpoint(camera_id).get("rtsp") or ""
-        sample = gateway.peek_live(camera_id)
-        if sample is not None and sample.jpeg[:2] == JPEG_SOI:
+        sample = await _wait_for_fresh_gateway_sample(camera_id)
+        if sample is not None:
             return {
                 "ok": True,
                 "jpeg": sample.jpeg,
@@ -335,33 +386,15 @@ async def snapshot_for_camera(
                 "cached": True,
                 "source": sample.source or "mediamtx",
             }
-        row = get_state(camera_id)
-        if row.jpeg[:2] == JPEG_SOI and (time.monotonic() - row.captured_at) < 2.0:
-            return {
-                "ok": True,
-                "jpeg": row.jpeg,
-                "url": row.url or local,
-                "url_redacted": row.url_redacted,
-                "cached": True,
-                "source": row.source or "mediamtx",
-            }
-        # One evidence still when the live decoder has not produced a frame yet.
-        # Live video must not call this in a loop.
-        if local.startswith("rtsp://"):
-            from app.services.frame_grab import capture_frame
-            grabbed = await capture_frame(local)
-            if grabbed.get("ok"):
-                remember_frame(
-                    camera_id,
-                    grabbed["jpeg"],
-                    url=local,
-                    url_redacted=str(grabbed.get("url_redacted") or ""),
-                    source="mediamtx",
-                )
-                grabbed["cached"] = False
-                grabbed["source"] = "mediamtx"
-                grabbed["url"] = local
-                return grabbed
+        # Never spawn a second FFmpeg RTSP reader while the live MediaMTX
+        # consumer is active. That competing decoder is what makes snapshots
+        # cause the live stream to stack, stall, or jump after recovery.
+        return {
+            "ok": False,
+            "error": "Live stream is stale; snapshot was not taken to protect video",
+            "source": "mediamtx",
+            "url": local,
+        }
     cached = await gateway.snapshot(camera_id)
     if cached[:2] == JPEG_SOI and live_is_current(camera_id):
         row = get_state(camera_id)
@@ -373,8 +406,48 @@ async def snapshot_for_camera(
             "cached": True,
             "source": row.source or "gateway",
         }
+    session = gateway.session(int(camera_id))
     row = get_state(camera_id)
-    from app.config import settings
+    producer_active = bool(
+        session is not None
+        and session.producer is not None
+        and not (
+            callable(getattr(session.producer, "done", None))
+            and session.producer.done()
+        )
+    )
+    if producer_active or (session is not None and session.detect_consumers > 0):
+        sample = await _wait_for_fresh_gateway_sample(camera_id)
+        if sample is not None:
+            return {
+                "ok": True,
+                "jpeg": sample.jpeg,
+                "url": sample.url,
+                "url_redacted": redact_url(sample.url),
+                "cached": True,
+                "source": sample.source or "gateway",
+            }
+        # The HVX host already owns the SDK decoder. Reading its latest JPEG
+        # is safe and does not create a second camera/FFmpeg connection. This
+        # keeps SDK snapshots usable while the shared producer warms up.
+        active_sdk_handle = sdk_handle if sdk_handle is not None else getattr(getattr(session, "spec", None), "sdk_handle", None)
+        if active_sdk_handle is not None:
+            grabbed = await resolve_playable(ip, username, password, explicit, row.url, sdk_handle=active_sdk_handle)
+            if grabbed.get("ok"):
+                gateway.publish(
+                    camera_id,
+                    grabbed["jpeg"],
+                    source=str(grabbed.get("source") or "sdk"),
+                    url=str(grabbed.get("url") or f"sdk://handle/{int(active_sdk_handle)}"),
+                    detect=False,
+                )
+            return grabbed
+        return {
+            "ok": False,
+            "error": "Live stream is stale; snapshot was not taken to protect video",
+            "source": session.source or "gateway",
+        }
+    row = get_state(camera_id)
     ttl = float(getattr(settings, "snapshot_cache_seconds", 0.4) or 0.4)
     if row.jpeg[:2] == JPEG_SOI and (time.monotonic() - row.captured_at) < ttl:
         return {
@@ -421,7 +494,15 @@ async def mjpeg_from_cache(camera_id: int):
             try:
                 await asyncio.wait_for(event.wait(), timeout=0.05)
             except asyncio.TimeoutError:
-                pass
+                # Do not leave an operator on an apparently live but stale
+                # picture. Ask only this camera's producer to recover, then
+                # close the response cleanly so the browser's existing retry
+                # path can reconnect. Raising here used to turn an ordinary
+                # stream recovery into an unhandled Starlette exception and
+                # an invisible 500 in the operator UI.
+                if last_seq >= 0 and not live_is_current(camera_id):
+                    gateway.restart_decoder(camera_id)
+                    return
             finally:
                 event.clear()
     finally:

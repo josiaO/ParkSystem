@@ -76,7 +76,9 @@ class Settings(BaseSettings):
     alpr_mode: str = "FASTALPR_ONLY"
     alpr_engine: str = "fastalpr"
     live_idle_seconds: float = 20.0
-    live_sdk_interval_seconds: float = 0.05
+    # Polling only reads the SDK host's latest frame; it is not a frame queue.
+    # Keep it close to the default display cadence without busy-spinning.
+    live_sdk_interval_seconds: float = 0.06
     snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
     stream_read_timeout_seconds: float = 3.0
@@ -101,7 +103,8 @@ class Settings(BaseSettings):
     recognition_absence_reset_seconds: float = 0.6
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
-    live_mjpeg_fps: float = 10.0
+    # Direct/MJPEG preview is independent from recognition_sample_fps.
+    live_mjpeg_fps: float = 15.0
     # Production: pin this PC to one gate (entry+exit). 0/unset = operator chooses.
     recognition_gate_id: int | None = None
     deployment_profile: str = "DEVELOPMENT"

@@ -28,9 +28,12 @@ async def test_sdk_without_first_jpeg_returns_for_fallback():
 
 
 @pytest.mark.asyncio
-async def test_sdk_video_failure_tries_rtsp_without_touching_recognition():
+async def test_generic_video_failure_tries_rtsp_without_touching_recognition():
+    from dataclasses import replace
+
     gateway = LocalMediaGateway()
-    row = gateway._session_for(spec())
+    generic = replace(spec(), sdk_handle=None)
+    row = gateway._session_for(generic)
     row.viewers = 1
     async def rtsp(_row):
         row.viewers = 0
@@ -39,7 +42,7 @@ async def test_sdk_video_failure_tries_rtsp_without_touching_recognition():
          patch.object(gateway, '_rtsp_frames', AsyncMock(side_effect=rtsp)) as stream, \
          patch.object(gateway, '_http_stills', AsyncMock()) as stills:
         await gateway._produce(row)
-    sdk.assert_awaited_once()
+    sdk.assert_not_awaited()
     stream.assert_awaited_once()
     stills.assert_not_awaited()
 
@@ -88,7 +91,7 @@ def test_clean_stream_eof_requests_reconnect():
     response = SimpleNamespace(status_code=200, iter_bytes=lambda: iter([]))
     client = SimpleNamespace(stream=lambda *a, **k: nullcontext(response), close=Mock())
     env.update(httpx=SimpleNamespace(Client=lambda **kw: client, Timeout=lambda **kw: kw),
-               BASE='http://local', api=SimpleNamespace(_headers=lambda: {}), time=time)
+               BASE='http://local', api=SimpleNamespace(base_url='http://local', _headers=lambda: {}), time=time)
     thread = SimpleNamespace(_stop=False, camera_id=1, mailbox=DisplayMailbox(), failed=Mock(), frame=Mock())
     run(thread)
     thread.failed.emit.assert_called_once_with('Camera stream ended; reconnecting.')

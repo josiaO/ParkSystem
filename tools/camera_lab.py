@@ -493,6 +493,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The original option-based CLI observes configured physical cameras. The
+    # recorded-footage subcommands are kept in a separate module so that
+    # existing Windows/operator invocations remain compatible.
+    replay_commands = {"inspect", "serve", "test-video", "test-image", "benchmark", "multi-camera", "failure-test", "report", "ground-truth"}
+    candidate = list(sys.argv[1:] if argv is None else argv)
+    if candidate and candidate[0] in replay_commands:
+        from tools.camera_lab_replay import main as replay_main
+
+        return replay_main(candidate)
     args = build_parser().parse_args(argv)
     if args.duration <= 0:
         print("FAIL\nreason: duration must be greater than 0")

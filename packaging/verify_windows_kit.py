@@ -153,6 +153,9 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("camera lab missing: tools/camera_lab.py")
     elif "--recognition" not in lab.read_text(encoding="utf-8"):
         errors.append("camera lab in the kit has no --recognition benchmark")
+    replay_lab = payload / "tools" / "camera_lab_replay.py"
+    if not replay_lab.is_file():
+        errors.append("camera lab replay module missing: tools/camera_lab_replay.py")
     if not (payload / "requirements-windows.txt").is_file():
         errors.append("requirements-windows.txt missing")
 

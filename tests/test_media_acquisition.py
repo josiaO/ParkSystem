@@ -98,6 +98,23 @@ class AcquisitionContractTests(unittest.TestCase):
         self.assertLess(health["last_received_age_ms"], 1000)
         self.assertEqual(health["queue_depth"], 1)
 
+    def test_source_sequence_keeps_identical_decoded_frame_fresh_without_ui_duplicates(self):
+        gw = LocalMediaGateway()
+        gw.publish(1, JPEG, source="sdk", source_seq=1)
+        row = gw.session(1)
+        first_fresh = row.last_fresh_frame_at
+        time.sleep(0.02)
+
+        # A real decoder can deliver a new frame whose pixels/JPEG bytes are
+        # identical (for example an empty lane). It must refresh health without
+        # adding another image to the live mailbox.
+        gw.publish(1, JPEG, source="sdk", source_seq=2)
+
+        self.assertEqual(row.live.depth(), 1)
+        self.assertEqual(row.live.latest().seq, 1)
+        self.assertGreater(row.last_fresh_frame_at, first_fresh)
+        self.assertEqual(row.frames_changed, 1)
+
     def test_restart_affects_only_the_failed_camera(self):
         gw = LocalMediaGateway()
         gw.publish(1, JPEG + b"a", source="sdk")

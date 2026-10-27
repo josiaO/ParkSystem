@@ -36,7 +36,7 @@ from .services.redaction import redact_text
 log = logging.getLogger("smartpark")
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
-from .services.captures import capture_dict, latest_for_camera, list_captures, persist_event, should_persist_vehicle_capture
+from .services.captures import capture_dict, latest_for_camera, list_captures, list_recent_detections, persist_event, should_persist_vehicle_capture
 from .services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from .services.gates import controller
 from .services.led_udp import send_led_text
@@ -246,6 +246,14 @@ def health():
 def health_live():
     from .services.health import live
     return live()
+
+
+@app.get("/deployment/info")
+def deployment_info():
+    """Public, non-secret identity used when pairing an operator workstation."""
+    from .deployment import public_server_identity
+
+    return public_server_identity()
 
 
 @app.get("/health/ready")
@@ -2294,6 +2302,17 @@ _snapshot_status_checked: set[int] = set()
 @app.get("/cameras/{camera_id}/snapshot.jpg")
 async def camera_snapshot(camera_id: int, _: User = Depends(require_media("cameras.view"))):
     spec = pumping_spec(camera_id) or _camera_live_spec(camera_id)
+    # A snapshot is a temporary live consumer. This guarantees that MediaMTX
+    # or the SDK producer is already supplying the shared latest-frame cache;
+    # snapshot capture must never open a competing RTSP/FFmpeg reader.
+    acquire_live(spec)
+    try:
+        return await _camera_snapshot_with_live_lease(camera_id, spec)
+    finally:
+        release_live(camera_id)
+
+
+async def _camera_snapshot_with_live_lease(camera_id: int, spec: CameraLiveSpec):
     row = get_state(camera_id)
 
     def _jpeg_response(jpeg: bytes, seq: int | None = None) -> Response:
@@ -2835,6 +2854,18 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
                 result = await handle_live_exit(
                     db, camera=camera, capture=row, gate=gate, source=source_name,
                 )
+            log.info(
+                "plate event decision camera_id=%s side=%s plate=%s capture_id=%s "
+                "reason=%s barrier_opened=%s session_id=%s message=%s",
+                camera.id,
+                side,
+                row.plate,
+                row.id,
+                result.get("reason") if isinstance(result, dict) else "",
+                result.get("barrier_opened") if isinstance(result, dict) else False,
+                ((result.get("session") or {}).get("id") if isinstance(result, dict) else None),
+                result.get("message") if isinstance(result, dict) else "",
+            )
             if result.get("session") and latest:
                 session_id = (result["session"] or {}).get("id")
                 if session_id:
@@ -3777,7 +3808,7 @@ def get_captures(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    return [capture_dict(row) for row in list_captures(db, gate_id=gate_id, limit=limit)]
+    return [capture_dict(row) for row in list_recent_detections(db, gate_id=gate_id, limit=limit)]
 
 
 @app.get("/gates/{gate_id}")

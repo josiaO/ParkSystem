@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import httpx
+from app.deployment import server_base_url
 
-BASE="http://127.0.0.1:8760"
+BASE = server_base_url()
+
+
+def configure_base_url(value: str | None = None) -> str:
+    """Refresh the API endpoint after setup or a connection change."""
+    global BASE
+    BASE = str(value or server_base_url()).rstrip("/")
+    return BASE
 
 
 def stream_http_error(response: httpx.Response) -> str:
@@ -71,6 +79,13 @@ class ApiClient:
         self.navigation:list[dict]=[]
         self.modules:dict={}
 
+    @property
+    def base_url(self) -> str:
+        return BASE
+
+    def configure(self, value: str | None = None) -> str:
+        return configure_base_url(value)
+
     def _headers(self):
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
@@ -121,7 +136,7 @@ class ApiClient:
         return friendly.get(label, label)
 
     def login(self, username, password):
-        r=_check(httpx.post(f"{BASE}/auth/login", json={"username":username,"password":password}, timeout=5))
+        r=_check(httpx.post(f"{self.base_url}/auth/login", json={"username":username,"password":password}, timeout=5))
         data=r.json()
         self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
         self.navigation=list(data.get("navigation") or [])
@@ -138,19 +153,19 @@ class ApiClient:
             return data
 
     def get(self, path, timeout=8):
-        r=_check(httpx.get(BASE+path, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout)); return r.json()
 
     def get_bytes(self, path, timeout=8):
-        r=_check(httpx.get(BASE+path, headers=self._headers(), timeout=timeout)); return r.content
+        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout)); return r.content
 
     def post(self, path, payload=None, timeout=15):
-        r=_check(httpx.post(BASE+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.post(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
 
     def put(self, path, payload=None, timeout=15):
-        r=_check(httpx.put(BASE+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.put(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
 
     def post_file(self, path, files, data=None, timeout=30):
-        r=_check(httpx.post(BASE+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout))
+        r=_check(httpx.post(self.base_url+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout))
         return r.json()
 
     def seed_site(self):
@@ -190,10 +205,10 @@ class ApiClient:
         }
 
     def patch(self, path, payload=None):
-        r=_check(httpx.patch(BASE+path, json=payload or {}, headers=self._headers(), timeout=8)); return r.json()
+        r=_check(httpx.patch(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=8)); return r.json()
 
     def delete(self, path):
-        r=_check(httpx.delete(BASE+path, headers=self._headers(), timeout=8)); return r.json()
+        r=_check(httpx.delete(self.base_url+path, headers=self._headers(), timeout=8)); return r.json()
 
     def can(self, permission):
         return "*" in self.permissions or permission in self.permissions

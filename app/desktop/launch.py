@@ -1,4 +1,4 @@
-"""Installed Windows entry: start HVX host + local API, then the desktop app."""
+"""Installed Windows entry with role-aware server/client startup."""
 
 from __future__ import annotations
 
@@ -101,16 +101,17 @@ def start_hvx_host(root: Path) -> None:
     )
 
 
-def wait_for_api(timeout: float = 60.0) -> None:
+def wait_for_api(timeout: float = 60.0, base_url: str = "http://127.0.0.1:8760") -> None:
+    base_url = base_url.rstrip("/")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen("http://127.0.0.1:8760/health/live", timeout=1) as resp:
+            with urllib.request.urlopen(f"{base_url}/health/live", timeout=1) as resp:
                 if resp.status == 200:
                     return
         except Exception:
             try:
-                with urllib.request.urlopen("http://127.0.0.1:8760/health", timeout=1) as resp:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=1) as resp:
                     if resp.status == 200:
                         return
             except Exception:
@@ -118,12 +119,13 @@ def wait_for_api(timeout: float = 60.0) -> None:
                 continue
             return
         time.sleep(0.2)
-    raise RuntimeError("SmartPark API did not start on http://127.0.0.1:8760")
+    raise RuntimeError(f"SmartPark API did not start on {base_url}")
 
 
-def start_site_service(root: Path) -> None:
+def start_site_service(root: Path, config=None) -> None:
     """Run FastAPI in its own process so a UI crash cannot take parking down."""
-    if _port_open(8760):
+    port = int(getattr(config, "server_bind_port", None) or 8760)
+    if _port_open(port):
         return
     py = root / "python64" / "python.exe"
     if not py.is_file():
@@ -134,6 +136,9 @@ def start_site_service(root: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root)
     env["SMARTPARK_HOME"] = str(root)
+    if config is not None:
+        env["SMARTPARK_API_HOST"] = str(config.server_bind_host or "127.0.0.1")
+        env["SMARTPARK_API_PORT"] = str(int(config.server_bind_port or 8760))
     subprocess.Popen(
         [str(py), "-m", "app.site_service"],
         cwd=str(root),
@@ -145,14 +150,16 @@ def start_site_service(root: Path) -> None:
     )
 
 
-def start_api() -> None:
+def start_api(config=None) -> None:
     """In-process fallback used only if the Site Service process cannot spawn."""
-    if _port_open(8760):
+    port = int(getattr(config, "server_bind_port", None) or 8760)
+    if _port_open(port):
         return
     import uvicorn
     from app.api_main import app
 
-    uvicorn.run(app, host="127.0.0.1", port=8760, log_level="warning", access_log=False, reload=False, workers=1)
+    host = str(getattr(config, "server_bind_host", None) or "127.0.0.1")
+    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False, reload=False, workers=1)
 
 
 def start_pipeline_services(root: Path) -> None:
@@ -172,21 +179,30 @@ def start_pipeline_services(root: Path) -> None:
             )
 
 
-def ensure_background_services(root: Path | None = None) -> None:
+def ensure_background_services(root: Path | None = None, config=None) -> None:
+    from app.deployment import SITE_SERVER, load_deployment_config
+
     root = root or install_root()
+    config = config or load_deployment_config()
+    if config.role not in {SITE_SERVER, "EDGE_NODE"}:
+        # Operator workstations are thin clients. They must never start a
+        # local API, database, camera SDK, MediaMTX or recognition process.
+        return
     start_hvx_host(root)
-    if _port_open(8760):
+    port = int(config.server_bind_port or 8760)
+    if _port_open(port):
         start_pipeline_services(root)
         return
-    start_site_service(root)
+    start_site_service(root, config=config)
+    local_url = f"http://127.0.0.1:{port}"
     try:
-        wait_for_api(timeout=12.0)
+        wait_for_api(timeout=12.0, base_url=local_url)
         start_pipeline_services(root)
         return
     except RuntimeError:
         pass
-    threading.Thread(target=start_api, name="smartpark-api", daemon=True).start()
-    wait_for_api()
+    threading.Thread(target=start_api, args=(config,), name="smartpark-api", daemon=True).start()
+    wait_for_api(base_url=local_url)
     start_pipeline_services(root)
 
 
@@ -224,7 +240,6 @@ def main() -> int:
             print(message, file=sys.stderr)
         return 0
     try:
-        ensure_background_services(root)
         from app.desktop.main import main as desktop_main
         return int(desktop_main() or 0)
     except Exception as exc:

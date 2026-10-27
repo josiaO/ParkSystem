@@ -2,7 +2,7 @@
 import time
 import httpx
 from PySide6.QtCore import QThread, Signal
-from .api import api, BASE, stream_http_error
+from .api import api, stream_http_error
 from .frame_mailbox import DisplayMailbox
 
 
@@ -30,7 +30,7 @@ class MjpegStream(QThread):
         try:
             with client.stream(
                 "GET",
-                f"{BASE}/cameras/{self.camera_id}/live.mjpeg",
+                f"{api.base_url}/cameras/{self.camera_id}/live.mjpeg",
                 headers=api._headers(),
             ) as response:
                 if response.status_code >= 400:

@@ -16,6 +16,7 @@ def main() -> int:
         print("SmartPark Site Service is already running.", file=sys.stderr)
         return 0
     from app.config import settings
+    from app.deployment import load_deployment_config
     from app.desktop.launch import install_root, start_hvx_host
 
     snap = platform_snapshot()
@@ -26,10 +27,13 @@ def main() -> int:
     import uvicorn
     from app.api_main import app
 
+    deployment = load_deployment_config()
+    bind_host = deployment.server_bind_host if deployment.is_server else settings.api_host
+    bind_port = int(deployment.server_bind_port or settings.api_port) if deployment.is_server else settings.api_port
     uvicorn.run(
         app,
-        host=settings.api_host,
-        port=settings.api_port,
+        host=bind_host,
+        port=bind_port,
         log_level="warning",
         access_log=False,
         reload=False,
