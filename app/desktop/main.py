@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sys
 import time
 import traceback
 import httpx
 from PySide6.QtCore import QDate, Qt, QSize, QThread, QTime, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextDocument
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
@@ -25,6 +26,7 @@ from .shell import DesktopShell
 
 from .common import (Worker, _stop_thread, action_label, available_screen, fit_window_to_screen,
                      is_technician, deployment_kind, source_label, money_label, method_label)
+from app.branding import PRODUCT_NAME, PRODUCT_TAGLINE
 
 
 def _qr_png_from_sources(qr_url="", qr_payload=""):
@@ -132,11 +134,11 @@ from .streams import MjpegStream, pop_latest_mjpeg, _pop_raw_jpegs
 
 class Login(QDialog):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("SmartPark Edge — Sign In")
+        super().__init__(); self.setWindowTitle(f"{PRODUCT_NAME} — Sign In")
         self.setMinimumWidth(360); self.setMaximumWidth(460)
         l=QVBoxLayout(self); l.setContentsMargins(28,28,28,28); l.setSpacing(8)
-        brand=QLabel("SmartPark Edge"); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
-        tag=QLabel("Vehicle intelligence · edge platform")
+        brand=QLabel(PRODUCT_NAME); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
+        tag=QLabel(PRODUCT_TAGLINE)
         tag.setObjectName("muted")
         title=QLabel("Sign in"); title.setStyleSheet("font-size:22px;font-weight:700;margin-top:10px")
         self.sub=QLabel("Sign in with the first-run admin password shown at setup")
@@ -166,10 +168,40 @@ class Login(QDialog):
         except Exception:
             pass
     def login(self):
+        def is_connection_failure(exc) -> bool:
+            text = str(exc).lower()
+            return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)) or any(
+                marker in text for marker in ("winerror 10061", "connection refused", "connecterror")
+            )
+
         try:
+            # The wizard may have just replaced deployment.json. Refresh the
+            # endpoint immediately before the first authentication request.
+            from .api import configure_base_url
+
+            configure_base_url()
             api.login(self.user.text().strip(), self.pwd.text())
             self.accept()
+            return
         except Exception as e:
+            if is_connection_failure(e):
+                try:
+                    from app.deployment import load_deployment_config
+                    from app.desktop.launch import ensure_background_services, wait_for_api
+
+                    config = load_deployment_config()
+                    if config.is_server:
+                        # Safe to call again: the launcher verifies the API
+                        # health endpoint and uses the Site Service lock.
+                        ensure_background_services(config=config)
+                    else:
+                        wait_for_api(timeout=20.0, base_url=api.base_url)
+                    configure_base_url()
+                    api.login(self.user.text().strip(), self.pwd.text())
+                    self.accept()
+                    return
+                except Exception as retry_error:
+                    e = retry_error
             text=str(e)
             if "401" in text or "Invalid username" in text:
                 text = (
@@ -179,7 +211,7 @@ class Login(QDialog):
                     "Reset it with: python -m app.cli reset-admin"
                 )
             elif "Connection" in text or "ConnectError" in text or "8760" in text:
-                text = f"Cannot reach the SmartPark Site Server at {api.base_url}. Check the connection or open deployment configuration."
+                text = f"Cannot reach the {PRODUCT_NAME} Site Server at {api.base_url}. Check the connection or open deployment configuration."
             QMessageBox.critical(self,"Sign in failed",text)
 
 
@@ -1308,7 +1340,7 @@ class OnboardingWizard(QWidget):
         self.rec_mode = QComboBox()
         for mid, label in [
             ("NATIVE_ONLY", "Use camera recognition"),
-            ("FASTALPR_ONLY", "Use SmartPark AI recognition"),
+            ("FASTALPR_ONLY", f"Use {PRODUCT_NAME} AI recognition"),
             ("HYBRID", "Use both"),
             ("VIDEO_ONLY", "Video only"),
         ]:
@@ -1744,7 +1776,7 @@ class MainWindow(DesktopShell):
         super().__init__()
         import platform
         system = platform.system() or "desktop"
-        self.setWindowTitle(f"SmartPark  ·  {system}")
+        self.setWindowTitle(f"{PRODUCT_NAME}  ·  {system}")
         self.pages=[]
         self._makers=[]
         if api.nav_page("dashboard"):
@@ -1917,7 +1949,13 @@ class MainWindow(DesktopShell):
 
 
 def main():
-    app=QApplication(sys.argv); app.setApplicationName("SmartPark Edge")
+    app=QApplication(sys.argv); app.setApplicationName(PRODUCT_NAME)
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    icon = assets / "zirp.ico"
+    if not icon.is_file():
+        icon = assets / "zirp-logo.png"
+    if icon.is_file():
+        app.setWindowIcon(QIcon(str(icon)))
     font = QFont()
     font.setPointSize(10)
     app.setFont(font)
@@ -1937,23 +1975,55 @@ def main():
             from app.desktop.launch import ensure_background_services
             ensure_background_services(config=config)
         except Exception as exc:
-            QMessageBox.critical(None, "SmartPark Edge", f"The SmartPark Site Server could not start.\n\n{exc}")
+            QMessageBox.critical(None, PRODUCT_NAME, f"The {PRODUCT_NAME} Site Server could not start.\n\n{exc}")
             return 1
     else:
-        try:
-            import httpx
-            response = httpx.get(f"{api.base_url}/health/live", timeout=3)
-            response.raise_for_status()
-            identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
-            identity.raise_for_status()
-            identity_body = identity.json()
-            if config.server_id and identity_body.get("server_id") != config.server_id:
-                raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
-            if config.installation_id and identity_body.get("installation_id") != config.installation_id:
-                raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
-        except Exception as exc:
-            QMessageBox.critical(None, "SmartPark Operator Workstation", f"The SmartPark Site Server could not be reached.\n\nServer: {api.base_url}\n\n{exc}")
-            return 1
+        from app.desktop.launch import disable_background_services
+
+        disable_background_services()
+        while True:
+            try:
+                import httpx
+                response = httpx.get(f"{api.base_url}/health/live", timeout=3)
+                response.raise_for_status()
+                identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
+                identity.raise_for_status()
+                identity_body = identity.json()
+                if config.paired_server_id:
+                    if identity_body.get("server_installation_id", identity_body.get("installation_id")) != config.paired_server_id:
+                        raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+                elif config.server_id and identity_body.get("server_id") != config.server_id:
+                    # Compatibility with v1 client metadata, where server_id
+                    # was the server's public site identity.
+                    raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+                if config.paired_site_id and identity_body.get("site_id", identity_body.get("server_id")) != config.paired_site_id:
+                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+                elif not config.paired_server_id and config.installation_id and identity_body.get("installation_id") != config.installation_id:
+                    # Compatibility with v1 clients that stored the server
+                    # installation ID in installation_id.
+                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+                break
+            except Exception as exc:
+                prompt = QMessageBox(None)
+                prompt.setIcon(QMessageBox.Icon.Warning)
+                prompt.setWindowTitle(f"{PRODUCT_NAME} Operator Workstation")
+                prompt.setText(f"{PRODUCT_NAME} Site Server unavailable")
+                prompt.setInformativeText(f"Server: {api.base_url}\n\n{exc}")
+                retry = prompt.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
+                change = prompt.addButton("Change Server", QMessageBox.ButtonRole.ActionRole)
+                prompt.addButton("Exit", QMessageBox.ButtonRole.RejectRole)
+                prompt.exec()
+                if prompt.clickedButton() is retry:
+                    continue
+                if prompt.clickedButton() is change:
+                    from .setup import SetupWizard
+
+                    wizard = SetupWizard(config)
+                    if wizard.exec() == QDialog.DialogCode.Accepted:
+                        config = load_deployment_config()
+                        configure_base_url()
+                        continue
+                return 1
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()

@@ -4,7 +4,7 @@ SmartPark Edge is a **plate-first parking system**. Cameras read number plates, 
 
 The **desktop app and Site Service** run on Windows and Linux. A small **32-bit Windows process** talks to the HVX camera vendor SDK so the main app can stay 64-bit — that host cannot run on Linux. On Linux the desktop still opens; IP cameras use RTSP/HTTP and FastALPR.
 
-Install on the parking PC from `dist/SmartParkEdge-Install` (or the USB zip). First-run sign-in is `admin` plus the password printed by setup (also written once to `bootstrap_password.txt` in the data directory). How to help, and what is still open, is in [CONTRIBUTING.md](CONTRIBUTING.md). How the pieces fit is in [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/00-START-HERE.md](docs/00-START-HERE.md).
+For a real site, install the approved SmartPark Windows package and follow the production documentation in [docs-site/index.html](docs-site/index.html). The portable/USB package is a maintainer test artifact. First-run authentication is created by the deployment wizard; this repository does not define a production default password.
 
 ## Perspective
 
@@ -69,7 +69,7 @@ The site must keep running if one camera dies, the UI is closed, or FastALPR is 
 
 ## Windows install (full HVX site)
 
-Copy `dist/SmartParkEdge-Install` onto a USB stick. On the parking PC, double-click **Install-SmartPark.bat**. Then **Add site cameras** → **Connect all**. Camera login is typically `admin` / `admin` on port 30000. Register plates under **Vehicles**.
+Use the approved Windows installer package on the Site Server, select **Site Server** in Deployment Configuration, configure the approved database and create the first administrator. Then add cameras, connect them and complete the field acceptance checks. Camera credentials are site-specific and must not be copied from this repository. Register plates under **Vehicles**.
 
 Close any other SDK client first. First hardware pass: [FIRST_TEST_WINDOWS.md](FIRST_TEST_WINDOWS.md).
 
@@ -82,7 +82,7 @@ pip install -r requirements.txt
 ./scripts/run_dev_linux.sh  # or: python -m app.web.launch
 ```
 
-Opens `http://127.0.0.1:8760`. Sign in `admin` / `SmartPark1!`.
+Opens `http://127.0.0.1:8760`. Create the first administrator through the deployment wizard; do not rely on a repository default password.
 
 For **normal (non-LAPR) IP cameras**, set Adapter to **rtsp** (or dahua/hikvision), then Connect. FastALPR reads plates. Install `ffmpeg` on the PATH for RTSP snapshots.
 

@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Install SmartPark Edge from this USB/folder onto this Windows PC.
+    Install Zirp from this USB/folder onto this Windows PC.
     Double-click Install-SmartPark.bat. No project copy and no internet required.
 #>
 [CmdletBinding()]
@@ -35,7 +35,7 @@ Write-Host "Installer log: $InstallerLog"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Administrator approval is required to register SmartPark background tasks."
+    Write-Host "Administrator approval is required to register Zirp background tasks."
     $elevation = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($InstallDir) { $elevation += " -InstallDir `"$InstallDir`"" }
     if ($AllUsers) { $elevation += " -AllUsers" }
@@ -62,16 +62,20 @@ if (-not $InstallDir) {
     }
 }
 
-Write-Host "SmartPark Edge installer"
+Write-Host "Zirp installer"
 Write-Host "From: $KitRoot"
 Write-Host "To:   $InstallDir"
+$buildInfo = Join-Path $KitRoot "BUILD-INFO.txt"
+if (Test-Path $buildInfo) {
+    Write-Host "Kit build: $((Get-Content -LiteralPath $buildInfo -Raw -Encoding UTF8).Trim())"
+}
 Write-Host ""
 
 function Stop-SmartParkProcesses {
     param([string]$Root)
     $root = ""
     if ($Root) { $root = [IO.Path]::GetFullPath($Root).TrimEnd("\") }
-    Write-Host "Stopping any previous SmartPark Edge process..."
+    Write-Host "Stopping any previous Zirp process..."
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $cmd = [string]$_.CommandLine
         $exe = [string]$_.ExecutablePath
@@ -116,6 +120,9 @@ function Remove-SmartParkTree {
 Stop-SmartParkProcesses -Root $InstallDir
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+if (Test-Path $buildInfo) {
+    Copy-Item $buildInfo (Join-Path $InstallDir "BUILD-INFO.txt") -Force
+}
 
 $copyDirs = @("app", "tools", "vendor", "python64", "python32", "wheels", "wheels32", "models")
 foreach ($name in $copyDirs) {
@@ -137,6 +144,18 @@ if (Test-Path $docSrc) {
     if (Test-Path $docDest) { Remove-SmartParkTree -Path $docDest -InstallRoot $InstallDir }
     Copy-Item $docSrc $docDest -Recurse -Force
 }
+# Development/build layouts may carry the technician markdown under docs
+# instead of the assembled documentation folder. Include the actual database
+# and deployment procedures in the installed kit without changing the normal
+# operator workflow.
+$repoDocs = Join-Path $KitRoot "..\..\docs"
+if (-not (Test-Path $repoDocs)) { $repoDocs = Join-Path $KitRoot "..\docs" }
+if ((Test-Path $repoDocs) -and -not (Test-Path (Join-Path $InstallDir "documentation\DATABASE_CONFIGURATION.md"))) {
+    $docDest = Join-Path $InstallDir "documentation"
+    New-Item -ItemType Directory -Force -Path $docDest | Out-Null
+    Copy-Item (Join-Path $repoDocs "DATABASE_CONFIGURATION.md") $docDest -Force -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $repoDocs "DEPLOYMENT.md") $docDest -Force -ErrorAction SilentlyContinue
+}
 $getPip = Join-Path $Payload "get-pip.py"
 if (Test-Path $getPip) {
     Copy-Item $getPip (Join-Path $InstallDir "get-pip.py") -Force
@@ -145,6 +164,11 @@ if (Test-Path $getPip) {
 $Py64 = Join-Path $InstallDir "python64\python.exe"
 if (-not (Test-Path $Py64)) {
     throw "64-bit Python is missing from the kit (payload\python64)."
+}
+foreach ($runtimeDll in @("msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+    if (-not (Test-Path (Join-Path $InstallDir "python64\$runtimeDll"))) {
+        throw "The bundled 64-bit C++ runtime is incomplete: python64\$runtimeDll is missing. Rebuild the installation kit."
+    }
 }
 
 $Pth = Get-ChildItem (Join-Path $InstallDir "python64") -Filter "python*._pth" | Select-Object -First 1
@@ -213,23 +237,29 @@ if ($LASTEXITCODE -ne 0) { throw "Installed Python dependencies are incompatible
 
 $Py32 = Join-Path $InstallDir "python32\python.exe"
 $Wheels32 = Join-Path $InstallDir "wheels32"
-if (-not (Test-Path $Py32)) { throw "32-bit Python is missing from the kit (payload\python32)." }
-if (-not (Test-Path $Wheels32)) { throw "32-bit host wheels are missing from the kit (payload\wheels32)." }
-$pillow32 = Get-ChildItem -Path $Wheels32 -Filter "pillow-*-win32.whl" | Select-Object -First 1
-if (-not $pillow32) { throw "32-bit Pillow wheel is missing from the kit." }
-$site32 = Join-Path $InstallDir "python32\Lib\site-packages"
-New-Item -ItemType Directory -Force -Path $site32 | Out-Null
-# The 32-bit host only needs Pillow. Extracting this wheel avoids installing a
-# second pip stack and avoids pulling 64-bit application dependencies into the
-# vendor-compatible interpreter.
-$pillowZip = Join-Path ([IO.Path]::GetTempPath()) ("SmartPark-Pillow32-{0}.zip" -f $PID)
-Copy-Item $pillow32.FullName $pillowZip -Force
-Expand-Archive -LiteralPath $pillowZip -DestinationPath $site32 -Force
-Remove-Item -LiteralPath $pillowZip -Force -ErrorAction SilentlyContinue
+if ((Test-Path $Py32) -and (Test-Path $Wheels32)) {
+    $pillow32 = Get-ChildItem -Path $Wheels32 -Filter "pillow-*-win32.whl" | Select-Object -First 1
+    if ($pillow32) {
+        $site32 = Join-Path $InstallDir "python32\Lib\site-packages"
+        New-Item -ItemType Directory -Force -Path $site32 | Out-Null
+        # The 32-bit host only needs Pillow. Extracting this wheel avoids
+        # installing a second pip stack into the vendor-compatible interpreter.
+        $pillowZip = Join-Path ([IO.Path]::GetTempPath()) ("SmartPark-Pillow32-{0}.zip" -f $PID)
+        Copy-Item $pillow32.FullName $pillowZip -Force
+        Expand-Archive -LiteralPath $pillowZip -DestinationPath $site32 -Force
+        Remove-Item -LiteralPath $pillowZip -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Warning "32-bit Pillow wheel missing; HVX runtime will be unavailable until the server kit is repaired."
+    }
+} else {
+    Write-Host "32-bit HVX runtime not present; this is valid for an Operator Workstation and generic RTSP Site Server."
+}
 
 $RuntimeCheck = Join-Path $InstallDir "tools\hvx_sdk_host\check_runtime.py"
-& $Py32 $RuntimeCheck --vendor-dir (Join-Path $InstallDir "vendor")
-if ($LASTEXITCODE -ne 0) { throw "Vendor DLL load check failed. Resolve the runtime/dependency error above before starting cameras." }
+if ((Test-Path $Py32) -and (Test-Path $RuntimeCheck)) {
+    & $Py32 $RuntimeCheck --vendor-dir (Join-Path $InstallDir "vendor")
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Vendor DLL load check failed. HVX cameras will remain unavailable until the Site Server runtime is repaired." }
+}
 
 $StartBat = Join-Path $InstallDir "Start-SmartPark.bat"
 $StartCmd = @"
@@ -245,7 +275,7 @@ set QT_QPA_PLATFORM_PLUGIN_PATH=%~dp0python64\Lib\site-packages\PySide6\plugins\
 "%~dp0python64\python.exe" -m app.desktop.launch
 if errorlevel 1 (
   echo.
-  echo SmartPark Edge did not start. See %ProgramData%\SmartParkEdge\logs\launch.log
+  echo Zirp did not start. See %ProgramData%\SmartParkEdge\logs\launch.log
   pause
 )
 "@
@@ -316,11 +346,13 @@ Set-Content -Path $StartVbs -Value $Vbs -Encoding ASCII
 $Programs = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\SmartPark"
 New-Item -ItemType Directory -Force -Path $Programs | Out-Null
 $Wsh = New-Object -ComObject WScript.Shell
+$IconFile = Join-Path $InstallDir "app\assets\zirp.ico"
 $lnk = $Wsh.CreateShortcut((Join-Path $Programs "SmartPark Edge.lnk"))
 $lnk.TargetPath = $StartBat
 $lnk.WorkingDirectory = $InstallDir
 $lnk.WindowStyle = 7
-$lnk.Description = "SmartPark Edge"
+$lnk.Description = "Zirp"
+if (Test-Path $IconFile) { $lnk.IconLocation = "$IconFile,0" }
 $lnk.Save()
 
 $Desktop = [Environment]::GetFolderPath("Desktop")
@@ -328,7 +360,8 @@ $desk = $Wsh.CreateShortcut((Join-Path $Desktop "SmartPark Edge.lnk"))
 $desk.TargetPath = $StartBat
 $desk.WorkingDirectory = $InstallDir
 $desk.WindowStyle = 7
-$desk.Description = "SmartPark Edge"
+$desk.Description = "Zirp"
+if (Test-Path $IconFile) { $desk.IconLocation = "$IconFile,0" }
 $desk.Save()
 
 $CheckBat = Join-Path $InstallDir "Run-StartupCheck.bat"
@@ -414,13 +447,24 @@ $deploymentPath = Join-Path $env:ProgramData "SmartParkEdge\deployment.json"
 $databasePath = Join-Path $env:ProgramData "SmartParkEdge\smartpark.db"
 $freshDeployment = -not (Test-Path $deploymentPath) -and -not (Test-Path $databasePath)
 $configuredRole = ""
+$deploymentConfigured = $false
 if (Test-Path $deploymentPath) {
     try {
-        $configuredRole = [string]((Get-Content -LiteralPath $deploymentPath -Raw -Encoding UTF8 | ConvertFrom-Json).role)
+        $deployment = Get-Content -LiteralPath $deploymentPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $configuredRole = [string]$deployment.role
+        # A previous wizard attempt can leave deployment.json and a database
+        # behind while the role/setup is still incomplete.  Do not start the
+        # API against that partial state: it exits immediately and leaves the
+        # installer looking healthy until the later MediaMTX step fails.
+        $deploymentConfigured = [bool]$deployment.configured -and (
+            -not $deployment.PSObject.Properties['state'] -or
+            [string]$deployment.state -eq "CONFIGURED"
+        )
     } catch {
         throw "The existing SmartPark deployment configuration is invalid: $($_.Exception.Message)"
     }
 }
+$setupRequired = $freshDeployment -or -not $deploymentConfigured
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
@@ -431,13 +475,13 @@ foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", 
     }
 }
 if ((Test-Path $svcScript) -and $configuredRole -ne "OPERATOR_CLIENT") {
-    if ($freshDeployment) {
-        Write-Host "Registering background tasks; first start is deferred until the native wizard chooses the role..."
+    if ($setupRequired) {
+        Write-Host "Registering background tasks; startup is deferred until the native wizard completes deployment setup..."
     } else {
         Write-Host "Starting Site Service, HVX host, Media Service and Recognition Worker..."
     }
     try {
-        if ($freshDeployment) {
+        if ($setupRequired) {
             & $svcScript -InstallDir $InstallDir -RegisterOnly
         } else {
             & $svcScript -InstallDir $InstallDir
@@ -447,7 +491,7 @@ if ((Test-Path $svcScript) -and $configuredRole -ne "OPERATOR_CLIENT") {
     }
 }
 $enableMedia = Join-Path $InstallDir "Enable-MediaMTX.ps1"
-if ((Test-Path $enableMedia) -and -not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
+if ((Test-Path $enableMedia) -and -not $setupRequired -and $configuredRole -ne "OPERATOR_CLIENT") {
     & $enableMedia -InstallDir $InstallDir -LiveView
 }
 
@@ -455,14 +499,14 @@ Write-Host ""
 $env:SMARTPARK_HOME = $InstallDir
 $env:PYTHONPATH = $InstallDir
 $env:SMARTPARK_HVX_VENDOR_DIR = Join-Path $InstallDir "vendor"
-if (-not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
+if (-not $setupRequired -and $configuredRole -ne "OPERATOR_CLIENT") {
     Write-Host "Setting the sign-in password to the install password..."
     & $Py64 -m app.cli reset-admin
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Could not set the admin password. The file is %ProgramData%\SmartParkEdge\bootstrap_password.txt"
     }
-} elseif ($freshDeployment) {
-    Write-Host "Fresh deployment detected: role setup and service startup are deferred to the native wizard."
+} elseif ($setupRequired) {
+    Write-Host "Deployment setup is incomplete: role setup and service startup are deferred to the native wizard."
 } else {
     Write-Host "Operator Workstation detected: no local database, camera, gate or recognition services will be started."
 }
@@ -493,7 +537,7 @@ function Start-SmartParkFromInstaller {
     if (Test-SmartParkAdmin) {
         Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -WorkingDirectory $InstallDir
         Start-Sleep -Seconds 3
-        if (-not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
+        if (-not $setupRequired -and $configuredRole -ne "OPERATOR_CLIENT") {
             Start-Process "http://127.0.0.1:8760/"
         }
         return
@@ -513,7 +557,7 @@ function Start-SmartParkFromInstaller {
 
 Write-Host ""
 Write-Host "Installed."
-Write-Host "  Open: SmartPark Edge (desktop operator UI). SmartPark Edge Web is for administration/remote access."
+Write-Host "  Open: Zirp (desktop operator UI). Zirp Web is for administration/remote access."
 Write-Host "  Background: Site Service + HVX host + Media Service + Recognition Worker start at Windows logon"
 if (Test-Path $MediaMtxExe) {
     Write-Host "  MediaMTX: enabled for RTSP cameras; SDK cameras use their SDK JPEG path"

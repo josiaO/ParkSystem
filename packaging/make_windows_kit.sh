@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build a USB install folder on Linux. Copy dist/SmartParkEdge-Install to a flash drive.
+# Build the maintainer Windows test/distribution package on Linux. The portable
+# folder may be copied to removable media for field testing; it is not the
+# production installation workflow described by the installed documentation.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -119,6 +121,18 @@ rm -rf "$OUT/payload/python64" "$OUT/payload/python32"
 mkdir -p "$OUT/payload/python64" "$OUT/payload/python32"
 python3 -m zipfile -e "$CACHE/python-${PY_VER}-embed-amd64.zip" "$OUT/payload/python64"
 python3 -m zipfile -e "$CACHE/python-${PY_VER}-embed-win32.zip" "$OUT/payload/python32"
+# ONNX Runtime's Windows wheel depends on the MSVC C++ runtime. The
+# embeddable Python archive carries vcruntime140*.dll but not MSVCP140*.dll,
+# so a fresh Windows PC otherwise fails with:
+# "DLL load failed while importing onnxruntime_pybind11_state".
+VC_RUNTIME_SOURCE="$ROOT/Current_ParkSystem_configs/ParkingSystem/ParkWatch"
+for dll in msvcp140.dll msvcp140_1.dll; do
+  if [[ ! -f "$VC_RUNTIME_SOURCE/$dll" ]]; then
+    echo "ERROR: required Windows runtime DLL is missing: $VC_RUNTIME_SOURCE/$dll" >&2
+    exit 1
+  fi
+  cp "$VC_RUNTIME_SOURCE/$dll" "$OUT/payload/python64/$dll"
+done
 printf 'python311.zip\r\n.\r\n..\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python64/python311._pth"
 printf 'python311.zip\r\n.\r\n..\\tools\\hvx_sdk_host\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python32/python311._pth"
 
@@ -264,24 +278,40 @@ cp "$ROOT/packaging/windows/Wipe-SmartPark.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Wipe-SmartPark.bat" "$OUT/"
 cp "$ROOT/packaging/windows/README-USB.txt" "$OUT/README.txt"
 cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/FIRST_TEST_WINDOWS.md"
-cp "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" "$OUT/WINDOWS_CAMERA_UI_FIXES.md"
+if [[ -f "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" ]]; then
+  cp "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" "$OUT/WINDOWS_CAMERA_UI_FIXES.md"
+fi
+# Make it impossible to confuse a stale USB copy with the package that was
+# actually assembled.  The source tree may contain uncommitted fixes, so the
+# marker includes hashes of the two startup scripts as well as the Git state.
+BUILD_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+INSTALLER_SHA="$(sha256sum "$ROOT/packaging/windows/Install-SmartPark.ps1" | awk '{print $1}')"
+SERVICES_SHA="$(sha256sum "$ROOT/packaging/windows/Install-SmartParkServices.ps1" | awk '{print $1}')"
+cat > "$OUT/BUILD-INFO.txt" <<EOF
+Zirp Windows kit
+Build UTC: $BUILD_TIME
+Git base: $BUILD_COMMIT
+Install-SmartPark.ps1 SHA256: $INSTALLER_SHA
+Install-SmartParkServices.ps1 SHA256: $SERVICES_SHA
+EOF
 rm -rf "$OUT/documentation"
 mkdir -p "$OUT/documentation"
 cp "$ROOT/docs-site/index.html" "$OUT/documentation/"
 cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
-cp "$ROOT/docs-site/i18n.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
+cp "$ROOT/docs-site/"*.ico "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
+cp "$ROOT/docs/DEPLOYMENT.md" "$OUT/documentation/"
+cp "$ROOT/docs/DATABASE_CONFIGURATION.md" "$OUT/documentation/"
+cp "$ROOT/docs/POSTGRESQL-PREREQUISITE.md" "$OUT/documentation/"
 cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
 cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
 cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
+cp "$ROOT/docs/MIGRATION-AND-ROLLBACK.md" "$OUT/documentation/"
 if [[ -f "$ROOT/docs/CAMERA-LAB.md" ]]; then
   cp "$ROOT/docs/CAMERA-LAB.md" "$OUT/documentation/"
 fi
-if [[ -f "$ROOT/PARKWATCH-LESSONS.md" ]]; then
-  cp "$ROOT/PARKWATCH-LESSONS.md" "$OUT/documentation/"
-fi
-
 echo "Verifying offline payload (wheels, NetSDK, models, Python)..."
 python3 "$ROOT/packaging/verify_windows_kit.py" "$OUT/payload"
 
@@ -292,9 +322,9 @@ rm -f "$ZIP"
 sha256sum "$ZIP" > "$ZIP.sha256"
 
 echo
-echo "USB kit ready:"
+echo "Maintainer Windows test package ready:"
 echo "  Folder: $OUT"
 echo "  Zip:    $ZIP"
-echo "Copy the folder (or the zip) onto a flash drive."
+echo "For field testing, copy the folder (or the zip) to the target Windows PC."
 echo "On Windows, double-click Install-SmartPark.bat"
 echo "Documentation site: $OUT/documentation/index.html"
