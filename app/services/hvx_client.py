@@ -68,6 +68,7 @@ def _shared_live_client(base_url: str, handle: int) -> httpx.AsyncClient:
 class HVXHostClient:
     def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or settings.hvx_host_url).rstrip("/")
+        self.last_live_seq: dict[int, int] = {}
 
     async def info(self) -> dict:
         try:
@@ -254,6 +255,10 @@ class HVXHostClient:
         try:
             client = _shared_live_client(self.base_url, handle)
             r = await client.get(f"/live-jpeg/{int(handle)}")
+            try:
+                self.last_live_seq[int(handle)] = int(r.headers.get("x-frame-seq") or 0)
+            except (TypeError, ValueError):
+                self.last_live_seq[int(handle)] = 0
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
                 return r.content
         except (httpx.TransportError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):

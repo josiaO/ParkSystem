@@ -6,6 +6,7 @@ import asyncio
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.core.plate import apply_site_plate, correct_ocr_confusions
@@ -111,6 +112,28 @@ class DesktopMediaMTXTests(unittest.TestCase):
         self.assertTrue(body["cached"])
         self.assertEqual(body["jpeg"], sample.jpeg)
         capture.assert_not_called()
+
+    def test_stale_active_stream_does_not_spawn_competing_snapshot_decoder(self):
+        stale_session = SimpleNamespace(
+            producer=object(),
+            detect_consumers=0,
+            last_fresh_frame_at=0.0,
+            source="rtsp",
+        )
+
+        async def run():
+            with patch("app.infrastructure.media.registry.mediamtx_live_active", return_value=False), \
+                 patch("app.services.preview.gateway.session", return_value=stale_session), \
+                 patch("app.services.preview.gateway.peek_live", return_value=None), \
+                 patch("app.services.preview.gateway.snapshot", new=AsyncMock(return_value=b"")), \
+                 patch("app.services.preview.resolve_playable", new=AsyncMock(side_effect=AssertionError("competing decoder"))) as resolve:
+                body = await snapshot_for_camera(9, "127.0.0.1", "admin", "secret", "")
+            return body, resolve
+
+        body, resolve = asyncio.run(run())
+        self.assertFalse(body["ok"])
+        self.assertIn("protect video", body["error"])
+        resolve.assert_not_awaited()
 
     def test_acquire_live_starts_mediamtx_live_consumer(self):
         spec = CameraLiveSpec(id=9, ip="127.0.0.1", username="a", password="b", rtsp_url="", sdk_handle=None)

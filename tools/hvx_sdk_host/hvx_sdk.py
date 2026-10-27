@@ -328,6 +328,7 @@ class HVXSDK:
         self._last_capture = {}
         self._last_live_jpeg = {}
         self._live_received_at = {}
+        self._live_frame_seq = {}
         self._live_requested_at = {}
         self._video_streams = {}
         self._function_lists = {}
@@ -986,6 +987,7 @@ class HVXSDK:
             getattr(self, "_draw_frame_seq", {}).pop(handle, None)
             getattr(self, "_draw_encoded_seq", {}).pop(handle, None)
             self._live_received_at.pop(handle, None)
+            getattr(self, "_live_frame_seq", {}).pop(handle, None)
             self._live_requested_at.pop(handle, None)
             self._video_streams.pop(handle, None)
             getattr(self, "_function_lists", {}).pop(int(handle), None)
@@ -1289,6 +1291,7 @@ class HVXSDK:
                 self._draw_encoded_seq[handle] = seq
                 self._last_live_jpeg[handle] = jpeg
                 self._live_received_at[handle] = time.monotonic()
+                getattr(self, "_live_frame_seq", {})[handle] = seq
         self._note_video(handle, capture_mode="sdk_draw_data", window_capture_rc=None)
         return jpeg
 
@@ -1311,6 +1314,11 @@ class HVXSDK:
         row["state"] = ("LIVE" if age is not None and age <= 5.0 else "START_FAILED"
                         if row.get("start_rc") not in (None, DC_NO_ERROR) else "NO_FRAMES")
         return row
+
+    def live_frame_seq(self, handle: int) -> int:
+        """Monotonic source-frame identity for the live JPEG endpoint."""
+        with self._lock:
+            return int(getattr(self, "_live_frame_seq", {}).get(int(handle), 0) or 0)
 
     def _start_video(self, handle: int, stream_type: int) -> dict:
         if not hasattr(self.dll, "Net_StartVideo"):
@@ -1756,12 +1764,20 @@ class HVXSDK:
         handle = int(handle)
         idle = 0
         retry_at = time.monotonic() + 5.0
-        interval = 1.0 / max(1.0, min(20.0, float(os.environ.get("SMARTPARK_HVX_JPEG_FPS", "10"))))
+        interval = 1.0 / max(1.0, min(20.0, float(os.environ.get("SMARTPARK_HVX_JPEG_FPS", "15"))))
         def publish(jpeg):
             with self._lock:
                 if handle in self._video_handles:
+                    previous = self._last_live_jpeg.get(handle, b"")
                     self._last_live_jpeg[handle] = jpeg
-                    self._live_received_at[handle] = time.monotonic()
+                    # Draw-data frames update freshness when they are encoded.
+                    # For the legacy buffer path, only a changed JPEG is proof
+                    # that the SDK delivered a new frame; repeated cache reads
+                    # must not keep stale video alive.
+                    if handle not in getattr(self, "_draw_callbacks", {}) and jpeg != previous:
+                        self._live_received_at[handle] = time.monotonic()
+                        seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0) + 1
+                        getattr(self, "_live_frame_seq", {})[handle] = seq
         while self._video_running:
             started = time.monotonic()
             with self._lock:

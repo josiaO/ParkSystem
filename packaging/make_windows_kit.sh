@@ -34,6 +34,7 @@ cp "$ROOT/tools/field_acceptance_test.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/startup_check.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/field_realtime_report.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/camera_lab.py" "$OUT/payload/tools/"
+cp "$ROOT/tools/camera_lab_replay.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/__init__.py" "$OUT/payload/tools/"
 if [[ -f "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" ]]; then
   cp "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
@@ -274,6 +275,9 @@ cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
 cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
 cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
 cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
+if [[ -f "$ROOT/docs/CAMERA-LAB.md" ]]; then
+  cp "$ROOT/docs/CAMERA-LAB.md" "$OUT/documentation/"
+fi
 if [[ -f "$ROOT/PARKWATCH-LESSONS.md" ]]; then
   cp "$ROOT/PARKWATCH-LESSONS.md" "$OUT/documentation/"
 fi

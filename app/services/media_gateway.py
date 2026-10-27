@@ -144,6 +144,7 @@ class StreamSession:
     last_fresh_frame_at: float = 0.0
     frozen: bool = False
     source_fps: float = 0.0
+    source_frame_seq: int = 0
     frame_intervals: deque = field(default_factory=lambda: deque(maxlen=256))
     _restart_not_before: float = 0.0
     _src_at: float = 0.0
@@ -477,6 +478,7 @@ class LocalMediaGateway:
             "source": row.source or (live.source if live else ""),
             "fps": row.live_fps,
             "source_fps": row.source_fps,
+            "source_frame_seq": row.source_frame_seq,
             "live_fps": row.live_fps,
             "ai_processed_fps": row.ai_fps,
             "ai_samples_dropped": row.frames_dropped_ai,
@@ -618,7 +620,16 @@ class LocalMediaGateway:
             task.cancel()
         return True
 
-    def publish(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "", detect: bool = True) -> FrameSample | None:
+    def publish(
+        self,
+        camera_id: int,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        detect: bool = True,
+        source_seq: int | None = None,
+    ) -> FrameSample | None:
         if jpeg[:2] != JPEG_SOI:
             return None
         row = self._sessions.get(camera_id)
@@ -628,8 +639,21 @@ class LocalMediaGateway:
             ))
             self._sessions[camera_id] = row
         previous = row.live.latest()
+        source_advanced = False
+        if source_seq is not None:
+            incoming_seq = int(source_seq or 0)
+            source_advanced = incoming_seq > row.source_frame_seq
+            row.source_frame_seq = max(row.source_frame_seq, incoming_seq)
         if previous is not None and previous.jpeg == jpeg:
-            self._note_arrival(row, jpeg, time.monotonic(), changed=False)
+            now = time.monotonic()
+            self._note_arrival(row, jpeg, now, changed=False)
+            # A decoded source frame may legitimately encode to identical
+            # JPEG bytes (for example an empty lane). Keep freshness based on
+            # the source frame sequence, without sending duplicate images to
+            # the UI or growing any queue.
+            if source_advanced:
+                row.last_fresh_frame_at = now
+                row.frozen = False
             return previous
         sample = row.live.put(jpeg, source=source, url=url, camera_id=camera_id)
         self._note_arrival(row, jpeg, sample.received_at, changed=True)
@@ -745,6 +769,7 @@ class LocalMediaGateway:
                     spec.id, jpeg,
                     source="sdk",
                     url=f"sdk://handle/{int(spec.sdk_handle)}",
+                    source_seq=host.last_live_seq.get(int(spec.sdk_handle)),
                 )
                 got = True
                 # The host keeps returning the last JPEG until the camera
