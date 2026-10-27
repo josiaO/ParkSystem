@@ -10,6 +10,8 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.branding import PRODUCT_NAME
+
 
 def default_data_dir() -> Path:
     if platform.system() == "Windows":
@@ -57,7 +59,7 @@ def default_node_id() -> str:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=install_directory() / ".env", extra="ignore")
 
-    app_name: str = "SmartPark Edge"
+    app_name: str = PRODUCT_NAME
     app_version: str = "0.3.0"
     site_name: str = "Parking Site"
     api_host: str = "127.0.0.1"

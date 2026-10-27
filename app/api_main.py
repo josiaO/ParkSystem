@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
 import logging
+import os
 import time
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -113,6 +114,7 @@ async def lifespan(app: FastAPI):
     from .services.logging_setup import configure_logging
     from .services.runtime import install_asyncio_exception_filter, mark_core_ready, set_process_name, set_startup_state
 
+    alpr_warmup_task = None
     configure_logging("site-service")
     set_process_name("SmartParkSiteService")
     set_startup_state("STARTING")
@@ -137,6 +139,24 @@ async def lifespan(app: FastAPI):
             migrate_plaintext_secrets(db)
         except Exception as exc:  # a secret-store problem must not stop parking
             log.warning("secrets migration skipped: %s", exc)
+    if os.environ.get("SMARTPARK_ALPR_PREFLIGHT") == "1":
+        async def _warm_alpr_in_background():
+            try:
+                from .services.alpr import warmup
+
+                result = await asyncio.to_thread(warmup)
+                log.info("FastALPR preflight ready in %sms", result.get("warmup_ms", 0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A missing/invalid model must make recognition visibly
+                # degraded, not take the camera and gate service offline.
+                log.error("FastALPR preflight failed: %s", exc)
+
+        # The API must become live while the optional recognition engine is
+        # loading.  FastALPR can be slow on a cold Windows CPU and Uvicorn does
+        # not serve /health/live until this lifespan reaches ``yield``.
+        alpr_warmup_task = asyncio.create_task(_warm_alpr_in_background(), name="fastalpr-warmup")
     mark_core_ready()
     start_idle_watch()
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
@@ -155,9 +175,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if alpr_warmup_task is not None and not alpr_warmup_task.done():
+            alpr_warmup_task.cancel()
         for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events):
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, return_exceptions=True)
+        tasks = [ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events]
+        if alpr_warmup_task is not None:
+            tasks.append(alpr_warmup_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
         await onvif_runtime.shutdown()
         stop_live_pumps()
         from .services.hvx_client import close_host_clients
@@ -236,6 +261,16 @@ def mediamtx_reader():
     return FileResponse(WEB_DIR / "mediamtx-reader.js", media_type="application/javascript")
 
 
+@app.get("/assets/zirp-logo.png", include_in_schema=False)
+def zirp_logo():
+    return FileResponse(WEB_DIR / "assets" / "zirp-logo.png", media_type="image/png")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(WEB_DIR / "assets" / "zirp.ico", media_type="image/x-icon")
+
+
 @app.get("/health")
 def health():
     from .services.health import live
@@ -263,6 +298,15 @@ def health_ready():
     if not body.get("ok"):
         return JSONResponse(body, status_code=503)
     return body
+
+
+@app.get("/health/database")
+def health_database():
+    """Non-secret database readiness for the deployment wizard and support staff."""
+    from .services.health import database_health
+
+    body = database_health()
+    return JSONResponse(body, status_code=200 if body.get("state") == "HEALTHY" else 503)
 
 
 @app.get("/health/details")
@@ -2621,7 +2665,7 @@ async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: 
         "pins": pins,
         "last_car": get_state(c.id).last_car or None,
         "note": (
-            "You do not need to know the GPIO number. SmartPark scans camera GPIO IN pins 1–7 "
+            "You do not need to know the GPIO number. Zirp scans camera GPIO IN pins 1–7 "
             "(not the barrier output on 0) and locks onto the pin that changes when a car hits the loop. "
             "If the camera already snaps on the coil, that image callback is enough even without GPIO. "
             "POST this URL with occupied=true to simulate a car on the loop."
@@ -5025,11 +5069,11 @@ async def printer_test(
         entry_gate="Simulation",
         public_reference=token,
         public_url=public_url,
-        payment_instructions="SmartPark thermal printer test ticket. Scan the QR code.",
-        body_text="SmartPark test receipt\nPlate: T000TST\n",
+        payment_instructions="Zirp thermal printer test ticket. Scan the QR code.",
+        body_text="Zirp test receipt\nPlate: T000TST\n",
         qr_payload=public_url,
         qr_png=_qr_png(public_url),
-        lines=["SmartPark test receipt"],
+        lines=["Zirp test receipt"],
     )
     adapter = printer_adapter(cfg.get("printer_adapter"), printer_name=cfg.get("printer_name") or "")
     printed = await adapter.print_receipt(document)

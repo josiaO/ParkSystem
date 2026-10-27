@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.deployment import OPERATOR_CLIENT, SITE_SERVER, DeploymentConfig, load_deployment_config, save_deployment_config, server_base_url
@@ -51,3 +52,22 @@ def test_site_server_role_remains_explicit():
     config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
     assert config.is_server
     assert not config.is_operator_client
+
+
+def test_legacy_site_server_migrates_to_lan_bind(tmp_path):
+    legacy_settings = SimpleNamespace(
+        data_dir=tmp_path,
+        database_url=None,
+        api_host="127.0.0.1",
+        api_port=8760,
+        node_id="legacy-node",
+        site_name="Parking Site",
+    )
+    with patch("app.deployment.settings", legacy_settings), \
+         patch.dict("os.environ", {"SMARTPARK_API_HOST": ""}, clear=False):
+        (tmp_path / "smartpark.db").touch()
+        config = load_deployment_config()
+
+    assert config.is_server
+    assert config.server_bind_host == "0.0.0.0"
+    assert server_base_url(config) == "http://127.0.0.1:8760"

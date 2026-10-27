@@ -2,14 +2,63 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.desktop import launch
+from app.deployment import DeploymentConfig, SITE_SERVER
 from app.services import mediamtx, mediamtx_telemetry
 
 
 def test_existing_api_does_not_skip_video_and_recognition_services(tmp_path):
     with patch.object(launch, "start_hvx_host"), patch.object(launch, "_port_open", return_value=True), \
+         patch.object(launch, "wait_for_api"), \
          patch.object(launch, "start_pipeline_services") as pipeline:
         launch.ensure_background_services(tmp_path)
     pipeline.assert_called_once_with(tmp_path)
+
+
+def test_existing_listener_is_health_checked_before_pipeline_start(tmp_path):
+    with patch.object(launch, "start_hvx_host"), patch.object(launch, "_port_open", return_value=True), \
+         patch.object(launch, "wait_for_api") as wait, patch.object(launch, "start_pipeline_services"):
+        launch.ensure_background_services(tmp_path)
+    wait.assert_called_once()
+    assert wait.call_args.kwargs["base_url"] == "http://127.0.0.1:8760"
+
+
+def test_site_service_start_waits_for_slow_first_boot(tmp_path):
+    with patch.object(launch, "start_site_service", return_value=True), \
+         patch.object(launch, "_port_open", return_value=False), \
+         patch.object(launch, "start_hvx_host"), \
+         patch.object(launch, "wait_for_api") as wait, \
+         patch.object(launch, "start_pipeline_services"):
+        launch.ensure_background_services(tmp_path)
+    assert wait.call_args.kwargs["timeout"] == launch.SITE_SERVICE_START_TIMEOUT_SECONDS
+
+
+def test_windows_registered_task_is_started_without_spawning_duplicate_api(tmp_path):
+    config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
+    with patch.object(launch.os, "name", "nt"), \
+         patch.object(launch, "_scheduled_site_service_exists", return_value=True) as exists, \
+         patch.object(launch, "_start_scheduled_site_service", return_value=True) as start_task, \
+         patch.object(launch, "start_hvx_host"), \
+         patch.object(launch, "wait_for_api") as wait, \
+         patch.object(launch, "start_pipeline_services") as pipeline, \
+         patch.object(launch, "start_site_service") as spawn:
+        launch.ensure_background_services(tmp_path, config=config)
+    exists.assert_called_once_with()
+    start_task.assert_called_once_with()
+    spawn.assert_not_called()
+    wait.assert_called_once_with(
+        timeout=launch.SITE_SERVICE_START_TIMEOUT_SECONDS,
+        base_url="http://127.0.0.1:8760",
+    )
+    pipeline.assert_called_once_with(tmp_path)
+
+
+def test_site_service_start_keeps_child_diagnostics(tmp_path):
+    with patch.object(launch, "_log_dir", return_value=tmp_path), \
+         patch.object(launch, "_port_open", return_value=False), \
+         patch.object(launch.subprocess, "Popen") as spawn:
+        assert launch.start_site_service(tmp_path)
+    assert spawn.call_args.kwargs["stdout"].name.endswith("site-service-launch.log")
+    assert spawn.call_args.kwargs["stderr"].name.endswith("site-service-launch.log")
 
 
 def test_pipeline_launches_separate_owners_with_logs(tmp_path):

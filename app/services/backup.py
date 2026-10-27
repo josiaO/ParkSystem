@@ -5,6 +5,10 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+import os
+import shutil
+import sqlite3
+import subprocess
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -151,12 +155,51 @@ def snooze_offline_reminder(db: Session, *, hours: int = 24) -> dict[str, Any]:
 
 
 def dump_sql(db: Session) -> bytes:
-    conn = db.connection().connection
-    raw = getattr(conn, "driver_connection", None) or getattr(conn, "dbapi_connection", None) or conn
-    if not hasattr(raw, "iterdump"):
-        raise RuntimeError("This database cannot be exported as a SQL file")
-    text = "\n".join(raw.iterdump())
-    return text.encode("utf-8")
+    """Return a consistent plain SQL backup using the engine-specific provider."""
+    bind = db.get_bind()
+    if bind.dialect.name == "sqlite":
+        conn = db.connection().connection
+        raw = getattr(conn, "driver_connection", None) or getattr(conn, "dbapi_connection", None) or conn
+        if not hasattr(raw, "backup"):
+            raise RuntimeError("SQLite backup is unavailable")
+        destination = sqlite3.connect(":memory:")
+        try:
+            # sqlite backup() takes a consistent snapshot and includes WAL
+            # content; copying the .db file directly would not.
+            raw.backup(destination)
+            return ("\n".join(destination.iterdump()) + "\n").encode("utf-8")
+        finally:
+            destination.close()
+
+    if bind.dialect.name == "postgresql":
+        pg_dump = os.environ.get("SMARTPARK_PG_DUMP") or shutil.which("pg_dump")
+        if not pg_dump:
+            raise RuntimeError("PostgreSQL backup requires pg_dump from the approved PostgreSQL installation")
+        url = bind.url
+        command = [
+            str(pg_dump), "--format=plain", "--no-owner", "--no-privileges",
+            "--host", str(url.host or "127.0.0.1"),
+            "--port", str(url.port or 5432),
+            "--username", str(url.username or ""),
+            str(url.database or "smartpark"),
+        ]
+        env = os.environ.copy()
+        # PGPASSWORD is process-scoped and avoids exposing credentials in the
+        # command line/process arguments. It is removed as soon as pg_dump exits.
+        if url.password:
+            env["PGPASSWORD"] = str(url.password)
+        try:
+            completed = subprocess.run(command, capture_output=True, check=False, env=env, timeout=120)
+        except OSError as exc:
+            raise RuntimeError(f"Could not start pg_dump: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", "replace").strip()[-800:]
+            raise RuntimeError(f"pg_dump failed ({completed.returncode}): {detail}")
+        if not completed.stdout:
+            raise RuntimeError("pg_dump returned an empty backup")
+        return completed.stdout
+
+    raise RuntimeError(f"Unsupported database backup engine: {bind.dialect.name}")
 
 
 def push_cloud_backup(db: Session) -> dict[str, Any]:

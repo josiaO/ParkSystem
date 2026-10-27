@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 _configured: set[str] = set()
@@ -19,13 +21,34 @@ def configure_logging(process_name: str = "smartpark") -> logging.Logger:
     log = logging.getLogger("smartpark")
     log.setLevel(level)
     log.propagate = False
-    dest = logs_dir() / f"{process_name.replace(' ', '-').lower()}.log"
-    handler = RotatingFileHandler(
-        dest,
-        maxBytes=int(getattr(settings, "log_max_bytes", 5_000_000) or 5_000_000),
-        backupCount=int(getattr(settings, "log_backup_count", 8) or 8),
-        encoding="utf-8",
-    )
+    filename = f"{process_name.replace(' ', '-').lower()}.log"
+    try:
+        dest = logs_dir() / filename
+    except OSError:
+        dest = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "SmartParkEdge" / "logs" / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handler = RotatingFileHandler(
+            dest,
+            maxBytes=int(getattr(settings, "log_max_bytes", 5_000_000) or 5_000_000),
+            backupCount=int(getattr(settings, "log_backup_count", 8) or 8),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        # A stale ACL on a previous ProgramData log must not stop the Site
+        # Service, Media Service or recognition worker from starting. The
+        # installer repairs the ACL, but this fallback keeps upgrades and
+        # manually copied installations operational while preserving logs.
+        fallback = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "SmartParkEdge" / "logs"
+        fallback.mkdir(parents=True, exist_ok=True)
+        dest = fallback / dest.name
+        handler = RotatingFileHandler(
+            dest,
+            maxBytes=int(getattr(settings, "log_max_bytes", 5_000_000) or 5_000_000),
+            backupCount=int(getattr(settings, "log_backup_count", 8) or 8),
+            encoding="utf-8",
+        )
+        logging.getLogger().warning("Primary log unavailable (%s); using fallback log %s", exc, dest)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(process)d %(message)s"))
     if not any(isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(dest) for h in log.handlers):
         log.addHandler(handler)

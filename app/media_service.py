@@ -103,6 +103,14 @@ def main() -> int:
     if not acquire_instance_lock("media-service"):
         print("SmartPark Media Service is already running.", file=sys.stderr)
         return 0
+    from app.deployment import load_deployment_config
+    from app.database_config import apply_runtime_database_config
+
+    deployment = load_deployment_config()
+    if not deployment.is_server or not deployment.configured:
+        print("Media Service is disabled until a configured Site Server exists.", file=sys.stderr)
+        return 2
+    apply_runtime_database_config(deployment.database)
     from app.services import mediamtx
 
     from sqlalchemy.exc import OperationalError
