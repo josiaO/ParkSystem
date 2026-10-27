@@ -237,6 +237,7 @@ $StartCmd = @"
 cd /d "%~dp0"
 set SMARTPARK_HOME=%~dp0
 set SMARTPARK_HVX_VENDOR_DIR=%~dp0vendor
+set SMARTPARK_DEPLOYMENT_PROFILE=PRODUCTION
 set PYTHONPATH=%~dp0
 set PATH=%~dp0python64;%~dp0python64\Scripts;%~dp0python64\Lib\site-packages\PySide6;%~dp0python64\Lib\site-packages\shiboken6;%~dp0vendor;%PATH%
 set QT_PLUGIN_PATH=%~dp0python64\Lib\site-packages\PySide6\plugins
@@ -303,6 +304,7 @@ Set sh = CreateObject("WScript.Shell")
 sh.CurrentDirectory = "$(& $Esc $InstallDir)"
 sh.Environment("Process")("SMARTPARK_HOME") = "$(& $Esc $InstallDir)"
 sh.Environment("Process")("SMARTPARK_HVX_VENDOR_DIR") = "$(& $Esc $VendorDir)"
+sh.Environment("Process")("SMARTPARK_DEPLOYMENT_PROFILE") = "PRODUCTION"
 sh.Environment("Process")("PYTHONPATH") = "$(& $Esc $InstallDir)"
 sh.Environment("Process")("PATH") = "$(& $Esc $Py64Dir);$(& $Esc $ScriptsDir);$(& $Esc $PySideDir);$(& $Esc $ShibokenDir);$(& $Esc $VendorDir);" & sh.Environment("Process")("PATH")
 sh.Environment("Process")("QT_PLUGIN_PATH") = "$(& $Esc $PluginsDir)"
@@ -408,6 +410,17 @@ Write-Host 'SmartPark Edge removed. Camera database is still in %ProgramData%\Sm
 Set-Content -Path $Uninstall -Value $UninstallBody -Encoding ASCII
 
 $svcScript = Join-Path $KitRoot "Install-SmartParkServices.ps1"
+$deploymentPath = Join-Path $env:ProgramData "SmartParkEdge\deployment.json"
+$databasePath = Join-Path $env:ProgramData "SmartParkEdge\smartpark.db"
+$freshDeployment = -not (Test-Path $deploymentPath) -and -not (Test-Path $databasePath)
+$configuredRole = ""
+if (Test-Path $deploymentPath) {
+    try {
+        $configuredRole = [string]((Get-Content -LiteralPath $deploymentPath -Raw -Encoding UTF8 | ConvertFrom-Json).role)
+    } catch {
+        throw "The existing SmartPark deployment configuration is invalid: $($_.Exception.Message)"
+    }
+}
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
@@ -417,27 +430,41 @@ foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", 
         Copy-Item $src (Join-Path $InstallDir $helper) -Force
     }
 }
-if (Test-Path $svcScript) {
-    Write-Host "Starting Site Service, HVX host, Media Service and Recognition Worker..."
+if ((Test-Path $svcScript) -and $configuredRole -ne "OPERATOR_CLIENT") {
+    if ($freshDeployment) {
+        Write-Host "Registering background tasks; first start is deferred until the native wizard chooses the role..."
+    } else {
+        Write-Host "Starting Site Service, HVX host, Media Service and Recognition Worker..."
+    }
     try {
-        & $svcScript -InstallDir $InstallDir
+        if ($freshDeployment) {
+            & $svcScript -InstallDir $InstallDir -RegisterOnly
+        } else {
+            & $svcScript -InstallDir $InstallDir
+        }
     } catch {
         throw "Background task registration failed: $_"
     }
 }
 $enableMedia = Join-Path $InstallDir "Enable-MediaMTX.ps1"
-if (Test-Path $enableMedia) {
+if ((Test-Path $enableMedia) -and -not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
     & $enableMedia -InstallDir $InstallDir -LiveView
 }
 
 Write-Host ""
-Write-Host "Setting the sign-in password to the install password..."
 $env:SMARTPARK_HOME = $InstallDir
 $env:PYTHONPATH = $InstallDir
 $env:SMARTPARK_HVX_VENDOR_DIR = Join-Path $InstallDir "vendor"
-& $Py64 -m app.cli reset-admin
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Could not set the admin password. The file is %ProgramData%\SmartParkEdge\bootstrap_password.txt"
+if (-not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
+    Write-Host "Setting the sign-in password to the install password..."
+    & $Py64 -m app.cli reset-admin
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Could not set the admin password. The file is %ProgramData%\SmartParkEdge\bootstrap_password.txt"
+    }
+} elseif ($freshDeployment) {
+    Write-Host "Fresh deployment detected: role setup and service startup are deferred to the native wizard."
+} else {
+    Write-Host "Operator Workstation detected: no local database, camera, gate or recognition services will be started."
 }
 
 $AdminStart = Join-Path $InstallDir "Start-SmartPark-Admin.ps1"
@@ -466,7 +493,9 @@ function Start-SmartParkFromInstaller {
     if (Test-SmartParkAdmin) {
         Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -WorkingDirectory $InstallDir
         Start-Sleep -Seconds 3
-        Start-Process "http://127.0.0.1:8760/"
+        if (-not $freshDeployment -and $configuredRole -ne "OPERATOR_CLIENT") {
+            Start-Process "http://127.0.0.1:8760/"
+        }
         return
     }
     Write-Host ""

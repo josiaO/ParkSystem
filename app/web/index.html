@@ -1737,6 +1737,14 @@
         liveObjectUrls[slot] = null;
       }
       liveOverlays[slot] = null;
+      // Never carry the previous vehicle into a newly opened live view. The
+      // capture endpoint may still legitimately return the last raw read,
+      // but it must not appear as a current plate after tab navigation.
+      liveLastCars[slot] = null;
+      const resetEls = paneEls(slot);
+      if (resetEls.plate) resetEls.plate.textContent = "—";
+      if (resetEls.snap) resetEls.snap.innerHTML = `<p class="muted">Waiting for a car</p>`;
+      if (resetEls.crop) resetEls.crop.innerHTML = `<p class="muted">—</p>`;
     }
 
     function stopLive() {

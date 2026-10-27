@@ -61,10 +61,12 @@ def reply(handler, status, payload):
     handler.end_headers(); handler.wfile.write(body)
 
 
-def reply_jpeg(handler, jpeg: bytes, status=200):
+def reply_jpeg(handler, jpeg: bytes, status=200, headers=None):
     handler.send_response(status)
     handler.send_header("Content-Type", "image/jpeg")
     handler.send_header("Content-Length", str(len(jpeg)))
+    for name, value in (headers or {}).items():
+        handler.send_header(str(name), str(value))
     handler.send_header("Connection", "keep-alive")
     handler.end_headers()
     handler.wfile.write(jpeg)
@@ -193,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not jpeg:
                     return reply(self,404,{"error":"no live video frame yet — Net_StartVideo / Net_GetJpgBuffer",
                                            "video": sdk.video_status(handle)})
-                return reply_jpeg(self, jpeg)
+                return reply_jpeg(self, jpeg, headers={"X-Frame-Seq": sdk.live_frame_seq(handle)})
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/state/"):
             if not sdk: return reply(self,503,{"error":startup_error})

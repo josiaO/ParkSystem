@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
-from .api import api, BASE, stream_http_error
+from .api import api, stream_http_error
 from .desk import ReportsPage, health_sentences
 from .theme import APPEARANCES, apply_appearance
 from .presentation import configure_table, label_for, page_viewport, prepare_page
@@ -44,7 +44,7 @@ def _qr_png_from_sources(qr_url="", qr_payload=""):
             path = str(qr_url).split("?")[0]
             if path.endswith("/qr.png"):
                 path = path[: -len("/qr.png")]
-            payload = f"{BASE}{path}" if path.startswith("/") else path
+            payload = f"{api.base_url}{path}" if path.startswith("/") else path
         png = qr_png_bytes(payload)
     return png if png.startswith(b"\x89PNG") else b""
 
@@ -156,7 +156,7 @@ class Login(QDialog):
     def _prefill(self):
         try:
             import httpx
-            setup=httpx.get(f"{BASE}/auth/setup", timeout=3).json()
+            setup=httpx.get(f"{api.base_url}/auth/setup", timeout=3).json()
             if setup.get("username"): self.user.setText(setup["username"])
             if setup.get("password"):
                 self.pwd.setText(setup["password"])
@@ -179,7 +179,7 @@ class Login(QDialog):
                     "Reset it with: python -m app.cli reset-admin"
                 )
             elif "Connection" in text or "ConnectError" in text or "8760" in text:
-                text = "Cannot reach the API at http://127.0.0.1:8760. Start SmartPark with python -m app.desktop.launch"
+                text = f"Cannot reach the SmartPark Site Server at {api.base_url}. Check the connection or open deployment configuration."
             QMessageBox.critical(self,"Sign in failed",text)
 
 
@@ -1618,7 +1618,7 @@ class SettingsPage(QWidget):
         self.language=QComboBox(); self.language.addItems(["en","sw","ar","fr","pt"])
         self.plate_validation=QComboBox(); self.plate_validation.addItems(["NONE","TZ","KE","ZA","AE"])
         self.public_base_url=QLineEdit()
-        self.public_base_url.setPlaceholderText("http://192.168.1.10:8760")
+        self.public_base_url.setPlaceholderText("http://smartpark-server:8760")
         form.addRow("Timezone (IANA)", self.timezone)
         form.addRow("Currency (ISO 4217)", self.currency)
         form.addRow("Language", self.language)
@@ -1736,7 +1736,7 @@ class SettingsPage(QWidget):
             self.park_status.setText(str(e))
     def open_web(self):
         import webbrowser
-        webbrowser.open(BASE + "/")
+        webbrowser.open(api.base_url + "/")
 
 
 class MainWindow(DesktopShell):
@@ -1922,12 +1922,38 @@ def main():
     font.setPointSize(10)
     app.setFont(font)
     apply_appearance(app, "Light")
-    try:
-        from app.desktop.launch import ensure_background_services
-        ensure_background_services()
-    except Exception as exc:
-        QMessageBox.critical(None, "SmartPark Edge", f"The local API did not start on http://127.0.0.1:8760\n\n{exc}")
-        return 1
+    from app.deployment import OPERATOR_CLIENT, ensure_legacy_config_saved, load_deployment_config
+    from .api import configure_base_url
+    config = ensure_legacy_config_saved()
+    if not config.configured:
+        from .setup import SetupWizard
+        wizard = SetupWizard(config)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            return 0
+        config = load_deployment_config()
+    configure_base_url()
+    if config.role != OPERATOR_CLIENT:
+        try:
+            from app.desktop.launch import ensure_background_services
+            ensure_background_services(config=config)
+        except Exception as exc:
+            QMessageBox.critical(None, "SmartPark Edge", f"The SmartPark Site Server could not start.\n\n{exc}")
+            return 1
+    else:
+        try:
+            import httpx
+            response = httpx.get(f"{api.base_url}/health/live", timeout=3)
+            response.raise_for_status()
+            identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
+            identity.raise_for_status()
+            identity_body = identity.json()
+            if config.server_id and identity_body.get("server_id") != config.server_id:
+                raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+            if config.installation_id and identity_body.get("installation_id") != config.installation_id:
+                raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+        except Exception as exc:
+            QMessageBox.critical(None, "SmartPark Operator Workstation", f"The SmartPark Site Server could not be reached.\n\nServer: {api.base_url}\n\n{exc}")
+            return 1
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()

@@ -8,7 +8,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    [switch]$RegisterOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +24,31 @@ $Py64 = Join-Path $InstallDir "python64\python.exe"
 $Py32 = Join-Path $InstallDir "python32\python.exe"
 $HostPy = Join-Path $InstallDir "tools\hvx_sdk_host\hvx_host.py"
 $MediaMtx = Join-Path $InstallDir "vendor\mediamtx\mediamtx.exe"
+$DeploymentPath = Join-Path $env:ProgramData "SmartParkEdge\deployment.json"
 if (-not (Test-Path $Py64)) {
     throw "Install SmartPark Edge first. Missing $Py64"
+}
+
+# Operator workstations are API clients only.  This guard also makes an
+# upgraded install safe when an old server-task registration is still present.
+if (Test-Path $DeploymentPath) {
+    try {
+        $deployment = Get-Content -LiteralPath $DeploymentPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$deployment.role -eq "OPERATOR_CLIENT") {
+            Write-Host "Operator Workstation selected: removing local SmartPark service tasks."
+            foreach ($task in @(
+                "SmartPark Site Service",
+                "SmartPark Recognition Worker",
+                "SmartPark HVX Host",
+                "SmartPark Media Service"
+            )) {
+                Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            exit 0
+        }
+    } catch {
+        throw "The deployment configuration is invalid: $($_.Exception.Message)"
+    }
 }
 $TaskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
@@ -152,6 +176,14 @@ if ($mediaBat) {
 }
 if ($failed.Count -gt 0) {
     throw ($failed -join "; ")
+}
+
+# A first-run installer registers the tasks before the role is selected, but
+# deliberately leaves them stopped. The native wizard starts the current
+# server session; the AtLogOn trigger takes over after the next sign-in.
+if ($RegisterOnly) {
+    Write-Host "Background tasks registered; first start is deferred until deployment setup completes."
+    exit 0
 }
 
 # Start in dependency order. The tasks remain registered with an AtLogOn

@@ -595,6 +595,62 @@ def list_captures(db: Session, *, gate_id: int | None = None, limit: int = 20) -
     return list(db.scalars(stmt).all())
 
 
+DETECTION_DISPLAY_DEDUPE_SECONDS = 8.0
+
+
+def _dedupe_detection_rows(rows: list[VehicleCapture], *, limit: int) -> list[VehicleCapture]:
+    """Collapse repeated reads for the operator history without deleting evidence.
+
+    Native cameras can report the same vehicle several times while it is over
+    the trigger line.  Those rows remain in ``vehicle_captures`` for audit and
+    troubleshooting; this is only the compact read model used by Detections.
+    A different visit id is retained once it is outside the short repeat-read
+    window, so a later visit by the same plate is not hidden.
+    """
+    selected: list[VehicleCapture] = []
+    latest_by_key: dict[tuple[int | None, str, str], tuple[object | None, str]] = {}
+    for row in rows:
+        plate = normalize_plate(row.plate or row.plate_raw or "")
+        if not plate:
+            selected.append(row)
+            if len(selected) >= limit:
+                break
+            continue
+        key = (row.camera_id, str(row.lane_direction or "").upper(), plate)
+        created = as_utc(row.created_at)
+        visit_id = str(row.visit_id or "")
+        previous = latest_by_key.get(key)
+        repeated = False
+        if previous is not None:
+            previous_created, previous_visit = previous
+            same_visit = bool(visit_id and previous_visit and visit_id == previous_visit)
+            within_window = bool(
+                created is not None and previous_created is not None
+                and abs((previous_created - created).total_seconds()) <= DETECTION_DISPLAY_DEDUPE_SECONDS
+            )
+            repeated = same_visit or within_window
+        if repeated:
+            continue
+        latest_by_key[key] = (created, visit_id)
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def list_recent_detections(db: Session, *, gate_id: int | None = None, limit: int = 20) -> list[VehicleCapture]:
+    """Return a compact detection history while retaining raw capture rows."""
+    safe_limit = max(1, min(int(limit), 100))
+    # Read enough raw rows to fill the requested compact page when a camera is
+    # reporting repeated frames. The hard cap keeps this endpoint bounded.
+    raw_limit = min(500, max(safe_limit, safe_limit * 6))
+    stmt = select(VehicleCapture).order_by(VehicleCapture.id.desc()).limit(raw_limit)
+    if gate_id is not None:
+        stmt = stmt.where(VehicleCapture.gate_id == gate_id)
+    rows = list(db.scalars(stmt).all())
+    return _dedupe_detection_rows(rows, limit=safe_limit)
+
+
 def apply_operator_plate_correction(row: VehicleCapture, plate: str) -> VehicleCapture:
     """Set the operator plate without erasing the original OCR string."""
     chosen = normalize_plate(plate)
