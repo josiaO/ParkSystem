@@ -49,8 +49,8 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
         recog = _label(language, "status.ready", "Ready")
     else:
         recog = _label(language, "status.offline", "Offline")
-    from app.services.node_scope import camera_in_recognition_scope, describe_recognition_scope
-    if not camera_in_recognition_scope(camera, db=db):
+    from app.services.node_scope import camera_active_on_this_installation, describe_recognition_scope
+    if not camera_active_on_this_installation(camera, db=db):
         scope = describe_recognition_scope(db)
         recog = "NODE NOT ASSIGNED TO GATE" if scope["mode"] == "unassigned" else "OTHER GATE"
     barrier = _label(language, "status.ready", "Ready") if camera.gate and camera.gate.enabled else _label(language, "status.unknown", "Unknown")

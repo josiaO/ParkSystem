@@ -26,6 +26,7 @@
     <a href="#prerequisites">Prerequisites</a>
     <a href="#site-server">Install the Site Server</a>
     <a href="#operator-workstation">Add an Operator Workstation</a>
+    <a href="#processing-node">Add a Processing Node</a>
     <a href="#network">Network and firewall</a>
     <a href="#database">Database</a>
     <a href="#cameras">Cameras and lanes</a>
@@ -51,6 +52,7 @@
       <p>Deploy a Site Server, connect operator workstations, commission cameras and gates, and keep the parking operation supportable after handover.</p>
       <div class="quick-links">
         <a href="#site-server">Install a Site Server</a>
+        <a href="#processing-node">Add a processing node</a>
         <a href="#operator-workstation">Connect a workstation</a>
         <a href="#troubleshooting">Fix a problem</a>
         <a href="#development">Build and test</a>
@@ -59,10 +61,11 @@
 
     <section id="overview">
       <h2>Overview</h2>
-      <p>Zirp is a plate-first parking system. The Site Server owns the database, API, camera connections, recognition, gate decisions, receipts, evidence and backups. Operator Workstations are clients of that server.</p>
-      <div class="card ok"><strong>Production rule:</strong> install and configure one Site Server per parking site. Add Operator Workstations only after the server has a stable address and passes the server acceptance checks. A workstation must never become a second parking server.</div>
+      <p>Zirp is a plate-first parking system. The Site Server owns the authoritative database and site state. Processing Nodes use that database but run only the cameras and recognition assigned to their persisted gate. Operator Workstations are UI clients of the server.</p>
+      <div class="card ok"><strong>Production rule:</strong> install one Site Server per parking site. Use a Processing Node for another PC that must own cameras, or an Operator Workstation for UI-only access. A node starts fail-closed until its gate is assigned.</div>
       <div class="grid3">
         <div class="card icon-card"><div class="icon">🖥️</div><h4>Site Server</h4><p>Runs Zirp services, database, cameras, recognition, gates and receipts.</p></div>
+        <div class="card icon-card"><div class="icon">📡</div><h4>Processing Node</h4><p>Runs local camera/media/recognition services for one dynamically assigned gate.</p></div>
         <div class="card icon-card"><div class="icon">👥</div><h4>Operator Workstation</h4><p>Displays the server UI and sends authenticated operator actions to it.</p></div>
         <div class="card icon-card"><div class="icon">📷</div><h4>Field hardware</h4><p>Cameras, barriers, controllers, displays and printers connected to the site server.</p></div>
       </div>
@@ -72,7 +75,7 @@
           <rect x="20" y="55" width="145" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="92" y="87" fill="var(--diagram-text)" text-anchor="middle" font-size="12">Cameras</text><text x="92" y="106" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">LAN / SDK / RTSP</text>
           <rect x="210" y="38" width="200" height="105" rx="8" fill="var(--diagram-accent)" stroke="#3b82f6"/><text x="310" y="75" fill="var(--accent2)" text-anchor="middle" font-size="14" font-weight="bold">Site Server</text><text x="310" y="97" fill="var(--diagram-text)" text-anchor="middle" font-size="11">API · DB · recognition</text><text x="310" y="116" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">gates · receipts · backups</text>
           <rect x="455" y="18" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="11">PostgreSQL</text><text x="517" y="58" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">production DB</text>
-          <rect x="455" y="102" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="126" fill="var(--diagram-text)" text-anchor="middle" font-size="11">Operator PCs</text><text x="517" y="142" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">API clients</text>
+          <rect x="455" y="102" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="126" fill="var(--diagram-text)" text-anchor="middle" font-size="11">Nodes / PCs</text><text x="517" y="142" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">scoped clients</text>
           <rect x="625" y="55" width="115" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--accent)"/><text x="682" y="86" fill="var(--accent)" text-anchor="middle" font-size="12">Gates</text><text x="682" y="105" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">controllers / LEDs</text>
           <path d="M165 90 H210 M410 65 L455 46 M410 115 L455 130 M580 75 L625 90" stroke="url(#g1)" stroke-width="2" fill="none"/>
         </svg>
@@ -86,10 +89,12 @@
         <thead><tr><th>Role</th><th>Owns</th><th>Must not do</th></tr></thead>
         <tbody>
           <tr><td><strong>Site Server</strong></td><td>Database, API, parking logic, cameras, recognition, MediaMTX, HVX SDK, gates, printers, evidence, backups and users.</td><td>Expose PostgreSQL or camera credentials to the operator LAN.</td></tr>
+          <tr><td><strong>Processing Node</strong></td><td>Local camera host, MediaMTX, recognition worker and one persisted gate scope using PostgreSQL.</td><td>Start with no gate assignment, stream another node's camera, or use shared SQLite.</td></tr>
           <tr><td><strong>Operator Workstation</strong></td><td>Desktop UI, local UI preferences, server URL and verified server identity.</td><td>Run a local database, migrations, camera SDK, recognition worker, MediaMTX, gate hardware or Site Service.</td></tr>
-          <tr><td><strong>Edge Node</strong></td><td>Advanced distributed deployments only.</td><td>Do not select it for an ordinary two-PC installation until the site topology has been designed and approved.</td></tr>
         </tbody>
       </table>
+      <div class="card warn"><strong>Important two-PC boundary:</strong> the authoritative database must be PostgreSQL. Do not make a second laptop process its own gate against a shared SQLite file or install it as an Operator Workstation when it must own cameras. Use the Processing Node installer and assign its gate after setup.</div>
+      <p>Every live media boundary is scope-checked. A node cannot open another node's WHEP, MJPEG, snapshot, preview, stream telemetry or probe path; the request returns <code>403</code> and the Site Service log records the node, gate and camera IDs.</p>
     </section>
 
     <section id="production-checklist">
@@ -97,10 +102,10 @@
       <p>Use this as the handover gate. Every item needs an owner and an observed result; do not mark a check complete from configuration alone.</p>
       <ol class="steps">
         <li><strong>Approve the site design.</strong> Record the Site Server name, reserved IP/DNS name, lanes, camera IPs, gate/controller addresses, printer model and operator accounts.</li>
-        <li><strong>Install the approved Zirp release.</strong> Use the signed or otherwise approved installer package supplied by the software owner. USB is a maintainer test artifact, not a production operating procedure.</li>
+        <li><strong>Install the approved Zirp release.</strong> Use the signed or otherwise approved installer package supplied by the software owner. After the Site Server is running, another PC may download the same clean installer from the server login page on the private LAN.</li>
         <li><strong>Configure the Site Server.</strong> Select the Site Server role, configure PostgreSQL, create the first administrator and complete the deployment wizard.</li>
         <li><strong>Commission hardware safely.</strong> Add cameras, verify live video and recognition, then test gate outputs with the lane physically safe and a technician present.</li>
-        <li><strong>Add workstations.</strong> Select Operator Workstation, enter the server URL, test connectivity and verify the displayed server identity before signing in.</li>
+        <li><strong>Add workstations or nodes.</strong> Select Operator Workstation for UI-only access. Select Processing Node for local camera processing, use the same PostgreSQL database, then assign its gate in Live Gates.</li>
         <li><strong>Prove failure handling.</strong> Disconnect one camera, close a workstation, restart the UI and restart the server services. The remaining lanes and server state must remain correct.</li>
         <li><strong>Prove recovery.</strong> Take a backup, verify it, record the restore owner and document the support contact, release version and configuration identifiers.</li>
       </ol>
@@ -141,6 +146,7 @@
 
     <section id="operator-workstation">
       <h2>Add an Operator Workstation</h2>
+      <p>Once the Site Server is running, open <code>http://SERVER_IP:8760/</code> on the new node or PC and select <strong>Download the Zirp installer for a node or another PC</strong> on the login page. Extract the downloaded <code>Zirp-Installer.zip</code>, run <code>Install-SmartPark.bat</code>, and then complete the normal role setup below. The download contains application/runtime files only; it does not contain the Site Server database, media, credentials or deployment identity.</p>
       <ol class="steps">
         <li>Install the approved Zirp package on the workstation. Do not copy the Site Server database or camera configuration to this PC.</li>
         <li>Open Deployment Configuration and select <strong>Operator Workstation</strong>.</li>
@@ -149,6 +155,22 @@
         <li>Complete setup and sign in with a site user. The workstation should open the remote site UI and must not create <code>smartpark.db</code> locally.</li>
       </ol>
       <div class="card ok"><strong>Reachability promise:</strong> a correctly configured Site Server listens on <code>0.0.0.0:8760</code>, and its Private-network firewall rule allows operator clients on the local subnet. Verify with a browser and <code>/health/live</code> from the workstation before declaring it ready.</div>
+    </section>
+
+    <section id="processing-node">
+      <h2>Add a Processing Node</h2>
+      <p>Use this role when the second PC must connect to its own cameras and recognition lane. From the Site Server login page, download the Zirp installer, extract it, and run <code>Install-SmartPark-Node.bat</code> (or choose <strong>N Processing Node</strong> in <code>Install-SmartPark.bat</code>).</p>
+      <ol class="steps">
+        <li>Install PostgreSQL on the Site Server and create the dedicated Zirp database user. Allow the node PC to reach PostgreSQL on the private network.</li>
+        <li>The node installer locks the wizard to <strong>Processing Node</strong>. Enter the existing Site Server address, then a dedicated PostgreSQL host/database/user/password approved for this deployment. SQLite is hidden and rejected; the node only checks the existing schema and never creates or migrates a local site database.</li>
+        <li>The Site Server pairing response contains identity only; it does not hand out the web administrator password, camera passwords, RTSP credentials or secret-store references. Never reuse the Site Server web password or the PostgreSQL <code>postgres</code> superuser on a node.</li>
+        <li>During node setup, create the node's own username and password in the wizard. Zirp creates that account with only the built-in <strong>Processing Node</strong> role. The node login rejects the Site Administrator account and other shared-database usernames. The node password is never written to <code>deployment.json</code>; only its Argon2 hash is stored.</li>
+        <li>A node session is restricted to its assigned camera/media lane and local hardware diagnostics. Users, roles, site settings, tariffs, payments, subscribers, backups and central topology must be managed from the Site Server.</li>
+        <li>Sign in locally on the node. It starts with no camera ownership and must not open the server's cameras.</li>
+        <li>Open <strong>Live Gates</strong>, select the gate for this PC, and click <strong>Assign this PC to selected gate</strong>.</li>
+        <li>Add or edit the cameras with their actual gate assignment. The node will connect only to cameras in its assigned gate; the Site Server remains the central configuration/database owner.</li>
+      </ol>
+      <div class="card ok"><strong>Isolation check:</strong> if the node log shows an empty assigned gate, its recognition worker and MediaMTX should claim zero cameras. A request for a foreign camera returns HTTP 403 and is logged with the node identity and gate IDs.</div>
     </section>
 
     <section id="network">
@@ -160,7 +182,7 @@
           <tr><td><code>TCP 8760</code></td><td>Zirp API and web UI</td><td>Operator PCs on the private site LAN</td></tr>
           <tr><td><code>TCP 8889</code></td><td>MediaMTX WebRTC signalling</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
           <tr><td><code>UDP/TCP 8189</code></td><td>WebRTC ICE media</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
-          <tr><td><code>TCP 5432</code></td><td>PostgreSQL</td><td>Site Server only by default; never open to operator PCs for normal operation</td></tr>
+          <tr><td><code>TCP 5432</code></td><td>PostgreSQL</td><td>Site Server and explicitly assigned Processing Nodes only; never open to operator workstations or the Internet</td></tr>
           <tr><td><code>TCP 8554</code></td><td>Internal RTSP</td><td>Site Server only</td></tr>
           <tr><td><code>TCP 9997/9998</code></td><td>MediaMTX control and metrics</td><td>Site Server only</td></tr>
           <tr><td><code>TCP 8765</code></td><td>HVX SDK host</td><td>Site Server only</td></tr>
@@ -180,12 +202,15 @@ http://&lt;site-server&gt;:8760/health/ready</code></pre>
       </div>
       <h3>PostgreSQL prerequisite</h3>
       <p>For production, install PostgreSQL as a normal system service before starting Zirp setup. Use the official <a href="https://www.postgresql.org/download/windows/">PostgreSQL Windows installer</a> or the site’s approved offline installer. Keep the PostgreSQL administrator credential separate from the Zirp application credential.</p>
+      <div class="card warn"><strong>Do not install PostgreSQL Server on a Processing Node.</strong> PostgreSQL runs on the Site Server only. The node connects to the Site Server's PostgreSQL over the private LAN and needs only the Zirp package, a dedicated database login, and firewall access to the server. Installing PostgreSQL on the node creates a second unrelated database.</div>
       <ol class="steps">
-        <li>Install the approved PostgreSQL version and let it run as a Windows service.</li>
-        <li>Keep the default port <code>5432</code> unless there is a documented conflict. Keep the service local to the Site Server whenever possible.</li>
-        <li>Create a dedicated non-superuser login and a database owned by that login; do not use <code>postgres</code> for Zirp.</li>
-        <li>Run the Zirp wizard’s <strong>Test Database</strong>, then apply the configuration and verify <code>/health/database</code>.</li>
+        <li>Confirm the service from an Administrator CMD: <code>sc query type= service state= all | findstr /I "postgres"</code>, then start the exact service name if needed, for example <code>net start postgresql-x64-17</code>.</li>
+        <li>Check the port with <code>netstat -ano | findstr ":5432"</code> and <code>powershell -NoProfile -Command "Test-NetConnection 127.0.0.1 -Port 5432"</code>. Keep the default port <code>5432</code> unless there is a documented conflict.</li>
+        <li>Use the installed <code>psql.exe</code> to connect as the PostgreSQL administrator, then create a dedicated <code>smartpark</code> login and a database owned by it. Do not use <code>postgres</code> for Zirp.</li>
+        <li>Verify the exact credentials with <code>psql -h 127.0.0.1 -p 5432 -U smartpark -d smartpark -c "select current_user, current_database();"</code>. Enter the password at the prompt; do not put it in the command line.</li>
+        <li>In Zirp choose <strong>Site Server → PostgreSQL</strong>, enter <code>127.0.0.1</code>, <code>5432</code>, <code>smartpark</code>, <code>smartpark</code> and the tested password, then run <strong>Test Database</strong>, apply and verify <code>/health/database</code>.</li>
       </ol>
+      <div class="card info"><strong>Already installed but cannot connect?</strong> Run the checks above in order. A running service and open port are not enough: the database and login must exist, the login must own the database, and the password must pass the exact <code>psql</code> command. The full copy/paste CMD procedure, including the safe interactive <code>CREATE ROLE</code>, <code>CREATE DATABASE</code> and <code>\password</code> steps, is in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</div>
       <h3>PostgreSQL requirements</h3>
       <ul>
         <li>Create the database and a Zirp user with the permissions required to create and migrate the Zirp schema.</li>
@@ -217,6 +242,9 @@ http://&lt;site-server&gt;:8760/health/ready</code></pre>
         <li>Confirm recognition with a permitted test vehicle and verify that the plate is assigned to the intended lane.</li>
         <li>Record the result for every camera, including the camera model, stream, adapter, last successful frame and recognition method.</li>
       </ol>
+      <h3>Allowing a Processing Node to reach PostgreSQL</h3>
+      <p>Example: Site Server <code>192.168.10.20</code>, Processing Node <code>192.168.10.21</code>. On the Site Server, set <code>listen_addresses = '192.168.10.20,127.0.0.1'</code> in <code>postgresql.conf</code>, then add <code>host smartpark smartpark 192.168.10.21/32 scram-sha-256</code> to <code>pg_hba.conf</code>. Restart the PostgreSQL Windows service. Add a Private-profile firewall rule that permits TCP <code>5432</code> from <code>192.168.10.21</code> only.</p>
+      <p>From the node, run <code>powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"</code>. Then run <code>Install-SmartPark-Node.bat</code>, use <code>http://192.168.10.20:8760</code> for the Site Server address, and use <code>192.168.10.20</code>—never <code>localhost</code> or <code>127.0.0.1</code>—as the PostgreSQL host. The full Windows CMD procedure and failure table are in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</p>
       <div class="card warn"><strong>Camera ownership:</strong> close other vendor SDK clients before connecting HVX cameras. Another program may allow video while preventing the callback path required for plate events.</div>
     </section>
 

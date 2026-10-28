@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import os
 import socket
 from pathlib import Path
 
@@ -69,10 +70,18 @@ def repo_root() -> Path:
 
 
 def site_ini_path() -> Path:
-    """Optional site INI with camera/controller/display IPs. Not required at runtime."""
+    """Optional SmartPark site INI with camera/controller/display IPs.
+
+    The old ParkWatch installation was a reverse-engineering reference, not a
+    SmartPark runtime dependency.  Production topology is stored in the
+    SmartPark database; this file is only a development/setup fixture.
+    """
+    configured = os.environ.get("SMARTPARK_SITE_INI", "").strip()
+    if configured:
+        return Path(configured)
     candidates = (
-        repo_root() / "ParkingSystem" / "ParkWatch" / "ParkWatch.ini",
-        repo_root() / "Current_ParkSystem_configs" / "ParkingSystem" / "ParkWatch" / "ParkWatch.ini",
+        repo_root() / "config" / "site.ini",
+        repo_root() / "site.ini",
     )
     for path in candidates:
         if path.is_file():

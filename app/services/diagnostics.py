@@ -39,7 +39,6 @@ def _camera_row(cam: Camera) -> dict:
         "enabled": cam.enabled,
         "recognition_mode": cam.recognition_mode,
         "username": cam.username,
-        "credentials_ref": getattr(cam, "credentials_ref", "") or "",
         "password_configured": cam.has_password(),
         "rtsp_url": cam.rtsp_url,  # redact_obj masks user:pass@
         "stream_profiles": public_profiles(cam.stream_profiles or {}),
@@ -49,7 +48,7 @@ def _camera_row(cam: Camera) -> dict:
     }
 
 
-def bundle(db: Session) -> dict:
+def bundle(db: Session, *, local_only: bool = False) -> dict:
     from app.services.health import details
     from app.infrastructure.secrets import describe as secrets_describe
     from app.migrations.runner import status as schema_status
@@ -57,6 +56,16 @@ def bundle(db: Session) -> dict:
 
     cameras = db.scalars(select(Camera).order_by(Camera.id)).all()
     gates = db.scalars(select(Gate).order_by(Gate.id)).all()
+    if local_only:
+        # A Processing Node support bundle must describe this worker only. It
+        # uses the shared DB for coordination, but the Site Server's other
+        # camera lanes and gate topology are not node diagnostic data.
+        from app.services.node_scope import camera_active_on_this_installation, is_processing_node, recognition_gate_id
+
+        if is_processing_node():
+            gate_id = recognition_gate_id(db)
+            cameras = [c for c in cameras if camera_active_on_this_installation(c, db=db)]
+            gates = [g for g in gates if gate_id is not None and int(g.id) == int(gate_id)]
     body = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "app": {"name": settings.app_name, "version": settings.app_version},

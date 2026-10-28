@@ -26,8 +26,8 @@ def migrate_plaintext_secrets(db: Session) -> dict:
         return summary
     rows = db.scalars(select(Camera)).all()
     for cam in rows:
-        from app.services.node_scope import camera_in_recognition_scope
-        if not camera_in_recognition_scope(cam, db=db):
+        from app.services.node_scope import camera_active_on_this_installation
+        if not camera_active_on_this_installation(cam, db=db):
             summary["skipped"] += 1
             continue
         raw = cam._password_secret or ""

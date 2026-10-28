@@ -71,8 +71,8 @@ def _sync_cameras_from_db() -> list[dict]:
         if not cfg.get("media_gateway_enabled"):
             return synced
         for camera in db.query(Camera).filter(Camera.enabled == True).all():
-            from app.services.node_scope import camera_in_recognition_scope
-            if not camera_in_recognition_scope(camera, db=db):
+            from app.services.node_scope import camera_active_on_this_installation
+            if not camera_active_on_this_installation(camera, db=db):
                 continue
             if not media_mtx_for_camera(int(camera.id), db):
                 continue

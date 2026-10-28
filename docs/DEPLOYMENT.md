@@ -17,6 +17,20 @@ This is the technician runbook for a real site. Obtain Zirp through the approved
 
 The server binds the API to `0.0.0.0:8760` after configuration so a separate workstation can reach it. Use a stable server address or DHCP reservation. Do not edit Python, `.env` or SQL for a normal installation.
 
+## Download the installer from the Site Server
+
+After the Site Server is installed, a node or another PC can open `http://SERVER_IP:8760/`
+on the private LAN and select **Download the Zirp installer for a node or another PC** on
+the login page. Extract `Zirp-Installer.zip`, then run `Install-SmartPark.bat`.
+The downloaded archive is assembled from the installed runtime and excludes the
+database, media, logs, credentials and deployment identity. It is equivalent to
+the approved installation package; it does not copy the server's site data to
+the new PC.
+
+Keep this download endpoint on the private site LAN. It is intended for
+provisioning another Zirp computer, not for publishing the installer to the
+public Internet.
+
 PostgreSQL is an external managed prerequisite in this release. Zirp does not bundle PostgreSQL binaries, install the PostgreSQL service, or create the database role automatically. The technician should use the official [PostgreSQL Windows installer](https://www.postgresql.org/download/windows/) or the site’s approved offline installer, then use Zirp’s **Test Database** check.
 
 The default offline kit registers restartable Windows scheduled tasks at user logon for Site Service, recognition, MediaMTX and the optional HVX host. This is the currently supported startup path because vendor SDK behavior under a non-interactive Windows service still needs validation on the target gate PC. `Install-SmartParkWinService.ps1` is available only for a site that has completed that hardware validation.

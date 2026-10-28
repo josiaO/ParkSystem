@@ -152,3 +152,18 @@ def test_rolling_evidence_changes_url_and_versioned_url_loads(tmp_path):
         assert first.split('?')[0] == second.split('?')[0]
         assert _jpeg_from_ref(second) == b'\xff\xd8second'
         assert len(list((tmp_path/'crops').iterdir())) == 1
+
+
+def test_rolling_evidence_skips_identical_callback_write(tmp_path):
+    from unittest.mock import PropertyMock
+    from app.api_main import _live_still_digests, _publish_live_still
+    from app.config import Settings
+
+    _live_still_digests.clear()
+    with patch.object(Settings, 'media_dir', new_callable=PropertyMock, return_value=tmp_path):
+        first = _publish_live_still(78, 'crops', b'\xff\xd8same')
+        path = tmp_path / 'crops' / 'live-78.jpg'
+        before = path.stat().st_mtime_ns
+        second = _publish_live_still(78, 'crops', b'\xff\xd8same')
+        assert first == second
+        assert path.stat().st_mtime_ns == before

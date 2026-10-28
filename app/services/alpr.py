@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import statistics
+import sys
 import threading
 import time
 import uuid
@@ -31,6 +32,8 @@ _engine = None
 _warm_engine = None
 _fastalpr_error = ""
 _engine_error = ""
+_dll_directory_handles = []
+_native_runtime_prepared = False
 
 
 @dataclass
@@ -145,10 +148,10 @@ def ensure_alpr_model_cache() -> dict:
         detector_src = next((p for p in (src / DETECTOR_ONNX, src / "detector" / DETECTOR_ONNX) if p.is_file()), None)
         ocr_src = next((p for p in (src / OCR_ONNX, src / "ocr" / OCR_ONNX) if p.is_file()), None)
         cfg_src = next((p for p in (src / OCR_CONFIG, src / "ocr" / OCR_CONFIG) if p.is_file()), None)
-    # Scheduled tasks and service accounts do not necessarily share the
-    # desktop user's profile.  The launcher sets this to the SmartPark data
-    # directory on production installs; keeping the profile fallback makes
-    # development and older direct launches continue to work.
+    # A scheduled Windows service may run as a different account from the
+    # desktop. Keep the model cache in the installation's shared data folder
+    # when the launcher provides one, instead of splitting models across user
+    # profiles and reporting detector-unavailable on the service account.
     cache_home = Path(os.environ.get("SMARTPARK_ALPR_CACHE_DIR") or (Path.home() / ".cache"))
     detector_dest = cache_home / "open-image-models" / DETECTOR_MODEL / DETECTOR_ONNX
     ocr_dest = cache_home / "fast-plate-ocr" / OCR_MODEL / OCR_ONNX
@@ -166,16 +169,58 @@ def ensure_alpr_model_cache() -> dict:
     }
 
 
+def prepare_native_runtime() -> None:
+    """Make bundled Windows native dependencies visible before importing ORT.
+
+    Scheduled tasks do not go through the desktop launcher's DLL setup. Python
+    3.8+ therefore needs the ONNX Runtime ``capi`` directory registered
+    explicitly, otherwise Windows can find the extension but fail while
+    initializing one of its dependent DLLs.
+    """
+    global _native_runtime_prepared
+    if _native_runtime_prepared or os.name != "nt":
+        return
+    _native_runtime_prepared = True
+    install_root = Path(os.environ.get("SMARTPARK_HOME") or Path(sys.executable).resolve().parent)
+    python_root = Path(sys.prefix).resolve()
+    site_packages = python_root / "Lib" / "site-packages"
+    candidates = (
+        python_root,
+        install_root / "python64",
+        site_packages / "onnxruntime" / "capi",
+        install_root / "python64" / "Lib" / "site-packages" / "onnxruntime" / "capi",
+        site_packages / "numpy.libs",
+        install_root / "python64" / "Lib" / "site-packages" / "numpy.libs",
+        install_root / "vendor",
+    )
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    for folder in candidates:
+        if not folder.is_dir():
+            continue
+        text = str(folder)
+        path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+        if text not in path_parts:
+            os.environ["PATH"] = text + os.pathsep + os.environ.get("PATH", "")
+        if add_dll_directory is not None:
+            try:
+                _dll_directory_handles.append(add_dll_directory(text))
+            except OSError:
+                pass
+
+
 def fastalpr_installed() -> bool:
     global _fastalpr_error
+    prepare_native_runtime()
+    if _fastalpr_error:
+        return False
     try:
         import fast_alpr  # noqa: F401
 
         _fastalpr_error = ""
         return True
     except Exception as exc:
-        # A native DLL/ONNX Runtime load error is not always an ImportError.
-        # Preserve the actionable part for the technician and the live pane.
+        # Native DLL/ONNX Runtime load failures are not always ImportError.
+        # Keep the actionable part visible to the technician and live pane.
         _fastalpr_error = f"{type(exc).__name__}: {str(exc)[:240]}"
         return False
 
@@ -260,6 +305,7 @@ def _load_engine():
     with _lock:
         if _engine is None:
             try:
+                prepare_native_runtime()
                 from fast_alpr import ALPR
 
                 models = ensure_alpr_model_cache()
@@ -651,7 +697,7 @@ def _bbox_size(bbox) -> tuple[int, int]:
 
 
 def plate_box_ok(bbox, image_width: int, image_height: int) -> bool:
-    """Reject sky/sign boxes that are not plate-shaped. ParkWatch uses a recognition zone."""
+    """Reject sky/sign boxes that are not plate-shaped."""
     width, height = _bbox_size(bbox)
     if width < MIN_PLATE_WIDTH_PX or height < MIN_PLATE_HEIGHT_PX:
         return False
@@ -799,7 +845,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
     """OCR a JPEG that is already a plate crop, skipping full-frame detection.
 
     Native ALPR cameras often provide a plate JPEG alongside the vehicle image.
-    Re-reading that crop is the cheapest ParkWatch-style software verification:
+    Re-reading that crop is the cheapest software verification:
     camera event -> plate crop -> FastPlateOCR. Generic cameras still use the
     detector-first path because they do not know the plate box.
     """
@@ -1066,7 +1112,7 @@ def recognize_bgr(
                 "latency_ms": round((time.monotonic() - started) * 1000, 2),
                 "count": len(hits),
             }
-        # ParkWatch filters 无车牌. A second full-frame CLAHE detect on empty
+        # Filter 无车牌. A second full-frame CLAHE detect on empty
         # asphalt doubles CPU and is how ZC ghosts appear. Only retry when the
         # detector already found a plate-shaped box (glare / dirty plate).
         if not plate_shaped:

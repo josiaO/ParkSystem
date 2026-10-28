@@ -124,7 +124,7 @@ class CrudTests(unittest.TestCase):
 
     def test_roles_list(self):
         roles = self.client.get("/roles", headers=self.headers).json()
-        self.assertEqual({r["name"] for r in roles}, {"Admin", "Operator", "Developer", "Kiosk Operator"})
+        self.assertEqual({r["name"] for r in roles}, {"Admin", "Operator", "Developer", "Kiosk Operator", "Processing Node"})
 
     def test_device_registry_projects_cameras(self):
         cam = self.client.post("/cameras", headers=self.headers, json={

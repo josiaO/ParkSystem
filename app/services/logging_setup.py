@@ -4,10 +4,54 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import json
+import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 _configured: set[str] = set()
+
+
+def _startup_context(process_name: str, settings, log_path: Path) -> dict:
+    """Return safe context that makes a field log useful without secrets."""
+    from app.services.runtime import app_version, data_dir
+
+    try:
+        from app.deployment import load_deployment_config
+
+        deployment = load_deployment_config()
+        deployment_role = deployment.role
+        deployment_id = deployment.installation_id
+    except Exception:
+        deployment_role = ""
+        deployment_id = ""
+
+    return {
+        "event": "startup",
+        "product": "Zirp",
+        "process": process_name,
+        "pid": os.getpid(),
+        "version": app_version(),
+        "python": sys.version.split()[0],
+        "python_bits": 64 if sys.maxsize > 2**32 else 32,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cwd": str(Path.cwd()),
+        "executable": sys.executable,
+        "data_dir": str(data_dir()),
+        "log_file": str(log_path),
+        "log_level": str(getattr(settings, "log_level", "INFO") or "INFO").upper(),
+        "deployment_profile": os.environ.get("SMARTPARK_DEPLOYMENT_PROFILE", ""),
+        "deployment_role": deployment_role,
+        "deployment_installation_id": deployment_id,
+        "node_role": str(getattr(settings, "node_role", "") or ""),
+        "node_id": str(getattr(settings, "node_id", "") or ""),
+        "recognition_gate_id": getattr(settings, "recognition_gate_id", None),
+        "node_id_configured": bool(os.environ.get("SMARTPARK_NODE_ID")),
+        "hvx_vendor_configured": bool(os.environ.get("SMARTPARK_HVX_VENDOR_DIR")),
+        "mediamtx_configured": bool(os.environ.get("SMARTPARK_MEDIAMTX_BIN") or os.environ.get("SMARTPARK_MEDIAMTX")),
+    }
 
 
 def configure_logging(process_name: str = "smartpark") -> logging.Logger:
@@ -63,4 +107,5 @@ def configure_logging(process_name: str = "smartpark") -> logging.Logger:
     from app.services.redaction import install_logging_redaction
 
     install_logging_redaction(log, logging.getLogger(), logging.getLogger("uvicorn"), logging.getLogger("uvicorn.error"))
+    log.info("STARTUP %s", json.dumps(_startup_context(process_name, settings, dest), sort_keys=True, default=str))
     return log

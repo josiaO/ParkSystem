@@ -55,7 +55,9 @@ def _percentile(values: Iterable[float], fraction: float) -> float | None:
 
 
 def _ffprobe(path: Path) -> dict[str, Any]:
-    command = [_which("ffprobe"), "-v", "error", "-show_format", "-show_streams", "-show_frames", "-select_streams", "v:0", "-show_entries", "frame=key_frame,best_effort_timestamp_time", "-of", "json", str(path)]
+    # Inventory must not decode/scan a full field recording.  The old
+    # show_frames call made a 243 MB MP4 look hung before any test started.
+    command = [_which("ffprobe"), "-v", "error", "-show_format", "-show_streams", "-select_streams", "v:0", "-of", "json", str(path)]
     completed = subprocess.run(command, check=True, capture_output=True, text=True)
     return json.loads(completed.stdout or "{}")
 
@@ -76,7 +78,7 @@ def _video_row(path: Path) -> dict[str, Any]:
             "resolution": {"width": int(stream.get("width") or 0), "height": int(stream.get("height") or 0)},
             "fps": stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "",
             "pixel_format": stream.get("pix_fmt", ""), "has_b_frames": stream.get("has_b_frames"),
-            "keyframes": {"count": len(key_times), "first_seconds": key_times[:10], "interval_avg_seconds": round(statistics.mean(gaps), 3) if gaps else None, "interval_max_seconds": round(max(gaps), 3) if gaps else None},
+            "keyframes": {"count": len(key_times) if frames else None, "first_seconds": key_times[:10], "interval_avg_seconds": round(statistics.mean(gaps), 3) if gaps else None, "interval_max_seconds": round(max(gaps), 3) if gaps else None},
         }
     except Exception as exc:
         return {"filename": str(path), "kind": "video", "size_bytes": path.stat().st_size, "probe_error": f"{type(exc).__name__}: {exc}"}
@@ -292,6 +294,7 @@ class VirtualCamera:
     media_process: subprocess.Popen | None = None
     publisher: subprocess.Popen | None = None
     path_count: int = 1
+    publisher_logs: dict[str, str] | None = None
 
     @property
     def rtsp_url(self) -> str:
@@ -311,19 +314,29 @@ class VirtualCamera:
         self.workdir.mkdir(parents=True, exist_ok=True)
         config = self.workdir / f"mediamtx-{_safe(self.path)}.yml"
         path_blocks = "".join(f"  {self.path if index == 1 else f'{self.path}-{index}'}:\n    source: publisher\n" for index in range(1, max(1, self.path_count) + 1))
-        config.write_text(f"logLevel: warn\nlogDestinations: [stdout]\napi: yes\napiAddress: 127.0.0.1:{self.api_port}\nmetrics: yes\nmetricsAddress: 127.0.0.1:{_free_port()}\nrtsp: yes\nrtspAddress: 127.0.0.1:{self.rtsp_port}\nwebrtc: yes\nwebrtcAddress: 127.0.0.1:{self.webrtc_port}\nwebrtcLocalUDPAddress: 127.0.0.1:{_free_port()}\npaths:\n{path_blocks}", encoding="utf-8")
+        config.write_text(f"logLevel: warn\nlogDestinations: [stdout]\napi: yes\napiAddress: 127.0.0.1:{self.api_port}\nmetrics: yes\nmetricsAddress: 127.0.0.1:{_free_port()}\nrtmp: no\nhls: no\nsrt: no\nrtsp: yes\nrtspTransports: [tcp]\nrtspAddress: 127.0.0.1:{self.rtsp_port}\nwebrtc: yes\nwebrtcAddress: 127.0.0.1:{self.webrtc_port}\nwebrtcLocalUDPAddress: 127.0.0.1:{_free_port()}\nwebrtcIPsFromInterfaces: no\nwebrtcAdditionalHosts: [127.0.0.1]\npaths:\n{path_blocks}", encoding="utf-8")
         self.media_process = subprocess.Popen([str(mediamtx), str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         if not _wait_http(f"http://127.0.0.1:{self.api_port}/v3/paths/list"):
             self.stop()
             raise RuntimeError("MediaMTX control API did not become ready")
-        self.publisher = subprocess.Popen(self._publisher_command(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.publisher_logs = self.publisher_logs or {}
+        main_log = self.workdir / "publisher-1.log"
+        self.publisher_logs["1"] = str(main_log)
+        with main_log.open("w", encoding="utf-8") as stream:
+            self.publisher = subprocess.Popen(self._publisher_command(), stdout=stream, stderr=subprocess.STDOUT)
         if not _wait_path(self.api_port, self.path):
             self.stop()
             raise RuntimeError("FFmpeg publisher did not make the MediaMTX path ready")
 
     def restart_publisher(self) -> None:
         self.stop_publisher()
-        self.publisher = subprocess.Popen(self._publisher_command(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.publisher_logs = self.publisher_logs or {}
+        main_log = self.workdir / "publisher-1.log"
+        self.publisher_logs["1"] = str(main_log)
+        with main_log.open("a", encoding="utf-8") as stream:
+            self.publisher = subprocess.Popen(self._publisher_command(), stdout=stream, stderr=subprocess.STDOUT)
+        if not _wait_path(self.api_port, self.path, timeout=6.0):
+            raise RuntimeError("FFmpeg publisher did not recover the MediaMTX path")
 
     def stop_publisher(self) -> None:
         if self.publisher is not None and self.publisher.poll() is None:
@@ -359,7 +372,13 @@ def _proc_sample(pid: int | None) -> dict[str, Any]:
         return {"pid": pid, "rss_kb": None, "cpu_seconds": None}
 
 
-async def _recognize_loop(engine, camera_id: int, stop: asyncio.Event, rows: list[dict[str, Any]], delay_ms: float) -> None:
+async def _recognize_loop(
+    engine,
+    camera_id: int,
+    stop: asyncio.Event,
+    rows: list[dict[str, Any]],
+    delay_ms: float,
+) -> None:
     from app.services.alpr import recognize_bytes
 
     last_seq = 0
@@ -380,7 +399,16 @@ async def _recognize_loop(engine, camera_id: int, stop: asyncio.Event, rows: lis
         rows.append({"camera_id": camera_id, "frame_seq": sample.seq, "latest_seq_at_complete": newest.seq if newest else None, "frame_seq_lag": (newest.seq - sample.seq) if newest else None, "input_frame_age_ms": start_age, "completed_frame_age_ms": sample.age_ms(completed), "latency_ms": round((completed - started) * 1000, 2), "plate_raw": best.get("plate_raw", ""), "plate_normalized": best.get("plate_normalized", ""), "confidence": best.get("confidence"), "detector_confidence": best.get("detector_confidence"), "timings": best.get("timings", {}), "detail": result.get("detail", "")})
 
 
-async def _measure(engine, media: VirtualCamera, duration: float, recognition: bool, delay_ms: float, cameras: int) -> dict[str, Any]:
+async def _measure(
+    engine,
+    media: VirtualCamera,
+    duration: float,
+    recognition: bool,
+    delay_ms: float,
+    cameras: int,
+    slow_camera: int = 0,
+    slow_camera_delay_ms: float = 0.0,
+) -> dict[str, Any]:
     from app.services.media_gateway import CameraLiveSpec
     from app.infrastructure.media.service import MediaService
 
@@ -392,7 +420,16 @@ async def _measure(engine, media: VirtualCamera, duration: float, recognition: b
         engine.acquire_live(spec)
     stop = asyncio.Event()
     recognition_rows: list[dict[str, Any]] = []
-    tasks = [asyncio.create_task(_recognize_loop(engine, camera_id, stop, recognition_rows, delay_ms)) for camera_id in range(1, cameras + 1)] if recognition else []
+    tasks = []
+    if recognition:
+        for camera_id in range(1, cameras + 1):
+            camera_delay_ms = float(delay_ms)
+            if int(slow_camera or 0) == camera_id:
+                camera_delay_ms = max(camera_delay_ms, float(slow_camera_delay_ms or 0.0))
+            tasks.append(asyncio.create_task(
+                _recognize_loop(engine, camera_id, stop, recognition_rows, camera_delay_ms),
+                name=f"camera-lab-recognition-{camera_id}",
+            ))
     health_samples, resources = [], []
     started = time.monotonic()
     try:
@@ -411,16 +448,60 @@ async def _measure(engine, media: VirtualCamera, duration: float, recognition: b
         samples = [row for row in health_samples if int(row.get("camera_id") or 0) == camera_id]
         recs = [row for row in recognition_rows if row["camera_id"] == camera_id]
         ages = [float(row["live_frame_age_ms"]) for row in samples if row.get("live_frame_age_ms") is not None]
-        per_camera.append({"camera_id": camera_id, "samples": len(samples), "final_health": samples[-1] if samples else {}, "live_video": {"received_fps": samples[-1].get("live_fps") if samples else None, "frame_age_avg_ms": round(statistics.mean(ages), 2) if ages else None, "frame_age_p95_ms": _percentile(ages, 0.95), "frame_interval_p95_ms": _percentile([row["frame_interval_p95_ms"] for row in samples if row.get("frame_interval_p95_ms") is not None], 0.95), "reconnects": samples[-1].get("reconnects", 0) if samples else None, "frozen": any(bool(row.get("frozen")) for row in samples)}, "recognition": {"attempts": len(recs), "fps": round(len(recs) / max(duration, 0.001), 2) if recognition else None, "input_frame_age_avg_ms": round(statistics.mean([row["input_frame_age_ms"] for row in recs]), 2) if recs else None, "input_frame_age_p95_ms": _percentile([row["input_frame_age_ms"] for row in recs], 0.95), "latency_avg_ms": round(statistics.mean([row["latency_ms"] for row in recs]), 2) if recs else None, "latency_p95_ms": _percentile([row["latency_ms"] for row in recs], 0.95), "max_frame_seq_lag": max([row["frame_seq_lag"] or 0 for row in recs], default=None), "stale_frame_failures": sum(1 for row in recs if float(row["completed_frame_age_ms"]) > 2000)}, "timeline": recs[-200:]})
-    healthy = per_camera and all(row["live_video"]["received_fps"] or row["final_health"].get("frames_received", 0) for row in per_camera) and all(not row["live_video"]["frozen"] for row in per_camera)
-    return {"status": "PASS" if healthy else "WARNING", "mode": "recognition-on" if recognition else "recognition-off", "duration_seconds": duration, "source": str(media.media_path), "virtual_camera": {"rtsp": media.rtsp_url, "whep": media.whep_url, "timestamp_pacing": "ffmpeg -re", "publisher_codec": "stream-copy"}, "per_camera": per_camera, "resource_usage": {"sample_count": len(resources), "samples": resources, "max_self_rss_kb": max((row["self"]["rss_kb"] or 0 for row in resources), default=None), "max_publisher_rss_kb": max((row["publisher"]["rss_kb"] or 0 for row in resources), default=None)}, "recognition_records": recognition_rows[-1000:]}
+        diagnosis = _recognition_diagnosis(recs, recognition)
+        recognition_metrics = {
+            "attempts": len(recs),
+            "fps": round(len(recs) / max(duration, 0.001), 2) if recognition else None,
+            "input_frame_age_avg_ms": round(statistics.mean([row["input_frame_age_ms"] for row in recs]), 2) if recs else None,
+            "input_frame_age_p95_ms": _percentile([row["input_frame_age_ms"] for row in recs], 0.95),
+            "latency_avg_ms": round(statistics.mean([row["latency_ms"] for row in recs]), 2) if recs else None,
+            "latency_p95_ms": _percentile([row["latency_ms"] for row in recs], 0.95),
+            "max_frame_seq_lag": max([row["frame_seq_lag"] or 0 for row in recs], default=None),
+            "max_completed_frame_age_ms": max([float(row["completed_frame_age_ms"]) for row in recs], default=None),
+            "stale_frame_failures": sum(1 for row in recs if float(row["completed_frame_age_ms"]) > 2000),
+            "diagnosis": diagnosis,
+        }
+        per_camera.append({"camera_id": camera_id, "samples": len(samples), "final_health": samples[-1] if samples else {}, "live_video": {"received_fps": samples[-1].get("live_fps") if samples else None, "frame_age_avg_ms": round(statistics.mean(ages), 2) if ages else None, "frame_age_p95_ms": _percentile(ages, 0.95), "frame_interval_p95_ms": _percentile([row["frame_interval_p95_ms"] for row in samples if row.get("frame_interval_p95_ms") is not None], 0.95), "reconnects": samples[-1].get("reconnects", 0) if samples else None, "frozen": any(bool(row.get("frozen")) for row in samples)}, "recognition": recognition_metrics, "timeline": recs[-200:]})
+    healthy = per_camera and all(row["live_video"]["received_fps"] or row["final_health"].get("frames_received", 0) for row in per_camera) and all(not row["live_video"]["frozen"] for row in per_camera) and all(not row["recognition"]["diagnosis"]["lag_detected"] for row in per_camera)
+    return {
+        "status": "PASS" if healthy else "WARNING",
+        "mode": "recognition-on" if recognition else "recognition-off",
+        "duration_seconds": duration,
+        "source": str(media.media_path),
+        "stress": {
+            "slow_camera": int(slow_camera or 0),
+            "slow_camera_delay_ms": float(slow_camera_delay_ms or 0.0),
+            "interpretation": (
+                "Camera recognition delay was injected only into the selected camera; compare the other camera's live FPS, frame age and reconnect count."
+                if int(slow_camera or 0) > 0 else "No camera-specific recognition delay was injected."
+            ),
+        },
+        "virtual_camera": {"rtsp": media.rtsp_url, "whep": media.whep_url, "timestamp_pacing": "ffmpeg -re", "publisher_codec": "stream-copy"},
+        "per_camera": per_camera,
+        "resource_usage": {"sample_count": len(resources), "samples": resources, "max_self_rss_kb": max((row["self"]["rss_kb"] or 0 for row in resources), default=None), "max_publisher_rss_kb": max((row["publisher"]["rss_kb"] or 0 for row in resources), default=None)},
+        "recognition_records": recognition_rows[-1000:],
+    }
 
 
 def _start_extra_publishers(media: VirtualCamera, count: int) -> list[subprocess.Popen]:
     publishers = []
+    media.publisher_logs = media.publisher_logs or {}
     for camera_id in range(2, count + 1):
-        publishers.append(subprocess.Popen(media._publisher_command(f"{media.path}-{camera_id}"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        log_path = media.workdir / f"publisher-{camera_id}.log"
+        media.publisher_logs[str(camera_id)] = str(log_path)
+        with log_path.open("w", encoding="utf-8") as stream:
+            publishers.append(subprocess.Popen(media._publisher_command(f"{media.path}-{camera_id}"), stdout=stream, stderr=subprocess.STDOUT))
     return publishers
+
+
+def _publisher_diagnostics(media: VirtualCamera, extras: list[subprocess.Popen]) -> list[dict[str, Any]]:
+    processes = [("1", media.publisher), *[(str(index + 2), process) for index, process in enumerate(extras)]]
+    return [{
+        "camera_id": int(camera_id),
+        "pid": process.pid if process is not None else None,
+        "returncode": process.poll() if process is not None else None,
+        "log": (media.publisher_logs or {}).get(camera_id, ""),
+    } for camera_id, process in processes]
 
 
 def _stop_processes(processes: list[subprocess.Popen]) -> None:
@@ -441,6 +522,37 @@ def _source_path(args: argparse.Namespace) -> tuple[Path, Path]:
     return dataset, source
 
 
+def _recognition_diagnosis(records: list[dict[str, Any]], enabled: bool) -> dict[str, Any]:
+    """Explain lag without confusing latest-frame dropping with a queue."""
+    if not enabled:
+        return {
+            "enabled": False,
+            "queue_depth": 0,
+            "queue_stacking_detected": False,
+            "latest_frame_policy": "drop-oldest",
+            "lag_detected": False,
+            "failure_class": "",
+        }
+    lags = [max(0, int(row.get("frame_seq_lag") or 0)) for row in records]
+    ages = [float(row.get("completed_frame_age_ms") or 0) for row in records]
+    lag_detected = bool(lags and (max(lags) >= 3 or (_percentile(ages, 0.95) or 0) >= 1000))
+    return {
+        "enabled": True,
+        "queue_depth": 0,
+        "queue_stacking_detected": False,
+        "latest_frame_policy": "drop-oldest",
+        "lag_detected": lag_detected,
+        "failure_class": "recognition-slower-than-live" if lag_detected else "",
+        "frames_skipped_while_inference": sum(lags),
+        "max_frame_seq_lag": max(lags, default=0),
+        "completed_frame_age_p95_ms": _percentile(ages, 0.95),
+        "interpretation": (
+            "OCR is slower than the live source; the latest-frame mailbox is dropping old frames."
+            if lag_detected else "Recognition kept up with the live source."
+        ),
+    }
+
+
 def run_test_video(args: argparse.Namespace) -> int:
     dataset, source = _source_path(args)
     if not source.is_file():
@@ -458,9 +570,14 @@ def run_test_video(args: argparse.Namespace) -> int:
                 _wait_path(media.api_port, f"{media.path}-{camera_id}")
         from app.services.media_gateway import LocalMediaGateway
 
-        body = asyncio.run(_measure(LocalMediaGateway(), media, float(args.duration), bool(args.recognition), float(args.recognition_delay_ms), int(args.cameras)))
+        body = asyncio.run(_measure(
+            LocalMediaGateway(), media, float(args.duration), bool(args.recognition),
+            float(args.recognition_delay_ms), int(args.cameras),
+            int(args.slow_camera), float(args.slow_camera_delay_ms),
+        ))
         body["source_inventory"] = _video_row(source)
         body["failure_test"] = args.failure_test or ""
+        body["publisher_processes"] = _publisher_diagnostics(media, extras)
         _dump(output / f"video-{('on' if args.recognition else 'off')}-{args.cameras}c.json", body)
         print(f"{body['status']}: {args.duration:g}s {body['mode']} {args.cameras} camera(s)")
         for row in body["per_camera"]:
@@ -523,6 +640,7 @@ def run_failure_test(args: argparse.Namespace) -> int:
             body = asyncio.run(interrupted())
         body["scenario"] = args.scenario
         body["status"] = "WARNING"
+        body["publisher_processes"] = _publisher_diagnostics(media, [])
         _dump(output / f"{_safe(args.scenario)}.json", body)
         print(f"WARNING: recorded failure scenario {args.scenario}; inspect reconnect and stale-frame fields")
         return 2
@@ -532,7 +650,6 @@ def run_failure_test(args: argparse.Namespace) -> int:
 
 def run_report(args: argparse.Namespace) -> int:
     results = Path(args.results).resolve()
-    rows = []
     for path in sorted(results.rglob("*.json")):
         if path.name == "report.json":
             continue
@@ -602,6 +719,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--webrtc-port", type=int, default=0)
         command.add_argument("--recognition", action="store_true")
         command.add_argument("--recognition-delay-ms", type=float, default=0.0)
+        command.add_argument("--slow-camera", type=int, default=0, help="inject the larger recognition delay into this camera only")
+        command.add_argument("--slow-camera-delay-ms", type=float, default=0.0, help="recognition delay for --slow-camera")
         command.add_argument("--cameras", type=int, default=1)
         command.add_argument("--failure-test", default="")
 

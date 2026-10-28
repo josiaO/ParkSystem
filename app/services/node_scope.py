@@ -64,6 +64,28 @@ def recognition_gate_id(db=None) -> int | None:
     return None
 
 
+def deployment_role() -> str:
+    """Return this installation's persisted deployment role.
+
+    The Windows launchers historically exported ``SMARTPARK_NODE_ROLE=SERVER``
+    for every local service.  That legacy setting is not sufficient to decide
+    ownership: an EDGE_NODE is a local camera processor but is not the central
+    Site Server.  Keep the deployment file as the authoritative role and use
+    the legacy setting only as a compatibility signal for older lane installs.
+    """
+    try:
+        from app.deployment import load_deployment_config
+
+        return str(load_deployment_config().role or "").upper()
+    except Exception:
+        return ""
+
+
+def is_processing_node() -> bool:
+    """Whether this process must have an explicit gate before touching media."""
+    return deployment_role() == "EDGE_NODE" or str(getattr(settings, "node_role", "SERVER")).upper() == "CLIENT"
+
+
 def camera_gate_id(camera) -> int | None:
     if camera is None:
         return None
@@ -82,9 +104,67 @@ def camera_gate_id(camera) -> int | None:
 def camera_in_recognition_scope(camera=None, *, gate_id: int | None = None, db=None) -> bool:
     wanted = recognition_gate_id(db)
     if wanted is None:
+        # A lane processor must never interpret a missing assignment as
+        # "all cameras".  This is the safe startup state while the operator
+        # selects its gate in Live Gates.
+        if is_processing_node():
+            return False
         return settings.deployment_profile == "DEVELOPMENT" or settings.recognition_all_gates_enabled
     cam_gate = gate_id if gate_id is not None else camera_gate_id(camera)
     return cam_gate is not None and int(cam_gate) == int(wanted)
+
+
+def camera_active_on_this_installation(camera=None, *, db=None) -> bool:
+    """Whether this process may start media/recognition for a camera.
+
+    The central Site Server owns and processes the whole registry. Only an
+    EDGE_NODE uses the persisted gate assignment as a local hardware boundary.
+    This is intentionally separate from the UI's selected recognition scope.
+    """
+    if not is_processing_node():
+        return True
+    return camera_in_recognition_scope(camera, db=db)
+
+
+def site_server_can_manage_unassigned_cameras() -> bool:
+    """Return whether this installation is the central Site Server.
+
+    The Site Server owns the camera registry, so its management view must stay
+    global even after the server itself is assigned a gate for testing.  The
+    gate check is deliberately kept for media, connection, and recognition;
+    this function must never be used as a stream-ownership check.
+
+    This is deliberately separate from ``settings.node_role``: an EDGE_NODE
+    can also use a server database and must not gain central-management rights
+    merely because that setting says ``SERVER``.
+    """
+    try:
+        from app.deployment import SITE_SERVER
+
+        return deployment_role() == SITE_SERVER and not is_processing_node()
+    except Exception:
+        return False
+
+
+def camera_visible_in_management(camera=None, *, db=None) -> bool:
+    """Whether a camera may appear in the configuration list.
+
+    Recognition/media ownership remains strict.  The central Site Server may
+    manage every registry record so an administrator can assign or repair a
+    camera that belongs to another lane.  A processing node still sees only
+    its own gate plus unassigned records during commissioning; it can save a
+    new record without gaining permission to stream another node's camera.
+    """
+    if site_server_can_manage_unassigned_cameras():
+        return True
+    if is_processing_node():
+        # An EDGE_NODE must not even inherit the central server's unassigned or
+        # foreign rows from the shared database.  Gate names remain available
+        # through the read-only gate list so the node can choose its owner.
+        return camera_in_recognition_scope(camera, db=db)
+    if camera_in_recognition_scope(camera, db=db):
+        return True
+    return camera_gate_id(camera) is None
 
 
 def set_recognition_gate_id(gate_id: int | None, db=None) -> dict[str, Any]:

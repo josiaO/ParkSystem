@@ -32,11 +32,23 @@ def test_site_service_start_waits_for_slow_first_boot(tmp_path):
     assert wait.call_args.kwargs["timeout"] == launch.SITE_SERVICE_START_TIMEOUT_SECONDS
 
 
+def test_api_timeout_includes_site_service_launch_tail():
+    with patch.object(launch, "_site_service_launch_tail", return_value=" Last output: DATABASE STARTUP FAILED"):
+        try:
+            launch.wait_for_api(timeout=0)
+        except RuntimeError as exc:
+            assert "DATABASE STARTUP FAILED" in str(exc)
+        else:
+            raise AssertionError("an API timeout must include the launch log tail")
+
+
 def test_windows_registered_task_is_started_without_spawning_duplicate_api(tmp_path):
     config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
     with patch.object(launch.os, "name", "nt"), \
          patch.object(launch, "_scheduled_site_service_exists", return_value=True) as exists, \
          patch.object(launch, "_start_scheduled_site_service", return_value=True) as start_task, \
+         patch.object(launch, "_scheduled_task_exists", return_value=True) as dependent_exists, \
+         patch.object(launch, "_start_scheduled_task", return_value=True) as start_dependent, \
          patch.object(launch, "start_hvx_host"), \
          patch.object(launch, "wait_for_api") as wait, \
          patch.object(launch, "start_pipeline_services") as pipeline, \
@@ -49,7 +61,29 @@ def test_windows_registered_task_is_started_without_spawning_duplicate_api(tmp_p
         timeout=launch.SITE_SERVICE_START_TIMEOUT_SECONDS,
         base_url="http://127.0.0.1:8760",
     )
-    pipeline.assert_called_once_with(tmp_path)
+    pipeline.assert_not_called()
+    assert dependent_exists.call_count == 3
+    assert start_dependent.call_count == 3
+
+
+def test_windows_task_start_failure_is_reported_without_fallback_process(tmp_path):
+    config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
+    with patch.object(launch.os, "name", "nt"), \
+         patch.object(launch, "_scheduled_site_service_exists", return_value=True), \
+         patch.object(launch, "_start_scheduled_site_service", return_value=False), \
+         patch.object(launch, "_scheduled_task_query", return_value=None), \
+         patch.object(launch, "start_hvx_host"), \
+         patch.object(launch, "start_site_service") as spawn, \
+         patch.object(launch, "start_pipeline_services") as pipeline:
+        try:
+            launch.ensure_background_services(tmp_path, config=config)
+        except RuntimeError as exc:
+            assert "SmartPark Site Service" in str(exc)
+            assert "Run As User" in str(exc)
+        else:
+            raise AssertionError("scheduled task failure must be surfaced")
+    spawn.assert_not_called()
+    pipeline.assert_not_called()
 
 
 def test_site_service_start_keeps_child_diagnostics(tmp_path):
@@ -59,6 +93,21 @@ def test_site_service_start_keeps_child_diagnostics(tmp_path):
         assert launch.start_site_service(tmp_path)
     assert spawn.call_args.kwargs["stdout"].name.endswith("site-service-launch.log")
     assert spawn.call_args.kwargs["stderr"].name.endswith("site-service-launch.log")
+
+
+def test_site_service_spawn_failure_does_not_start_an_in_process_api(tmp_path):
+    config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
+    with patch.object(launch, "_port_open", return_value=False), \
+         patch.object(launch, "start_site_service", return_value=False), \
+         patch.object(launch, "start_pipeline_services") as pipeline:
+        try:
+            launch.ensure_background_services(tmp_path, config=config)
+        except RuntimeError as exc:
+            assert "could not be started" in str(exc)
+            assert "site-service-launch.log" in str(exc)
+        else:
+            raise AssertionError("a failed Site Service spawn must stop startup")
+    pipeline.assert_not_called()
 
 
 def test_pipeline_launches_separate_owners_with_logs(tmp_path):
@@ -105,6 +154,19 @@ def test_worker_reads_the_actual_detect_path_not_the_live_fallback():
 def test_windows_registers_and_activates_recognition():
     services = Path("packaging/windows/Install-SmartParkServices.ps1").read_text()
     installer = Path("packaging/windows/Install-SmartPark.ps1").read_text()
+    win_service = Path("packaging/windows/Install-SmartParkWinService.ps1").read_text()
     assert '-Arguments "-m app.recognition_worker"' in services
     assert 'Register-SmartParkTask -Name "SmartPark Recognition Worker"' in services
-    assert '& $enableMedia -InstallDir $InstallDir -LiveView' in installer
+    # The installer owns deployment roles and task startup; pipeline behavior
+    # remains the stable main-branch runtime implementation.
+    assert 'ValidateSet("SITE_SERVER", "EDGE_NODE", "OPERATOR_CLIENT")' in installer
+    assert "PreserveMediaRollout" not in installer
+    assert '& $enableMedia -InstallDir $InstallDir -LiveView' not in installer
+    assert 'SMARTPARK_NODE_ROLE=SERVER' in services
+    assert 'SMARTPARK_NODE_ROLE            = "SERVER"' in installer
+    assert 'SMARTPARK_NODE_ROLE=$nodeRole' in win_service
+
+
+def test_recognition_worker_uses_main_runtime_without_installer_preflight():
+    source = Path("app/recognition_worker.py").read_text()
+    assert "SMARTPARK_ALPR_PREFLIGHT" not in source

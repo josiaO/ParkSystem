@@ -390,7 +390,7 @@ def onboarding_status(db: Session) -> dict[str, Any]:
         },
         "health": health,
         "recognition_modes": [
-            {"id": "FASTALPR_ONLY", "label": "FastALPR", "description": "Read every lane JPEG in the FastALPR engine. This is the ParkWatch software-OCR path."},
+            {"id": "FASTALPR_ONLY", "label": "FastALPR", "description": "Read every lane JPEG in SmartPark's local FastALPR engine."},
             {"id": "NATIVE_ONLY", "label": "Camera OCR", "description": "Keep the camera's own plate text when it sends one."},
             {"id": "HYBRID", "label": "Hybrid", "description": "Read in FastALPR and keep the camera text when they agree."},
             {"id": "VIDEO_ONLY", "label": "Video only", "description": "Live video without plate recognition."},

@@ -67,3 +67,4 @@ def test_server_identity_keeps_site_and_installation_identity_distinct():
     assert identity["server_installation_id"] == "server-installation"
     assert identity["server_id"] == "server-node"
     assert identity["site_id"] == "site-1"
+    assert not any("password" in key.lower() or "secret" in key.lower() for key in identity)

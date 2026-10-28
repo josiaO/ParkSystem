@@ -13,6 +13,103 @@ SmartPark Edge uses the managed/prerequisite PostgreSQL approach for production.
 
 Use the PostgreSQL major version approved for the SmartPark release. Do not upgrade the major version on a live site without a backup, a tested restore and a release-compatibility check.
 
+## If PostgreSQL is already installed: do this in order
+
+Installing PostgreSQL is only the first step. Zirp still needs a running Windows service, a database, a dedicated login and a successful connection test. The following commands can be run from **CMD as Administrator**. They do not configure Zirp by themselves; after the database checks pass, use the Zirp Deployment Configuration wizard so the password is stored in Windows DPAPI.
+
+### 1. Find and start the PostgreSQL service
+
+```cmd
+sc query type= service state= all | findstr /I "postgres"
+```
+
+The service name normally looks like `postgresql-x64-17`; the major version may be different. Start the exact name shown by the command:
+
+```cmd
+net start postgresql-x64-17
+```
+
+If `net start` says the service name is invalid, repeat the first command and use the installed version. If the service is already running, continue. Do not start a second PostgreSQL instance.
+
+### 2. Find `psql` and verify the port
+
+```cmd
+where psql
+psql --version
+netstat -ano | findstr ":5432"
+powershell -NoProfile -Command "Test-NetConnection 127.0.0.1 -Port 5432"
+```
+
+If `where psql` finds nothing, use the full path. PostgreSQL commonly installs it below `C:\Program Files\PostgreSQL\<major>\bin`:
+
+```cmd
+set "PG_BIN=C:\Program Files\PostgreSQL\17\bin"
+"%PG_BIN%\psql.exe" --version
+```
+
+Replace `17` with the major version installed on the PC. `TcpTestSucceeded : True` means that something is listening on the port; it does not yet prove that the Zirp login or database is correct.
+
+### 3. Create the Zirp database and dedicated login
+
+Open an interactive administrator session. The password is requested by `psql`; do not put it in the command line.
+
+```cmd
+"%PG_BIN%\psql.exe" -h 127.0.0.1 -p 5432 -U postgres -d postgres
+```
+
+At the `postgres=#` prompt, run:
+
+```sql
+CREATE ROLE smartpark LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE DATABASE smartpark OWNER smartpark;
+\password smartpark
+\q
+```
+
+Use the site’s password manager for the password entered by `\password`. If either `CREATE` statement reports that the role or database already exists, stop and inspect ownership instead of running it again:
+
+```cmd
+"%PG_BIN%\psql.exe" -h 127.0.0.1 -p 5432 -U postgres -d postgres
+```
+
+```sql
+SELECT rolname, rolcanlogin, rolsuper FROM pg_roles WHERE rolname = 'smartpark';
+SELECT datname, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = 'smartpark';
+\q
+```
+
+The `smartpark` role must be allowed to log in, must not be a superuser, and should own the `smartpark` database. A database administrator should use `ALTER ROLE`, `ALTER DATABASE` or the approved grant procedure when correcting an existing installation.
+
+### 4. Test the exact Zirp credentials
+
+```cmd
+"%PG_BIN%\psql.exe" -h 127.0.0.1 -p 5432 -U smartpark -d smartpark -c "select current_user, current_database();"
+```
+
+Enter the password when prompted. The expected result contains `smartpark | smartpark`. If this command fails, do not continue to the Zirp wizard: fix the service, port, role, password or `pg_hba.conf` first.
+
+### 5. Configure Zirp and run migrations
+
+1. Start **Zirp** and open **Deployment Configuration**.
+2. Choose **Site Server**.
+3. On **Database**, choose **PostgreSQL — recommended for production**.
+4. Enter `127.0.0.1`, port `5432`, database `smartpark`, username `smartpark` and the password just tested.
+5. Press **Test Database** and wait for every check to show `PASS`.
+6. Continue, create the first Zirp administrator, review the site values and choose **Apply**.
+7. Confirm `http://127.0.0.1:8760/health/database` reports a healthy PostgreSQL connection and restart Zirp if the wizard requests it.
+
+The wizard runs the Zirp migrations and stores only a protected secret reference in `deployment.json`. Do not paste the password into a ticket, screenshot, permanent environment variable or command history.
+
+### CMD-only diagnostic fallback
+
+CMD is useful for provisioning PostgreSQL and testing it. It is not the preferred way to save the Zirp database password because a full connection URL can expose that password in process listings and history. For a one-process diagnostic only, use a URL with a URL-encoded password and close the CMD window afterward:
+
+```cmd
+set "SMARTPARK_DATABASE_URL=postgresql+psycopg://smartpark:URL_ENCODED_PASSWORD@127.0.0.1:5432/smartpark"
+```
+
+Use the Deployment Configuration wizard for the real installation; it validates migrations and uses the protected Windows secret store.
+
 ## Technician installation procedure on Windows
 
 1. Download PostgreSQL from the official Windows installer page above, or obtain the approved offline installer from the site software administrator.
@@ -23,6 +120,171 @@ Use the PostgreSQL major version approved for the SmartPark release. Do not upgr
 6. Confirm the PostgreSQL Windows service is running and that the configured port is reachable locally.
 7. Create the SmartPark database and dedicated login described below.
 8. Open SmartPark Deployment Configuration, select **Site Server**, select **PostgreSQL**, enter the database values, select **Test Database**, then apply the configuration.
+
+For a Processing Node, do not install or select SQLite. Start the Site Server
+first, run `Install-SmartPark-Node.bat` on the node PC, enter the Site Server's
+LAN address when asked for the Site Server connection, and enter that same
+server's PostgreSQL host, port, database and dedicated login. The node tests
+the existing schema but does not initialize a local database, run migrations or
+create an administrator. PostgreSQL must therefore be configured to accept the
+node PC's private-network address in `listen_addresses`, `pg_hba.conf` and the
+Windows firewall; never expose port 5432 to the whole network.
+
+### Important: PostgreSQL is installed on the Site Server, not the node
+
+Do **not** install a second PostgreSQL Server on the Processing Node. That would
+create a different database on the node and the node would no longer be using
+the Site Server's authoritative database. The node only needs:
+
+- the Zirp Processing Node installation;
+- a network route to the Site Server;
+- the Site Server PostgreSQL host address and port; and
+- a dedicated PostgreSQL login/password that the node is allowed to use.
+
+The Zirp Windows package includes the Python PostgreSQL driver used by the
+wizard and service. A separate `psql.exe` client is optional and is not the
+same thing as installing a PostgreSQL Server.
+
+Assume the following example values and replace them with the actual values:
+
+```text
+Site Server IPv4 address: 192.168.10.20
+Processing Node IPv4 address: 192.168.10.21
+PostgreSQL port: 5432
+Database: smartpark
+Database login: smartpark
+Site Server API: http://192.168.10.20:8760
+```
+
+#### Configure the Site Server for the node
+
+Run these checks on the Site Server:
+
+1. Find the server's private IPv4 address:
+
+   ```cmd
+   ipconfig
+   ```
+
+   Use the IPv4 address of the LAN adapter, not `127.0.0.1` and not a VPN
+   address. Give the server a DHCP reservation or another stable address.
+
+2. Find the PostgreSQL data directory. It is normally:
+
+   ```text
+   C:\Program Files\PostgreSQL\<major>\data
+   ```
+
+   The two files to edit are `postgresql.conf` and `pg_hba.conf`. If the
+   installed service uses another data directory, inspect it in the PostgreSQL
+   service's executable path or use pgAdmin's server configuration view.
+
+3. In `postgresql.conf`, set the listener to the Site Server LAN address and
+   localhost. Do not use `0.0.0.0` unless the site firewall is carefully
+   restricted:
+
+   ```conf
+   listen_addresses = '192.168.10.20,127.0.0.1'
+   port = 5432
+   ```
+
+4. At the bottom of `pg_hba.conf`, add one rule for each Processing Node. Use
+   the node's fixed IPv4 address with `/32` so only that computer is allowed:
+
+   ```conf
+   host    smartpark    smartpark    192.168.10.21/32    scram-sha-256
+   ```
+
+   Add more `/32` lines for additional nodes. Do not add `0.0.0.0/0`,
+   `192.168.10.0/24` or `trust` as a shortcut. The database and login names in
+   this rule must exactly match the values used in the node wizard.
+
+5. Allow TCP 5432 from the node in **Windows Defender Firewall**. From an
+   elevated CMD on the Site Server:
+
+   ```cmd
+   netsh advfirewall firewall add rule name="Zirp PostgreSQL from node 192.168.10.21" dir=in action=allow protocol=TCP localport=5432 remoteip=192.168.10.21 profile=Private
+   ```
+
+   For more than one node, create one restricted rule per node, or use the
+   approved node subnet. Do not select `Any` remote address.
+
+6. Restart PostgreSQL so `listen_addresses` is applied. Use the exact service
+   name shown by the first command:
+
+   ```cmd
+   sc query type= service state= all | findstr /I "postgres"
+   net stop postgresql-x64-17
+   net start postgresql-x64-17
+   ```
+
+   Replace `postgresql-x64-17` with the installed service name. Confirm it is
+   running:
+
+   ```cmd
+   netstat -ano | findstr ":5432"
+   ```
+
+7. Make sure the Site Server API is also reachable from the node. The node
+   wizard tests `http://192.168.10.20:8760`; TCP 8760 must be allowed by the
+   private-network firewall rule created for Zirp.
+
+#### Test from the Processing Node
+
+Run these commands on the node in CMD or PowerShell. These tests do not require
+installing PostgreSQL Server on the node:
+
+```cmd
+ping 192.168.10.20
+powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 8760"
+powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"
+```
+
+Expected results:
+
+- port `8760` is reachable, proving the node can contact the Zirp API;
+- port `5432` is reachable, proving the firewall/listener path is open.
+
+`TcpTestSucceeded : True` only proves that TCP is open. It does not prove the
+PostgreSQL password or database rule is correct. The Zirp wizard performs the
+real authentication and schema test.
+
+#### Enter the node wizard values
+
+On the Processing Node PC:
+
+1. Run `Install-SmartPark-Node.bat`.
+2. On **Site Server connection**, enter `http://192.168.10.20:8760` and press
+   **Test Connection**. The identity must show the expected site server.
+3. On **Database**, PostgreSQL is forced. Enter:
+
+   ```text
+   Database server: 192.168.10.20
+   Port:            5432
+   Database name:   smartpark
+   Username:        smartpark
+   Password:        the password assigned to the smartpark login
+   ```
+
+   Never enter `127.0.0.1` or `localhost` here: those addresses mean the node
+   PC itself, not the Site Server.
+
+4. Press **Test Database**. It must report authentication, database access and
+   current schema as `PASS`. A node must not run migrations; if the schema is
+   behind, run the upgrade from the Site Server and test the node again.
+5. Finish setup, sign in with the Zirp user created on the Site Server using
+   the **Processing Node** role, then assign the node to its gate.
+
+#### What each failure means
+
+| Failure | Likely cause | Fix |
+|---|---|---|
+| Site Server connection fails | API address or TCP 8760 blocked | Use the server LAN IP with `:8760`; allow the Zirp API on the Private firewall profile |
+| Port 5432 test fails | PostgreSQL listens only on localhost, firewall blocked, wrong IP, or service stopped | Check `listen_addresses`, restart PostgreSQL, and add the restricted firewall rule |
+| Authentication failed | Wrong username/password or `pg_hba.conf` mismatch | Test the exact role on the server, reset its password with `\\password smartpark`, and verify the `/32` rule |
+| Database does not exist | Node points to the wrong database name | Use the database created on the Site Server, normally `smartpark` |
+| Schema is not current | Site Server has not completed setup/migrations | Run **Test Database/Apply** on the Site Server first; never migrate from the node |
+| Node connects to the wrong computer | Node database host is `localhost` or `127.0.0.1` | Replace it with the Site Server's private IPv4 address |
 
 Example checks from an elevated PowerShell prompt:
 
@@ -40,7 +302,7 @@ The PostgreSQL administrator performs the one-time provisioning. The SmartPark a
 Connect to the maintenance database as the PostgreSQL administrator using pgAdmin or `psql`, then run the following statements. Replace only the database and role names if the site has an approved naming standard:
 
 ```sql
-CREATE ROLE smartpark_app
+CREATE ROLE smartpark
   LOGIN
   NOSUPERUSER
   NOCREATEDB
@@ -48,13 +310,13 @@ CREATE ROLE smartpark_app
   NOREPLICATION
   NOBYPASSRLS;
 
-CREATE DATABASE smartpark OWNER smartpark_app;
+CREATE DATABASE smartpark OWNER smartpark;
 ```
 
 Set the login password using the password prompt rather than putting it in shell history:
 
 ```sql
-\password smartpark_app
+\password smartpark
 ```
 
 If the role or database already exists, do not run `CREATE` blindly. Ask the database administrator to verify ownership, login status, connection privilege and password, then use the appropriate `ALTER ROLE` or `GRANT` operation.
@@ -97,7 +359,7 @@ The password is not written to `deployment.json`. On Windows it is stored throug
 
 - Install PostgreSQL before running the SmartPark Site Server wizard.
 - Use the PostgreSQL major version approved for the release.
-- Use a dedicated `smartpark_app`-style login with `NOSUPERUSER` and no role/database administration privileges.
+- Use a dedicated `smartpark`-style login with `NOSUPERUSER` and no role/database administration privileges.
 - Keep PostgreSQL local to the Site Server whenever possible.
 - Use a stable Site Server address for Operator Workstations.
 - Run **Test Database** before applying the SmartPark configuration.

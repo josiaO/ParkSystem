@@ -105,6 +105,9 @@ set "SMARTPARK_HOME=$InstallDir"
 set "PYTHONPATH=%SMARTPARK_HOME%"
 set "SMARTPARK_HVX_VENDOR_DIR=%SMARTPARK_HOME%\vendor"
 if not defined SMARTPARK_DEPLOYMENT_PROFILE set "SMARTPARK_DEPLOYMENT_PROFILE=PRODUCTION"
+rem Deployment metadata decides whether this is the central server or an
+rem EDGE_NODE. Do not overwrite a legacy lane setting copied from another PC.
+if not defined SMARTPARK_NODE_ROLE set "SMARTPARK_NODE_ROLE=SERVER"
 $mtxLine
 set "PATH=%SMARTPARK_HOME%\python64;%SMARTPARK_HOME%\python64\Scripts;%SMARTPARK_HOME%\vendor;%PATH%"
 $waitForSiteLines
@@ -281,8 +284,16 @@ Register-SmartParkFirewall
 
 # Start in dependency order. The tasks remain registered with an AtLogOn
 # trigger, so the same sequence is repeated automatically after the next
-# Windows sign-in. Site Service is the dependency root: it must complete
-# schema migration and return HTTP 200 before workers inspect the database.
+# Windows sign-in. Start the native camera host before Site Service begins its
+# camera reconciliation loop; otherwise SDK cameras briefly connect and
+# disconnect on every boot while port 8765 is still coming up.
+foreach ($name in @("SmartPark HVX Host")) {
+    if ($registered -contains $name) {
+        Write-Host "Starting $name..."
+        Start-SmartParkTask -Name $name
+    }
+}
+
 foreach ($name in @("SmartPark Site Service")) {
     if ($registered -contains $name) {
         Write-Host "Starting $name..."
@@ -297,7 +308,7 @@ if ($registered -contains "SmartPark Site Service") {
     Wait-SmartParkHttp -Url "http://127.0.0.1:8760/health/live" -Label "Site Service" -TimeoutSeconds 120
 }
 
-foreach ($name in @("SmartPark HVX Host", "SmartPark Media Service", "SmartPark Recognition Worker")) {
+foreach ($name in @("SmartPark Media Service", "SmartPark Recognition Worker")) {
     if ($registered -contains $name) {
         Write-Host "Starting $name..."
         Start-SmartParkTask -Name $name
@@ -328,7 +339,7 @@ if (Test-Path $MediaMtx) {
     Write-Host "  SmartPark Media Service  (MediaMTX realtime gateway when enabled by effective site flags)"
 }
 Write-Host "Desktop is only a client. Parking continues if the UI is closed."
-Write-Host "Fresh installs prefer MediaMTX/WebRTC when the bundled binary is available; upgraded sites keep their stored rollout flags."
-Write-Host "To promote an upgraded site explicitly, run Enable-MediaMTX.ps1 -LiveView."
+Write-Host "The runtime follows the stable main-branch MediaMTX/FastALPR path; SDK cameras retain their direct SDK adapter fallback."
+Write-Host "Use Enable-MediaMTX.ps1 only to repair or explicitly re-register a camera path."
 Write-Host "Recovery: Windows restarts each task up to 3 times, 1 minute apart."
 Write-Host "Automatic startup: tasks run for $taskUser at Windows logon; no manual Start-SmartPark.bat is required."
