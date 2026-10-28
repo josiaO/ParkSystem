@@ -204,12 +204,19 @@ class Login(QDialog):
                     e = retry_error
             text=str(e)
             if "401" in text or "Invalid username" in text:
-                text = (
-                    "Invalid username or password.\n\n"
-                    "admin / first-run password only works on a fresh database. "
-                    "This PC already has an admin account. "
-                    "Reset it with: python -m app.cli reset-admin"
-                )
+                if len(self.pwd.text()) < 12:
+                    text = (
+                        "Authentication failed. The Processing Node password must be at least 12 characters.\n\n"
+                        "Enter this Processing Node's configured account password. The Site Server administrator "
+                        "password cannot be used here."
+                    )
+                else:
+                    text = (
+                        "Invalid username or password.\n\n"
+                        "admin / first-run password only works on a fresh database. "
+                        "This PC already has an admin account. "
+                        "Reset it with: python -m app.cli reset-admin"
+                    )
             elif "Connection" in text or "ConnectError" in text or "8760" in text:
                 text = f"Cannot reach the {PRODUCT_NAME} Site Server at {api.base_url}. Check the connection or open deployment configuration."
             QMessageBox.critical(self,"Sign in failed",text)
@@ -1965,7 +1972,8 @@ def main():
     config = ensure_legacy_config_saved()
     if not config.configured:
         from .setup import SetupWizard
-        wizard = SetupWizard(config)
+        role_lock = str(os.environ.get("SMARTPARK_ROLE_LOCKED") or "").upper() or None
+        wizard = SetupWizard(config, role_locked=role_lock)
         if wizard.exec() != QDialog.DialogCode.Accepted:
             return 0
         config = load_deployment_config()

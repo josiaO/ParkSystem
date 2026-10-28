@@ -12,6 +12,7 @@ from contextlib import aclosing
 from urllib.parse import urlparse
 
 from app.services.frame_grab import ffmpeg_bin
+from app.services.ffmpeg_recovery import drain_stderr
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _JPEG_SOI = b"\xff\xd8"
@@ -56,7 +57,8 @@ def decoder_command(url: str, *, sample_fps: float, scale: int = 960) -> list[st
         "-hide_banner",
         "-loglevel", "error",
         "-rtsp_transport", "tcp",
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt",
+        "-err_detect", "ignore_err",
         "-flags", "low_delay",
         "-probesize", "1000000",
         "-analyzeduration", "1000000",
@@ -71,23 +73,6 @@ def decoder_command(url: str, *, sample_fps: float, scale: int = 960) -> list[st
         "-q:v", "8",
         "pipe:1",
     ]
-
-
-async def _drain_bounded(stream, sink: bytearray, limit: int = 4096) -> None:
-    if stream is None:
-        return
-    try:
-        while True:
-            chunk = await stream.read(1024)
-            if not chunk:
-                return
-            sink.extend(chunk)
-            if len(sink) > limit:
-                del sink[: len(sink) - limit]
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
@@ -139,7 +124,11 @@ class RecognitionDecoder:
             self.pid = None
             raise RuntimeError("recognition decoder produced no output")
         errors = bytearray()
-        stderr_task = asyncio.create_task(_drain_bounded(proc.stderr, errors))
+        fault_event = asyncio.Event()
+        fault_detail: list[str] = []
+        stderr_task = asyncio.create_task(
+            drain_stderr(proc.stderr, errors, fault_event=fault_event, fault_detail=fault_detail)
+        )
         buf = b""
         from app.config import settings
 
@@ -148,6 +137,8 @@ class RecognitionDecoder:
         deadline = loop.time() + timeout
         try:
             while True:
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "recognition decoder H264 fault")
                 # Partial bytes must not keep a broken stream alive forever.
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -156,6 +147,8 @@ class RecognitionDecoder:
                 if not chunk:
                     text = errors.decode(errors="replace").strip()
                     raise RuntimeError(text[-300:] or "recognition decoder ended")
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "recognition decoder H264 fault")
                 buf += chunk
                 if len(buf) > 1_000_000:
                     start = buf.rfind(_JPEG_SOI)

@@ -3,8 +3,9 @@
 .SYNOPSIS
     Optional Windows Service (SCM) registration for Site Service and HVX host.
 
-    Default installs still use logon scheduled tasks (Install-SmartParkServices.ps1).
-    Keep that path until SCM restart is verified on the real site PC.
+    This is an alternative to the scheduled-task supervisor. It removes the
+    scheduled-task owners before registering SCM services so two supervisors
+    can never compete for ports or instance locks.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +35,9 @@ function Register-WithNssm {
     & $Nssm set $Name AppRestartDelay 5000
     $profile = [Environment]::GetEnvironmentVariable("SMARTPARK_DEPLOYMENT_PROFILE", "User")
     if (-not $profile) { $profile = "PRODUCTION" }
-    & $Nssm set $Name AppEnvironmentExtra "SMARTPARK_DEPLOYMENT_PROFILE=$profile" "SMARTPARK_HOME=$InstallDir" "PYTHONPATH=$InstallDir" "SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor"
+    $nodeRole = [Environment]::GetEnvironmentVariable("SMARTPARK_NODE_ROLE", "User")
+    if (-not $nodeRole) { $nodeRole = "SERVER" }
+    & $Nssm set $Name AppEnvironmentExtra "SMARTPARK_DEPLOYMENT_PROFILE=$profile" "SMARTPARK_NODE_ROLE=$nodeRole" "SMARTPARK_HOME=$InstallDir" "PYTHONPATH=$InstallDir" "SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor"
     & $Nssm start $Name
 }
 
@@ -53,7 +56,38 @@ if (-not (Test-Path $Py64)) {
     throw "Install SmartPark Edge first. Missing $Py64"
 }
 
-Write-Host "Registering optional Windows services via nssm (scheduled tasks are not removed)."
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run Install-SmartParkWinService.ps1 from an elevated PowerShell window."
+}
+
+Write-Host "Removing scheduled-task owners before registering SCM services..."
+foreach ($task in @(
+    "SmartPark Site Service",
+    "SmartPark Recognition Worker",
+    "SmartPark HVX Host",
+    "SmartPark Media Service"
+)) {
+    Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+}
+Start-Sleep -Seconds 1
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $cmd = [string]$_.CommandLine
+    $cmd -and (
+        $cmd -like "*hvx_host.py*" -or
+        $cmd -like "*app.site_service*" -or
+        $cmd -like "*app.media_service*" -or
+        $cmd -like "*app.recognition_worker*" -or
+        $cmd -like "*mediamtx.exe*"
+    ) -and $cmd -like "*$InstallDir*"
+} | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 800
+
+Write-Host "Registering Windows services via nssm (scheduled-task owners have been removed)."
 Register-WithNssm -Name "SmartParkSiteService" -Exe $Py64 -Args "-m app.site_service" -WorkDir $InstallDir
 Register-WithNssm -Name "SmartParkRecognitionWorker" -Exe $Py64 -Args "-m app.recognition_worker" -WorkDir $InstallDir
 if (Test-Path (Join-Path $InstallDir "vendor\mediamtx\mediamtx.exe")) {

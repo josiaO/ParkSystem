@@ -48,7 +48,7 @@ def vendor_candidates(
         f"rtsp://{ip}:40000/subvideo",
         f"rtsp://{ip}:40000/video",
     ]
-    # ParkWatch builds ``RTSP://<ip>:<port>/video`` and ``/subvideo`` for
+    # The vendor camera exposes ``RTSP://<ip>:<port>/video`` and ``/subvideo``
     # continuous video.  Put credential-bearing variants first so MediaMTX can
     # authenticate without relying on the vendor SDK process.  OcxConfig's
     # av0_0/av0_1 forms remain fallbacks for older QY firmware.

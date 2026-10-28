@@ -14,6 +14,48 @@ from sqlalchemy.orm import Session, selectinload
 from .db import get_db, short_session
 from .models import AuthSession, User, UserRole, UserStatus
 
+
+# These are the only API capabilities a Processing Node may use.  A node may
+# still use an administrator account from the shared database for backwards
+# compatibility, but the installation boundary wins over that account: the
+# node cannot use the token to browse or modify central users, settings,
+# payments, tariffs, subscribers, backups, or site topology.
+_PROCESSING_NODE_ALLOWED_PERMISSIONS = frozenset({
+    "cameras.view",
+    "cameras.manage",
+    "cameras.connect",
+    "gates.view",
+    "gates.open",
+    "gates.open_simulated",
+    "hardware.view",
+})
+
+
+def processing_node_permissions(permissions: set[str]) -> set[str]:
+    """Return the permissions safe to advertise from a Processing Node."""
+    if not _processing_node_installation():
+        return set(permissions)
+    return set(permissions) & _PROCESSING_NODE_ALLOWED_PERMISSIONS
+
+
+def _node_permission_allowed(permission: str, *, processing_node_allowed: bool = False) -> bool:
+    if not _processing_node_installation():
+        return True
+    # This opt-in is deliberately used only by the persisted gate-owner
+    # assignment endpoint. It is not a general way to bypass the node wall.
+    if processing_node_allowed and permission == "settings.manage":
+        return True
+    return permission in _PROCESSING_NODE_ALLOWED_PERMISSIONS
+
+
+def _processing_node_installation() -> bool:
+    try:
+        from app.services.node_scope import is_processing_node
+
+        return bool(is_processing_node())
+    except Exception:
+        return False
+
 _ph = PasswordHasher()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
@@ -49,6 +91,36 @@ def user_permissions(user: User) -> set[str]:
     for ur in user.roles:
         perms |= ur.role.permissions()
     return perms
+
+
+def is_processing_node_account(user: User) -> bool:
+    """Whether a shared-database user is reserved for one Processing Node."""
+    return any(getattr(getattr(link, "role", None), "name", "") == "Processing Node" for link in user.roles)
+
+
+def _configured_node_username() -> str:
+    try:
+        from app.deployment import load_deployment_config
+
+        return load_deployment_config().node_username.strip().casefold()
+    except Exception:
+        return ""
+
+
+def _enforce_installation_account_boundary(user: User) -> None:
+    """Keep node accounts on their node and site accounts on the server."""
+    if _processing_node_installation():
+        expected = _configured_node_username()
+        if not expected or str(user.username).strip().casefold() != expected:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This Processing Node accepts only its own configured account.",
+            )
+    elif is_processing_node_account(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Processing Node accounts can sign in only on their paired Processing Node.",
+        )
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User:
@@ -89,6 +161,7 @@ def load_user_from_token(db: Session, token: str | None) -> User:
     )
     if not user or user.status != UserStatus.ACTIVE.value:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account unavailable")
+    _enforce_installation_account_boundary(user)
     return user
 
 
@@ -112,9 +185,15 @@ def media_user(
         db.close()
 
 
-def require(permission: str):
+def require(permission: str, *, processing_node_allowed: bool = False):
     def dep(user: User = Depends(current_user)) -> User:
-        if "*" not in user_permissions(user) and permission not in user_permissions(user):
+        if not _node_permission_allowed(permission, processing_node_allowed=processing_node_allowed):
+            raise HTTPException(
+                status_code=403,
+                detail="Processing Nodes cannot access central site data or configuration. Use the Site Server.",
+            )
+        perms = user_permissions(user)
+        if "*" not in perms and permission not in perms:
             raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
         return user
     return dep
@@ -122,6 +201,13 @@ def require(permission: str):
 
 def require_any(*permissions: str):
     def dep(user: User = Depends(current_user)) -> User:
+        if _processing_node_installation() and permissions and not all(
+            _node_permission_allowed(permission) for permission in permissions
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Processing Nodes cannot access central site data or configuration. Use the Site Server.",
+            )
         perms = user_permissions(user)
         if "*" in perms or any(permission in perms for permission in permissions):
             return user
@@ -131,7 +217,13 @@ def require_any(*permissions: str):
 
 def require_media(permission: str):
     def dep(user: User = Depends(media_user)) -> User:
-        if "*" not in user_permissions(user) and permission not in user_permissions(user):
+        if not _node_permission_allowed(permission):
+            raise HTTPException(
+                status_code=403,
+                detail="Processing Nodes can stream only their assigned camera resources.",
+            )
+        perms = user_permissions(user)
+        if "*" not in perms and permission not in perms:
             raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
         return user
     return dep

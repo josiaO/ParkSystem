@@ -65,6 +65,10 @@ class DeploymentConfig:
     paired_site_id: str = ""
     paired_server_id: str = ""
     site_name: str = "Parking Site"
+    # A Processing Node has its own application account.  This is only the
+    # username; the password is hashed in the shared database during node
+    # provisioning and is never written to deployment.json.
+    node_username: str = ""
     machine_name: str = ""
     configured_at: str = ""
     database: DatabaseConfig = field(default_factory=default_database_config)
@@ -105,6 +109,7 @@ def _from_mapping(data: dict) -> DeploymentConfig:
         paired_site_id=str(data.get("paired_site_id") or ""),
         paired_server_id=str(data.get("paired_server_id") or ""),
         site_name=str(data.get("site_name") or settings.site_name),
+        node_username=str(data.get("node_username") or ""),
         machine_name=str(data.get("machine_name") or socket.gethostname()),
         configured_at=str(data.get("configured_at") or ""),
         database=database_config_from_mapping(data.get("database")),
