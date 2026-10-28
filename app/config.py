@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     alpr_detector_confidence: float = 0.26
     alpr_crop_padding_ratio: float = 0.18
     alpr_ocr_target_width: int = 320
-    # ParkWatch OcxConfig recognition zone (车牌识别区): skip sky / far field.
+    # SmartPark recognition zone (车牌识别区): skip sky / far field.
     # Normalized x1,y1,x2,y2. "off" uses the full frame.
     alpr_detect_roi: str = "0.06,0.18,0.94,0.92"
     alpr_min_ocr_confidence: float = 0.40

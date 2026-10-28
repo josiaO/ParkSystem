@@ -19,6 +19,7 @@ from app.models import Role, User, UserRole
 from app.security import hash_password
 from app.services.node_scope import (
     camera_in_recognition_scope,
+    camera_visible_in_management,
     reset_recognition_scope,
     set_recognition_gate_id,
 )
@@ -41,7 +42,7 @@ class NodeScopeTests(unittest.TestCase):
                 self.assertFalse(camera_in_recognition_scope(self.cam2e, db=db))
             from app.recognition_worker import _camera_rows
             with patch("app.db.SessionLocal", self.Session), patch("app.services.flags.media_mtx_for_camera", return_value=True), patch("app.recognition_worker._software_camera", return_value=True):
-                self.assertEqual({row["id"] for row in _camera_rows()}, {self.cam1e["id"], self.cam1x["id"]})
+                self.assertEqual({row["id"] for row in _camera_rows()}, {self.cam1e["id"], self.cam1x["id"], self.cam2e["id"]})
             response = self.client.post("/runtime/recognition-scope", headers=self.headers, json={"gate_id": self.gate2["id"]})
             self.assertEqual(response.status_code, 409)
             response = self.client.get("/runtime/recognition-scope", headers=self.headers)
@@ -78,6 +79,31 @@ class NodeScopeTests(unittest.TestCase):
         token = self.client.post("/auth/login", json={"username": "operator", "password": "operator-pass"}).json()["token"]
         response = self.client.put("/runtime/recognition-owner", headers={"Authorization": f"Bearer {token}"}, json={"gate_id": self.gate1["id"]})
         self.assertEqual(response.status_code, 403, response.text)
+
+    def test_processing_node_admin_token_cannot_browse_central_controls(self):
+        """A node must reject a copied Site Administrator token entirely."""
+        from unittest.mock import patch
+
+        with patch("app.security._processing_node_installation", return_value=True), \
+             patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            me = self.client.get("/auth/me", headers=self.headers)
+            self.assertEqual(me.status_code, 403, me.text)
+
+            for path in ("/users", "/roles", "/modules", "/settings/site"):
+                response = self.client.get(path, headers=self.headers) if path != "/settings/site" else self.client.patch(path, headers=self.headers, json={})
+                self.assertEqual(response.status_code, 403, f"{path}: {response.text}")
+
+            setup = self.client.get("/auth/setup")
+            self.assertEqual(setup.status_code, 200, setup.text)
+            self.assertEqual(setup.json()["password"], "")
+            self.assertEqual(setup.json()["usernames"], [])
+
+    def test_camera_response_never_exposes_secret_store_reference(self):
+        response = self.client.get("/cameras", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        for camera in response.json():
+            self.assertNotIn("credentials_ref", camera)
+            self.assertNotIn("password_secret", camera)
 
     def setUp(self):
         reset_recognition_scope()
@@ -156,6 +182,69 @@ class NodeScopeTests(unittest.TestCase):
             with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_all_gates_enabled", False):
                 self.assertFalse(camera_in_recognition_scope(self.cam2e, db=db))
 
+    def test_unassigned_site_server_can_list_cameras_for_commissioning(self):
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch.object(settings, "recognition_gate_id", None), \
+             patch.object(settings, "recognition_all_gates_enabled", False), \
+             patch("app.services.node_scope.site_server_can_manage_unassigned_cameras", return_value=True):
+            with self.Session() as db:
+                self.assertTrue(camera_visible_in_management(self.cam1e, db=db))
+                self.assertTrue(camera_visible_in_management(self.cam2e, db=db))
+            response = self.client.get("/cameras", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual({row["id"] for row in response.json()}, {self.cam1e["id"], self.cam1x["id"], self.cam2e["id"]})
+
+    def test_site_server_management_stays_global_after_gate_assignment(self):
+        """A server-side gate test must not hide another lane's registry rows."""
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch.object(settings, "recognition_gate_id", self.gate1["id"]), \
+             patch.object(settings, "recognition_all_gates_enabled", False), \
+             patch("app.services.node_scope.site_server_can_manage_unassigned_cameras", return_value=True):
+            response = self.client.get("/cameras", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                {row["id"] for row in response.json()},
+                {self.cam1e["id"], self.cam1x["id"], self.cam2e["id"]},
+            )
+            # The Site Server owns every local producer; only an EDGE_NODE
+            # applies the selected gate as a hardware boundary.
+            by_id = {row["id"]: row for row in response.json()}
+            self.assertTrue(by_id[self.cam1e["id"]]["stream_allowed"])
+            self.assertTrue(by_id[self.cam2e["id"]]["stream_allowed"])
+
+    def test_unassigned_edge_node_stays_hidden_and_fail_closed(self):
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch.object(settings, "recognition_gate_id", None), \
+             patch.object(settings, "recognition_all_gates_enabled", False), \
+             patch("app.services.node_scope.site_server_can_manage_unassigned_cameras", return_value=False):
+            with self.Session() as db:
+                self.assertFalse(camera_visible_in_management(self.cam1e, db=db))
+            response = self.client.get("/cameras", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), [])
+
+    def test_unassigned_processing_node_never_defaults_to_all_cameras(self):
+        """A fresh node must not inherit the server's camera scope."""
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "DEVELOPMENT"), \
+             patch.object(settings, "recognition_gate_id", None), \
+             patch.object(settings, "recognition_all_gates_enabled", True), \
+             patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            with self.Session() as db:
+                self.assertFalse(camera_in_recognition_scope(self.cam1e, db=db))
+                self.assertFalse(camera_in_recognition_scope(self.cam1x, db=db))
+                self.assertFalse(camera_visible_in_management(self.cam1e, db=db))
+            response = self.client.get("/cameras", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), [])
+
     def test_zx5188_is_not_a_bundled_plate(self):
         hits = []
         for path in (ROOT / "app").rglob("*"):
@@ -197,12 +286,83 @@ class NodeScopeTests(unittest.TestCase):
             with patch.object(settings, "node_id", "lane-client"):
                 self.assertEqual(recognition_gate_id(db), self.gate2["id"])
 
-    def test_viewing_another_gate_does_not_change_recognition_assignment(self):
+    def test_viewing_another_gate_is_rejected_without_changing_assignment(self):
         set_recognition_gate_id(self.gate1["id"])
-        response = self.client.get(f"/cameras/{self.cam2e['id']}/live/endpoint", headers=self.headers)
-        self.assertEqual(response.status_code, 200, response.text)
+        from app.config import settings
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_all_gates_enabled", False), patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            response = self.client.get(f"/cameras/{self.cam2e['id']}/live/endpoint", headers=self.headers)
+        self.assertEqual(response.status_code, 403, response.text)
         from app.services.node_scope import recognition_gate_id
         self.assertEqual(recognition_gate_id(), self.gate1["id"])
+
+    def test_all_media_boundaries_reject_another_nodes_camera(self):
+        """A node must fail closed before it opens a foreign camera producer."""
+        from app.config import settings
+
+        set_recognition_gate_id(self.gate1["id"])
+        foreign = self.cam2e["id"]
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_all_gates_enabled", False), patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            requests = [
+                self.client.get(f"/cameras/{foreign}/streams", headers=self.headers),
+                self.client.get(f"/cameras/{foreign}/snapshot.jpg", headers=self.headers),
+                self.client.get(f"/cameras/{foreign}/preview", headers=self.headers),
+                self.client.post(f"/cameras/{foreign}/live/viewer-state", headers=self.headers, json={"transport": "MJPEG"}),
+                self.client.post(f"/cameras/{foreign}/live/watch", headers=self.headers),
+                self.client.post(f"/cameras/{foreign}/live/whep", headers=self.headers, content=b""),
+                self.client.post(f"/cameras/{foreign}/rtsp/probe", headers=self.headers),
+            ]
+        self.assertTrue(all(response.status_code == 403 for response in requests), [response.status_code for response in requests])
+
+    def test_processing_node_can_only_add_and_manage_its_assigned_gate(self):
+        """Shared PostgreSQL is the site registry; local node control is gate-scoped."""
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch.object(settings, "recognition_gate_id", None), \
+             patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            response = self.client.post("/cameras", headers=self.headers, json={
+                "name": "Node camera", "ip_address": "192.168.1.200",
+            })
+            self.assertEqual(response.status_code, 409, response.text)
+
+            response = self.client.put("/runtime/recognition-owner", headers=self.headers, json={"gate_id": self.gate1["id"]})
+            self.assertEqual(response.status_code, 200, response.text)
+            created = self.client.post("/cameras", headers=self.headers, json={
+                "name": "Node camera", "ip_address": "192.168.1.200",
+            })
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(created.json()["gate_id"], self.gate1["id"])
+
+            foreign = self.client.get(f"/cameras/{self.cam2e['id']}", headers=self.headers)
+            self.assertEqual(foreign.status_code, 403, foreign.text)
+            central = self.client.post("/gates", headers=self.headers, json={"name": "Central-only"})
+            self.assertEqual(central.status_code, 403, central.text)
+
+    def test_site_server_can_still_manage_foreign_camera_records(self):
+        """The central server keeps global registry access after a lane is assigned."""
+        from app.config import settings
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+             patch("app.services.node_scope.deployment_role", return_value="SITE_SERVER"):
+            response = self.client.get(f"/cameras/{self.cam2e['id']}", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+
+    def test_out_of_scope_media_sync_unregisters_local_path(self):
+        from app.config import settings
+        from app.models import Camera
+        from app.services.mediamtx_sources import sync_camera
+
+        with patch.object(settings, "deployment_profile", "PRODUCTION"), patch.object(settings, "recognition_all_gates_enabled", False), patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            with self.Session() as db:
+                set_recognition_gate_id(self.gate1["id"], db)
+                camera = db.get(Camera, self.cam2e["id"])
+                with patch("app.infrastructure.media.registry.unregister_camera_source") as unregister, \
+                     patch("app.infrastructure.media.registry.register_camera_source") as register:
+                    result = sync_camera(camera, db=db)
+        self.assertFalse(result["registered"])
+        self.assertIn("outside", result["reason"])
+        unregister.assert_called_once_with(self.cam2e["id"])
+        register.assert_not_called()
 
 
 if __name__ == "__main__":

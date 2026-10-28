@@ -569,7 +569,7 @@ def ensure_mjpeg_source(spec: CameraLiveSpec) -> None:
     """Fill the JPEG cache that desktop /live.mjpeg reads.
 
     MediaMTX still owns browser WebRTC. HVX/QY desktop panes use the SDK
-    live_jpeg pump (ParkWatch picture path) so we do not add a second FFmpeg
+    live_jpeg pump so we do not add a second FFmpeg
     JPEG decoder on top of MediaMTX ingest. Generic IP cameras keep the
     MediaMTX JPEG consumer. If that consumer produces no frame, callers can
     invoke this again after a short wait; ``gateway.ensure_producer`` is the

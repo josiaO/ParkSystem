@@ -9,13 +9,28 @@ Copy this whole folder onto a USB stick. On the parking PC:
      Do NOT run Wipe-SmartPark.bat for an upgrade. Wiping deletes cameras,
      gate assignment, parking records, media and logs. Use it only for a
      deliberate reset after backing up the site.
-  3. Double-click  Install-SmartPark.bat
+  3. Double-click  Install-SmartPark.bat and choose `S` for a Site Server,
+     `N` for a Processing Node, `C` for an Operator Workstation, or `P` to
+     preserve the existing role.
+     For an unambiguous server reinstall, use Install-SmartPark-Server.bat.
   4. Open the Desktop shortcut  SmartPark Edge
 
 The installer copies the app, then sets user environment variables
 (SMARTPARK_HOME, PATH for Python/Qt/SDK DLLs, QT_PLUGIN_PATH).
 It also places a Startup shortcut so the app opens at Windows logon.
 Re-run Install-SmartPark.bat if a previous install did not start.
+If this PC was previously configured as an Operator Workstation but must now
+own the site, run Install-SmartPark-Server.bat. It changes only the local
+deployment role metadata, preserves the database files, and sends the PC back
+through Site Server setup before starting local services.
+For a second computer that must process its own cameras, run
+Install-SmartPark-Node.bat. It uses the shared PostgreSQL database, starts
+local camera/media/recognition services, and starts with no camera ownership
+until a gate is assigned in Live Gates.
+The Processing Node wizard creates this PC's own node username and password;
+it does not use the Site Server administrator password. The account receives
+only the Processing Node role, and the node rejects Site Administrator logins.
+Use at least 12 characters for the node password.
 The Desktop shortcut "SmartPark logs" opens the service and camera logs.
 You can also double-click Open-SmartParkLogs.bat in this USB folder.
 
@@ -145,9 +160,11 @@ not choose between them. Old 32-bit-only PCs are not supported.
 COMMISSIONING mode pulses the live barrier (GPIO + Board* + LED). Confirm the
 lane in the UI before you press Open.
 
-The installer registers Site Service, HVX host, Media Service, and Recognition
-Worker as logon tasks and starts them immediately. The Desktop is a client;
-recognition runs in the background for this PC's assigned gate.
+On a Site Server, the installer registers Site Service, HVX host, Media Service,
+and Recognition Worker as logon tasks and starts them immediately. The Desktop
+UI is a client of the local Site Service at 127.0.0.1:8760. On an Operator
+Workstation, the Desktop and browser shortcuts use the configured remote Site
+Server URL and no local parking services are started.
 
 For blank gate-camera video or Dahua video without OCR, see
 documentation\CAMERA-DELIVERY-DIAGNOSTICS.md. The updated SDK host reports

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+import logging
 from io import BytesIO
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from app.config import settings
 from app.core.plate import is_empty_scene_ocr, normalize_plate
 from app.models import Camera, VehicleCapture, as_utc, utcnow
 from app.services.camera_lpr import bbox_from_lp_box, native_from_sdk_capture
+
+log = logging.getLogger("smartpark")
 
 
 # Common false OCR from roadside signs / UI chrome — not vehicle plates.
@@ -144,6 +147,17 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
     folder = settings.media_dir / kind
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / name
+    # Late native callbacks can repeat the same image_id/capture.  Preserve the
+    # first evidence file and avoid another synchronous disk write when the
+    # bytes are identical.  A changed image with the same name is still
+    # accepted, which keeps the late-box update path correct.
+    if dest.is_file():
+        try:
+            if dest.read_bytes() == data:
+                log.debug("evidence write skipped duplicate kind=%s name=%s", kind, name)
+                return (Path(kind) / name).as_posix()
+        except OSError:
+            pass
     dest.write_bytes(data)
     return (Path(kind) / name).as_posix()
 

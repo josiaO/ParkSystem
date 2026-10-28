@@ -60,7 +60,7 @@ def recognize_frame(
     detect_roi: str | None = None,
     detect_zoom: float | None = None,
 ) -> dict[str, Any]:
-    """ParkWatch RecognizeAll equivalent: one JPEG in, plate candidates out."""
+    """One JPEG in, plate candidates out."""
     engine = active_engine()
     kwargs: dict[str, Any] = {}
     if detect_roi:

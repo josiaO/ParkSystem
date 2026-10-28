@@ -34,9 +34,9 @@ def resolve_vendor_dir() -> Path:
     here = Path(__file__).resolve().parent
     ocx = here.parent.parent / "OcxConfig"
     local = here / "vendor"
-    configs_ocx = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
     installed = here.parent.parent / "vendor"
-    for candidate in (installed, ocx, local, configs_ocx):
+    supplied = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
+    for candidate in (installed, ocx, local, supplied):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else local

@@ -471,7 +471,10 @@
       <p class="error" id="login-error"></p>
       <button type="submit" id="login-btn">Sign in</button>
     </form>
-    <div class="login-foot">Sign in with your site operator account.</div>
+    <div class="login-foot">
+      Sign in with your site operator account.
+      <br><a href="/downloads/zirp-installer.zip" download="Zirp-Installer.zip">Download the Zirp installer for a node or another PC</a>
+    </div>
   </section>
 
   <section id="app-view" class="app hidden">
@@ -542,7 +545,7 @@
       </div>
 
       <div id="page-cameras" class="hidden">
-        <div class="notice">Assign this PC to one gate's entry and exit under Devices. Viewing another camera does not change recognition ownership. Leaving this page only stops the picture.</div>
+        <div class="notice">The Site Server can manage every camera record, but this computer only opens and processes its assigned gate. Select a lane and assign this PC before starting live video. Viewing another camera does not change ownership.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">Devices</button>
@@ -556,6 +559,7 @@
             </div>
             <label>Lane preset <select id="live-lane"></select></label>
             <span class="muted" id="recognition-scope-hint"></span>
+            <button class="secondary" type="button" id="assign-recognition-owner">Assign this PC to selected gate</button>
             <button class="secondary" type="button" id="apply-lane">Fill both from lane</button>
             <button class="secondary" type="button" id="refresh-live">Refresh live <kbd>F5</kbd></button>
             <span class="muted" id="live-shortcut-hint">Click a camera or press 1 / 2. F8 and F9 pulse that side only — never both.</span>
@@ -1381,6 +1385,8 @@
     let simSessionId = null;
     let cameraSub = "live";
     let cameraRowsCache = [];
+    let gateRowsCache = [];
+    let cameraLiveRowsCache = [];
     const liveCameras = [null, null];
     const liveWatchIds = [null, null];
     const liveFrameSeq = [0, 0];
@@ -1610,7 +1616,7 @@
     function cameraFromSelect(slot) {
       const id = paneEls(slot).camera && paneEls(slot).camera.value;
       if (!id) return null;
-      return cameraRowsCache.find((c) => String(c.id) === String(id)) || null;
+      return cameraLiveRowsCache.find((c) => String(c.id) === String(id)) || null;
     }
 
     let liveLayout = lsGet("smartpark_live_layout") || "2";
@@ -1666,7 +1672,7 @@
       const pane1 = grid.querySelector('.live-pane[data-slot="1"]');
       if (pane1) pane1.hidden = liveLayout === "1";
       if (liveLayout === "1") stopLiveSlot(1);
-      const want = liveLayout === "all" ? Math.max(cameraRowsCache.length, 2) : 2;
+      const want = liveLayout === "all" ? Math.max(cameraLiveRowsCache.length, 2) : 2;
       [...grid.querySelectorAll(".live-pane")].forEach((pane) => {
         const slot = Number(pane.dataset.slot);
         if (slot >= 2 && slot >= want) {
@@ -2083,7 +2089,7 @@
     function applyLanePreset() {
       const gateId = document.getElementById("live-lane").value;
       pushRecognitionScope(gateId);
-      const pair = pairLaneCameras(cameraRowsCache, gateId);
+      const pair = pairLaneCameras(cameraLiveRowsCache, gateId);
       [0, 1].forEach((slot) => {
         const cam = pair[slot];
         const sel = paneEls(slot).camera;
@@ -2096,22 +2102,22 @@
     function startDualLive(force = false) {
       if (!liveTabVisible()) { stopLive(); return; }
       syncLivePanes();
-      fillPaneSelects(cameraRowsCache);
+      fillPaneSelects(cameraLiveRowsCache);
       const slots = [...document.querySelectorAll(".dual-live .live-pane")]
         .map((pane) => Number(pane.dataset.slot))
         .filter((slot) => liveLayout !== "1" || slot === 0);
       if (liveLayout === "all") {
         slots.forEach((slot, index) => {
-          const cam = cameraRowsCache[index] || null;
+          const cam = cameraLiveRowsCache[index] || null;
           const sel = paneEls(slot).camera;
           if (sel) sel.value = cam ? String(cam.id) : "";
           startLiveSlot(slot, cam, force);
         });
       } else {
         const anyChosen = slots.some((slot) => cameraFromSelect(slot));
-        if (!anyChosen && cameraRowsCache.length) {
-          const left = cameraRowsCache[0];
-          const right = cameraRowsCache[1] || null;
+        if (!anyChosen && cameraLiveRowsCache.length) {
+          const left = cameraLiveRowsCache[0];
+          const right = cameraLiveRowsCache[1] || null;
           if (paneEls(0).camera) paneEls(0).camera.value = left ? String(left.id) : "";
           if (paneEls(1).camera && liveLayout !== "1") paneEls(1).camera.value = right ? String(right.id) : "";
         }
@@ -2201,11 +2207,14 @@
       }
     }
 
-    function fillLiveLanes(rows) {
+    function fillLiveLanes(rows, gates) {
       const select = document.getElementById("live-lane");
       if (!select) return;
       const current = select.value;
       const seen = new Map();
+      (gates || gateRowsCache || []).forEach((g) => {
+        if (g.id != null) seen.set(String(g.id), g.name || `Lane ${g.id}`);
+      });
       (rows || []).forEach((c) => {
         if (c.gate_id == null) return;
         if (!seen.has(String(c.gate_id))) seen.set(String(c.gate_id), c.lane_name || c.gate_name || `Lane ${c.gate_id}`);
@@ -2230,6 +2239,32 @@
       }).catch((err) => {
         if (hint) hint.textContent = err.message || "";
       });
+    }
+
+    async function assignRecognitionOwner() {
+      const hint = document.getElementById("recognition-scope-hint");
+      const gateId = document.getElementById("live-lane").value;
+      if (!gateId) {
+        if (hint) hint.textContent = "Select a gate first.";
+        return;
+      }
+      const button = document.getElementById("assign-recognition-owner");
+      if (button) button.disabled = true;
+      try {
+        const body = await api("/runtime/recognition-owner", {
+          method: "PUT",
+          body: JSON.stringify({ gate_id: Number(gateId) }),
+        });
+        if (hint) hint.textContent = body.detail || "This PC is now assigned to the selected gate.";
+        toast("Recognition ownership assigned. Loading this gate's cameras.", "info");
+        await loadCameras();
+        applyLanePreset();
+      } catch (err) {
+        if (hint) hint.textContent = err.message || "Could not assign this PC.";
+        toast(err.message || "Could not assign this PC.", "dgr");
+      } finally {
+        if (button) button.disabled = false;
+      }
     }
 
     function showCameraSub(name) {
@@ -3211,6 +3246,8 @@
       document.getElementById("add-ip-cameras").style.display = can("cameras.manage") ? "" : "none";
       const onboardBtn = document.getElementById("onboard-camera");
       if (onboardBtn) onboardBtn.style.display = can("cameras.manage") ? "" : "none";
+      const assignOwner = document.getElementById("assign-recognition-owner");
+      if (assignOwner) assignOwner.style.display = can("settings.manage") ? "" : "none";
       document.getElementById("add-gate").style.display = can("gates.manage") ? "" : "none";
       document.getElementById("add-user").style.display = can("users.manage") ? "" : "none";
       const paySession = document.getElementById("pay-session");
@@ -4001,7 +4038,8 @@
       const error = document.getElementById("camera-error");
       error.textContent = "";
       try {
-        const rows = await api("/cameras");
+        const [rows, gates] = await Promise.all([api("/cameras"), api("/gates")]);
+        gateRowsCache = gates || [];
         const body = document.getElementById("camera-rows");
         body.innerHTML = "";
         rows.forEach((c) => {
@@ -4040,8 +4078,13 @@
           body.innerHTML = `<tr><td colspan="11"><div class="empty-state"><b>No cameras configured.</b><p>Add a camera to start live monitoring and plate recognition.</p></div></td></tr>`;
         }
         cameraRowsCache = rows;
-        fillLiveLanes(rows);
-        fillPaneSelects(rows);
+        cameraLiveRowsCache = rows.filter((camera) => camera.stream_allowed !== false);
+        // Keep the gate selector populated from the management registry even
+        // when this PC has no owner yet.  That is how an administrator chooses
+        // a gate before pressing "Assign this PC"; only the camera pickers
+        // below are restricted to the local stream scope.
+        fillLiveLanes(rows, gateRowsCache);
+        fillPaneSelects(cameraLiveRowsCache);
         if (selectedCameraId) refreshStreamProfiles(selectedCameraId);
         if (liveTabVisible()) startDualLive();
       } catch (err) {
@@ -4050,6 +4093,7 @@
     }
 
     document.getElementById("refresh-cameras").addEventListener("click", loadCameras);
+    document.getElementById("assign-recognition-owner").addEventListener("click", assignRecognitionOwner);
     document.getElementById("refresh-live").addEventListener("click", () => startDualLive(true));
     document.getElementById("apply-lane").addEventListener("click", applyLanePreset);
     document.getElementById("live-lane").addEventListener("change", applyLanePreset);

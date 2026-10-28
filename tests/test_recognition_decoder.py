@@ -30,10 +30,38 @@ class LocalEndpointTests(unittest.TestCase):
             cmd = decoder_command("rtsp://localhost:8554/cam2", sample_fps=3, scale=960)
         self.assertEqual(cmd[0], "ffmpeg")
         self.assertIn("tcp", cmd)
+        self.assertIn("+genpts+discardcorrupt", cmd)
+        self.assertIn("ignore_err", cmd)
         self.assertIn("fps=3,scale=960:-2", cmd)
         self.assertIn("mjpeg", cmd)
         self.assertNotIn("libx264", cmd)
         self.assertNotIn("192.168.1.49", " ".join(cmd))
+
+    def test_repeated_h264_faults_signal_a_decoder_boundary(self):
+        from app.services.ffmpeg_recovery import drain_stderr
+
+        class Stream:
+            def __init__(self):
+                self.chunks = [
+                    b"[h264] non-existing PPS 0 referenced\n"
+                    b"[h264] decode_slice_header error\n"
+                    b"[h264] no frame!\n" * 2,
+                    b"[h264] non-existing PPS 0 referenced\n"
+                    b"[h264] no frame!\n",
+                ]
+
+            async def read(self, _n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        async def scenario():
+            event = asyncio.Event()
+            detail = []
+            await drain_stderr(Stream(), bytearray(), fault_event=event, fault_detail=detail)
+            return event.is_set(), detail
+
+        signalled, detail = asyncio.run(scenario())
+        self.assertTrue(signalled)
+        self.assertIn("no frame", detail[0])
 
 
 class DecoderLifecycleTests(unittest.IsolatedAsyncioTestCase):

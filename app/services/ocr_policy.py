@@ -1,4 +1,4 @@
-"""Software plate reading is the default, matching ParkWatch InALPR/OutALPR.
+"""Software plate reading is the default for SmartPark's local pipeline.
 
 The camera snaps the JPEG. The active PlateEngine (FastALPR) reads that JPEG.
 NATIVE_ONLY is still available when a lane should keep the camera's own text.
@@ -54,7 +54,7 @@ def fusion_mode(camera=None) -> str:
 
 
 def software_ocr_enabled(camera=None) -> bool:
-    """ParkWatch InALPR/OutALPR: the PC reads the camera JPEG in FastALPR.
+    """The PC reads the camera JPEG in FastALPR.
 
     QY/HVX cameras still supply video and optional native callbacks. They are
     not the plate engine unless the lane is explicitly ``NATIVE_ONLY``.
@@ -84,7 +84,7 @@ def should_run_local(
         # HVX FASTALPR_ONLY reads the capture/coil JPEG, not every idle frame.
         return bool(presence)
     if mode == NATIVE_WITH_LOCAL_VERIFY:
-        # ParkWatch-style event verification: when a vehicle-trigger JPEG is
+        # Event verification: when a vehicle-trigger JPEG is
         # available, always run software OCR once and fuse it with native LPR.
         # This is event-driven, not continuous video OCR.
         return bool(presence)

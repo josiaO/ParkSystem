@@ -38,8 +38,9 @@ def resolve_vendor_dir() -> Path:
         return Path(env)
     ocx = repo_root() / "OcxConfig"
     copied = repo_root() / "tools" / "hvx_sdk_host" / "vendor"
-    configs_ocx = repo_root() / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
-    for candidate in (ocx, copied, configs_ocx):
+    installed = repo_root() / "vendor"
+    supplied = repo_root() / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
+    for candidate in (installed, ocx, copied, supplied):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else copied
@@ -72,9 +73,9 @@ def vendor_inventory() -> dict:
         "path": str(vendor_dir),
         "present": net_sdk.exists(),
         "product": "OcxConfig NetSDK 3.2.3.6",
-        "source": "OcxConfig.ocx official camera config + NetSDK.dll",
-        "official_config_ui": "OcxConfig/OcxConfig.ocx",
-        "official_config_client": "OcxConfig/OcxConfigClient.exe",
+        "source": "SmartPark-configured HVX vendor directory + NetSDK.dll",
+        "official_config_ui": "vendor/OcxConfig.ocx (optional)",
+        "official_config_client": "vendor/OcxConfigClient.exe (optional)",
         "sdk_control_port_default": 30000,
         "sdk_picture_port": 40000,
         "http_ui_port_not_sdk": 80,

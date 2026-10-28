@@ -19,6 +19,13 @@ fi
 rm -rf -- "$OUT"
 mkdir -p "$CACHE" "$OUT/payload"
 
+echo "Preparing existing Zirp icon artwork..."
+python3 "$ROOT/packaging/resize_zirp_icon.py" \
+  --source "$ROOT/app/assets/zirp-logo.png" \
+  --output "$ROOT/app/assets/zirp.ico" \
+  --output "$ROOT/app/web/assets/zirp.ico" \
+  --output "$ROOT/docs-site/zirp.ico"
+
 echo "Assembling application payload..."
 rm -rf "$OUT/payload/app" "$OUT/payload/tools" "$OUT/payload/vendor"
 mkdir -p "$OUT/payload/app" "$OUT/payload/tools/hvx_sdk_host" "$OUT/payload/vendor"
@@ -45,10 +52,30 @@ elif [[ -f "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/hvx_binding
 fi
 cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
+HVX_VENDOR_SOURCE="${SMARTPARK_HVX_VENDOR_DIR:-}"
+if [[ -z "$HVX_VENDOR_SOURCE" ]]; then
+  for candidate in "$ROOT/OcxConfig" "$ROOT/vendor" "$ROOT/tools/hvx_sdk_host/vendor" \
+                  "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig"; do
+    if [[ -f "$candidate/NetSDK.dll" ]]; then
+      HVX_VENDOR_SOURCE="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$HVX_VENDOR_SOURCE" || ! -f "$HVX_VENDOR_SOURCE/NetSDK.dll" ]]; then
+  echo "ERROR: SmartPark HVX vendor DLLs are not bundled in this checkout." >&2
+  echo "Provide SMARTPARK_HVX_VENDOR_DIR containing NetSDK.dll and its companion DLLs." >&2
+  echo "The deleted ParkWatch reference is not a supported vendor source." >&2
+  exit 1
+fi
 shopt -s nullglob
-cp "$ROOT/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
-cp "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/"*.dll "$OUT/payload/vendor/" 2>/dev/null || true
+vendor_dlls=("$HVX_VENDOR_SOURCE/"*.dll)
 shopt -u nullglob
+if [[ ${#vendor_dlls[@]} -eq 0 ]]; then
+  echo "ERROR: no DLLs found in SmartPark HVX vendor directory: $HVX_VENDOR_SOURCE" >&2
+  exit 1
+fi
+cp "${vendor_dlls[@]}" "$OUT/payload/vendor/"
 
 download() {
   local url="$1" dest="$2"
@@ -125,14 +152,53 @@ python3 -m zipfile -e "$CACHE/python-${PY_VER}-embed-win32.zip" "$OUT/payload/py
 # embeddable Python archive carries vcruntime140*.dll but not MSVCP140*.dll,
 # so a fresh Windows PC otherwise fails with:
 # "DLL load failed while importing onnxruntime_pybind11_state".
-VC_RUNTIME_SOURCE="$ROOT/Current_ParkSystem_configs/ParkingSystem/ParkWatch"
-for dll in msvcp140.dll msvcp140_1.dll; do
-  if [[ ! -f "$VC_RUNTIME_SOURCE/$dll" ]]; then
-    echo "ERROR: required Windows runtime DLL is missing: $VC_RUNTIME_SOURCE/$dll" >&2
+VC_RUNTIME_SOURCE="${SMARTPARK_MSVC_RUNTIME_DIR:-}"
+MSVC_REDIST_SOURCE="${SMARTPARK_MSVC_REDIST_EXE:-$CACHE/msvc/vc_redist.x64.exe}"
+if [[ -z "$VC_RUNTIME_SOURCE" ]]; then
+  for candidate in \
+    "$ROOT/packaging/windows/runtime"; do
+    if [[ -f "$candidate/msvcp140.dll" && -f "$candidate/msvcp140_1.dll" ]]; then
+      VC_RUNTIME_SOURCE="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -n "$VC_RUNTIME_SOURCE" ]]; then
+  for dll in msvcp140.dll msvcp140_1.dll; do
+    if [[ ! -f "$VC_RUNTIME_SOURCE/$dll" ]]; then
+      echo "ERROR: required Windows runtime DLL is missing: $VC_RUNTIME_SOURCE/$dll" >&2
+      exit 1
+    fi
+    cp "$VC_RUNTIME_SOURCE/$dll" "$OUT/payload/python64/$dll"
+  done
+  # Prefer the complete, matching MSVC runtime set when the source includes it.
+  # Mixing an older MSVCP pair with a newer VCRUNTIME can make ORT fail inside
+  # DLL initialization even though every required filename is present.
+  for dll in vcruntime140.dll vcruntime140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll; do
+    if [[ -f "$VC_RUNTIME_SOURCE/$dll" ]]; then
+      cp "$VC_RUNTIME_SOURCE/$dll" "$OUT/payload/python64/$dll"
+    fi
+  done
+elif [[ -f "$MSVC_REDIST_SOURCE" ]]; then
+  # The official Microsoft bootstrapper is intentionally used when the host
+  # cannot extract its embedded CAB. It is run elevated by the Windows
+  # installer before the ONNX import self-test, and avoids shipping a mixed
+  # or stale local MSVCP/VCRUNTIME pair beside embedded Python.
+  MSVC_REDIST_SHA256="843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c"
+  actual_redist_sha256="$(sha256sum "$MSVC_REDIST_SOURCE" | awk '{print $1}')"
+  if [[ "$actual_redist_sha256" != "$MSVC_REDIST_SHA256" ]]; then
+    echo "ERROR: Microsoft VC++ redistributable hash mismatch: $MSVC_REDIST_SOURCE" >&2
+    echo "Expected $MSVC_REDIST_SHA256, got $actual_redist_sha256" >&2
     exit 1
   fi
-  cp "$VC_RUNTIME_SOURCE/$dll" "$OUT/payload/python64/$dll"
-done
+  cp "$MSVC_REDIST_SOURCE" "$OUT/payload/vendor/vc_redist.x64.exe"
+  echo "Bundled verified Microsoft VC++ x64 redistributable installer."
+else
+  echo "ERROR: MSVC runtime DLLs are not bundled in this checkout." >&2
+  echo "Provide SMARTPARK_MSVC_RUNTIME_DIR containing msvcp140.dll and msvcp140_1.dll," >&2
+  echo "or SMARTPARK_MSVC_REDIST_EXE pointing to the official vc_redist.x64.exe." >&2
+  exit 1
+fi
 printf 'python311.zip\r\n.\r\n..\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python64/python311._pth"
 printf 'python311.zip\r\n.\r\n..\\tools\\hvx_sdk_host\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python32/python311._pth"
 
@@ -203,17 +269,30 @@ fi
 
 rm -rf "$OUT/payload/wheels"
 mkdir -p "$OUT/payload/wheels"
-# One wheel per package (newest). Cached downloads can accumulate two versions of
-# the same dist (e.g. websockets 15 and 17); pip then fails on Windows with
-# ResolutionImpossible even with --no-deps.
-python3 - "$WHEELS" "$OUT/payload/wheels" <<'PY'
+# One wheel per package (newest unless requirements pin an exact version).
+# Cached downloads can accumulate multiple versions of the same dist; selecting
+# newest blindly would silently violate an exact safety pin such as the Windows
+# ONNX Runtime version below.
+python3 - "$WHEELS" "$OUT/payload/wheels" "$ROOT/packaging/windows/requirements-windows.txt" <<'PY'
 from pathlib import Path
 import shutil
 import sys
+import re
 from packaging.version import InvalidVersion, Version
 
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+src, dst, requirements = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 skip = ("pyside6-", "pyside6_addons-", "watchfiles-")
+pinned: dict[str, Version] = {}
+for raw in requirements.read_text(encoding="utf-8").splitlines():
+    line = raw.split("#", 1)[0].strip()
+    if not line or line.startswith("-") or "==" not in line:
+        continue
+    package, version = re.split(r"\s*==\s*", line, maxsplit=1)
+    package = re.sub(r"\[.*\]$", "", package).strip().lower().replace("_", "-")
+    try:
+        pinned[package] = Version(version.strip())
+    except InvalidVersion:
+        continue
 best: dict[str, tuple[Version, Path]] = {}
 for path in src.glob("*.whl"):
     name = path.name
@@ -225,6 +304,9 @@ for path in src.glob("*.whl"):
         parsed = Version(ver)
     except InvalidVersion:
         parsed = Version("0")
+    required = pinned.get(key)
+    if required is not None and parsed != required:
+        continue
     if key == "websockets" and parsed >= Version("17.1"):
         continue
     prev = best.get(key)
@@ -263,6 +345,9 @@ cp "$WHEELS32"/pillow-*.whl "$OUT/payload/wheels32/"
 
 cp "$ROOT/packaging/windows/Install-SmartPark.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartPark.bat" "$OUT/"
+cp "$ROOT/packaging/windows/Install-SmartPark-Server.bat" "$OUT/"
+cp "$ROOT/packaging/windows/Install-SmartPark-Node.bat" "$OUT/"
+cp "$ROOT/packaging/windows/Install-SmartPark-Client.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartParkServices.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartParkWinService.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Enable-MediaMTX.ps1" "$OUT/"
@@ -271,6 +356,10 @@ cp "$ROOT/packaging/windows/Run-FieldAcceptanceTest.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Run-FieldAcceptanceTest.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Run-StartupCheck.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Run-StartupCheck.bat" "$OUT/"
+cp "$ROOT/packaging/windows/Run-ServerDiagnostics.ps1" "$OUT/"
+cp "$ROOT/packaging/windows/Run-ServerDiagnostics.bat" "$OUT/"
+cp "$ROOT/packaging/windows/Run-RecordedMediaTests.ps1" "$OUT/"
+cp "$ROOT/packaging/windows/Run-RecordedMediaTests.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Open-SmartParkLogs.bat" "$OUT/"
 cp "$ROOT/packaging/windows/Run-CameraLab.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Run-CameraLab.bat" "$OUT/"
@@ -285,6 +374,7 @@ fi
 # actually assembled.  The source tree may contain uncommitted fixes, so the
 # marker includes hashes of the two startup scripts as well as the Git state.
 BUILD_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_DIRTY="$(git -C "$ROOT" status --short 2>/dev/null | tr '\n' ' ' || true)"
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 INSTALLER_SHA="$(sha256sum "$ROOT/packaging/windows/Install-SmartPark.ps1" | awk '{print $1}')"
 SERVICES_SHA="$(sha256sum "$ROOT/packaging/windows/Install-SmartParkServices.ps1" | awk '{print $1}')"
@@ -292,6 +382,7 @@ cat > "$OUT/BUILD-INFO.txt" <<EOF
 Zirp Windows kit
 Build UTC: $BUILD_TIME
 Git base: $BUILD_COMMIT
+Git working tree: ${BUILD_DIRTY:-clean}
 Install-SmartPark.ps1 SHA256: $INSTALLER_SHA
 Install-SmartParkServices.ps1 SHA256: $SERVICES_SHA
 EOF
