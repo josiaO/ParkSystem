@@ -16,6 +16,13 @@ REQUIRED_DLLS = (
     "DecodeSdk.dll",
 )
 
+REQUIRED_PYTHON64_RUNTIME = (
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
+
 REQUIRED_MODELS = (
     "fastalpr/detector/yolo-v9-t-384-license-plates-end2end.onnx",
     "fastalpr/ocr/cct_xs_v2_global.onnx",
@@ -77,6 +84,24 @@ def _wheel_dist(filename: str) -> str:
     return _norm(filename.split("-", 1)[0])
 
 
+def _wheel_version(filename: str) -> str:
+    return filename.split("-", 2)[1]
+
+
+def _pinned_requirements(requirements: Path) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    if not requirements.is_file():
+        return pins
+    for raw in requirements.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-") or "==" not in line:
+            continue
+        package, version = re.split(r"\s*==\s*", line, maxsplit=1)
+        package = re.sub(r"\[.*\]$", "", package).strip()
+        pins[_norm(package)] = version.strip()
+    return pins
+
+
 def _requires_dist(wheel: Path) -> list[str]:
     with ZipFile(wheel) as zf:
         metas = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")]
@@ -127,12 +152,22 @@ def verify_payload(payload: Path) -> list[str]:
 
     if not (payload / "python64" / "python.exe").is_file():
         errors.append("64-bit embeddable Python missing: python64/python.exe")
+    local_runtime_complete = all((payload / "python64" / name).is_file() for name in REQUIRED_PYTHON64_RUNTIME)
+    bundled_redist = payload / "vendor" / "vc_redist.x64.exe"
+    if not local_runtime_complete and not bundled_redist.is_file():
+        errors.append(
+            "64-bit Windows runtime missing: provide python64 MSVC DLLs or vendor/vc_redist.x64.exe"
+        )
     if not (payload / "python32" / "python.exe").is_file():
         errors.append("32-bit embeddable Python missing: python32/python.exe")
     if not (payload / "get-pip.py").is_file():
         errors.append("get-pip.py missing")
     if not (payload / "app" / "web" / "index.html").is_file():
         errors.append("web UI missing: app/web/index.html")
+    if not any((payload / "app" / "assets").glob("*.ico")):
+        errors.append("desktop application icon missing: app/assets/*.ico")
+    if not any((payload / "app" / "web" / "assets").glob("*.ico")):
+        errors.append("browser favicon missing: app/web/assets/*.ico")
     if not (payload / "app" / "desktop" / "main.py").is_file():
         errors.append("desktop UI missing: app/desktop/main.py")
     if not (payload / "tools" / "field_acceptance_test.py").is_file():
@@ -168,6 +203,12 @@ def verify_payload(payload: Path) -> list[str]:
     names = [p.name for p in wheels]
     dists = [_wheel_dist(n) for n in names]
     present = set(dists)
+    pins = _pinned_requirements(payload / "requirements-windows.txt")
+    for name in names:
+        dist = _wheel_dist(name)
+        required = pins.get(dist)
+        if required is not None and _wheel_version(name) != required:
+            errors.append(f"wheel {name} violates exact requirement {dist}=={required}")
     dupes = sorted({d for d in dists if dists.count(d) > 1})
     if dupes:
         errors.append(f"duplicate wheel packages: {dupes}")

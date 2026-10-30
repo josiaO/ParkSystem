@@ -10,14 +10,16 @@ FALLBACK_PROFILE = "COMPATIBLE"
 _PROFILES: dict[str, dict[str, str]] = {
     "COMPATIBLE": {
         "rtsp_transport": "tcp",
-        "fflags": "+genpts",
+        "fflags": "+genpts+discardcorrupt",
+        "err_detect": "ignore_err",
         "probesize": "5000000",
         "analyzeduration": "5000000",
         "max_delay": "500000",
     },
     "LOW_LATENCY_LAN": {
         "rtsp_transport": "tcp",
-        "fflags": "+genpts",
+        "fflags": "+genpts+discardcorrupt",
+        "err_detect": "ignore_err",
         "flags": "low_delay",
         "probesize": "1000000",
         "analyzeduration": "1000000",
@@ -25,14 +27,16 @@ _PROFILES: dict[str, dict[str, str]] = {
     },
     "LOSSY_NETWORK": {
         "rtsp_transport": "tcp",
-        "fflags": "nobuffer+discardcorrupt",
+        "fflags": "nobuffer+genpts+discardcorrupt",
+        "err_detect": "ignore_err",
         "probesize": "1000000",
         "analyzeduration": "1000000",
         "max_delay": "1000000",
     },
     "VENDOR_SPECIAL": {
         "rtsp_transport": "tcp",
-        "fflags": "+genpts",
+        "fflags": "+genpts+discardcorrupt",
+        "err_detect": "ignore_err",
         "probesize": "2000000",
         "analyzeduration": "2000000",
         "max_delay": "500000",

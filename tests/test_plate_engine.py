@@ -1,4 +1,4 @@
-"""FastALPR plate engine: ParkWatch-style read, swap, and retrain pack."""
+"""FastALPR plate engine: SmartPark read, swap, and retrain pack."""
 
 from __future__ import annotations
 

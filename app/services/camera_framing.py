@@ -72,11 +72,40 @@ def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float)
     return out
 
 
+def best_arrival_box(boxes: list[dict] | None) -> dict | None:
+    """Choose the closest credible plate for the lane gate.
+
+    Detector confidence order can change between frames when a second car or
+    a reflection is present. Area-first selection keeps the gate attached to
+    the nearest plate, which is also the plate with the most readable pixels.
+    """
+    candidates = [item for item in (boxes or []) if isinstance(item, dict)]
+    if not candidates:
+        return None
+
+    def key(item: dict) -> tuple[float, float]:
+        try:
+            area = max(0.0, float(item.get("x2", 0)) - float(item.get("x1", 0))) * max(
+                0.0, float(item.get("y2", 0)) - float(item.get("y1", 0))
+            )
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+        return area, confidence
+
+    return max(candidates, key=key)
+
+
 def gate_for(camera_id: int) -> "ArrivalGate":
     camera_id = int(camera_id)
     gate = _gates.get(camera_id)
     if gate is None:
-        gate = ArrivalGate()
+        from app.config import settings
+
+        gate = ArrivalGate(
+            min_plate_width_px=int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 0),
+            far_fallback_seconds=float(getattr(settings, "alpr_capture_far_fallback_seconds", 1.5) or 0),
+        )
         _gates[camera_id] = gate
     return gate
 
@@ -93,15 +122,19 @@ class ArrivalGate:
     def __init__(
         self,
         *,
-        stable_seconds: float = 0.35,
-        move_ratio: float = 0.025,
+        stable_seconds: float = 0.25,
+        move_ratio: float = 0.05,
         absence_seconds: float = 0.6,
         max_ocr: int = 2,
+        min_plate_width_px: int = 0,
+        far_fallback_seconds: float = 0.0,
     ) -> None:
         self.stable_seconds = float(stable_seconds)
         self.move_ratio = float(move_ratio)
         self.absence_seconds = float(absence_seconds)
         self.max_ocr = int(max_ocr)
+        self.min_plate_width_px = max(0, int(min_plate_width_px or 0))
+        self.far_fallback_seconds = max(0.0, float(far_fallback_seconds or 0.0))
         self.reset()
 
     def reset(self) -> None:
@@ -142,10 +175,19 @@ class ArrivalGate:
         center = _box_center(box)
         if center is None:
             return "absent"
-        if self._last is None or _moved(self._last, center, self.move_ratio):
+        moved = self._last is None or _moved(self._last, center, self.move_ratio)
+        if moved:
+            had_previous = self._last is not None
             self._last = center
             self._stable_since = now
             self._announced = False
+            # Do not require a stopped car when the plate already has enough
+            # pixels to read. The second near-size frame is an immediate,
+            # bounded OCR opportunity for fast traffic; consensus and plate
+            # validation still reject accidental/non-car text.
+            if had_previous and self._near_enough(box) and self._ocr_count < self.max_ocr:
+                self._announced = True
+                return "ready"
             return "moving"
         if self._stable_since is None:
             self._stable_since = now
@@ -153,6 +195,20 @@ class ArrivalGate:
             return "moving"
         if now - self._stable_since < self.stable_seconds:
             return "moving"
+        # Plate pixel width is a useful distance proxy. Upscaling cannot
+        # recover characters that were not sampled by the camera. Delay the
+        # OCR until the vehicle is close enough, but only for a bounded time so
+        # a fast vehicle is never lost solely because it stayed far away.
+        if self.min_plate_width_px > 0:
+            try:
+                plate_width = float(box["x2"]) - float(box["x1"])
+            except (KeyError, TypeError, ValueError):
+                plate_width = 0.0
+            if plate_width < self.min_plate_width_px and (
+                self.far_fallback_seconds <= 0.0
+                or now - self._stable_since < self.far_fallback_seconds
+            ):
+                return "far"
         if self._announced:
             return "moving"
         if self._ocr_count >= self.max_ocr:
@@ -160,6 +216,14 @@ class ArrivalGate:
             return "held"
         self._announced = True
         return "ready"
+
+    def _near_enough(self, box: dict) -> bool:
+        if self.min_plate_width_px <= 0:
+            return False
+        try:
+            return float(box["x2"]) - float(box["x1"]) >= self.min_plate_width_px
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def note_ocr(self, *, published: bool) -> None:
         self._ocr_count += 1

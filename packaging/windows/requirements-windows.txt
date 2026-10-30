@@ -13,7 +13,10 @@ PySide6_Essentials
 pillow
 numpy
 opencv-python-headless>=4.9.0.80,<5
-onnxruntime
+# Pin the Windows CPU provider to the field-tested build.  Newer unpinned
+# wheels have caused a native 0xC0000005 crash during FastALPR warm-up on the
+# packaged Windows runtime; this version is retained in the offline kit cache.
+onnxruntime==1.29.0
 protobuf
 fast-alpr[onnx]
 colorama

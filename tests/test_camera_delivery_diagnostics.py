@@ -54,6 +54,11 @@ def test_worker_claim_without_healthy_frames_does_not_disable_site_ocr(tmp_path,
             health["cameras"][0].update(state="READY", last_frame_at=time.time(), last_inference_at=time.time())
             recognition_worker._owns_cache.clear()
             assert recognition_worker.worker_owns_software_reads(83)
+            health["cameras"][0].update(state="STALLED", last_frame_at=time.time())
+            recognition_worker._owns_cache.clear()
+            # A slow native inference call still owns its decoder lane; Site
+            # Service must not start a second FastALPR instance beside it.
+            assert recognition_worker.worker_owns_software_reads(83)
             health["cameras"][0]["last_frame_at"] -= 60
             recognition_worker._owns_cache.clear()
             assert not recognition_worker.worker_owns_software_reads(83)

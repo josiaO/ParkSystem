@@ -7,7 +7,6 @@ The HVX NetSDK host stays Windows-only.
 from __future__ import annotations
 
 import socket
-import sys
 import threading
 import time
 import webbrowser
@@ -37,53 +36,45 @@ def _open_browser(url: str, delay: float = 1.2) -> None:
 
 
 def main() -> int:
+    from app.branding import PRODUCT_NAME
     from app.config import settings
+    from app.deployment import load_deployment_config
     from app.services.logging_setup import configure_logging
     from app.services.platform_capabilities import platform_snapshot
-    from app.services.runtime import acquire_instance_lock, install_crash_hooks
+    from app.services.runtime import install_crash_hooks
 
     install_crash_hooks("SmartParkWeb")
     configure_logging("web")
     snap = platform_snapshot()
-    url = f"http://{settings.api_host}:{settings.api_port}/"
-    print(f"SmartPark Edge web UI — {snap['os']}")
-    print(f"Open {url}")
-    print(snap["note"])
-    if not snap["hvx_host_supported"]:
-        print("Recommended camera adapter for IP cams:", snap["recommended_camera_adapter"])
-
-    if _port_open(settings.api_port):
-        print("Site Service already running; opening browser.")
+    deployment = load_deployment_config()
+    if deployment.is_operator_client:
+        url = f"{deployment.server_base_url}/"
+        print(f"Operator Workstation: using Site Server at {url}")
         try:
             webbrowser.open(url)
         except Exception:
             pass
         return 0
+    bind_port = int(deployment.server_bind_port or settings.api_port)
+    url = f"http://127.0.0.1:{bind_port}/"
+    print(f"{PRODUCT_NAME} web UI — {snap['os']}")
+    print(f"Open {url}")
+    print(snap["note"])
+    if not snap["hvx_host_supported"]:
+        print("Recommended camera adapter for IP cams:", snap["recommended_camera_adapter"])
 
-    if not acquire_instance_lock("site-service"):
-        print("SmartPark Site Service is already starting.", file=sys.stderr)
-        _open_browser(url)
-        time.sleep(2.0)
-        return 0
+    try:
+        from app.desktop.launch import ensure_background_services
 
-    from app.desktop.launch import install_root, start_hvx_host
+        ensure_background_services(config=deployment)
+    except Exception as exc:
+        print(f"{PRODUCT_NAME} Site Service failed to become ready: {exc}")
+        return 1
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
 
-    root = install_root()
-    start_hvx_host(root)
-    _open_browser(url)
-
-    import uvicorn
-    from app.api_main import app
-
-    uvicorn.run(
-        app,
-        host=settings.api_host,
-        port=settings.api_port,
-        log_level="warning",
-        access_log=False,
-        reload=False,
-        workers=1,
-    )
     return 0
 
 

@@ -166,7 +166,7 @@ def is_camera_no_plate(value: str | None) -> bool:
 def is_empty_scene_ocr(value: str | None, *, confidence: float = 0.0) -> bool:
     """True when OCR looks like an empty-lane hallucination, not a vehicle plate.
 
-    ParkWatch OcxConfig filters 无车牌 (no vehicle). FastALPR's CCT-global model
+    The camera/OCR path filters 无车牌 (no vehicle). FastALPR's CCT-global model
     and a QY camera left on 全国 Chinese plate types commonly emit ``ZC…`` on
     bollards and empty asphalt. A real registration that happens to start with
     those letters still passes when it matches a known plate shape or is a

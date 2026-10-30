@@ -71,8 +71,8 @@ def _sync_cameras_from_db() -> list[dict]:
         if not cfg.get("media_gateway_enabled"):
             return synced
         for camera in db.query(Camera).filter(Camera.enabled == True).all():
-            from app.services.node_scope import camera_in_recognition_scope
-            if not camera_in_recognition_scope(camera, db=db):
+            from app.services.node_scope import camera_active_on_this_installation
+            if not camera_active_on_this_installation(camera, db=db):
                 continue
             if not media_mtx_for_camera(int(camera.id), db):
                 continue
@@ -103,6 +103,14 @@ def main() -> int:
     if not acquire_instance_lock("media-service"):
         print("SmartPark Media Service is already running.", file=sys.stderr)
         return 0
+    from app.deployment import load_deployment_config
+    from app.database_config import apply_runtime_database_config
+
+    deployment = load_deployment_config()
+    if not deployment.runs_local_gate_runtime or not deployment.configured:
+        print("Media Service is disabled until a configured Site Server exists.", file=sys.stderr)
+        return 2
+    apply_runtime_database_config(deployment.database)
     from app.services import mediamtx
 
     from sqlalchemy.exc import OperationalError
