@@ -345,31 +345,23 @@ cp "$WHEELS32"/pillow-*.whl "$OUT/payload/wheels32/"
 
 cp "$ROOT/packaging/windows/Install-SmartPark.ps1" "$OUT/"
 cp "$ROOT/packaging/windows/Install-SmartPark.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Install-SmartPark-Server.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Install-SmartPark-Node.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Install-SmartPark-Client.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Install-SmartParkServices.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Install-SmartParkWinService.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Enable-MediaMTX.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/MediaMTX-SoakTest.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-FieldAcceptanceTest.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-FieldAcceptanceTest.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Run-StartupCheck.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-StartupCheck.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Run-ServerDiagnostics.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-ServerDiagnostics.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Run-RecordedMediaTests.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-RecordedMediaTests.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Open-SmartParkLogs.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Run-CameraLab.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Run-CameraLab.bat" "$OUT/"
-cp "$ROOT/packaging/windows/Wipe-SmartPark.ps1" "$OUT/"
-cp "$ROOT/packaging/windows/Wipe-SmartPark.bat" "$OUT/"
+SUPPORT="$OUT/support"
+mkdir -p "$SUPPORT"
+for helper in \
+  Install-SmartParkServices.ps1 \
+  Install-SmartParkWinService.ps1 \
+  Enable-MediaMTX.ps1 \
+  MediaMTX-SoakTest.ps1 \
+  Run-FieldAcceptanceTest.ps1 Run-FieldAcceptanceTest.bat \
+  Run-StartupCheck.ps1 Run-StartupCheck.bat \
+  Run-ServerDiagnostics.ps1 Run-ServerDiagnostics.bat \
+  Run-RecordedMediaTests.ps1 Run-RecordedMediaTests.bat \
+  Open-SmartParkLogs.bat \
+  Run-CameraLab.ps1 Run-CameraLab.bat \
+  Wipe-SmartPark.ps1 Wipe-SmartPark.bat; do
+  cp "$ROOT/packaging/windows/$helper" "$SUPPORT/"
+done
 cp "$ROOT/packaging/windows/README-USB.txt" "$OUT/README.txt"
-cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/FIRST_TEST_WINDOWS.md"
-if [[ -f "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" ]]; then
-  cp "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" "$OUT/WINDOWS_CAMERA_UI_FIXES.md"
-fi
 # Make it impossible to confuse a stale USB copy with the package that was
 # actually assembled.  The source tree may contain uncommitted fixes, so the
 # marker includes hashes of the two startup scripts as well as the Git state.
@@ -388,6 +380,9 @@ Install-SmartParkServices.ps1 SHA256: $SERVICES_SHA
 EOF
 rm -rf "$OUT/documentation"
 mkdir -p "$OUT/documentation"
+if [[ -f "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" ]]; then
+  cp "$ROOT/WINDOWS_CAMERA_UI_FIXES.md" "$OUT/documentation/WINDOWS_CAMERA_UI_FIXES.md"
+fi
 cp "$ROOT/docs-site/index.html" "$OUT/documentation/"
 cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
@@ -400,13 +395,14 @@ cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
 cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
 cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
 cp "$ROOT/docs/MIGRATION-AND-ROLLBACK.md" "$OUT/documentation/"
+cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/documentation/"
 if [[ -f "$ROOT/docs/CAMERA-LAB.md" ]]; then
   cp "$ROOT/docs/CAMERA-LAB.md" "$OUT/documentation/"
 fi
 echo "Verifying offline payload (wheels, NetSDK, models, Python)..."
 python3 "$ROOT/packaging/verify_windows_kit.py" "$OUT/payload"
 
-ZIP="$ROOT/dist/SmartParkEdge-USB.zip"
+ZIP="$ROOT/dist/SmartParkEdge-Installer.zip"
 mkdir -p "$ROOT/dist"
 rm -f "$ZIP"
 ( cd "$ROOT/dist" && python3 -m zipfile -c "$(basename "$ZIP")" "SmartParkEdge-Install" )

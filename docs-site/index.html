@@ -159,7 +159,7 @@
 
     <section id="processing-node">
       <h2>Add a Processing Node</h2>
-      <p>Use this role when the second PC must connect to its own cameras and recognition lane. From the Site Server login page, download the Zirp installer, extract it, and run <code>Install-SmartPark-Node.bat</code> (or choose <strong>N Processing Node</strong> in <code>Install-SmartPark.bat</code>).</p>
+      <p>Use this role when the second PC must connect to its own cameras and recognition lane. From the Site Server login page, download the single Zirp installer, extract it, and run <code>Install-SmartPark.bat</code>, then choose <strong>EDGE_NODE</strong> (Processing Node).</p>
       <ol class="steps">
         <li>Install PostgreSQL on the Site Server and create the dedicated Zirp database user. Allow the node PC to reach PostgreSQL on the private network.</li>
         <li>The node installer locks the wizard to <strong>Processing Node</strong>. Enter the existing Site Server address, then a dedicated PostgreSQL host/database/user/password approved for this deployment. SQLite is hidden and rejected; the node only checks the existing schema and never creates or migrates a local site database.</li>
@@ -244,7 +244,7 @@ http://&lt;site-server&gt;:8760/health/ready</code></pre>
       </ol>
       <h3>Allowing a Processing Node to reach PostgreSQL</h3>
       <p>Example: Site Server <code>192.168.10.20</code>, Processing Node <code>192.168.10.21</code>. On the Site Server, set <code>listen_addresses = '192.168.10.20,127.0.0.1'</code> in <code>postgresql.conf</code>, then add <code>host smartpark smartpark 192.168.10.21/32 scram-sha-256</code> to <code>pg_hba.conf</code>. Restart the PostgreSQL Windows service. Add a Private-profile firewall rule that permits TCP <code>5432</code> from <code>192.168.10.21</code> only.</p>
-      <p>From the node, run <code>powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"</code>. Then run <code>Install-SmartPark-Node.bat</code>, use <code>http://192.168.10.20:8760</code> for the Site Server address, and use <code>192.168.10.20</code>—never <code>localhost</code> or <code>127.0.0.1</code>—as the PostgreSQL host. The full Windows CMD procedure and failure table are in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</p>
+      <p>From the node, run <code>powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"</code>. Then run <code>Install-SmartPark.bat</code>, choose <code>EDGE_NODE</code>, use <code>http://192.168.10.20:8760</code> for the Site Server address, and use <code>192.168.10.20</code>—never <code>localhost</code> or <code>127.0.0.1</code>—as the PostgreSQL host. The full Windows CMD procedure and failure table are in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</p>
       <div class="card warn"><strong>Camera ownership:</strong> close other vendor SDK clients before connecting HVX cameras. Another program may allow video while preventing the callback path required for plate events.</div>
     </section>
 

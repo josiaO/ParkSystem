@@ -487,6 +487,13 @@ class HVXSDK:
             return
         with self._lock:
             previous = dict(self._last_capture.get(handle) or {})
+            pending = self._pending_events.setdefault(handle, deque(maxlen=64))
+            # A report containing only geometry is an enrichment for an image
+            # callback already in the queue. It is not a new vehicle event.
+            # Reusing ``previous.plate`` here made an empty-lane report create
+            # another capture with the last car's plate.
+            if not plate and not pending:
+                return
             event = {
                 "image_id": int(previous.get("image_id") or 0),
                 "captured_at_epoch": time.time(),
@@ -502,7 +509,6 @@ class HVXSDK:
             }
             event = retain_plate_box(previous, event)
             self._last_capture[handle] = event
-            pending = self._pending_events.setdefault(handle, deque(maxlen=64))
             if pending and not plate_box_usable(pending[-1].get("plate_box")):
                 pending[-1]["plate_box"] = list(event["plate_box"]) if event.get("plate_box") else pending[-1].get("plate_box")
                 pending[-1]["have_vehicle"] = bool(event.get("have_vehicle"))

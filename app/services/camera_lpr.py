@@ -280,6 +280,10 @@ def capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0
         "local_plate": fusion.get("local_plate") or local.get("plate") or "",
         "needs_review": bool(getattr(fused, "needs_review", False)),
         "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
+        "image_ref": local.get("image_ref") or native.get("image_ref") or "",
+        "plate_crop_ref": local.get("plate_crop_ref") or native.get("plate_crop_ref") or "",
+        "event_id": local.get("event_id") or native.get("event_id") or "",
+        "visit_id": local.get("visit_id") or native.get("visit_id") or "",
     }
 
 

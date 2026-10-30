@@ -12,10 +12,11 @@ from __future__ import annotations
 import re
 import time
 import logging
+import hashlib
 from io import BytesIO
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,12 @@ from app.models import Camera, VehicleCapture, as_utc, utcnow
 from app.services.camera_lpr import bbox_from_lp_box, native_from_sdk_capture
 
 log = logging.getLogger("smartpark")
+
+_MEDIA_HASH_INDEX: dict[str, dict[tuple[int, str], str]] = {}
+
+
+def _media_signature(data: bytes) -> tuple[int, str]:
+    return len(data), hashlib.sha256(data).hexdigest()
 
 
 # Common false OCR from roadside signs / UI chrome — not vehicle plates.
@@ -147,19 +154,64 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
     folder = settings.media_dir / kind
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / name
-    # Late native callbacks can repeat the same image_id/capture.  Preserve the
-    # first evidence file and avoid another synchronous disk write when the
-    # bytes are identical.  A changed image with the same name is still
-    # accepted, which keeps the late-box update path correct.
+    if not data:
+        return ""
+    index_key = str(folder.resolve())
+    index = _MEDIA_HASH_INDEX.setdefault(index_key, {})
+    signature = _media_signature(data)
+    existing = index.get(signature)
+    if existing and (folder / existing).is_file():
+        log.debug("evidence write skipped duplicate kind=%s existing=%s", kind, existing)
+        return (Path(kind) / existing).as_posix()
+    # Build the index lazily, only when an evidence write occurs. This catches
+    # duplicates left by an earlier process without adding work to idle lanes.
+    if not index:
+        try:
+            for candidate in folder.iterdir():
+                if candidate.suffix.lower() != ".jpg" or not candidate.is_file():
+                    continue
+                try:
+                    index.setdefault(_media_signature(candidate.read_bytes()), candidate.name)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        existing = index.get(signature)
+        if existing and (folder / existing).is_file():
+            log.debug("evidence write skipped existing duplicate kind=%s existing=%s", kind, existing)
+            return (Path(kind) / existing).as_posix()
+    # Late native callbacks can repeat the same image_id/capture. Preserve the
+    # first evidence file; a changed image with the same name is still accepted.
     if dest.is_file():
         try:
             if dest.read_bytes() == data:
-                log.debug("evidence write skipped duplicate kind=%s name=%s", kind, name)
+                index[signature] = name
                 return (Path(kind) / name).as_posix()
         except OSError:
             pass
     dest.write_bytes(data)
+    for old_signature, old_name in list(index.items()):
+        if old_name == name and old_signature != signature:
+            index.pop(old_signature, None)
+    index[signature] = name
     return (Path(kind) / name).as_posix()
+
+
+def _reuse_media_ref(ref: str | None, kind: str, data: bytes) -> str:
+    """Reuse evidence already archived by the recognition worker."""
+    raw = str(ref or "").strip().replace("\\", "/")
+    if raw.startswith("/media/"):
+        raw = raw[len("/media/"):]
+    parts = Path(raw).parts
+    if len(parts) != 2 or parts[0] != kind or parts[1] in {"", ".", ".."}:
+        return ""
+    path = settings.media_dir / kind / parts[1]
+    try:
+        if path.is_file() and (not data or path.read_bytes() == data):
+            return Path(kind, parts[1]).as_posix()
+    except OSError:
+        return ""
+    return ""
 
 
 def _plate_crop_name(camera_id: int, image_id: int, capture: dict | None, plate: str = "") -> str:
@@ -340,6 +392,27 @@ def _crop_from_bbox(jpeg: bytes, box: dict | None, *, pad_ratio: float = PLATE_C
         return b""
 
 
+def _enhance_crop_jpeg(crop: bytes) -> bytes:
+    """Create the readable evidence crop while keeping the car snapshot raw."""
+    if not crop or crop[:2] != b"\xff\xd8":
+        return b""
+    try:
+        from app.services.alpr import _prepare_ocr_crop, decode_alpr_image
+        from PIL import Image
+
+        bgr = decode_alpr_image(crop)
+        enhanced = _prepare_ocr_crop(bgr, enhance=True)
+        if enhanced is None or getattr(enhanced, "size", 0) == 0:
+            return crop
+        output = BytesIO()
+        Image.fromarray(enhanced[:, :, ::-1]).save(output, format="JPEG", quality=95)
+        return output.getvalue() or crop
+    except Exception:
+        # Optional enhancement must never make evidence disappear on a minimal
+        # installation; the raw crop is the safe fallback.
+        return crop
+
+
 def _plate_jpeg(jpeg: bytes, crop: bytes, box: dict | None, capture: dict | None) -> bytes:
     capture = capture or {}
     plate_jpeg = crop if _looks_like_plate_crop(crop, jpeg) else b""
@@ -349,7 +422,9 @@ def _plate_jpeg(jpeg: bytes, crop: bytes, box: dict | None, capture: dict | None
         fallback = _crop_from_bbox(jpeg, box)
         if fallback[:2] == b"\xff\xd8":
             plate_jpeg = fallback
-    return plate_jpeg if plate_jpeg[:2] == b"\xff\xd8" else b""
+    if plate_jpeg[:2] != b"\xff\xd8":
+        return b""
+    return _enhance_crop_jpeg(plate_jpeg) or plate_jpeg
 
 
 def attach_fusion_audit(box: dict | None, capture: dict | None) -> dict:
@@ -433,6 +508,70 @@ def _capture_by_identity(db: Session, camera_id: int, capture: dict | None) -> V
             ))
             if existing is not None:
                 return existing
+    return None
+
+
+def _box_iou(left: dict | None, right: dict | None) -> float:
+    a = _xyxy(left)
+    b = _xyxy(right)
+    if a is None or b is None:
+        return 0.0
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if intersection <= 0:
+        return 0.0
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _recent_native_duplicate(
+    db: Session,
+    camera: Camera,
+    capture: dict | None,
+    native: dict,
+    *,
+    force: bool,
+) -> VehicleCapture | None:
+    """Collapse repeated native callbacks before writing another evidence file.
+
+    The HVX SDK may assign a new image ID to each callback for one car. The
+    visit ID normally protects the database, but an SDK reconnect or a late
+    callback can create a new visit ID. Same-camera native reads with the same
+    plate and nearby plate geometry are still one physical read during the
+    short repeat window. Explicit/maintenance writes use ``force`` and are
+    never collapsed here.
+    """
+    if force:
+        return None
+    source = str((capture or {}).get("source") or native.get("source") or "").lower()
+    if "fastalpr" in source or source in {"local", "simulation", "simulated"}:
+        return None
+    plate = normalize_plate(native.get("plate") or "")
+    if not plate:
+        return None
+    latest = latest_for_camera(db, camera.id)
+    if latest is None or normalize_plate(latest.plate or "") != plate:
+        return None
+    created = as_utc(latest.created_at)
+    if created is None:
+        return None
+    age = (utcnow() - created).total_seconds()
+    window = float(getattr(settings, "native_repeat_window_seconds", 8.0) or 8.0)
+    if age < 0 or age > window:
+        return None
+    current_box = native.get("bbox") if isinstance(native.get("bbox"), dict) else None
+    previous_box = latest.bbox if isinstance(latest.bbox, dict) else None
+    if current_box is None or previous_box is None or _box_iou(current_box, previous_box) >= 0.45:
+        log.info(
+            "native capture duplicate suppressed camera_id=%s plate=%s age_seconds=%.2f",
+            camera.id,
+            plate,
+            age,
+        )
+        return latest
     return None
 
 
@@ -520,12 +659,14 @@ def persist_event(
             elif not already:
                 existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
             if plate_jpeg[:2] == b"\xff\xd8":
-                existing.crop_path = _write_jpeg(
+                existing.crop_path = _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg) or _write_jpeg(
                     "crops", _plate_crop_name(camera.id, image_id, capture, incoming_plate or existing.plate), plate_jpeg,
                 )
                 updated = True
             if jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
-                existing.snapshot_path = _write_jpeg("snapshots", f"cam{camera.id}-img{image_id}-car.jpg", jpeg)
+                existing.snapshot_path = _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", jpeg) or _write_jpeg(
+                    "snapshots", f"cam{camera.id}-img{image_id}-car.jpg", jpeg,
+                )
                 updated = True
             if updated:
                 db.commit()
@@ -558,10 +699,17 @@ def persist_event(
                     db.commit()
                     db.refresh(latest)
                 return latest
+    recent_duplicate = _recent_native_duplicate(db, camera, capture, native, force=force)
+    if recent_duplicate is not None:
+        return recent_duplicate
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
-    snapshot_path = _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg) if jpeg[:2] == b"\xff\xd8" else ""
-    crop_path = _write_jpeg(
-        "crops", _plate_crop_name(camera.id, image_id, capture, native.get("plate")), plate_jpeg,
+    snapshot_path = (
+        _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", jpeg)
+        or _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg)
+    ) if jpeg[:2] == b"\xff\xd8" else ""
+    crop_path = (
+        _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg)
+        or _write_jpeg("crops", _plate_crop_name(camera.id, image_id, capture, native.get("plate")), plate_jpeg)
     ) if plate_jpeg[:2] == b"\xff\xd8" else ""
     row = VehicleCapture(
         camera_id=camera.id,
@@ -600,6 +748,55 @@ def latest_for_camera(db: Session, camera_id: int) -> VehicleCapture | None:
         .where(VehicleCapture.camera_id == camera_id)
         .order_by(VehicleCapture.id.desc())
     )
+
+
+def latest_for_cameras(db: Session, camera_ids: list[int] | set[int]) -> dict[int, VehicleCapture]:
+    """Fetch the latest capture for many cameras in one bounded query."""
+    ids = sorted({int(value) for value in camera_ids if value is not None})
+    if not ids:
+        return {}
+    latest_ids = (
+        select(func.max(VehicleCapture.id).label("id"))
+        .where(VehicleCapture.camera_id.in_(ids))
+        .group_by(VehicleCapture.camera_id)
+        .subquery()
+    )
+    rows = db.scalars(
+        select(VehicleCapture).where(VehicleCapture.id.in_(select(latest_ids.c.id)))
+    ).all()
+    return {int(row.camera_id): row for row in rows if row.camera_id is not None}
+
+
+def captures_for_sessions(db: Session, rows: list[object]) -> dict[int, VehicleCapture]:
+    """Resolve session display stills with bounded queries instead of one per row."""
+    from app.models import ParkingSession
+
+    sessions = [row for row in rows if isinstance(row, ParkingSession)]
+    if not sessions:
+        return {}
+    plates = {normalize_plate(row.plate) for row in sessions if normalize_plate(row.plate)}
+    camera_ids = {int(row.camera_id) for row in sessions if row.camera_id is not None}
+    by_plate: dict[str, VehicleCapture] = {}
+    by_camera = latest_for_cameras(db, camera_ids)
+    if plates:
+        latest_ids = (
+            select(func.max(VehicleCapture.id).label("id"))
+            .where(VehicleCapture.plate.in_(plates))
+            .group_by(VehicleCapture.plate)
+            .subquery()
+        )
+        by_plate = {
+            normalize_plate(row.plate): row
+            for row in db.scalars(
+                select(VehicleCapture).where(VehicleCapture.id.in_(select(latest_ids.c.id)))
+            ).all()
+            if row.plate
+        }
+    return {
+        int(row.id): by_plate.get(normalize_plate(row.plate)) or by_camera.get(int(row.camera_id))
+        for row in sessions
+        if row.id is not None
+    }
 
 
 def list_captures(db: Session, *, gate_id: int | None = None, limit: int = 20) -> list[VehicleCapture]:

@@ -28,9 +28,10 @@ class MjpegStream(QThread):
         client=httpx.Client(timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0))
         self._client=client
         try:
+            base_url = getattr(api, "local_base_url", "") or getattr(api, "base_url", "")
             with client.stream(
                 "GET",
-                f"{api.base_url}/cameras/{self.camera_id}/live.mjpeg",
+                f"{base_url}/cameras/{self.camera_id}/live.mjpeg",
                 headers=api._headers(),
             ) as response:
                 if response.status_code >= 400:

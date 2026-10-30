@@ -46,6 +46,9 @@ OPEN_STATUSES = {"WAITING_RECEIPT", "ACTIVE", "PAID", "OPEN"}
 
 
 def parking_settings(db: Session) -> dict:
+    cached = db.info.get("smartpark.parking_settings") if hasattr(db, "info") else None
+    if isinstance(cached, dict):
+        return dict(cached)
     row = db.get(SiteSetting, "parking")
     merged = dict(DEFAULT_PARKING_SETTINGS)
     if row and isinstance(row.value, dict):
@@ -53,6 +56,8 @@ def parking_settings(db: Session) -> dict:
     policy = resolve_receipt_policy(merged)
     merged["receipt_policy"] = policy
     merged["receipt_required_before_open"] = policy_requires_taken(policy)
+    if hasattr(db, "info"):
+        db.info["smartpark.parking_settings"] = dict(merged)
     return merged
 
 
@@ -82,10 +87,12 @@ def save_parking_settings(db: Session, payload: dict) -> dict:
         current["printer_adapter"] = "simulated"
         row.value = current
     db.commit()
+    if hasattr(db, "info"):
+        db.info.pop("smartpark.parking_settings", None)
     return parking_settings(db)
 
 
-def session_dict(row: ParkingSession) -> dict:
+def session_dict(row: ParkingSession, capture=None, *, lookup_capture: bool = True) -> dict:
     token = row.public_token or ""
     body = {
         "id": row.id,
@@ -120,7 +127,9 @@ def session_dict(row: ParkingSession) -> dict:
         from app.services.captures import capture_dict, find_capture_for_session
         db = object_session(row)
         if db is not None:
-            cap = find_capture_for_session(db, plate=row.plate, camera_id=row.camera_id)
+            cap = capture
+            if cap is None and lookup_capture:
+                cap = find_capture_for_session(db, plate=row.plate, camera_id=row.camera_id)
             if cap:
                 info = capture_dict(cap)
                 body["snapshot_url"] = info.get("snapshot_url")
