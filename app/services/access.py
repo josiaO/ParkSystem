@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.plate import correct_ocr_confusions, normalize_plate, plate_similarity
 from app.domain.site import DEFAULT_SITE_ID
@@ -76,10 +76,14 @@ def _fuzzy_match_vehicle(
     now = at or utcnow()
     best: RegisteredVehicle | None = None
     best_score = 0.0
-    for row in db.scalars(select(RegisteredVehicle).where(
-        RegisteredVehicle.site_id == site_id,
-        RegisteredVehicle.enabled.is_(True),
-    )):
+    for row in db.scalars(
+        select(RegisteredVehicle)
+        .options(joinedload(RegisteredVehicle.plan))
+        .where(
+            RegisteredVehicle.site_id == site_id,
+            RegisteredVehicle.enabled.is_(True),
+        )
+    ):
         if not _in_window(row, now):
             continue
         plan = row.plan
@@ -103,10 +107,14 @@ def lookup_entitlement(
     plate = normalize_plate(plate)
     if not plate:
         return Entitlement()
-    vehicle = db.scalar(select(RegisteredVehicle).where(
-        RegisteredVehicle.site_id == site_id,
-        RegisteredVehicle.plate == plate,
-    ))
+    vehicle = db.scalar(
+        select(RegisteredVehicle)
+        .options(joinedload(RegisteredVehicle.plan))
+        .where(
+            RegisteredVehicle.site_id == site_id,
+            RegisteredVehicle.plate == plate,
+        )
+    )
     if vehicle is None and strict:
         # Automatic barrier authority must not be granted from a fuzzy plate
         # guess. Recognition may reach a stable exact plate before calling us;
@@ -125,10 +133,14 @@ def lookup_entitlement(
         validation = str(site_policy(db).get("plate_validation") or "NONE")
         fixed = correct_ocr_confusions(plate, known_plates=known, policy=validation)
         if fixed.get("plate") and fixed["plate"] != plate:
-            vehicle = db.scalar(select(RegisteredVehicle).where(
-                RegisteredVehicle.site_id == site_id,
-                RegisteredVehicle.plate == fixed["plate"],
-            ))
+            vehicle = db.scalar(
+                select(RegisteredVehicle)
+                .options(joinedload(RegisteredVehicle.plan))
+                .where(
+                    RegisteredVehicle.site_id == site_id,
+                    RegisteredVehicle.plate == fixed["plate"],
+                )
+            )
     if vehicle is None:
         vehicle = _fuzzy_match_vehicle(db, plate, at=at, site_id=site_id)
     if vehicle is None or not vehicle.enabled:

@@ -568,7 +568,22 @@ def start_exit(
     if gate_id is not None:
         row.exit_gate_id = gate_id
     row.lane_direction = "EXIT"
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The partial unique exit-event index closes the final concurrent race
+        # between two lanes/outbox deliveries claiming the same event.
+        db.rollback()
+        if event_id:
+            winner = db.scalar(
+                select(ParkingSession).where(
+                    ParkingSession.site_id == site_id,
+                    ParkingSession.exit_event_id == event_id,
+                )
+            )
+            if winner is not None:
+                return winner, _current(winner)
+        raise
     db.refresh(row)
 
     if _current(row) == ACTIVE:

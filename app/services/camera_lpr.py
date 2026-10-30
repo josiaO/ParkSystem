@@ -60,7 +60,7 @@ def native_confidence(score) -> float:
 def bbox_from_lp_box(box) -> dict | None:
     """T_ImageUserInfo.usLpBox: top-left (0, 1), bottom-right (2, 3).
 
-    OcxConfig and ParkWatch both read those four ushorts at bytes 0x18, 0x1a,
+    The vendor camera callback stores those four ushorts at bytes 0x18, 0x1a,
     0x1c and 0x1e of the image callback. A zero rectangle is not a plate.
     """
     if isinstance(box, dict):
@@ -189,7 +189,7 @@ def live_plate_overlay(native: dict | None, local: dict | None, held: dict | Non
 
     A camera usLpBox is drawn as soon as the callback arrives. While the
     vehicle is still in the lane, that box stays up after the callback is no
-    longer fresh — the same way ParkWatch keeps the plate region on the video
+    longer fresh so the plate region remains available on the video
     for the visit. A FastALPR box is only the fallback while the lane is occupied.
     """
     camera = choose_overlay_box(native, None)
@@ -280,6 +280,10 @@ def capture_from_readings(native: dict, local: dict, fused, *, image_id: int = 0
         "local_plate": fusion.get("local_plate") or local.get("plate") or "",
         "needs_review": bool(getattr(fused, "needs_review", False)),
         "pending_confirmation": bool(pending or getattr(fused, "needs_review", False)),
+        "image_ref": local.get("image_ref") or native.get("image_ref") or "",
+        "plate_crop_ref": local.get("plate_crop_ref") or native.get("plate_crop_ref") or "",
+        "event_id": local.get("event_id") or native.get("event_id") or "",
+        "visit_id": local.get("visit_id") or native.get("visit_id") or "",
     }
 
 

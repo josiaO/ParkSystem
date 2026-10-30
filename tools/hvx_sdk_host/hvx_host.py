@@ -1,20 +1,78 @@
 from __future__ import annotations
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import platform
+import socket
 import struct
 import sys
+import threading
 from urllib.parse import parse_qs, urlparse
 
 from hvx_sdk import HVXSDK, HVXSDKError, describe_rc
 
 HOST="127.0.0.1"
 PORT=8765
+
+
+class BoundedHTTPServer(HTTPServer):
+    """Serve SDK requests without creating an unbounded thread per socket.
+
+    The old ``ThreadingHTTPServer`` allocated a native thread for every
+    polling connection.  A stuck SDK GPIO call therefore consumed another
+    thread on every dashboard poll until Windows returned ``can't start new
+    thread``.  That took the camera/control plane down even though the camera
+    sessions themselves were still connected.
+
+    Keep a small fixed worker pool and a bounded admission semaphore.  A
+    saturated host rejects excess requests instead of accumulating work that
+    can never be serviced.  The SDK callbacks and camera decoder remain
+    independent of this HTTP pool.
+    """
+
+    request_queue_size = 64
+
+    def __init__(self, server_address, handler_class, *, max_workers: int = 8, max_pending: int = 16):
+        super().__init__(server_address, handler_class)
+        self.daemon_threads = True
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hvx-http")
+        self._request_slots = threading.BoundedSemaphore(max_workers + max_pending)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            # Do not hand a request to an unbounded queue.  The client will
+            # retry through the normal HTTP client backoff path.
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+        try:
+            self._executor.submit(self._process_request, request, client_address)
+        except RuntimeError:
+            self._request_slots.release()
+            try:
+                request.close()
+            except OSError:
+                pass
+
+    def _process_request(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self._request_slots.release()
+
+    def server_close(self):
+        super().server_close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _is_peer_disconnect(exc: BaseException) -> bool:
@@ -34,9 +92,9 @@ def resolve_vendor_dir() -> Path:
     here = Path(__file__).resolve().parent
     ocx = here.parent.parent / "OcxConfig"
     local = here / "vendor"
-    configs_ocx = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
     installed = here.parent.parent / "vendor"
-    for candidate in (installed, ocx, local, configs_ocx):
+    supplied = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
+    for candidate in (installed, ocx, local, supplied):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else local
@@ -75,12 +133,20 @@ def reply_jpeg(handler, jpeg: bytes, status=200, headers=None):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version="SmartParkHVXHost/0.1"
+    def setup(self):
+        super().setup()
+        # A keep-alive socket must not reserve one of the bounded workers
+        # forever when an httpx client disappears without a clean FIN.
+        self.request.settimeout(10.0)
     def handle_one_request(self):
         # Browsers and the desktop client can close a keep-alive /info or JPEG
         # request while the host is writing its response.  socketserver prints
         # a traceback for that expected RST, which obscures actual SDK errors.
         try:
             return super().handle_one_request()
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+            return
         except OSError as exc:
             if _is_peer_disconnect(exc):
                 self.close_connection = True
@@ -273,7 +339,7 @@ if __name__ == "__main__":
     print(f"SmartPark HVX SDK Host — http://{HOST}:{PORT}")
     print(f"Python bitness: {struct.calcsize('P')*8}")
     if startup_error: print("SDK unavailable:",startup_error)
-    server=ThreadingHTTPServer((HOST,PORT),Handler)
+    server=BoundedHTTPServer((HOST,PORT),Handler)
     try: server.serve_forever()
     finally:
         if sdk: sdk.close()

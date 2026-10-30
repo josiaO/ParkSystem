@@ -33,7 +33,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
 
     camera_id = int(spec.id)
     local_url = _detect_url(camera_id)
-    ai_fps = float(getattr(settings, "detect_fps", 5.0) or 5.0)
+    ai_fps = float(getattr(settings, "detect_fps", 8.0) or 8.0)
     interval = 1.0 / max(ai_fps, 1.0)
     row = gateway._session_for(spec)
     row.detect_consumers = max(row.detect_consumers, 1)
@@ -47,7 +47,10 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             stream = gateway.ffmpeg_jpeg_stream(
                 local_url,
                 scale=960,
-                output_fps=ai_fps,
+                # Keep the source cadence here.  The single admission gate
+                # below chooses the newest frame; adding an FFmpeg fps filter
+                # would discard a useful plate view before it reaches it.
+                output_fps=None,
                 transport="TCP",
                 session=row,
             )
@@ -63,6 +66,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
                         jpeg,
                         source="mediamtx",
                         url=local_url,
+                        sampled=True,
                     )
                     last_sample = now
         except asyncio.CancelledError:

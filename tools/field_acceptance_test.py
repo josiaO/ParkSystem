@@ -420,7 +420,7 @@ def render_report(report: dict) -> str:
         if row.get("detail"):
             lines.append(f"            {row['detail']}")
     lines.append("")
-    lines.append("PASS means the live system matched the ParkWatch-style camera-JPEG → FastALPR path.")
+    lines.append("PASS means the live system matched the SmartPark camera-JPEG → FastALPR path.")
     lines.append("WARN is acceptable to finish a soak but should be reviewed before production.")
     lines.append("FAIL must be fixed; do not treat unit tests as a substitute for this report.")
     return "\n".join(lines)

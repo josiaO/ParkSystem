@@ -218,3 +218,44 @@ class LaneViewTests(unittest.TestCase):
             self.assertEqual(filled.id, first.id)
             self.assertTrue(filled.crop_path)
             self.assertTrue((self.media / filled.crop_path).is_file())
+
+    def test_recent_native_callbacks_with_new_image_ids_are_one_capture(self):
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            box = {"x1": 100, "y1": 120, "x2": 260, "y2": 165}
+            first = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 101, "plate": "T123ABC", "score": 90,
+                         "have_vehicle": True, "bbox": box},
+            )
+            repeated = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 102, "plate": "T123ABC", "score": 90,
+                         "have_vehicle": True, "bbox": box},
+            )
+            self.assertEqual(repeated.id, first.id)
+            count = db.scalar(select(func.count()).select_from(VehicleCapture).where(
+                VehicleCapture.camera_id == camera.id,
+            ))
+            self.assertEqual(count, 1)
+
+    def test_identical_evidence_bytes_are_reused_across_distinct_events(self):
+        self.client.post("/cameras/seed-site", headers=self.headers, json={})
+        with self.Session() as db:
+            camera = db.scalar(select(Camera).where(Camera.name == "1# Entry"))
+            first = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 201, "plate": "T123ABC", "score": .9,
+                         "source": "fastalpr", "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 50}},
+            )
+            second = persist_event(
+                db, camera, jpeg=JPEG, crop=CROP,
+                capture={"image_id": 202, "plate": "T123ABC", "score": .9,
+                         "source": "fastalpr", "bbox": {"x1": 11, "y1": 20, "x2": 101, "y2": 50}},
+            )
+            self.assertNotEqual(first.id, second.id)
+            self.assertEqual(first.snapshot_path, second.snapshot_path)
+            self.assertEqual(first.crop_path, second.crop_path)
+            self.assertEqual(len(list((self.media / "snapshots").glob("*.jpg"))), 1)
+            self.assertEqual(len(list((self.media / "crops").glob("*.jpg"))), 1)

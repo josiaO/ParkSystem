@@ -276,11 +276,19 @@ def apply_tariff_editor(db: Session, updates: dict[str, Any]) -> Tariff:
     row.rules = rules
     db.commit()
     db.refresh(row)
+    if hasattr(db, "info"):
+        for key in list(db.info):
+            if str(key).startswith("smartpark.tariff:"):
+                db.info.pop(key, None)
     return row
 
 
 def load_active_rules(db: Session, car_type: str = "Car1", *, site_id: int = DEFAULT_SITE_ID) -> dict[str, Any]:
     wanted = car_type or "Car1"
+    cache_key = f"smartpark.tariff:{int(site_id)}:{wanted}"
+    cached = db.info.get(cache_key) if hasattr(db, "info") else None
+    if isinstance(cached, dict):
+        return dict(cached)
     row = db.scalar(select(Tariff).where(
         Tariff.site_id == site_id,
         Tariff.car_type == wanted,
@@ -297,5 +305,9 @@ def load_active_rules(db: Session, car_type: str = "Car1", *, site_id: int = DEF
         rules.update(row.rules)
         rules["currency"] = row.currency or rules.get("currency")
         rules["car_type"] = wanted
-        return _class_overlay(rules)
-    return _class_overlay({**CAR1_RULES, "car_type": wanted})
+        result = _class_overlay(rules)
+    else:
+        result = _class_overlay({**CAR1_RULES, "car_type": wanted})
+    if hasattr(db, "info"):
+        db.info[cache_key] = dict(result)
+    return result

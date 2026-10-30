@@ -7,10 +7,18 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
-import threading
 import time
 import traceback
 import urllib.request
+
+from app.branding import PRODUCT_NAME
+
+
+# First startup can include Alembic migrations, database bootstrap and an
+# offline FastALPR model warm-up.  Twelve seconds is enough for a warm dev
+# process, but routinely too short for a Windows USB installation.
+SITE_SERVICE_START_TIMEOUT_SECONDS = 90.0
+_site_service_process: subprocess.Popen | None = None
 
 
 def install_root() -> Path:
@@ -101,10 +109,29 @@ def start_hvx_host(root: Path) -> None:
     )
 
 
-def wait_for_api(timeout: float = 60.0, base_url: str = "http://127.0.0.1:8760") -> None:
+def _site_service_launch_tail() -> str:
+    try:
+        path = _log_dir() / "site-service-launch.log"
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        useful = [line.strip() for line in lines if line.strip()]
+        if useful:
+            return " Last output: " + " | ".join(useful[-8:])[-1200:]
+    except Exception:
+        pass
+    return ""
+
+
+def wait_for_api(timeout: float = 60.0, base_url: str = "http://127.0.0.1:8760", process=None) -> None:
     base_url = base_url.rstrip("/")
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if process is not None:
+            return_code = process.poll()
+            if return_code is not None:
+                raise RuntimeError(
+                    f"{PRODUCT_NAME} Site Service exited with code {return_code} before becoming ready."
+                    f"{_site_service_launch_tail()}"
+                )
         try:
             with urllib.request.urlopen(f"{base_url}/health/live", timeout=1) as resp:
                 if resp.status == 200:
@@ -119,17 +146,29 @@ def wait_for_api(timeout: float = 60.0, base_url: str = "http://127.0.0.1:8760")
                 continue
             return
         time.sleep(0.2)
-    raise RuntimeError(f"SmartPark API did not start on {base_url}")
+    # A registered Windows task has no Popen handle to inspect.  Always attach
+    # the companion launch log so database authentication, migration, ACL and
+    # port failures are actionable instead of becoming a generic timeout.
+    raise RuntimeError(f"{PRODUCT_NAME} API did not start on {base_url}.{_site_service_launch_tail()}")
 
 
-def start_site_service(root: Path, config=None) -> None:
-    """Run FastAPI in its own process so a UI crash cannot take parking down."""
+def start_site_service(root: Path, config=None) -> bool:
+    """Run FastAPI in its own process so a UI crash cannot take parking down.
+
+    The return value distinguishes a successful process spawn from a missing
+    runtime. The desktop never embeds Uvicorn and never starts a second API
+    process merely because startup is slow or another launcher won a race.
+    """
+    global _site_service_process
     port = int(getattr(config, "server_bind_port", None) or 8760)
     if _port_open(port):
-        return
+        _site_service_process = None
+        return True
     py = root / "python64" / "python.exe"
     if not py.is_file():
         py = Path(sys.executable)
+    if not py.is_file():
+        return False
     flags = 0
     if os.name == "nt":
         flags = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -139,30 +178,29 @@ def start_site_service(root: Path, config=None) -> None:
     if config is not None:
         env["SMARTPARK_API_HOST"] = str(config.server_bind_host or "127.0.0.1")
         env["SMARTPARK_API_PORT"] = str(int(config.server_bind_port or 8760))
-    subprocess.Popen(
-        [str(py), "-m", "app.site_service"],
-        cwd=str(root),
-        env=env,
-        creationflags=flags,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=os.name != "nt",
-    )
+    # Keep the child console hidden on Windows, but preserve its early
+    # interpreter/import errors.  The structured site-service log is created
+    # later by the application; this companion log covers failures before
+    # logging is configured and makes a packaged install supportable.
+    launch_log = _log_dir() / "site-service-launch.log"
+    try:
+        with launch_log.open("ab") as output:
+            _site_service_process = subprocess.Popen(
+                [str(py), "-m", "app.site_service"],
+                cwd=str(root),
+                env=env,
+                creationflags=flags,
+                stdout=output,
+                stderr=output,
+                start_new_session=os.name != "nt",
+            )
+    except OSError:
+        _site_service_process = None
+        return False
+    return True
 
 
-def start_api(config=None) -> None:
-    """In-process fallback used only if the Site Service process cannot spawn."""
-    port = int(getattr(config, "server_bind_port", None) or 8760)
-    if _port_open(port):
-        return
-    import uvicorn
-    from app.api_main import app
-
-    host = str(getattr(config, "server_bind_host", None) or "127.0.0.1")
-    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False, reload=False, workers=1)
-
-
-def start_pipeline_services(root: Path) -> None:
+def start_pipeline_services(root: Path, modules=None) -> None:
     """Launch service owners; their instance locks reject duplicate launches."""
     python = root / "python64" / "python.exe"
     if not python.is_file():
@@ -170,13 +208,93 @@ def start_pipeline_services(root: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root)
     env["SMARTPARK_HOME"] = str(root)
-    for module, name in (("app.media_service", "media-service"), ("app.recognition_worker", "recognition-worker")):
+    selected = modules or ("app.media_service", "app.recognition_worker")
+    names = {"app.media_service": "media-service", "app.recognition_worker": "recognition-worker"}
+    for module in selected:
+        name = names[module]
         with (_log_dir() / f"{name}-launch.log").open("ab") as output:
             subprocess.Popen(
                 [str(python), "-m", module], cwd=str(root), env=env,
                 creationflags=(0x00000200 | 0x08000000) if os.name == "nt" else 0,
                 stdout=output, stderr=output, start_new_session=os.name != "nt",
             )
+
+
+_SCHEDULED_SITE_SERVICE = "SmartPark Site Service"
+_SCHEDULED_DEPENDENTS = {
+    "SmartPark HVX Host": "hvx",
+    "SmartPark Media Service": "app.media_service",
+    "SmartPark Recognition Worker": "app.recognition_worker",
+}
+
+
+def _scheduled_task_query(name: str):
+    if os.name != "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", "/Query", "/TN", name, "/V", "/FO", "LIST"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return result
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _scheduled_task_exists(name: str) -> bool:
+    result = _scheduled_task_query(name)
+    return bool(result is not None and result.returncode == 0)
+
+
+def _scheduled_site_service_exists() -> bool:
+    """Return whether the installer registered the Windows Site Service task."""
+    return _scheduled_task_exists(_SCHEDULED_SITE_SERVICE)
+
+
+def _scheduled_task_failure(name: str, action: str = "start") -> RuntimeError:
+    result = _scheduled_task_query(name)
+    details = ""
+    if result is None:
+        details = " schtasks.exe could not be executed."
+    else:
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
+        details = f" Output: {output[-1600:]}" if output else f" Exit code: {result.returncode}."
+    return RuntimeError(
+        f"Windows scheduled task '{name}' could not {action}.{details} "
+        "Inspect the task's Last Run Result, Run As User, action, and working directory in Task Scheduler."
+    )
+
+
+def _start_scheduled_site_service() -> bool:
+    """Ask Windows to start the registered task; never create a duplicate API."""
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", "/Run", "/TN", _SCHEDULED_SITE_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _start_scheduled_task(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", "/Run", "/TN", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def ensure_background_services(root: Path | None = None, config=None) -> None:
@@ -188,33 +306,93 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
         # Operator workstations are thin clients. They must never start a
         # local API, database, camera SDK, MediaMTX or recognition process.
         return
-    start_hvx_host(root)
     port = int(config.server_bind_port or 8760)
-    if _port_open(port):
-        start_pipeline_services(root)
-        return
-    start_site_service(root, config=config)
     local_url = f"http://127.0.0.1:{port}"
-    try:
-        wait_for_api(timeout=12.0, base_url=local_url)
+    # The installer owns the Windows scheduled task.  The desktop may open
+    # immediately after installation or after the wizard saves deployment.json
+    # while that task is still booting.  Starting a second Python API here can
+    # win the instance-lock race, leave the real task without the port, and
+    # produce WinError 10061.  Prefer the task and wait for its one API owner.
+    if os.name == "nt" and _scheduled_site_service_exists():
+        # The camera SDK host must be available before Site Service begins its
+        # camera reconciliation loop. Starting Site Service first causes a
+        # connect/disconnect storm during every boot on Windows.
+        missing_modules = []
+        if _scheduled_task_exists("SmartPark HVX Host"):
+            if not _start_scheduled_task("SmartPark HVX Host"):
+                raise _scheduled_task_failure("SmartPark HVX Host")
+        else:
+            start_hvx_host(root)
+        if not _start_scheduled_site_service():
+            raise _scheduled_task_failure(_SCHEDULED_SITE_SERVICE)
+        wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
+        for task_name, module in _SCHEDULED_DEPENDENTS.items():
+            if task_name == "SmartPark HVX Host":
+                continue
+            if _scheduled_task_exists(task_name):
+                if not _start_scheduled_task(task_name):
+                    raise _scheduled_task_failure(task_name)
+            else:
+                missing_modules.append(module)
+        if missing_modules:
+            start_pipeline_services(root, modules=missing_modules)
+        return
+    # No registered task owns the local services on this installation, so the
+    # desktop is the explicit owner of the direct-process fallback.
+    start_hvx_host(root)
+    if _port_open(port):
+        # A TCP listener is not proof that the Zirp API owns the port.  Verify
+        # the health endpoint before showing the login dialog; otherwise a
+        # stale process or a transient port race can lead to WinError 10061
+        # on the first login request.
+        wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
         start_pipeline_services(root)
         return
-    except RuntimeError:
-        pass
-    threading.Thread(target=start_api, args=(config,), name="smartpark-api", daemon=True).start()
-    wait_for_api(base_url=local_url)
+    if not start_site_service(root, config=config):
+        raise RuntimeError(
+            f"{PRODUCT_NAME} Site Service could not be started on {local_url}. "
+            f"Check {_log_dir() / 'site-service-launch.log'} and verify that the bundled Python executable is present."
+        )
+    try:
+        wait_for_api(
+            timeout=SITE_SERVICE_START_TIMEOUT_SECONDS,
+            base_url=local_url,
+            process=_site_service_process,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{PRODUCT_NAME} Site Service was started but did not become ready on {local_url}. "
+            "Check the Site Service log and site-service-launch.log in the SmartParkEdge logs folder; "
+            f"the desktop will not start a second API process. {exc}"
+        ) from exc
     start_pipeline_services(root)
+
+
+def disable_background_services() -> None:
+    """Remove transitional server tasks from an Operator Workstation."""
+    if os.name != "nt":
+        return
+    for name in (
+        "SmartPark Site Service",
+        "SmartPark Recognition Worker",
+        "SmartPark HVX Host",
+        "SmartPark Media Service",
+    ):
+        try:
+            subprocess.run(["schtasks.exe", "/Delete", "/TN", name, "/F"], check=False, capture_output=True)
+        except OSError:
+            pass
 
 
 def _fail(exc: BaseException) -> int:
     text = traceback.format_exc()
     log = _log_dir() / "launch.log"
     log.write_text(text, encoding="utf-8")
-    message = f"SmartPark Edge failed to start.\n\n{exc}\n\nDetails: {log}"
+    message = f"{PRODUCT_NAME} failed to start.\n\n{exc}\n\nDetails: {log}"
     if os.name == "nt":
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, "SmartPark Edge", 0x10)
+            ctypes.windll.user32.MessageBoxW(0, message, PRODUCT_NAME, 0x10)
         except Exception:
             print(message, file=sys.stderr)
     else:
@@ -232,10 +410,10 @@ def main() -> int:
     install_crash_hooks("SmartParkDesktop")
     configure_logging("desktop")
     if not acquire_instance_lock("desktop"):
-        message = "SmartPark Edge is already open."
+        message = f"{PRODUCT_NAME} is already open."
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, "SmartPark Edge", 0x40)
+            ctypes.windll.user32.MessageBoxW(0, message, PRODUCT_NAME, 0x40)
         except Exception:
             print(message, file=sys.stderr)
         return 0

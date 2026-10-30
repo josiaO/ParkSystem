@@ -351,7 +351,14 @@ class HVXSDK:
         self._draw_frames = {}
         self._draw_frame_seq = {}
         self._draw_encoded_seq = {}
+        self._window_frame_seq = {}
         self._video_handles = set()
+        # A failed PlaySdk start must not be reported as a live decoder, but
+        # the connection watcher still needs a bounded retry path.  Keep the
+        # two lifecycles separate so a dead video lane cannot look healthy or
+        # cause a second SDK connection to be opened for the same camera.
+        self._video_retry_handles = set()
+        self._video_retry_at = {}
         self._video_threads = {}
         self._video_thread = None
         self._video_running = False
@@ -480,6 +487,13 @@ class HVXSDK:
             return
         with self._lock:
             previous = dict(self._last_capture.get(handle) or {})
+            pending = self._pending_events.setdefault(handle, deque(maxlen=64))
+            # A report containing only geometry is an enrichment for an image
+            # callback already in the queue. It is not a new vehicle event.
+            # Reusing ``previous.plate`` here made an empty-lane report create
+            # another capture with the last car's plate.
+            if not plate and not pending:
+                return
             event = {
                 "image_id": int(previous.get("image_id") or 0),
                 "captured_at_epoch": time.time(),
@@ -495,7 +509,6 @@ class HVXSDK:
             }
             event = retain_plate_box(previous, event)
             self._last_capture[handle] = event
-            pending = self._pending_events.setdefault(handle, deque(maxlen=64))
             if pending and not plate_box_usable(pending[-1].get("plate_box")):
                 pending[-1]["plate_box"] = list(event["plate_box"]) if event.get("plate_box") else pending[-1].get("plate_box")
                 pending[-1]["have_vehicle"] = bool(event.get("have_vehicle"))
@@ -969,6 +982,8 @@ class HVXSDK:
             )
             with self._lock:
                 self._video_handles.discard(int(handle))
+                getattr(self, "_video_retry_handles", set()).discard(int(handle))
+                getattr(self, "_video_retry_at", {}).pop(int(handle), None)
         for ip, connection in list(self._connection_results.items()):
             if int(connection["result"]["handle"]) == int(handle):
                 self._connection_results.pop(ip, None)
@@ -986,6 +1001,7 @@ class HVXSDK:
             getattr(self, "_draw_frames", {}).pop(handle, None)
             getattr(self, "_draw_frame_seq", {}).pop(handle, None)
             getattr(self, "_draw_encoded_seq", {}).pop(handle, None)
+            getattr(self, "_window_frame_seq", {}).pop(handle, None)
             self._live_received_at.pop(handle, None)
             getattr(self, "_live_frame_seq", {}).pop(handle, None)
             self._live_requested_at.pop(handle, None)
@@ -1318,7 +1334,10 @@ class HVXSDK:
     def live_frame_seq(self, handle: int) -> int:
         """Monotonic source-frame identity for the live JPEG endpoint."""
         with self._lock:
-            return int(getattr(self, "_live_frame_seq", {}).get(int(handle), 0) or 0)
+            return max(
+                int(getattr(self, "_live_frame_seq", {}).get(int(handle), 0) or 0),
+                int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0),
+            )
 
     def _start_video(self, handle: int, stream_type: int) -> dict:
         if not hasattr(self.dll, "Net_StartVideo"):
@@ -1329,12 +1348,34 @@ class HVXSDK:
         rc = int(self.dll.Net_StartVideo(int(handle), selected, hwnd))
         used = selected
         if rc != DC_NO_ERROR:
+            # Some PlaySdk builds leave a partially opened receive port after
+            # a failed stream selection.  ParkWatch closes that player before
+            # trying the alternate stream; doing the same prevents two native
+            # decoder states from competing for one camera connection.
+            if hasattr(self.dll, "Net_StopVideo"):
+                try:
+                    self.dll.Net_StopVideo(int(handle))
+                except Exception:
+                    logging.getLogger("smartpark.hvx").debug(
+                        "Failed to clean up rejected PlaySdk stream: handle=%s",
+                        handle,
+                        exc_info=True,
+                    )
             # Preserve recovery for cameras without a function-list response,
             # while keeping advertised gate-camera stream types primary.
             other = 0 if selected != 0 else 1
             used = other
             rc = int(self.dll.Net_StartVideo(int(handle), other, hwnd))
         if rc != DC_NO_ERROR and hwnd:
+            if hasattr(self.dll, "Net_StopVideo"):
+                try:
+                    self.dll.Net_StopVideo(int(handle))
+                except Exception:
+                    logging.getLogger("smartpark.hvx").debug(
+                        "Failed to clean up rejected PlaySdk stream: handle=%s",
+                        handle,
+                        exc_info=True,
+                    )
             rc = int(self.dll.Net_StartVideo(int(handle), used, None))
         region_rc = None
         if rc == DC_NO_ERROR and hasattr(self.dll, "Net_ShowPlateRegion"):
@@ -1356,15 +1397,24 @@ class HVXSDK:
         self._note_video(handle, control_operation="IDLE", control_error="", start_rc=rc, start_rc_name=describe_rc(rc))
         with self._lock:
             self._video_streams[int(handle)] = used
-            self._video_handles.add(int(handle))
-            self._live_requested_at[int(handle)] = time.monotonic()
-            getattr(self, "_video_recovery_at", {}).pop(int(handle), None)
+            if rc == DC_NO_ERROR:
+                self._video_handles.add(int(handle))
+                getattr(self, "_video_retry_handles", set()).discard(int(handle))
+                getattr(self, "_video_retry_at", {}).pop(int(handle), None)
+                self._live_requested_at[int(handle)] = time.monotonic()
+                getattr(self, "_video_recovery_at", {}).pop(int(handle), None)
+            else:
+                self._video_handles.discard(int(handle))
+                getattr(self, "_video_retry_handles", set()).add(int(handle))
+                getattr(self, "_video_retry_at", {})[int(handle)] = time.monotonic() + 2.0
         # PlaySdk starts its receive/decode workers asynchronously.  Do not
         # call GetJpgBuffer in the same scheduling slice as Net_StartVideo;
         # several QY firmware versions throw a C++ exception during that
         # warm-up window even though the decoder recovers moments later.
         self._note_video(handle, jpeg_not_before=time.monotonic() + 0.35,
                         native_decoder_fault=False)
+        # Keep a retry pump for a failed start, but never add that handle to
+        # the active-video set until Net_StartVideo actually succeeds.
         self._ensure_camera_pump(int(handle))
         return {
             "ok": rc == DC_NO_ERROR,
@@ -1382,10 +1432,13 @@ class HVXSDK:
             with self._video_control(handle):
                 with self._lock:
                     self._video_handles.discard(int(handle))
+                    getattr(self, "_video_retry_handles", set()).discard(int(handle))
+                    getattr(self, "_video_retry_at", {}).pop(int(handle), None)
                     self._last_live_jpeg.pop(int(handle), None)
                     getattr(self, "_draw_frames", {}).pop(int(handle), None)
                     getattr(self, "_draw_frame_seq", {}).pop(int(handle), None)
                     getattr(self, "_draw_encoded_seq", {}).pop(int(handle), None)
+                    getattr(self, "_window_frame_seq", {}).pop(int(handle), None)
                     self._live_received_at.pop(int(handle), None)
                     self._live_requested_at.pop(int(handle), None)
                 if hasattr(self.dll, "Net_StopVideo"):
@@ -1541,6 +1594,9 @@ class HVXSDK:
             image.save(output, format="JPEG", quality=82, optimize=False)
             jpeg = output.getvalue()
             with self._lock:
+                window_seq = int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0) + 1
+                getattr(self, "_window_frame_seq", {})[int(handle)] = window_seq
+                self._live_received_at[int(handle)] = time.monotonic()
                 first_window_frame = not bool(self._video_diagnostics.get(int(handle), {}).get("window_capture_logged"))
             self._note_video(handle, capture_mode="play_sdk_hwnd", window_capture_rc=1,
                              window_capture_ms=round((time.monotonic() - started) * 1000, 1),
@@ -1765,6 +1821,9 @@ class HVXSDK:
         idle = 0
         retry_at = time.monotonic() + 5.0
         interval = 1.0 / max(1.0, min(20.0, float(os.environ.get("SMARTPARK_HVX_JPEG_FPS", "15"))))
+        last_progress_at = time.monotonic()
+        previous_jpeg = b""
+        previous_seq = 0
         def publish(jpeg):
             with self._lock:
                 if handle in self._video_handles:
@@ -1781,8 +1840,30 @@ class HVXSDK:
         while self._video_running:
             started = time.monotonic()
             with self._lock:
-                if handle not in self._video_handles:
+                active = handle in self._video_handles
+                retrying = handle in getattr(self, "_video_retry_handles", set())
+                retry_at = float(getattr(self, "_video_retry_at", {}).get(handle, 0.0) or 0.0)
+                if not active and not retrying:
                     break
+                requested = self._live_requested_at.get(handle, started)
+                current_stream = self._video_streams.get(handle)
+            if not active and retrying:
+                if started < retry_at:
+                    time.sleep(min(0.25, retry_at - started))
+                    continue
+                try:
+                    result = self.start_video(handle, current_stream)
+                    if result.get("ok"):
+                        idle = 0
+                        last_progress_at = time.monotonic()
+                        continue
+                except Exception as exc:
+                    self._note_video(handle, control_error=str(exc))
+                with self._lock:
+                    getattr(self, "_video_retry_at", {})[handle] = time.monotonic() + min(30.0, 2.0 ** min(idle + 1, 4))
+                idle = min(idle + 1, 4)
+                continue
+            with self._lock:
                 requested = self._live_requested_at.get(handle, started)
                 not_before = float(getattr(self, "_video_diagnostics", {}).get(handle, {}).get("jpeg_not_before") or 0.0)
             if started - requested > 5.0:
@@ -1793,11 +1874,30 @@ class HVXSDK:
                 time.sleep(min(0.1, not_before - started))
                 continue
             jpeg = self._get_jpg_buffer(handle)
+            with self._lock:
+                current_seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0)
+                draw_seq = int(getattr(self, "_draw_frame_seq", {}).get(handle, 0) or 0)
+                encoded_seq = int(getattr(self, "_draw_encoded_seq", {}).get(handle, 0) or 0)
+            new_frame = bool(jpeg) and (jpeg != previous_jpeg or current_seq > previous_seq or draw_seq > encoded_seq)
+            if jpeg and not new_frame:
+                # A cached draw/window JPEG is not progress. Route it through
+                # the normal no-frame recovery path so a frozen PlaySdk port
+                # is reopened instead of being served forever as "live".
+                jpeg = b""
             if jpeg:
-                publish(jpeg)
-                self._note_video(handle, decoder_recovery_attempts=0, recovery_state="STABLE")
-                idle = 0
-                retry_at = time.monotonic() + 5.0
+                if new_frame:
+                    publish(jpeg)
+                    previous_jpeg = jpeg
+                    previous_seq = max(previous_seq, current_seq)
+                    last_progress_at = time.monotonic()
+                    self._note_video(handle, decoder_recovery_attempts=0, recovery_state="STABLE")
+                    idle = 0
+                    retry_at = time.monotonic() + 5.0
+                else:
+                    # _draw_data_jpeg intentionally returns its cached JPEG
+                    # between callbacks. Treating that cache as a new frame
+                    # hid frozen cameras and made the UI appear connected.
+                    idle = min(idle + 1, 8)
             else:
                 idle = min(idle + 1, 8)
                 # A native access violation is not an empty network frame.
@@ -1818,11 +1918,14 @@ class HVXSDK:
                         handle,
                     )
                     break
-                if window_capture:
-                    # Window capture is deliberately non-destructive. Do not
-                    # call Net_StopVideo just because PrintWindow has not yet
-                    # received a paint; that can wedge PlaySdk on the same
-                    # firmware that made Net_GetJpgBuffer unsafe.
+                if window_capture and time.monotonic() - last_progress_at < 5.0:
+                    # Window capture is deliberately non-destructive during
+                    # the normal paint warm-up. Once it has been stale for a
+                    # bounded interval, the same close/reopen recovery used by
+                    # OcxConfig is required to recover a wedged PlaySdk port.
+                    time.sleep(max(0.05, interval))
+                    continue
+                if time.monotonic() - last_progress_at < 5.0:
                     time.sleep(max(0.05, interval))
                     continue
                 if time.monotonic() >= retry_at:

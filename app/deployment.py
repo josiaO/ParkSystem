@@ -7,7 +7,7 @@ credentials remain in the existing secret mechanisms.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -18,9 +18,14 @@ import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 from app.config import settings
+from app.database_config import DatabaseConfig, database_config_from_mapping, default_database_config
 
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
+UNCONFIGURED = "UNCONFIGURED"
+CONFIGURING = "CONFIGURING"
+CONFIGURED = "CONFIGURED"
+RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 SITE_SERVER = "SITE_SERVER"
 OPERATOR_CLIENT = "OPERATOR_CLIENT"
 EDGE_NODE = "EDGE_NODE"
@@ -48,20 +53,53 @@ def _stable_installation_id() -> str:
 class DeploymentConfig:
     config_version: int = CONFIG_VERSION
     configured: bool = False
+    state: str = UNCONFIGURED
     role: str = SITE_SERVER
     server_base_url: str = "http://127.0.0.1:8760"
     server_bind_host: str = "127.0.0.1"
     server_bind_port: int = 8760
     installation_id: str = ""
     server_id: str = ""
+    site_id: str = ""
     client_id: str = ""
+    paired_site_id: str = ""
+    paired_server_id: str = ""
     site_name: str = "Parking Site"
+    # A node stores only an identity and protected credential reference. Human
+    # users are separate central sessions and are never serialized here.
+    node_username: str = ""
+    node_credential_ref: str = ""
     machine_name: str = ""
     configured_at: str = ""
+    database: DatabaseConfig = field(default_factory=default_database_config)
+
+    @property
+    def is_site_server(self) -> bool:
+        """Whether this installation is the central SmartPark authority."""
+        return self.role == SITE_SERVER
+
+    @property
+    def runs_local_gate_runtime(self) -> bool:
+        """Whether this machine owns local hardware/runtime processes."""
+        return self.role in {SITE_SERVER, EDGE_NODE}
+
+    @property
+    def uses_remote_site_server(self) -> bool:
+        """Whether the central API is hosted by another machine."""
+        return self.role in {EDGE_NODE, OPERATOR_CLIENT}
+
+    @property
+    def is_operator_workstation(self) -> bool:
+        return self.role == OPERATOR_CLIENT
 
     @property
     def is_server(self) -> bool:
-        return self.role in {SITE_SERVER, EDGE_NODE}
+        """Compatibility alias for older runtime callers.
+
+        This intentionally means *central Site Server*, not "runs a local
+        process".  Local-runtime callers use ``runs_local_gate_runtime``.
+        """
+        return self.is_site_server
 
     @property
     def is_operator_client(self) -> bool:
@@ -76,19 +114,30 @@ def _from_mapping(data: dict) -> DeploymentConfig:
         raise ValueError(f"Unsupported deployment role: {role}")
     server_port = int(data.get("server_bind_port") or settings.api_port)
     base = _normalise_url(data.get("server_base_url") or "", default=f"http://127.0.0.1:{server_port}")
+    configured = bool(data.get("configured"))
+    state = str(data.get("state") or (CONFIGURED if configured else UNCONFIGURED)).upper()
+    if state not in {UNCONFIGURED, CONFIGURING, CONFIGURED, RECOVERY_REQUIRED}:
+        raise ValueError(f"Unsupported deployment state: {state}")
     return DeploymentConfig(
         config_version=int(data.get("config_version") or CONFIG_VERSION),
-        configured=bool(data.get("configured")),
+        configured=configured and state == CONFIGURED,
+        state=state,
         role=role,
         server_base_url=base,
         server_bind_host=str(data.get("server_bind_host") or "127.0.0.1"),
         server_bind_port=server_port,
         installation_id=str(data.get("installation_id") or ""),
         server_id=str(data.get("server_id") or ""),
+        site_id=str(data.get("site_id") or data.get("server_id") or ""),
         client_id=str(data.get("client_id") or ""),
+        paired_site_id=str(data.get("paired_site_id") or ""),
+        paired_server_id=str(data.get("paired_server_id") or ""),
         site_name=str(data.get("site_name") or settings.site_name),
+        node_username=str(data.get("node_username") or ""),
+        node_credential_ref=str(data.get("node_credential_ref") or ""),
         machine_name=str(data.get("machine_name") or socket.gethostname()),
         configured_at=str(data.get("configured_at") or ""),
+        database=database_config_from_mapping(data.get("database")),
     )
 
 
@@ -96,20 +145,30 @@ def _legacy_config() -> DeploymentConfig:
     """Recognize the current working installation without forcing re-entry."""
     db_file = settings.data_dir / "smartpark.db"
     production_existing = db_file.is_file() or bool(settings.database_url)
-    development_default = str(settings.deployment_profile).upper() != "PRODUCTION"
-    configured = production_existing or development_default
+    configured = production_existing
     server_id = str(settings.node_id or socket.gethostname())
+    # Pre-deployment builds used the local-only API default and did not write
+    # deployment.json.  When such an existing Site Server is upgraded, keep
+    # the local desktop URL but migrate the listener to the documented LAN
+    # default so Operator Workstations can reach it.  An explicit
+    # SMARTPARK_API_HOST remains respected for administrators who intentionally
+    # choose a specific interface.
+    bind_host = str(settings.api_host or "").strip() or "0.0.0.0"
+    if bind_host in {"127.0.0.1", "localhost", "::1"} and not os.environ.get("SMARTPARK_API_HOST"):
+        bind_host = "0.0.0.0"
     return DeploymentConfig(
         configured=configured,
+        state=CONFIGURED if configured else UNCONFIGURED,
         role=SITE_SERVER,
         server_base_url=f"http://127.0.0.1:{int(settings.api_port)}",
-        server_bind_host=str(settings.api_host or "127.0.0.1"),
+        server_bind_host=bind_host,
         server_bind_port=int(settings.api_port),
         installation_id=_stable_installation_id(),
         server_id=server_id,
         site_name=str(settings.site_name or "Parking Site"),
         machine_name=socket.gethostname(),
         configured_at="legacy-compatible" if configured else "",
+        database=default_database_config(),
     )
 
 
@@ -120,7 +179,7 @@ def load_deployment_config() -> DeploymentConfig:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         config = _from_mapping(data)
-        if config.config_version != CONFIG_VERSION or not config.installation_id:
+        if config.config_version not in {1, CONFIG_VERSION} or not config.installation_id:
             raise ValueError("unsupported or incomplete deployment configuration")
         return config
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -129,18 +188,24 @@ def load_deployment_config() -> DeploymentConfig:
         return DeploymentConfig(configured=False, role=SITE_SERVER, installation_id=_stable_installation_id())
 
 
-def save_deployment_config(config: DeploymentConfig | dict) -> DeploymentConfig:
+def save_deployment_config(config: DeploymentConfig | dict, *, state: str | None = None) -> DeploymentConfig:
     resolved = config if isinstance(config, DeploymentConfig) else _from_mapping(config)
+    next_state = str(state or resolved.state or (CONFIGURED if resolved.configured else UNCONFIGURED)).upper()
+    if next_state not in {UNCONFIGURED, CONFIGURING, CONFIGURED, RECOVERY_REQUIRED}:
+        raise ValueError(f"Unsupported deployment state: {next_state}")
     resolved = DeploymentConfig(
         **{
             **asdict(resolved),
             "config_version": CONFIG_VERSION,
-            "configured": True,
+            "configured": next_state == CONFIGURED,
+            "state": next_state,
             "installation_id": resolved.installation_id or _stable_installation_id(),
-            "server_id": resolved.server_id or str(settings.node_id),
+            "server_id": resolved.server_id or (str(settings.node_id) if resolved.is_site_server else ""),
+            "site_id": resolved.site_id or (str(uuid.uuid4()) if resolved.is_site_server else ""),
             "client_id": resolved.client_id or (str(uuid.uuid4()) if resolved.is_operator_client else ""),
             "machine_name": resolved.machine_name or socket.gethostname(),
             "configured_at": resolved.configured_at or datetime.now(timezone.utc).isoformat(),
+            "database": resolved.database,
         }
     )
     path = config_path()
@@ -170,20 +235,44 @@ def ensure_legacy_config_saved() -> DeploymentConfig:
     return config
 
 
-def server_base_url(config: DeploymentConfig | None = None) -> str:
+def central_server_base_url(config: DeploymentConfig | None = None) -> str:
+    """Resolve the central control-plane API target.
+
+    Site Server and Edge Node are deliberately different here: an Edge Node
+    uses its configured paired server, while its local runtime is addressed
+    through ``local_node_runtime_url``.
+    """
     config = config or load_deployment_config()
-    if config.is_operator_client:
+    if config.uses_remote_site_server:
         return config.server_base_url
     return f"http://127.0.0.1:{int(config.server_bind_port or settings.api_port)}"
 
 
+def local_node_runtime_url(config: DeploymentConfig | None = None) -> str:
+    """Resolve the local operational-plane runtime, if this PC owns one."""
+    config = config or load_deployment_config()
+    if not config.runs_local_gate_runtime:
+        return ""
+    return f"http://127.0.0.1:{int(config.server_bind_port or settings.api_port)}"
+
+
+def server_base_url(config: DeploymentConfig | None = None) -> str:
+    """Backward-compatible name for the central API target."""
+    return central_server_base_url(config)
+
+
 def public_server_identity(config: DeploymentConfig | None = None) -> dict:
+    from app.branding import PRODUCT_NAME
+
     config = config or load_deployment_config()
     return {
-        "application": "SmartPark",
+        "application": PRODUCT_NAME,
+        "legacy_application": "SmartPark",
         "version": settings.app_version,
         "installation_id": config.installation_id,
+        "server_installation_id": config.installation_id,
         "server_id": config.server_id,
+        "site_id": config.site_id or config.server_id,
         "site_name": config.site_name,
         "role": config.role,
         "api_protocol": 1,

@@ -176,7 +176,7 @@ def ready() -> dict:
         "ok": core,
         "status": status,
         "state": state,
-        "db": {"ok": db_ok, "sqlite": is_sqlite(), "error": error},
+        "db": {**database_health(), "ok": db_ok, "sqlite": is_sqlite(), "error": error},
         "hvx_host": {
             "ok": hvx_ok,
             "required": hvx_required,
@@ -195,6 +195,35 @@ def ready() -> dict:
         "time": datetime.now(timezone.utc).isoformat(),
     }
     return payload
+
+
+def database_health() -> dict:
+    """Safe database metadata for technicians; never returns credentials."""
+    from app.db import SessionLocal, engine, is_sqlite
+    from app.migrations.runner import status
+
+    started = time.perf_counter()
+    try:
+        with SessionLocal() as db:
+            db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        return {
+            "engine": "SQLite" if is_sqlite() else "PostgreSQL",
+            "state": "HEALTHY",
+            "revision": status(engine).get("revision"),
+            "head": status(engine).get("head"),
+            "up_to_date": status(engine).get("up_to_date", False),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        return {
+            "engine": "SQLite" if is_sqlite() else "PostgreSQL",
+            "state": "UNHEALTHY",
+            "revision": status(engine).get("revision"),
+            "head": status(engine).get("head"),
+            "up_to_date": False,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "error": str(exc)[:200],
+        }
 
 
 def details() -> dict:

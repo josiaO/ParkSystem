@@ -10,6 +10,7 @@ import secrets
 from datetime import timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import PaymentIntent, PaymentTransaction, ParkingSession, utcnow
@@ -132,7 +133,37 @@ def record_succeeded_payment(
         db.add(intent)
     else:
         intent.status = SUCCEEDED
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Two webhook/operator retries can pass the read-before-write check at
+        # the same time. The unique ledger keys are the final authority; turn
+        # that race into the same idempotent result instead of a 500 response.
+        db.rollback()
+        existing = db.scalar(select(PaymentTransaction).where(PaymentTransaction.idempotency_key == key))
+        if existing is None and provider_transaction_id:
+            existing = db.scalar(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.provider_transaction_id == provider_transaction_id
+                )
+            )
+        if existing is None:
+            raise
+        fresh_row = db.get(ParkingSession, row.id)
+        if fresh_row is None:
+            raise RuntimeError("Payment session disappeared while resolving a duplicate transaction")
+        fresh_intent = db.get(PaymentIntent, existing.intent_id) if existing.intent_id else None
+        if fresh_intent is not None and fresh_intent.status != SUCCEEDED:
+            fresh_intent.status = SUCCEEDED
+        apply_session_payment_state(db, fresh_row)
+        db.commit()
+        db.refresh(fresh_row)
+        return {
+            "session": fresh_row,
+            "transaction": existing,
+            "intent": fresh_intent,
+            "duplicate": True,
+        }
     txn = PaymentTransaction(
         intent_id=intent.id,
         session_id=row.id,
@@ -148,7 +179,34 @@ def record_succeeded_payment(
         extra={"source": "ledger", **(extra or {})},
     )
     db.add(txn)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(PaymentTransaction).where(PaymentTransaction.idempotency_key == key))
+        if existing is None and provider_transaction_id:
+            existing = db.scalar(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.provider_transaction_id == provider_transaction_id
+                )
+            )
+        if existing is None:
+            raise
+        fresh_row = db.get(ParkingSession, row.id)
+        if fresh_row is None:
+            raise RuntimeError("Payment session disappeared while resolving a duplicate transaction")
+        fresh_intent = db.get(PaymentIntent, existing.intent_id) if existing.intent_id else None
+        if fresh_intent is not None and fresh_intent.status != SUCCEEDED:
+            fresh_intent.status = SUCCEEDED
+        apply_session_payment_state(db, fresh_row)
+        db.commit()
+        db.refresh(fresh_row)
+        return {
+            "session": fresh_row,
+            "transaction": existing,
+            "intent": fresh_intent,
+            "duplicate": True,
+        }
     apply_session_payment_state(db, row)
     db.commit()
     db.refresh(row)

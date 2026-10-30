@@ -46,22 +46,56 @@ if (Test-Path $DeploymentPath) {
             }
             exit 0
         }
+        $configured = [bool]$deployment.configured -and (
+            -not $deployment.PSObject.Properties['state'] -or
+            [string]$deployment.state -eq "CONFIGURED"
+        )
+        if (-not $configured) {
+            Write-Host "Deployment setup is incomplete: registering tasks without starting them."
+            $RegisterOnly = $true
+        }
     } catch {
         throw "The deployment configuration is invalid: $($_.Exception.Message)"
     }
+} else {
+    Write-Host "No deployment configuration found: registering tasks without starting them."
+    $RegisterOnly = $true
 }
 $TaskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+# Scheduled tasks run as the interactive technician account, while the
+# installer may have created ProgramData files from an elevated process.
+# Grant that exact account Modify access so services can rotate logs, write
+# health state and update the model/cache directories after installation.
+$DataDir = Join-Path $env:ProgramData "SmartParkEdge"
+New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+$dataGrant = "{0}:(OI)(CI)M" -f $TaskUser
+& icacls.exe $DataDir /grant $dataGrant /T /C /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Could not grant $TaskUser Modify access to $DataDir. Services may not be able to rotate logs."
+}
 
 function Write-SmartParkLauncher {
     param(
         [string]$BatName,
         [string]$PythonExe,
-        [string]$Arguments
+        [string]$Arguments,
+        [switch]$WaitForSite
     )
     $bat = Join-Path $InstallDir $BatName
     $mtxLine = ""
     if (Test-Path $MediaMtx) {
         $mtxLine = "set `"SMARTPARK_MEDIAMTX_BIN=$MediaMtx`""
+    }
+    $waitForSiteLines = ""
+    if ($WaitForSite) {
+        # AtLogOn tasks are scheduled concurrently. Dependent workers must
+        # wait for the Site Service to finish migrations and expose HTTP 200;
+        # otherwise they can open the same SQLite file before tables exist.
+        $waitForSiteLines = @'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(180); do { try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:8760/health/live' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ([int]$r.StatusCode -eq 200) { exit 0 } } catch {}; Start-Sleep -Seconds 1 } while ((Get-Date) -lt $deadline); exit 1"
+if errorlevel 1 exit /b 1
+'@
     }
     @"
 @echo off
@@ -71,8 +105,12 @@ set "SMARTPARK_HOME=$InstallDir"
 set "PYTHONPATH=%SMARTPARK_HOME%"
 set "SMARTPARK_HVX_VENDOR_DIR=%SMARTPARK_HOME%\vendor"
 if not defined SMARTPARK_DEPLOYMENT_PROFILE set "SMARTPARK_DEPLOYMENT_PROFILE=PRODUCTION"
+rem Deployment metadata decides whether this is the central server or an
+rem EDGE_NODE. Do not overwrite a legacy lane setting copied from another PC.
+if not defined SMARTPARK_NODE_ROLE set "SMARTPARK_NODE_ROLE=SERVER"
 $mtxLine
 set "PATH=%SMARTPARK_HOME%\python64;%SMARTPARK_HOME%\python64\Scripts;%SMARTPARK_HOME%\vendor;%PATH%"
+$waitForSiteLines
 "$PythonExe" $Arguments
 "@ | Set-Content -Path $bat -Encoding ASCII
     return $bat
@@ -107,6 +145,32 @@ function Start-SmartParkTask {
     }
 }
 
+function Register-SmartParkFirewall {
+    # Only the Site Server needs inbound rules. Keep PostgreSQL, HVX, RTSP and
+    # MediaMTX's control/metrics ports local; operators need the API and the
+    # WebRTC signaling/ICE ports only.
+    $rules = @(
+        @{ Name = "SmartPark Site API"; Protocol = "TCP"; Port = 8760 }
+    )
+    if (Test-Path $MediaMtx) {
+        $rules += @(
+            @{ Name = "SmartPark MediaMTX WebRTC"; Protocol = "TCP"; Port = 8889 },
+            @{ Name = "SmartPark MediaMTX ICE"; Protocol = "UDP"; Port = 8189 },
+            @{ Name = "SmartPark MediaMTX ICE TCP"; Protocol = "TCP"; Port = 8189 }
+        )
+    }
+    foreach ($rule in $rules) {
+        if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
+            try {
+                New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -Profile Private -RemoteAddress LocalSubnet | Out-Null
+                Write-Host ("Firewall: opened {0}/{1} to LocalSubnet on Private networks." -f $rule.Protocol, $rule.Port)
+            } catch {
+                Write-Warning ("Could not create firewall rule {0}: {1}" -f $rule.Name, $_.Exception.Message)
+            }
+        }
+    }
+}
+
 function Wait-SmartParkHttp {
     param(
         [string]$Url,
@@ -114,29 +178,59 @@ function Wait-SmartParkHttp {
         [int]$TimeoutSeconds = 30
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastStatus = ""
+    $lastError = ""
     do {
         try {
             $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-            if ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500) {
+            $lastStatus = [string]$response.StatusCode
+            # Readiness endpoints must be owned by the expected service. A
+            # 3xx/4xx response can come from an unrelated process already
+            # holding the port and must never let installation continue.
+            if ([int]$response.StatusCode -eq 200) {
                 return
             }
         } catch {
+            $lastError = $_.Exception.Message
             # The process may still be starting. Keep polling until the bounded deadline.
         }
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "$Label did not answer $Url within $TimeoutSeconds seconds. Check the SmartPark logs."
+    $logDir = Join-Path $env:ProgramData "SmartParkEdge\logs"
+    $details = @()
+    foreach ($name in @("site-service.log", "site-service-launch.log", "launch.log")) {
+        $path = Join-Path $logDir $name
+        if (Test-Path $path) {
+            $tail = @(Get-Content -LiteralPath $path -Tail 8 -ErrorAction SilentlyContinue)
+            if ($tail.Count -gt 0) {
+                $details += "${name}: " + (($tail -join " | ").Substring(0, [Math]::Min(900, ($tail -join " | ").Length)))
+            }
+        }
+    }
+    $suffix = if ($details.Count) { "`n" + ($details -join "`n") } else { "" }
+    $portMatch = [regex]::Match($Url, ':(\d+)(?:/|$)')
+    $owner = ""
+    if ($portMatch.Success) {
+        $port = [int]$portMatch.Groups[1].Value
+        $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+        foreach ($listener in $listeners) {
+            $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+            $owner += " PID $($listener.OwningProcess)=$($process.ProcessName)"
+        }
+    }
+    $diagnostic = "Last HTTP status: $lastStatus. Last error: $lastError. Listening process:$owner"
+    throw "$Label did not return HTTP 200 from $Url within $TimeoutSeconds seconds. $diagnostic Check $logDir.$suffix"
 }
 
 $siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
-$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker"
+$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker" -WaitForSite
 $hostBat = ""
 if (Test-Path $Py32) {
     $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`""
 }
 $mediaBat = ""
 if (Test-Path $MediaMtx) {
-    $mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe $Py64 -Arguments "-m app.media_service"
+$mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe $Py64 -Arguments "-m app.media_service" -WaitForSite
 }
 
 Write-Host "Registering SmartPark background tasks..."
@@ -186,11 +280,35 @@ if ($RegisterOnly) {
     exit 0
 }
 
+Register-SmartParkFirewall
+
 # Start in dependency order. The tasks remain registered with an AtLogOn
 # trigger, so the same sequence is repeated automatically after the next
-# Windows sign-in. The Site Service also has its own duplicate-safe fallback,
-# but starting the explicit host first makes HVX diagnostics deterministic.
-foreach ($name in @("SmartPark HVX Host", "SmartPark Site Service", "SmartPark Media Service", "SmartPark Recognition Worker")) {
+# Windows sign-in. Start the native camera host before Site Service begins its
+# camera reconciliation loop; otherwise SDK cameras briefly connect and
+# disconnect on every boot while port 8765 is still coming up.
+foreach ($name in @("SmartPark HVX Host")) {
+    if ($registered -contains $name) {
+        Write-Host "Starting $name..."
+        Start-SmartParkTask -Name $name
+    }
+}
+
+foreach ($name in @("SmartPark Site Service")) {
+    if ($registered -contains $name) {
+        Write-Host "Starting $name..."
+        Start-SmartParkTask -Name $name
+    }
+}
+
+if ($registered -contains "SmartPark Site Service") {
+    # First boot may run migrations and warm the offline FastALPR models on a
+    # slower Windows CPU.  Match the desktop supervisor's bounded startup
+    # window so a healthy service is not reported as failed during upgrades.
+    Wait-SmartParkHttp -Url "http://127.0.0.1:8760/health/live" -Label "Site Service" -TimeoutSeconds 120
+}
+
+foreach ($name in @("SmartPark Media Service", "SmartPark Recognition Worker")) {
     if ($registered -contains $name) {
         Write-Host "Starting $name..."
         Start-SmartParkTask -Name $name
@@ -198,10 +316,18 @@ foreach ($name in @("SmartPark HVX Host", "SmartPark Site Service", "SmartPark M
 }
 
 if ($registered -contains "SmartPark HVX Host") {
-    Wait-SmartParkHttp -Url "http://127.0.0.1:8765/info" -Label "HVX SDK host" -TimeoutSeconds 30
-}
-if ($registered -contains "SmartPark Site Service") {
-    Wait-SmartParkHttp -Url "http://127.0.0.1:8760/health/live" -Label "Site Service" -TimeoutSeconds 45
+    try {
+        Wait-SmartParkHttp -Url "http://127.0.0.1:8765/info" -Label "HVX SDK host" -TimeoutSeconds 30
+    } catch {
+        # HVX/NetSDK is conditional hardware. A Windows site using RTSP,
+        # ONVIF, Dahua or Hikvision cameras must still complete installation
+        # when the optional 32-bit SDK host is unavailable. The scheduled
+        # task remains registered so a technician can repair the vendor
+        # runtime and restart it later; the Site Service and local recognition
+        # pipeline are independent of this host.
+        Write-Warning "HVX SDK host is not ready: $_"
+        Write-Warning "Installation will continue. HVX camera features remain unavailable until the 32-bit host is repaired."
+    }
 }
 
 Write-Host ""
@@ -213,7 +339,7 @@ if (Test-Path $MediaMtx) {
     Write-Host "  SmartPark Media Service  (MediaMTX realtime gateway when enabled by effective site flags)"
 }
 Write-Host "Desktop is only a client. Parking continues if the UI is closed."
-Write-Host "Fresh installs prefer MediaMTX/WebRTC when the bundled binary is available; upgraded sites keep their stored rollout flags."
-Write-Host "To promote an upgraded site explicitly, run Enable-MediaMTX.ps1 -LiveView."
+Write-Host "The runtime follows the stable main-branch MediaMTX/FastALPR path; SDK cameras retain their direct SDK adapter fallback."
+Write-Host "Use Enable-MediaMTX.ps1 only to repair or explicitly re-register a camera path."
 Write-Host "Recovery: Windows restarts each task up to 3 times, 1 minute apart."
 Write-Host "Automatic startup: tasks run for $taskUser at Windows logon; no manual Start-SmartPark.bat is required."

@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.i18n import t
 from app.config import settings
 from app.infrastructure.hardware.registry import camera_adapter_id
 from app.models import Camera, CameraStatus, Gate
-from app.services.captures import latest_for_camera
+from app.services.captures import latest_for_cameras
 from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
 from app.services.media_gateway import gateway
 from app.services.site_cameras import side_label
@@ -32,7 +32,13 @@ def _lane_label(camera: Camera) -> str:
     return (camera.name or "").strip() or f"Camera {camera.id}"
 
 
-def camera_operator_status(camera: Camera, *, language: str = "en", db: Session | None = None) -> dict[str, Any]:
+def camera_operator_status(
+    camera: Camera,
+    *,
+    language: str = "en",
+    db: Session | None = None,
+    latest=None,
+) -> dict[str, Any]:
     media = gateway.session(camera.id)
     live = media.live.latest() if media else None
     pumping = bool(media and media.producer is not None and not media.producer.done())
@@ -49,8 +55,8 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
         recog = _label(language, "status.ready", "Ready")
     else:
         recog = _label(language, "status.offline", "Offline")
-    from app.services.node_scope import camera_in_recognition_scope, describe_recognition_scope
-    if not camera_in_recognition_scope(camera, db=db):
+    from app.services.node_scope import camera_active_on_this_installation, describe_recognition_scope
+    if not camera_active_on_this_installation(camera, db=db):
         scope = describe_recognition_scope(db)
         recog = "NODE NOT ASSIGNED TO GATE" if scope["mode"] == "unassigned" else "OTHER GATE"
     barrier = _label(language, "status.ready", "Ready") if camera.gate and camera.gate.enabled else _label(language, "status.unknown", "Unknown")
@@ -63,11 +69,11 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
         live_text = _label(language, "status.offline", "Offline")
     last_plate = ""
     pending = False
-    if db is not None:
-        last = latest_for_camera(db, camera.id)
-        if last:
-            last_plate = last.plate or ""
-            pending = bool(isinstance(last.bbox, dict) and last.bbox.get("pending_confirmation"))
+    if db is not None and latest is None:
+        latest = latest_for_cameras(db, [camera.id]).get(int(camera.id))
+    if latest is not None:
+        last_plate = latest.plate or ""
+        pending = bool(isinstance(latest.bbox, dict) and latest.bbox.get("pending_confirmation"))
     gate_mode = str(camera.gate.mode if camera.gate else "")
     waiting = _label(language, "status.waiting", "Waiting for confirmation") if pending else ""
     return {
@@ -94,9 +100,17 @@ def camera_operator_status(camera: Camera, *, language: str = "en", db: Session 
 def lane_operator_status(db: Session) -> dict[str, Any]:
     policy = site_policy(db)
     language = str(policy.get("language") or "en")
-    cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
+    cameras = list(db.scalars(
+        select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+    ).all())
     gates = list(db.scalars(select(Gate).order_by(Gate.id)).all())
-    lanes = [camera_operator_status(camera, language=language, db=db) for camera in cameras]
+    # The dashboard polls this endpoint frequently. Fetch the last evidence
+    # row for all cameras together instead of issuing one query per lane.
+    latest = latest_for_cameras(db, [camera.id for camera in cameras])
+    lanes = []
+    for camera in cameras:
+        last = latest.get(int(camera.id))
+        lanes.append(camera_operator_status(camera, language=language, db=db, latest=last))
     return {
         "site": {
             "name": policy.get("name"),

@@ -170,6 +170,8 @@ class CameraRecognitionLane:
     recognition_restarts: int = 0
     native_events_received: int = 0
     last_native_capture_key: str = ""
+    last_native_capture_at: float = 0.0
+    last_native_plate: str = ""
     software_reads: int = 0
     published_events: int = 0
     duplicate_events_suppressed: int = 0
@@ -292,22 +294,52 @@ class CameraRecognitionLane:
         with self._lock:
             self.native_events_received += 1
 
-    def note_native_capture(self, capture_key: str) -> bool:
+    def note_native_capture(
+        self,
+        capture_key: str,
+        *,
+        plate: str | None = None,
+        repeat_window_seconds: float = 8.0,
+        now: float | None = None,
+    ) -> bool:
         """Start a fresh visit when a distinct native camera capture arrives.
 
         Some gate cameras emit callbacks for consecutive vehicles without an
         empty-frame callback between them. In that case the absence timer
         cannot close the previous visit, so a new capture token/image
         identifier is the vehicle boundary. Repeated callbacks for the same
-        capture remain attached to the current visit.
+        plate while it is still over the line remain attached to the current
+        visit. ``plate=None`` preserves the legacy explicit-boundary behavior
+        used by callers that do not have native plate text.
         """
         key = str(capture_key or "")
         if not key:
             return False
+        stamp = time.monotonic() if now is None else float(now)
         with self._lock:
             previous = self.last_native_capture_key
-            new_visit = bool(previous and previous != key and self.visit.event_published)
             self.last_native_capture_key = key
+            previous_at = self.last_native_capture_at
+            previous_plate = self.last_native_plate
+            self.last_native_capture_at = stamp
+            if plate is not None:
+                current_plate = str(plate or "").strip().upper()
+                self.last_native_plate = current_plate
+                same_plate = bool(current_plate) and current_plate in {
+                    previous_plate,
+                    str(self.visit.published_plate or "").strip().upper(),
+                }
+                recent = previous_at > 0 and (stamp - previous_at) <= max(
+                    0.1, float(repeat_window_seconds or 8.0),
+                )
+                # A no-plate callback does not prove a new vehicle. Let the
+                # normal absence/coil path close the old visit instead.
+                new_visit = bool(
+                    previous and previous != key and self.visit.event_published
+                    and current_plate and not (same_plate and recent)
+                )
+            else:
+                new_visit = bool(previous and previous != key and self.visit.event_published)
             if new_visit:
                 self.visit.reset()
             return new_visit

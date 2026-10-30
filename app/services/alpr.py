@@ -10,9 +10,11 @@ from __future__ import annotations
 import os
 import re
 import statistics
+import sys
 import threading
 import time
 import uuid
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +31,10 @@ from app.services.camera_lpr import camera_contract
 _lock = threading.Lock()
 _engine = None
 _warm_engine = None
+_fastalpr_error = ""
+_engine_error = ""
+_dll_directory_handles = []
+_native_runtime_prepared = False
 
 
 @dataclass
@@ -143,7 +149,11 @@ def ensure_alpr_model_cache() -> dict:
         detector_src = next((p for p in (src / DETECTOR_ONNX, src / "detector" / DETECTOR_ONNX) if p.is_file()), None)
         ocr_src = next((p for p in (src / OCR_ONNX, src / "ocr" / OCR_ONNX) if p.is_file()), None)
         cfg_src = next((p for p in (src / OCR_CONFIG, src / "ocr" / OCR_CONFIG) if p.is_file()), None)
-    cache_home = Path.home() / ".cache"
+    # A scheduled Windows service may run as a different account from the
+    # desktop. Keep the model cache in the installation's shared data folder
+    # when the launcher provides one, instead of splitting models across user
+    # profiles and reporting detector-unavailable on the service account.
+    cache_home = Path(os.environ.get("SMARTPARK_ALPR_CACHE_DIR") or (Path.home() / ".cache"))
     detector_dest = cache_home / "open-image-models" / DETECTOR_MODEL / DETECTOR_ONNX
     ocr_dest = cache_home / "fast-plate-ocr" / OCR_MODEL / OCR_ONNX
     cfg_dest = cache_home / "fast-plate-ocr" / OCR_MODEL / OCR_CONFIG
@@ -160,24 +170,114 @@ def ensure_alpr_model_cache() -> dict:
     }
 
 
+def prepare_native_runtime() -> None:
+    """Make bundled Windows native dependencies visible before importing ORT.
+
+    Scheduled tasks do not go through the desktop launcher's DLL setup. Python
+    3.8+ therefore needs the ONNX Runtime ``capi`` directory registered
+    explicitly, otherwise Windows can find the extension but fail while
+    initializing one of its dependent DLLs.
+    """
+    global _native_runtime_prepared
+    if _native_runtime_prepared or os.name != "nt":
+        return
+    _native_runtime_prepared = True
+    install_root = Path(os.environ.get("SMARTPARK_HOME") or Path(sys.executable).resolve().parent)
+    python_root = Path(sys.prefix).resolve()
+    site_packages = python_root / "Lib" / "site-packages"
+    candidates = (
+        python_root,
+        install_root / "python64",
+        site_packages / "onnxruntime" / "capi",
+        install_root / "python64" / "Lib" / "site-packages" / "onnxruntime" / "capi",
+        site_packages / "numpy.libs",
+        install_root / "python64" / "Lib" / "site-packages" / "numpy.libs",
+        install_root / "vendor",
+    )
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    for folder in candidates:
+        if not folder.is_dir():
+            continue
+        text = str(folder)
+        path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+        if text not in path_parts:
+            os.environ["PATH"] = text + os.pathsep + os.environ.get("PATH", "")
+        if add_dll_directory is not None:
+            try:
+                _dll_directory_handles.append(add_dll_directory(text))
+            except OSError:
+                pass
+
+
 def fastalpr_installed() -> bool:
+    global _fastalpr_error
+    prepare_native_runtime()
+    if _fastalpr_error:
+        return False
     try:
         import fast_alpr  # noqa: F401
 
+        _fastalpr_error = ""
         return True
-    except ImportError:
+    except Exception as exc:
+        # Native DLL/ONNX Runtime load failures are not always ImportError.
+        # Keep the actionable part visible to the technician and live pane.
+        _fastalpr_error = f"{type(exc).__name__}: {str(exc)[:240]}"
         return False
+
+
+def _remember_engine_error(exc: BaseException) -> str:
+    global _engine_error
+    from .redaction import redact_text
+
+    _engine_error = redact_text(f"{type(exc).__name__}: {str(exc)}")[:320]
+    return _engine_error
+
+
+def _availability_detail(models: dict | None = None) -> str:
+    if _fastalpr_error:
+        return f"FastALPR could not load: {_fastalpr_error}"
+    if _engine_error:
+        return f"FastALPR model startup failed: {_engine_error}"
+    models = models or {}
+    missing = []
+    if not models.get("detector"):
+        missing.append(DETECTOR_ONNX)
+    if not models.get("ocr"):
+        missing.append(f"{OCR_ONNX} and {OCR_CONFIG}")
+    if missing:
+        return "FastALPR model files are missing: " + ", ".join(missing)
+    return "FastALPR detector is not available. Check the Site Service log and /alpr/status."
+
+
+def _configure_model_cache(models: dict) -> None:
+    """Point the third-party model hubs at the offline SmartPark model cache."""
+    detector_path = models.get("detector_path")
+    ocr_path = models.get("ocr_path")
+    try:
+        if detector_path:
+            from open_image_models.detection.core import hub as detector_hub
+
+            detector_hub.MODEL_CACHE_DIR = Path(detector_path).parent.parent
+        if ocr_path:
+            from fast_plate_ocr.inference import hub as ocr_hub
+
+            ocr_hub.MODEL_CACHE_DIR = Path(ocr_path).parent.parent
+    except Exception as exc:
+        _remember_engine_error(exc)
 
 
 def status() -> dict:
     installed = fastalpr_installed()
-    models = ensure_alpr_model_cache() if installed else {"bundled_dir": str(bundled_alpr_dir() or ""), "detector": False, "ocr": False}
+    models = ensure_alpr_model_cache()
+    ready = bool(installed and models.get("detector") and models.get("ocr"))
     contract = camera_contract()
     return {
         "backend": "fastalpr" if installed else "none",
         "installed": installed,
         "loaded": _engine is not None,
-        "available": installed,
+        "available": ready,
+        "ready": ready,
         "models": models,
         "country": settings.alpr_country or None,
         "csf": settings.alpr_csf,
@@ -195,44 +295,53 @@ def status() -> dict:
             "then reads only that crop. Country profile: "
             f"{_country_name() or 'neutral'}. "
             "Replace the ONNX pack to retrain, or register another PlateEngine to change libraries."
-            if installed
-            else "FastALPR is not installed in this copy. Install the fast-alpr package and the ONNX model pack."
+            if ready
+            else _availability_detail(models)
         ),
     }
 
 
 def _load_engine():
-    global _engine
+    global _engine, _engine_error
     with _lock:
         if _engine is None:
-            from fast_alpr import ALPR
+            try:
+                prepare_native_runtime()
+                from fast_alpr import ALPR
 
-            models = ensure_alpr_model_cache()
-            kwargs = {
-                "detector_model": DETECTOR_MODEL,
-                "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
-                "ocr_device": "cpu",
-                "detector_providers": ["CPUExecutionProvider"],
-                "ocr_providers": ["CPUExecutionProvider"],
-            }
-            import onnxruntime as ort
+                models = ensure_alpr_model_cache()
+                if not models.get("detector") or not models.get("ocr"):
+                    raise FileNotFoundError(_availability_detail(models))
+                _configure_model_cache(models)
+                kwargs = {
+                    "detector_model": DETECTOR_MODEL,
+                    "detector_conf_thresh": float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26),
+                    "ocr_device": "cpu",
+                    "detector_providers": ["CPUExecutionProvider"],
+                    "ocr_providers": ["CPUExecutionProvider"],
+                }
+                import onnxruntime as ort
 
-            options = ort.SessionOptions()
-            workers = max(1, int(settings.recognition_max_concurrency))
-            automatic = max(1, min(2, ((os.cpu_count() or 2) - 1) // workers))
-            options.intra_op_num_threads = settings.recognition_model_threads or automatic
-            options.inter_op_num_threads = 1
-            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            options.add_session_config_entry("session.inter_op.allow_spinning", "0")
-            kwargs["detector_sess_options"] = options
-            kwargs["ocr_sess_options"] = options
-            if models.get("ocr_path") and models.get("ocr_config_path"):
-                kwargs["ocr_model"] = None
-                kwargs["ocr_model_path"] = models["ocr_path"]
-                kwargs["ocr_config_path"] = models["ocr_config_path"]
-            else:
-                kwargs["ocr_model"] = OCR_MODEL
-            _engine = ALPR(**kwargs)
+                options = ort.SessionOptions()
+                workers = max(1, int(settings.recognition_max_concurrency))
+                automatic = max(1, min(2, ((os.cpu_count() or 2) - 1) // workers))
+                options.intra_op_num_threads = settings.recognition_model_threads or automatic
+                options.inter_op_num_threads = 1
+                options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+                kwargs["detector_sess_options"] = options
+                kwargs["ocr_sess_options"] = options
+                if models.get("ocr_path") and models.get("ocr_config_path"):
+                    kwargs["ocr_model"] = None
+                    kwargs["ocr_model_path"] = models["ocr_path"]
+                    kwargs["ocr_config_path"] = models["ocr_config_path"]
+                else:
+                    kwargs["ocr_model"] = OCR_MODEL
+                _engine = ALPR(**kwargs)
+                _engine_error = ""
+            except Exception as exc:
+                _remember_engine_error(exc)
+                raise
         return _engine
 
 
@@ -349,6 +458,17 @@ def _boost_contrast(bgr):
     return cv2.cvtColor(cv2.merge((light, a, b)), cv2.COLOR_LAB2BGR)
 
 
+def _low_light(crop_bgr) -> bool:
+    """Use one enhanced OCR pass for dark/IR plates instead of two passes."""
+    try:
+        import cv2
+        import numpy as np
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+        return float(np.mean(gray)) < 78.0 or float(np.percentile(gray, 90)) < 125.0
+    except Exception:
+        return False
+
+
 def _crop_bgr(bgr, bbox, *, pad_ratio: float = 0.12):
     """Crop plate region with padding. Returns (crop_bgr, xyxy_used)."""
     h, w = bgr.shape[:2]
@@ -398,9 +518,11 @@ def _save_crop_bgr(crop_bgr) -> str | None:
         rgb = crop_bgr[:, :, ::-1]
         folder = settings.media_dir / "crops"
         folder.mkdir(parents=True, exist_ok=True)
-        dest = folder / f"{uuid.uuid4().hex}.jpg"
-        Image.fromarray(rgb).save(dest, quality=95)
-        return dest.relative_to(settings.media_dir).as_posix()
+        output = BytesIO()
+        Image.fromarray(rgb).save(output, format="JPEG", quality=95)
+        from app.services.captures import _write_jpeg
+        data = output.getvalue()
+        return _write_jpeg("crops", f"ocr-{hashlib.sha256(data).hexdigest()[:24]}.jpg", data)
     except Exception:
         return None
 
@@ -589,7 +711,7 @@ def _bbox_size(bbox) -> tuple[int, int]:
 
 
 def plate_box_ok(bbox, image_width: int, image_height: int) -> bool:
-    """Reject sky/sign boxes that are not plate-shaped. ParkWatch uses a recognition zone."""
+    """Reject sky/sign boxes that are not plate-shaped."""
     width, height = _bbox_size(bbox)
     if width < MIN_PLATE_WIDTH_PX or height < MIN_PLATE_HEIGHT_PX:
         return False
@@ -657,7 +779,8 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
         crop_ready = time.monotonic()
-        ocr_input = _prepare_ocr_crop(crop, enhance=False)
+        low_light = _low_light(crop)
+        ocr_input = _prepare_ocr_crop(crop, enhance=low_light)
         ocr_started = time.monotonic()
         try:
             ocr = engine.ocr.predict(ocr_input)
@@ -665,13 +788,20 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
             raise RuntimeError(f"FastALPR plate-crop OCR failed: {exc}") from exc
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
-        if text and conf < float(settings.recognition_high_confidence) and accept_ocr_plate(plate, conf, bbox=bbox, image_size=(image_w, image_h)):
+        accepted = accept_ocr_plate(plate, conf, bbox=bbox, image_size=(image_w, image_h))
+        # The first normal-light pass is cheap. Retry exactly once on an
+        # enhanced crop when it is empty or weak; the old condition retried
+        # only already-accepted text, losing plates that needed enhancement.
+        if not low_light and (not accepted or conf < float(settings.recognition_high_confidence)):
             try:
-                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop))
+                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop, enhance=True))
                 enhanced_text, enhanced_conf = _ocr_result_text(enhanced)
                 enhanced_plate, _rank = _apply_country_profile(enhanced_text, enhanced_conf)
-                if enhanced_conf > conf and accept_ocr_plate(enhanced_plate, enhanced_conf, bbox=bbox, image_size=(image_w, image_h)):
-                    text, conf, plate = enhanced_text, enhanced_conf, enhanced_plate
+                enhanced_ok = accept_ocr_plate(
+                    enhanced_plate, enhanced_conf, bbox=bbox, image_size=(image_w, image_h)
+                )
+                if enhanced_ok and (not accepted or enhanced_conf > conf):
+                    text, conf, plate, accepted = enhanced_text, enhanced_conf, enhanced_plate, True
             except Exception:
                 pass
         ocr_finished = time.monotonic()
@@ -688,7 +818,9 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
                 plate_raw=text,
                 plate_normalized=plate,
                 plate_confidence=raw_conf,
-                plate_crop_path=_save_crop_bgr(crop) if save_crops else None,
+                # Save the readable view used by OCR, not the raw tiny plate
+                # rectangle. The full vehicle snapshot remains unchanged.
+                plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(crop, enhance=True)) if save_crops else None,
                 bbox=box,
                 detector_confidence=_detection_score(detection),
                 timings={"crop_ms": round((crop_ready - crop_started) * 1000, 1),
@@ -737,7 +869,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
     """OCR a JPEG that is already a plate crop, skipping full-frame detection.
 
     Native ALPR cameras often provide a plate JPEG alongside the vehicle image.
-    Re-reading that crop is the cheapest ParkWatch-style software verification:
+    Re-reading that crop is the cheapest software verification:
     camera event -> plate crop -> FastPlateOCR. Generic cameras still use the
     detector-first path because they do not know the plate box.
     """
@@ -763,7 +895,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
             plate_raw=text,
             plate_normalized=plate,
             plate_confidence=raw_conf,
-            plate_crop_path=_save_crop_bgr(bgr),
+            plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(bgr, enhance=True)),
             bbox=None,
         )
         return {
@@ -801,13 +933,12 @@ def locate_plate_boxes(
     OCR is not called.
     """
     if not jpeg or not fastalpr_installed():
-        return [], {"available": False, "reason": "detector-unavailable"}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _availability_detail()}
     try:
         bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
     except Exception as exc:
-        from .redaction import redact_text
-        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _remember_engine_error(exc)}
     if not hasattr(engine, "detector"):
         return [], {"available": False, "reason": "detector-unavailable"}
     started = time.monotonic()
@@ -815,8 +946,7 @@ def locate_plate_boxes(
         view, dx, dy = _roi_crop(bgr, detect_roi, detect_zoom)
         detections = _shift_detections(engine.detector.predict(view), dx, dy)
     except Exception as exc:
-        from .redaction import redact_text
-        return [], {"available": False, "reason": "detector-unavailable", "detail": redact_text(str(exc))}
+        return [], {"available": False, "reason": "detector-unavailable", "detail": _remember_engine_error(exc)}
     width, height = int(bgr.shape[1]), int(bgr.shape[0])
     min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     boxes: list[dict] = []
@@ -868,7 +998,7 @@ def recognize_arrival_bytes(
             "plates": [],
             "count": 0,
             "best": None,
-            "detail": "detector unavailable; the live frame was not read",
+            "detail": meta.get("detail") or "detector unavailable; the live frame was not read",
         }
     if not boxes:
         return {
@@ -1006,7 +1136,7 @@ def recognize_bgr(
                 "latency_ms": round((time.monotonic() - started) * 1000, 2),
                 "count": len(hits),
             }
-        # ParkWatch filters 无车牌. A second full-frame CLAHE detect on empty
+        # Filter 无车牌. A second full-frame CLAHE detect on empty
         # asphalt doubles CPU and is how ZC ghosts appear. Only retry when the
         # detector already found a plate-shaped box (glare / dirty plate).
         if not plate_shaped:

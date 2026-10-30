@@ -3,360 +3,397 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SmartPark Edge — User Guide</title>
-  <meta name="description" content="Complete user guide: install SmartPark, connect cameras, manage parking and barriers.">
+  <link rel="icon" type="image/x-icon" href="zirp.ico">
+  <title>Zirp — Production Documentation</title>
+  <meta name="description" content="Production installation, operations, troubleshooting and developer reference for Zirp.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="layout">
-  <nav class="sidebar" aria-label="Guide navigation">
-    <div class="brand" data-i18n="brand">SmartPark Edge</div>
+  <nav class="sidebar" aria-label="Documentation navigation">
+    <div class="brand">Zirp</div>
     <div class="toolbar">
-      <button type="button" data-lang-btn="en" class="active" data-i18n="lang_en">English</button>
-      <button type="button" data-lang-btn="sw" data-i18n="lang_sw">Kiswahili</button>
+      <span class="badge blue">Production</span>
       <button type="button" id="theme-toggle" class="theme-btn" title="Toggle theme" aria-label="Toggle theme">☾</button>
     </div>
-    <div class="group" data-i18n="nav_start">Start</div>
-    <a href="#overview" data-i18n="nav_overview">Overview</a>
-    <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
-    <a href="#install" data-i18n="nav_install">Installation</a>
-    <a href="#login" data-i18n="login_h2">Sign in</a>
-    <a href="#daily" data-i18n="nav_daily">Daily use</a>
-    <div class="group" data-i18n="nav_cameras">Cameras</div>
-    <a href="#connect" data-i18n="nav_connect">Connect cameras</a>
-    <a href="#camera-types" data-i18n="nav_types">Camera types</a>
-    <a href="#live-video" data-i18n="nav_live">Live video</a>
-    <a href="#recognition" data-i18n="nav_plates">Plate reading</a>
-    <div class="group" data-i18n="nav_ops">Parking</div>
-    <a href="#vehicles" data-i18n="nav_vehicles">Registered vehicles</a>
-    <a href="#gates" data-i18n="nav_gates">Gates &amp; barriers</a>
-    <a href="#receipts" data-i18n="nav_receipts">Receipts &amp; fees</a>
-    <div class="group" data-i18n="nav_advanced">Advanced</div>
-    <a href="#streaming" data-i18n="nav_streaming">Smooth streaming</a>
-    <a href="#help" data-i18n="nav_help">Help &amp; fixes</a>
+
+    <div class="group">Start here</div>
+    <a href="#overview">Overview</a>
+    <a href="#roles">Deployment roles</a>
+    <a href="#production-checklist">Production checklist</a>
+
+    <div class="group">Technician guides</div>
+    <a href="#prerequisites">Prerequisites</a>
+    <a href="#site-server">Install the Site Server</a>
+    <a href="#operator-workstation">Add an Operator Workstation</a>
+    <a href="#processing-node">Add a Processing Node</a>
+    <a href="#network">Network and firewall</a>
+    <a href="#database">Database</a>
+    <a href="#cameras">Cameras and lanes</a>
+    <a href="#gates">Gates and safety</a>
+
+    <div class="group">Operations</div>
+    <a href="#daily-operations">Daily operation</a>
+    <a href="#recognition">Recognition</a>
+    <a href="#backups">Backups and recovery</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+
+    <div class="group">Developer reference</div>
+    <a href="#architecture">Architecture</a>
+    <a href="#runtime">Runtime and configuration</a>
+    <a href="#api">API and health checks</a>
+    <a href="#development">Development and testing</a>
   </nav>
 
   <main>
     <header class="hero" id="top">
-      <h1 data-i18n="hero_title">SmartPark Edge</h1>
-      <p data-i18n="hero_lead">Plate-first parking for your site.</p>
+      <span class="badge green">Technician + developer guide</span>
+      <h1>Zirp production documentation</h1>
+      <p>Deploy a Site Server, connect operator workstations, commission cameras and gates, and keep the parking operation supportable after handover.</p>
       <div class="quick-links">
-        <a href="#quickstart" data-i18n="hero_q1">First time setup</a>
-        <a href="#connect" data-i18n="hero_q2">Connect cameras</a>
-        <a href="#help" data-i18n="hero_q3">Fix a problem</a>
+        <a href="#site-server">Install a Site Server</a>
+        <a href="#processing-node">Add a processing node</a>
+        <a href="#operator-workstation">Connect a workstation</a>
+        <a href="#troubleshooting">Fix a problem</a>
+        <a href="#development">Build and test</a>
       </div>
     </header>
 
     <section id="overview">
-      <h2 data-i18n="overview_h2">What SmartPark does</h2>
-      <p data-i18n="overview_p">SmartPark Edge runs on the parking site computer.</p>
+      <h2>Overview</h2>
+      <p>Zirp is a plate-first parking system. The Site Server owns the authoritative database and site state. Processing Nodes use that database but run only the cameras and recognition assigned to their persisted gate. Operator Workstations are UI clients of the server.</p>
+      <div class="card ok"><strong>Production rule:</strong> install one Site Server per parking site. Use a Processing Node for another PC that must own cameras, or an Operator Workstation for UI-only access. A node starts fail-closed until its gate is assigned.</div>
       <div class="grid3">
-        <div class="card icon-card"><div class="icon">📷</div><h4 data-i18n="feat1_t">Cameras</h4><p data-i18n="feat1_d">Works with NetSDK cameras and IP cameras.</p></div>
-        <div class="card icon-card"><div class="icon">📺</div><h4 data-i18n="feat2_t">Live view</h4><p data-i18n="feat2_d">Watch lanes from Live Gates.</p></div>
-        <div class="card icon-card"><div class="icon">🔤</div><h4 data-i18n="feat3_t">Plates</h4><p data-i18n="feat3_d">Reads plates from camera or OCR.</p></div>
-        <div class="card icon-card"><div class="icon">🚧</div><h4 data-i18n="feat4_t">Barriers</h4><p data-i18n="feat4_d">Opens gate for allowed plates.</p></div>
-        <div class="card icon-card"><div class="icon">🧾</div><h4 data-i18n="feat5_t">Receipts</h4><p data-i18n="feat5_d">Prints entry tickets on a thermal roll printer.</p></div>
-        <div class="card icon-card"><div class="icon">⚡</div><h4 data-i18n="feat6_t">Always on</h4><p data-i18n="feat6_d">Parking continues when UI is closed.</p></div>
+        <div class="card icon-card"><div class="icon">🖥️</div><h4>Site Server</h4><p>Runs Zirp services, database, cameras, recognition, gates and receipts.</p></div>
+        <div class="card icon-card"><div class="icon">📡</div><h4>Processing Node</h4><p>Runs local camera/media/recognition services for one dynamically assigned gate.</p></div>
+        <div class="card icon-card"><div class="icon">👥</div><h4>Operator Workstation</h4><p>Displays the server UI and sends authenticated operator actions to it.</p></div>
+        <div class="card icon-card"><div class="icon">📷</div><h4>Field hardware</h4><p>Cameras, barriers, controllers, displays and printers connected to the site server.</p></div>
       </div>
-
       <figure class="figure">
-        <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
-          <defs>
-            <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stop-color="#3b82f6"/>
-              <stop offset="100%" stop-color="#22c55e"/>
-            </linearGradient>
-          </defs>
-          <rect x="10" y="70" width="130" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="75" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_entry">Entry camera</text>
-          <rect x="170" y="70" width="130" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="235" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_exit">Exit camera</text>
-          <rect x="330" y="55" width="150" height="90" rx="8" fill="var(--diagram-accent)" stroke="#3b82f6"/>
-          <text x="405" y="95" fill="var(--accent2)" text-anchor="middle" font-size="12" font-weight="bold" data-i18n-svg="lbl_sitepc">Site PC</text>
-          <text x="405" y="115" fill="var(--diagram-muted)" text-anchor="middle" font-size="11">SmartPark</text>
-          <rect x="510" y="70" width="100" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="560" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_barrier">Barrier</text>
-          <rect x="630" y="70" width="80" height="60" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="670" y="105" fill="var(--diagram-text)" text-anchor="middle" font-size="12" data-i18n-svg="lbl_led">Display</text>
-          <path d="M140 100 H170 M300 100 H330 M480 100 H510 M610 100 H630" stroke="url(#g1)" stroke-width="2" fill="none"/>
+        <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Zirp production topology">
+          <defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#22c55e"/></linearGradient></defs>
+          <rect x="20" y="55" width="145" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="92" y="87" fill="var(--diagram-text)" text-anchor="middle" font-size="12">Cameras</text><text x="92" y="106" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">LAN / SDK / RTSP</text>
+          <rect x="210" y="38" width="200" height="105" rx="8" fill="var(--diagram-accent)" stroke="#3b82f6"/><text x="310" y="75" fill="var(--accent2)" text-anchor="middle" font-size="14" font-weight="bold">Site Server</text><text x="310" y="97" fill="var(--diagram-text)" text-anchor="middle" font-size="11">API · DB · recognition</text><text x="310" y="116" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">gates · receipts · backups</text>
+          <rect x="455" y="18" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="11">PostgreSQL</text><text x="517" y="58" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">production DB</text>
+          <rect x="455" y="102" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="126" fill="var(--diagram-text)" text-anchor="middle" font-size="11">Nodes / PCs</text><text x="517" y="142" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">scoped clients</text>
+          <rect x="625" y="55" width="115" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--accent)"/><text x="682" y="86" fill="var(--accent)" text-anchor="middle" font-size="12">Gates</text><text x="682" y="105" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">controllers / LEDs</text>
+          <path d="M165 90 H210 M410 65 L455 46 M410 115 L455 130 M580 75 L625 90" stroke="url(#g1)" stroke-width="2" fill="none"/>
         </svg>
-        <figcaption data-i18n="topology_cap">Typical site layout.</figcaption>
-      </figure>
-
-      <h3 data-i18n="how_h2">How it works</h3>
-      <p data-i18n="how_p">When a vehicle arrives, the camera triggers a plate read.</p>
-      <figure class="figure">
-        <svg viewBox="0 0 640 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
-          <rect x="10" y="30" width="100" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="60" y="55" fill="var(--diagram-text)" text-anchor="middle" font-size="11" data-i18n-svg="flow1">Vehicle</text>
-          <text x="125" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
-          <rect x="140" y="30" width="100" height="40" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
-          <text x="190" y="55" fill="var(--accent2)" text-anchor="middle" font-size="11" data-i18n-svg="flow2">Plate read</text>
-          <text x="255" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
-          <rect x="270" y="30" width="100" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="320" y="55" fill="var(--diagram-text)" text-anchor="middle" font-size="11" data-i18n-svg="flow3">Decision</text>
-          <text x="385" y="55" fill="var(--diagram-muted)" font-size="16">→</text>
-          <rect x="400" y="30" width="120" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
-          <text x="460" y="55" fill="var(--accent)" text-anchor="middle" font-size="11" data-i18n-svg="flow4">Gate / receipt</text>
-        </svg>
-        <figcaption data-i18n="flow_cap">Detection runs in the background.</figcaption>
+        <figcaption>Only the Site Server owns the parking state and hardware control path. Operator PCs use the Zirp API and do not connect directly to PostgreSQL or cameras.</figcaption>
       </figure>
     </section>
 
-    <section id="quickstart">
-      <h2 data-i18n="quick_h2">Quick start</h2>
-      <p data-i18n="quick_p">Follow these steps the first time you set up a new site.</p>
-      <ol class="steps">
-        <li data-i18n="qs1">Install from USB.</li>
-        <li data-i18n="qs2">Open Desktop shortcut.</li>
-        <li data-i18n="qs3">Sign in.</li>
-        <li data-i18n="qs4">Add cameras.</li>
-        <li data-i18n="qs5">Connect all.</li>
-        <li data-i18n="qs6">Register plates.</li>
-        <li data-i18n="qs7">Choose printer.</li>
-        <li data-i18n="qs8">Test entry.</li>
-      </ol>
-    </section>
-
-    <section id="install">
-      <h2 data-i18n="install_h2">Installation</h2>
-      <p data-i18n="install_p">You receive SmartPark on a USB stick.</p>
-      <ol class="steps">
-        <li data-i18n="inst1">Open USB folder.</li>
-        <li data-i18n="inst2">Run Install-SmartPark.bat.</li>
-        <li data-i18n="inst3">Open Desktop shortcut.</li>
-        <li data-i18n="inst4">Use Start-SmartPark.bat if needed.</li>
-      </ol>
-      <div class="card warn"><strong>⚠</strong> <span data-i18n="inst_warn">Close other camera software first.</span></div>
+    <section id="roles">
+      <h2>Deployment roles</h2>
       <table>
+        <thead><tr><th>Role</th><th>Owns</th><th>Must not do</th></tr></thead>
         <tbody>
-          <tr><th data-i18n="inst_loc">Install folder</th><td><code>%LOCALAPPDATA%\Programs\SmartPark Edge</code></td></tr>
-          <tr><th data-i18n="inst_logs">Log files</th><td><code>%ProgramData%\SmartParkEdge\logs\</code></td></tr>
-          <tr><th data-i18n="inst_docs">This guide</th><td><code>documentation\index.html</code> in install folder</td></tr>
+          <tr><td><strong>Site Server</strong></td><td>Database, API, parking logic, cameras, recognition, MediaMTX, HVX SDK, gates, printers, evidence, backups and users.</td><td>Expose PostgreSQL or camera credentials to the operator LAN.</td></tr>
+          <tr><td><strong>Processing Node</strong></td><td>Local camera host, MediaMTX, recognition worker and one persisted gate scope using PostgreSQL.</td><td>Start with no gate assignment, stream another node's camera, or use shared SQLite.</td></tr>
+          <tr><td><strong>Operator Workstation</strong></td><td>Desktop UI, local UI preferences, server URL and verified server identity.</td><td>Run a local database, migrations, camera SDK, recognition worker, MediaMTX, gate hardware or Site Service.</td></tr>
         </tbody>
       </table>
-      <h3 data-i18n="inst_tasks_h">Services that start automatically</h3>
+      <div class="card warn"><strong>Important two-PC boundary:</strong> the authoritative database must be PostgreSQL. Do not make a second laptop process its own gate against a shared SQLite file or install it as an Operator Workstation when it must own cameras. Use the Processing Node installer and assign its gate after setup.</div>
+      <p>Every live media boundary is scope-checked. A node cannot open another node's WHEP, MJPEG, snapshot, preview, stream telemetry or probe path; the request returns <code>403</code> and the Site Service log records the node, gate and camera IDs.</p>
+    </section>
+
+    <section id="production-checklist">
+      <h2>Production checklist</h2>
+      <p>Use this as the handover gate. Every item needs an owner and an observed result; do not mark a check complete from configuration alone.</p>
+      <ol class="steps">
+        <li><strong>Approve the site design.</strong> Record the Site Server name, reserved IP/DNS name, lanes, camera IPs, gate/controller addresses, printer model and operator accounts.</li>
+        <li><strong>Install the approved Zirp release.</strong> Use the signed or otherwise approved installer package supplied by the software owner. After the Site Server is running, another PC may download the same clean installer from the server login page on the private LAN.</li>
+        <li><strong>Configure the Site Server.</strong> Select the Site Server role, configure PostgreSQL, create the first administrator and complete the deployment wizard.</li>
+        <li><strong>Commission hardware safely.</strong> Add cameras, verify live video and recognition, then test gate outputs with the lane physically safe and a technician present.</li>
+        <li><strong>Add workstations or nodes.</strong> Select Operator Workstation for UI-only access. Select Processing Node for local camera processing, use the same PostgreSQL database, then assign its gate in Live Gates.</li>
+        <li><strong>Prove failure handling.</strong> Disconnect one camera, close a workstation, restart the UI and restart the server services. The remaining lanes and server state must remain correct.</li>
+        <li><strong>Prove recovery.</strong> Take a backup, verify it, record the restore owner and document the support contact, release version and configuration identifiers.</li>
+      </ol>
+    </section>
+
+    <section id="prerequisites">
+      <h2>Prerequisites</h2>
+      <table>
+        <thead><tr><th>Area</th><th>Requirement</th><th>Check before installation</th></tr></thead>
+        <tbody>
+          <tr><td>Server OS</td><td>Supported Windows 10/11 64-bit workstation or server-class PC for the full HVX deployment.</td><td>Use a stable power source, automatic time sync and an account authorised to install software and scheduled tasks.</td></tr>
+          <tr><td>Network</td><td>Private site LAN with a stable server address. Reserve the address in DHCP or use an approved DNS name.</td><td>From every intended operator PC, resolve and reach the server address.</td></tr>
+          <tr><td>Database</td><td>PostgreSQL for a multi-workstation production site. SQLite is for development, demonstrations and temporary evaluation.</td><td>Have the approved PostgreSQL host, database, user and secret ready; do not send the password in a ticket or screenshot.</td></tr>
+          <tr><td>Cameras</td><td>Camera IPs, lane direction, vendor credentials and the correct adapter choice.</td><td>Confirm the camera LAN is reachable from the Site Server and no other SDK client owns the camera session.</td></tr>
+          <tr><td>Gate hardware</td><td>Barrier/controller/LED addresses, safe manual override and a responsible technician.</td><td>Keep automatic opening disabled until recognition and lane mapping are proven.</td></tr>
+          <tr><td>Printer</td><td>ESC/POS thermal printer, paper, power and USB or LAN connection if receipts are required.</td><td>Print a test ticket before site handover.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="site-server">
+      <h2>Install and configure the Site Server</h2>
+      <p>These are the production steps for a technician using the Zirp installer supplied by the software owner.</p>
+      <ol class="steps">
+        <li>Run the installer with administrator approval. Keep the application in the approved installation directory and allow the installer to register the background startup tasks.</li>
+        <li>Open Zirp and choose <strong>Site Server</strong> in Deployment Configuration. Do not use the desktop UI as proof that the background server is healthy.</li>
+        <li>Set the site name and confirm the LAN address shown by the wizard. Use a DHCP reservation or DNS name so operator workstations do not depend on a changing address.</li>
+        <li>Select <strong>PostgreSQL</strong> for production. Enter the approved database server, port, database name and username, then use <strong>Test Database</strong>. If PostgreSQL is not reachable, correct the database installation or deliberately select SQLite for evaluation.</li>
+        <li>Apply the configuration. Zirp creates or upgrades the schema, validates the migration revision, checks database read/write behavior and stores only a protected secret reference—not the password—in <code>deployment.json</code>.</li>
+        <li>Create the first administrator in the wizard. Use a site-specific password held under the site’s credential policy. There is no production default password in this guide.</li>
+        <li>Configure lanes, camera adapters, printers and gate/controller values in the application. Save one lane at a time and verify its live status before continuing.</li>
+        <li>Run the server acceptance checks in <a href="#network">Network and firewall</a>, <a href="#cameras">Cameras and lanes</a> and <a href="#gates">Gates and safety</a>.</li>
+      </ol>
+      <div class="card warn"><strong>Do not edit:</strong> Python files, <code>.env</code>, SQL, <code>deployment.json</code> or PowerShell files to complete a normal installation. If the wizard cannot complete, capture the error and logs and use the recovery procedure.</div>
+      <h3>Startup behavior</h3>
+      <p>The supported Windows startup path registers restartable scheduled tasks at user logon for the Site Service, recognition worker, MediaMTX and the optional HVX SDK host. A Windows service installation is an advanced path and should be used only after the vendor SDK has been validated on the target hardware.</p>
+    </section>
+
+    <section id="operator-workstation">
+      <h2>Add an Operator Workstation</h2>
+      <p>Once the Site Server is running, open <code>http://SERVER_IP:8760/</code> on the new node or PC and select <strong>Download the Zirp installer for a node or another PC</strong> on the login page. Extract the downloaded <code>Zirp-Installer.zip</code>, run <code>Install-SmartPark.bat</code>, and then complete the normal role setup below. The download contains application/runtime files only; it does not contain the Site Server database, media, credentials or deployment identity.</p>
+      <ol class="steps">
+        <li>Install the approved Zirp package on the workstation. Do not copy the Site Server database or camera configuration to this PC.</li>
+        <li>Open Deployment Configuration and select <strong>Operator Workstation</strong>.</li>
+        <li>Enter the Site Server URL, for example <code>http://smartpark-server:8760</code> or <code>http://192.168.10.20:8760</code>. Prefer the approved DNS name or reserved address.</li>
+        <li>Press <strong>Test connection</strong>. Confirm that the server identity is shown as <strong>VERIFIED</strong>; stop if it is not the expected site.</li>
+        <li>Complete setup and sign in with a site user. The workstation should open the remote site UI and must not create <code>smartpark.db</code> locally.</li>
+      </ol>
+      <div class="card ok"><strong>Reachability promise:</strong> a correctly configured Site Server listens on <code>0.0.0.0:8760</code>, and its Private-network firewall rule allows operator clients on the local subnet. Verify with a browser and <code>/health/live</code> from the workstation before declaring it ready.</div>
+    </section>
+
+    <section id="processing-node">
+      <h2>Add a Processing Node</h2>
+      <p>Use this role when the second PC must connect to its own cameras and recognition lane. From the Site Server login page, download the single Zirp installer, extract it, and run <code>Install-SmartPark.bat</code>, then choose <strong>EDGE_NODE</strong> (Processing Node).</p>
+      <ol class="steps">
+        <li>Install PostgreSQL on the Site Server and create the dedicated Zirp database user. Allow the node PC to reach PostgreSQL on the private network.</li>
+        <li>The node installer locks the wizard to <strong>Processing Node</strong>. Enter the existing Site Server address, then a dedicated PostgreSQL host/database/user/password approved for this deployment. SQLite is hidden and rejected; the node only checks the existing schema and never creates or migrates a local site database.</li>
+        <li>The Site Server pairing response contains identity only; it does not hand out the web administrator password, camera passwords, RTSP credentials or secret-store references. Never reuse the Site Server web password or the PostgreSQL <code>postgres</code> superuser on a node.</li>
+        <li>During node setup, create the node's own username and password in the wizard. Zirp creates that account with only the built-in <strong>Processing Node</strong> role. The node login rejects the Site Administrator account and other shared-database usernames. The node password is never written to <code>deployment.json</code>; only its Argon2 hash is stored.</li>
+        <li>A node session is restricted to its assigned camera/media lane and local hardware diagnostics. Users, roles, site settings, tariffs, payments, subscribers, backups and central topology must be managed from the Site Server.</li>
+        <li>Sign in locally on the node. It starts with no camera ownership and must not open the server's cameras.</li>
+        <li>Open <strong>Live Gates</strong>, select the gate for this PC, and click <strong>Assign this PC to selected gate</strong>.</li>
+        <li>Add or edit the cameras with their actual gate assignment. The node will connect only to cameras in its assigned gate; the Site Server remains the central configuration/database owner.</li>
+      </ol>
+      <div class="card ok"><strong>Isolation check:</strong> if the node log shows an empty assigned gate, its recognition worker and MediaMTX should claim zero cameras. A request for a foreign camera returns HTTP 403 and is logged with the node identity and gate IDs.</div>
+    </section>
+
+    <section id="network">
+      <h2>Network and firewall</h2>
+      <p>Keep the Zirp network private. The installer creates inbound rules only for the Site Server API and, when enabled, the WebRTC media path.</p>
+      <table>
+        <thead><tr><th>Port</th><th>Purpose</th><th>Who may reach it</th></tr></thead>
+        <tbody>
+          <tr><td><code>TCP 8760</code></td><td>Zirp API and web UI</td><td>Operator PCs on the private site LAN</td></tr>
+          <tr><td><code>TCP 8889</code></td><td>MediaMTX WebRTC signalling</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
+          <tr><td><code>UDP/TCP 8189</code></td><td>WebRTC ICE media</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
+          <tr><td><code>TCP 5432</code></td><td>PostgreSQL</td><td>Site Server and explicitly assigned Processing Nodes only; never open to operator workstations or the Internet</td></tr>
+          <tr><td><code>TCP 8554</code></td><td>Internal RTSP</td><td>Site Server only</td></tr>
+          <tr><td><code>TCP 9997/9998</code></td><td>MediaMTX control and metrics</td><td>Site Server only</td></tr>
+          <tr><td><code>TCP 8765</code></td><td>HVX SDK host</td><td>Site Server only</td></tr>
+        </tbody>
+      </table>
+      <h3>Verify from an Operator Workstation</h3>
+      <pre><code>http://&lt;site-server&gt;:8760/health/live
+http://&lt;site-server&gt;:8760/health/ready</code></pre>
+      <p>A response from <code>/health/live</code> proves that the API process answered. <code>/health/ready</code> additionally reflects whether the site is configured and ready for service. Authentication is still required for operational data.</p>
+    </section>
+
+    <section id="database">
+      <h2>Database policy</h2>
+      <div class="grid2">
+        <div class="card ok"><h4>PostgreSQL — production</h4><p>Recommended for multi-user, multi-workstation sites. PostgreSQL may be installed separately by the site’s approved process; Zirp does not silently download a database during an offline installation.</p></div>
+        <div class="card warn"><h4>SQLite — evaluation</h4><p>Useful for development, demonstrations, Camera Lab and a single-computer field test. It is not recommended for concurrent multi-workstation production. The wizard requires an explicit acknowledgement.</p></div>
+      </div>
+      <h3>PostgreSQL prerequisite</h3>
+      <p>For production, install PostgreSQL as a normal system service before starting Zirp setup. Use the official <a href="https://www.postgresql.org/download/windows/">PostgreSQL Windows installer</a> or the site’s approved offline installer. Keep the PostgreSQL administrator credential separate from the Zirp application credential.</p>
+      <div class="card warn"><strong>Do not install PostgreSQL Server on a Processing Node.</strong> PostgreSQL runs on the Site Server only. The node connects to the Site Server's PostgreSQL over the private LAN and needs only the Zirp package, a dedicated database login, and firewall access to the server. Installing PostgreSQL on the node creates a second unrelated database.</div>
+      <ol class="steps">
+        <li>Confirm the service from an Administrator CMD: <code>sc query type= service state= all | findstr /I "postgres"</code>, then start the exact service name if needed, for example <code>net start postgresql-x64-17</code>.</li>
+        <li>Check the port with <code>netstat -ano | findstr ":5432"</code> and <code>powershell -NoProfile -Command "Test-NetConnection 127.0.0.1 -Port 5432"</code>. Keep the default port <code>5432</code> unless there is a documented conflict.</li>
+        <li>Use the installed <code>psql.exe</code> to connect as the PostgreSQL administrator, then create a dedicated <code>smartpark</code> login and a database owned by it. Do not use <code>postgres</code> for Zirp.</li>
+        <li>Verify the exact credentials with <code>psql -h 127.0.0.1 -p 5432 -U smartpark -d smartpark -c "select current_user, current_database();"</code>. Enter the password at the prompt; do not put it in the command line.</li>
+        <li>In Zirp choose <strong>Site Server → PostgreSQL</strong>, enter <code>127.0.0.1</code>, <code>5432</code>, <code>smartpark</code>, <code>smartpark</code> and the tested password, then run <strong>Test Database</strong>, apply and verify <code>/health/database</code>.</li>
+      </ol>
+      <div class="card info"><strong>Already installed but cannot connect?</strong> Run the checks above in order. A running service and open port are not enough: the database and login must exist, the login must own the database, and the password must pass the exact <code>psql</code> command. The full copy/paste CMD procedure, including the safe interactive <code>CREATE ROLE</code>, <code>CREATE DATABASE</code> and <code>\password</code> steps, is in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</div>
+      <h3>PostgreSQL requirements</h3>
       <ul>
-        <li data-i18n="inst_task1">Site Service</li>
-        <li data-i18n="inst_task2">Camera host</li>
-        <li data-i18n="inst_task3">Media service</li>
+        <li>Create the database and a Zirp user with the permissions required to create and migrate the Zirp schema.</li>
+        <li>Keep PostgreSQL listening locally on the Site Server where possible. Operator Workstations connect to Zirp on port 8760, not directly to port 5432.</li>
+        <li>Enter the host, port, database, username and password in the wizard, then run <strong>Test Database</strong> before applying.</li>
+        <li>The protected secret store holds the password. <code>deployment.json</code>, logs, support exports and status pages contain no password or credential-bearing URL.</li>
       </ul>
+      <h3>SQLite location and warning</h3>
+      <p>On Windows the default database is <code>C:\ProgramData\SmartParkEdge\smartpark.db</code>. Zirp creates the data directory, runs Alembic migrations, checks integrity/WAL/read-write behavior and creates the first administrator. Do not copy a live SQLite database with Explorer while Zirp is running.</p>
+      <p>Operator Workstations never run migrations. Migrations belong to the Site Server and a migration failure prevents the Site Service from starting until the database is repaired or restored.</p>
+      <p>See the installed <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>, <a href="#" data-doc="DATABASE_CONFIGURATION.md">database reference</a> and the <a href="https://www.postgresql.org/docs/current/">official PostgreSQL documentation</a> for the detailed health, authentication, backup and recovery contract.</p>
     </section>
 
-    <section id="login">
-      <h2 data-i18n="login_h2">Sign in</h2>
-      <p data-i18n="login_p">Use the administrator account from your installer.</p>
+    <section id="cameras">
+      <h2>Cameras and lanes</h2>
+      <p>Configure one camera record per physical camera, assign it to a lane and choose the adapter that matches the camera’s actual interface.</p>
       <table>
+        <thead><tr><th>Adapter</th><th>Use when</th><th>Expected healthy state</th></tr></thead>
         <tbody>
-          <tr><th data-i18n="login_user">Username</th><td><code>admin</code></td></tr>
-          <tr><th data-i18n="login_pass">Password</th><td><code>SmartPark1!</code> <span class="badge">default</span></td></tr>
+          <tr><td><code>hvx</code></td><td>HVX / QY NetSDK camera, normally port 30000, with the vendor SDK path.</td><td>SDK connected, live frames and native plate events.</td></tr>
+          <tr><td><code>dahua</code> / <code>hikvision</code></td><td>Supported IP camera with video but no usable native Zirp plate callback.</td><td>Video connected; local recognition may provide plate reads.</td></tr>
+          <tr><td><code>rtsp</code></td><td>Generic RTSP/HTTP camera.</td><td>MediaMTX/local gateway delivers fresh frames; recognition is bounded and local.</td></tr>
         </tbody>
       </table>
-      <p data-i18n="login_note">Change password under Users if required.</p>
-    </section>
-
-    <section id="daily">
-      <h2 data-i18n="daily_h2">Daily use</h2>
-      <p data-i18n="daily_p">Screens operators use most often:</p>
-      <div class="grid2">
-        <div class="card"><h4 data-i18n="daily1_t">Live Gates</h4><p data-i18n="daily1_d">Watch cameras and plates.</p></div>
-        <div class="card"><h4 data-i18n="daily2_t">Sessions</h4><p data-i18n="daily2_d">Who is inside.</p></div>
-        <div class="card"><h4 data-i18n="daily3_t">Vehicles</h4><p data-i18n="daily3_d">Registered plates.</p></div>
-        <div class="card"><h4 data-i18n="daily4_t">Dashboard</h4><p data-i18n="daily4_d">Summary view.</p></div>
-      </div>
-      <div class="card tip"><h4 data-i18n="daily5_t">System Health</h4><p data-i18n="daily5_d">For supervisors.</p></div>
-    </section>
-
-    <section id="connect">
-      <h2 data-i18n="connect_h2">Connect your cameras</h2>
-      <p data-i18n="connect_p">Each camera needs IP, credentials, and entry/exit side.</p>
       <ol class="steps">
-        <li data-i18n="conn1">Open <span class="ui-path">Live Gates → IPs</span>.</li>
-        <li data-i18n="conn2">Add cameras.</li>
-        <li data-i18n="conn3">Enter details.</li>
-        <li data-i18n="conn4">Choose adapter.</li>
-        <li data-i18n="conn5">Close other camera apps.</li>
-        <li data-i18n="conn6">Connect all.</li>
-        <li data-i18n="conn7">Check live video.</li>
-        <li data-i18n="conn8">Test with a vehicle.</li>
+        <li>Open the camera or lane administration screen and enter the camera address, credentials, lane side and adapter.</li>
+        <li>Connect cameras from the Site Server. A failed camera must not prevent healthy cameras from connecting.</li>
+        <li>Confirm fresh live video, not merely a successful ping or login. Check that timestamps or changing frames advance.</li>
+        <li>Confirm recognition with a permitted test vehicle and verify that the plate is assigned to the intended lane.</li>
+        <li>Record the result for every camera, including the camera model, stream, adapter, last successful frame and recognition method.</li>
       </ol>
-      <figure class="figure">
-        <svg viewBox="0 0 560 80" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
-          <rect x="5" y="20" width="80" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="45" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_add">Add</text>
-          <text x="95" y="42" fill="var(--diagram-muted)">→</text>
-          <rect x="105" y="20" width="80" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="145" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_connect">Connect</text>
-          <text x="195" y="42" fill="var(--diagram-muted)">→</text>
-          <rect x="205" y="20" width="90" height="36" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
-          <text x="250" y="42" fill="var(--accent2)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_detect">Detect</text>
-          <text x="305" y="42" fill="var(--diagram-muted)">→</text>
-          <rect x="315" y="20" width="90" height="36" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
-          <text x="360" y="42" fill="var(--accent)" text-anchor="middle" font-size="10" data-i18n-svg="lbl_gate">Gate</text>
-        </svg>
-      </figure>
-      <h3 data-i18n="cred_h">Typical camera settings</h3>
-      <table>
-        <thead>
-          <tr>
-            <th data-i18n="cred_th1">Camera type</th>
-            <th data-i18n="cred_th2">Port</th>
-            <th data-i18n="cred_th3">Login</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td data-i18n="cred_r1c1">NetSDK / HVX</td>
-            <td>30000</td>
-            <td data-i18n="cred_r1c3">admin / admin</td>
-          </tr>
-          <tr>
-            <td data-i18n="cred_r2c1">Dahua / Hikvision</td>
-            <td>554</td>
-            <td data-i18n="cred_r2c3">From camera web page</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="camera-types">
-      <h2 data-i18n="types_h2">Camera types</h2>
-      <p data-i18n="types_p">Choose the adapter on the IPs tab.</p>
-      <table>
-        <thead>
-          <tr>
-            <th data-i18n="types_th1">Adapter</th>
-            <th data-i18n="types_th2">Use when</th>
-            <th data-i18n="types_th3">Status when OK</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>hvx</code> <span class="badge green">default</span></td>
-            <td data-i18n="types_r1c2">NetSDK port 30000</td>
-            <td>SDK Connected</td>
-          </tr>
-          <tr>
-            <td><code>dahua</code> / <code>hikvision</code></td>
-            <td data-i18n="types_r2c2">IP camera, no built-in reader</td>
-            <td>Video Connected</td>
-          </tr>
-          <tr>
-            <td><code>rtsp</code></td>
-            <td data-i18n="types_r3c2">Generic RTSP</td>
-            <td>Video Connected</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="live-video">
-      <h2 data-i18n="live_h2">Live video</h2>
-      <p data-i18n="live_p">Live Gates → Live tab.</p>
-      <figure class="figure">
-        <svg viewBox="0 0 520 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
-          <rect x="10" y="50" width="90" height="50" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="55" y="80" fill="var(--diagram-text)" text-anchor="middle" font-size="10">Camera</text>
-          <rect x="120" y="40" width="100" height="70" rx="6" fill="var(--diagram-accent)" stroke="#3b82f6"/>
-          <text x="170" y="72" fill="var(--accent2)" text-anchor="middle" font-size="10" font-weight="bold">SmartPark</text>
-          <text x="170" y="88" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">Live view</text>
-          <rect x="240" y="35" width="80" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
-          <text x="280" y="60" fill="var(--accent)" text-anchor="middle" font-size="9">Screen L</text>
-          <rect x="240" y="85" width="80" height="40" rx="6" fill="var(--diagram-fill)" stroke="var(--accent)"/>
-          <text x="280" y="110" fill="var(--accent)" text-anchor="middle" font-size="9">Screen R</text>
-          <rect x="340" y="50" width="80" height="50" rx="6" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/>
-          <text x="380" y="80" fill="var(--diagram-text)" text-anchor="middle" font-size="9">Plates</text>
-          <path d="M100 75 H120 M220 75 H240" stroke="var(--diagram-stroke)" stroke-width="2"/>
-        </svg>
-      </figure>
-      <div class="card warn"><span data-i18n="live_tip">If video freezes, close other camera software.</span></div>
-      <p data-i18n="live_roles">Stream quality is managed automatically.</p>
-    </section>
-
-    <section id="recognition">
-      <h2 data-i18n="plates_h2">Plate recognition</h2>
-      <p data-i18n="plates_p">Two methods:</p>
-      <div class="grid2">
-        <div class="card ok">
-          <h4><span class="badge green">1</span> <span data-i18n="native_t">Camera built-in</span></h4>
-          <p data-i18n="native_d">NetSDK cameras send plate text directly.</p>
-        </div>
-        <div class="card">
-          <h4><span class="badge blue">2</span> <span data-i18n="fast_t">Local OCR</span></h4>
-          <p data-i18n="fast_d">Reads plate from video image.</p>
-        </div>
-      </div>
-      <p data-i18n="hybrid_note">Camera reader first, OCR as backup.</p>
-      <p data-i18n="coil_p">Ground loop support.</p>
-    </section>
-
-    <section id="vehicles">
-      <h2 data-i18n="vehicles_h2">Registered vehicles</h2>
-      <p data-i18n="vehicles_p">Registered plates open automatically.</p>
-      <ol>
-        <li data-i18n="veh1">Vehicles → Register plate</li>
-        <li data-i18n="veh2">Enter plate number</li>
-        <li data-i18n="veh3">Choose access type</li>
-        <li data-i18n="veh4">Casual visitors get receipts</li>
-      </ol>
+      <h3>Allowing a Processing Node to reach PostgreSQL</h3>
+      <p>Example: Site Server <code>192.168.10.20</code>, Processing Node <code>192.168.10.21</code>. On the Site Server, set <code>listen_addresses = '192.168.10.20,127.0.0.1'</code> in <code>postgresql.conf</code>, then add <code>host smartpark smartpark 192.168.10.21/32 scram-sha-256</code> to <code>pg_hba.conf</code>. Restart the PostgreSQL Windows service. Add a Private-profile firewall rule that permits TCP <code>5432</code> from <code>192.168.10.21</code> only.</p>
+      <p>From the node, run <code>powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"</code>. Then run <code>Install-SmartPark.bat</code>, choose <code>EDGE_NODE</code>, use <code>http://192.168.10.20:8760</code> for the Site Server address, and use <code>192.168.10.20</code>—never <code>localhost</code> or <code>127.0.0.1</code>—as the PostgreSQL host. The full Windows CMD procedure and failure table are in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</p>
+      <div class="card warn"><strong>Camera ownership:</strong> close other vendor SDK clients before connecting HVX cameras. Another program may allow video while preventing the callback path required for plate events.</div>
     </section>
 
     <section id="gates">
-      <h2 data-i18n="gates_h2">Gates &amp; barriers</h2>
-      <p data-i18n="gates_p">Barrier control via camera, board, and LED.</p>
-      <p data-i18n="gate_mode">Commissioning mode for testing.</p>
-      <p data-i18n="gate_manual">Manual open on Live Gates when commissioning.</p>
+      <h2>Gates, barriers and safety</h2>
+      <p>Recognition is not a physical safety system. Mechanical safety circuits, emergency stops, loop detectors and the barrier manufacturer’s controls remain authoritative.</p>
+      <ul>
+        <li>Verify that each lane’s camera, controller, display and barrier address belong to the same physical lane.</li>
+        <li>Keep the lane in commissioning/manual mode while mapping and testing outputs.</li>
+        <li>Use a trained technician at the barrier during any output test. Confirm the physical lane before pressing Open.</li>
+        <li>Test registered, unregistered, unreadable and duplicate-visit cases. Confirm that a camera or network failure fails safe according to the site policy.</li>
+        <li>Do not claim automatic gate acceptance until the observed barrier behavior matches the site’s approved safety procedure.</li>
+      </ul>
     </section>
 
-    <section id="receipts">
-      <h2 data-i18n="receipts_h2">Receipts &amp; fees</h2>
-      <p data-i18n="receipts_p">Casual visitors get a thermal entry receipt, then the barrier opens.</p>
-      <ol>
-        <li data-i18n="rec1">Settings → thermal printer</li>
-        <li data-i18n="rec2">Fees tab for tariffs</li>
-        <li data-i18n="rec3">Reprint from Sessions</li>
-      </ol>
-      <div class="card tip"><p data-i18n="rec_thermal">Use a 58 mm or 80 mm roll printer. USB or network (ESC/POS).</p></div>
-    </section>
-
-    <section id="streaming">
-      <h2 data-i18n="stream_h2">Smooth streaming (optional)</h2>
-      <p data-i18n="stream_p">Optional media service for smoother video.</p>
-      <div class="card">
-        <p data-i18n="stream_off">Off by default.</p>
-        <p data-i18n="stream_you">Built-in player when enabled.</p>
-        <p data-i18n="stream_roll">Contact technician to roll back if worse.</p>
+    <section id="daily-operations">
+      <h2>Daily operation</h2>
+      <div class="grid2">
+        <div class="card"><h4>Live Gates</h4><p>Monitor lane video, current plate reads, connectivity and manual/commissioning state.</p></div>
+        <div class="card"><h4>Sessions</h4><p>Review vehicles inside, entry/exit events, tickets, payments and reprints.</p></div>
+        <div class="card"><h4>Vehicles</h4><p>Register approved plates and access types according to site policy.</p></div>
+        <div class="card"><h4>System Health</h4><p>Supervisors use health and service status to decide whether a problem is local, network or server-side.</p></div>
       </div>
+      <p>Close an Operator Workstation without stopping the Site Server. The parking service and recognition continue on the Site Server while the server remains configured and its background tasks are running.</p>
     </section>
 
-    <section id="help">
-      <h2 data-i18n="help_h2">Help &amp; common fixes</h2>
-      <p data-i18n="help_p">Try these first.</p>
+    <section id="recognition">
+      <h2>Recognition behavior</h2>
+      <div class="grid2">
+        <div class="card ok"><h4>Native camera recognition</h4><p>HVX cameras can send plate text through the 32-bit SDK host. This is the preferred path for the site’s native cameras.</p></div>
+        <div class="card"><h4>Local OCR</h4><p>Generic IP cameras use bounded frame sampling and FastALPR/ONNX recognition on the Site Server. OCR is not run on every displayed frame.</p></div>
+      </div>
+      <p>The system uses the freshest valid evidence and site rules to form a parking event. An empty lane must not retain a stale plate, a single vehicle must not create duplicate sessions, and one stalled camera must not freeze other lanes. These are acceptance conditions, not assumptions.</p>
+    </section>
+
+    <section id="backups">
+      <h2>Backups and recovery</h2>
+      <ol class="steps">
+        <li>Define the backup owner, schedule, retention period and off-machine destination with the site owner.</li>
+        <li>Back up before upgrades, database changes, role changes or hardware replacement. Keep the previous deployment configuration with the backup.</li>
+        <li>For SQLite, stop Zirp writes and use the Zirp consistent backup operation; do not copy a live WAL database in Explorer.</li>
+        <li>For PostgreSQL, use the matching <code>pg_dump</code> tooling through the approved administrator procedure. The password must be supplied process-locally, never as a command-line argument.</li>
+        <li>Verify that the backup can be read before changing the live site. A file existing on disk is not proof of a usable backup.</li>
+        <li>For restore, stop writes, preserve a backup of the current database, restore using the approved PostgreSQL/SQLite procedure, verify the Alembic revision and run the health checks before reopening the site.</li>
+      </ol>
+      <div class="card warn"><strong>Never use a wipe or fresh migration as a troubleshooting step on a live site.</strong> If Apply fails, preserve the database and deployment file, collect logs and use the recovery runbook.</div>
+      <p>See <a href="#" data-doc="DATABASE_CONFIGURATION.md">DATABASE_CONFIGURATION.md</a> and <a href="#" data-doc="MIGRATION-AND-ROLLBACK.md">MIGRATION-AND-ROLLBACK.md</a> for the detailed recovery procedures.</p>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting</h2>
       <table>
-        <thead>
-          <tr>
-            <th data-i18n="help_th1">Problem</th>
-            <th data-i18n="help_th2">What to do</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Symptom</th><th>Check first</th><th>Do not do</th></tr></thead>
         <tbody>
-          <tr><td data-i18n="help_r1c1">Offline</td><td data-i18n="help_r1c2">Check network and Connect.</td></tr>
-          <tr><td data-i18n="help_r2c1">Frozen video</td><td data-i18n="help_r2c2">Close other apps.</td></tr>
-          <tr><td data-i18n="help_r3c1">No plate</td><td data-i18n="help_r3c2">Check Online status.</td></tr>
-          <tr><td data-i18n="help_r4c1">Gate stuck</td><td data-i18n="help_r4c2">Check plate and mode.</td></tr>
-          <tr><td data-i18n="help_r5c1">App won't open</td><td data-i18n="help_r5c2">Start-SmartPark.bat</td></tr>
-          <tr><td data-i18n="help_r6c1">No print</td><td data-i18n="help_r6c2">Re-select printer.</td></tr>
+          <tr><td>Workstation says offline</td><td>Resolve the server name, open <code>http://server:8760/health/live</code>, verify the Private-network firewall and confirm Site Service is running.</td><td>Do not configure a local database on the workstation.</td></tr>
+          <tr><td>Site Server is not ready</td><td>Open Deployment Configuration, check database health, migration status, disk space and the service logs.</td><td>Do not delete <code>deployment.json</code> or recreate the database.</td></tr>
+          <tr><td>PostgreSQL refused</td><td>Verify the approved PostgreSQL service, host/port, database permissions and local firewall. Re-run Test Database.</td><td>Do not open 5432 to the whole operator LAN.</td></tr>
+          <tr><td>Video frozen or stale</td><td>Check camera ownership, stream freshness, camera network path, MediaMTX status and the camera delivery diagnostics.</td><td>Do not treat ping or an old cached frame as a healthy camera.</td></tr>
+          <tr><td>Video works but no plate</td><td>Check adapter, native callback status, OCR model availability, image quality, lane assignment and recent recognition logs.</td><td>Do not enable every adapter or run OCR on every live frame as a workaround.</td></tr>
+          <tr><td>Gate does not behave</td><td>Verify lane mapping, controller/LED addresses, commissioning state, safety circuit and technician presence.</td><td>Do not repeatedly pulse an unknown lane.</td></tr>
+          <tr><td>No receipt</td><td>Verify printer selection, power, paper, USB/LAN path and the receipt test from Settings.</td><td>Do not assume an event was lost because a paper roll is empty.</td></tr>
+        </tbody>
+      </table>
+      <h3>Logs and escalation bundle</h3>
+      <p>Collect the Zirp logs, release version, deployment state, server identity, failing camera/lane, exact time window and the result of <code>/health/live</code>, <code>/health/ready</code> and <code>/health/database</code>. Redact credentials, database URLs and plate data according to the site policy.</p>
+      <table>
+        <tbody><tr><th>Application logs</th><td><code>%ProgramData%\SmartParkEdge\logs\</code></td></tr><tr><th>Deployment metadata</th><td><code>%ProgramData%\SmartParkEdge\deployment.json</code> — non-secret, but still site information</td></tr><tr><th>Installed documentation</th><td><code>%LOCALAPPDATA%\Programs\SmartPark Edge\documentation\</code> or the approved all-users install path</td></tr></tbody>
+      </table>
+    </section>
+
+    <section id="architecture">
+      <h2>Developer reference: architecture</h2>
+      <p>Keep hardware behind adapters and keep the parking core independent of vendor SDK details. The 64-bit application communicates with the 32-bit HVX sidecar rather than loading <code>NetSDK.dll</code> directly.</p>
+      <table>
+        <thead><tr><th>Component</th><th>Responsibility</th><th>Process boundary</th></tr></thead>
+        <tbody>
+          <tr><td><code>app.site_service</code></td><td>API, parking state, authentication, migrations and server lifecycle.</td><td>64-bit Site Server process</td></tr>
+          <tr><td><code>app.recognition_worker</code></td><td>Bounded recognition for generic media streams and event delivery.</td><td>64-bit background worker</td></tr>
+          <tr><td><code>app.media_service</code></td><td>MediaMTX supervision and local media gateway support.</td><td>64-bit background worker + sidecar</td></tr>
+          <tr><td><code>tools/hvx_sdk_host</code></td><td>Vendor camera SDK login, callbacks and native capture.</td><td>32-bit Windows Python process</td></tr>
+          <tr><td><code>app.desktop</code></td><td>Site Server desktop or remote Operator Workstation UI.</td><td>Interactive client process</td></tr>
+          <tr><td><code>app.web</code></td><td>Browser UI launch and remote site access.</td><td>API-served/static client</td></tr>
+          <tr><td><code>app/database_config.py</code></td><td>Authoritative database selection, secret reference, preflight and runtime application.</td><td>Shared configuration boundary</td></tr>
+        </tbody>
+      </table>
+      <p>Primary code areas are <code>app/api</code>, <code>app/services</code>, <code>app/infrastructure/hardware</code>, <code>app/desktop</code>, <code>app/web</code>, <code>app/migrations</code> and <code>tools/hvx_sdk_host</code>. Add a new camera or printer through its adapter seam; do not replace the parking engine with vendor-specific code.</p>
+    </section>
+
+    <section id="runtime">
+      <h2>Runtime and configuration reference</h2>
+      <table>
+        <thead><tr><th>Item</th><th>Contract</th></tr></thead>
+        <tbody>
+          <tr><td>Deployment state</td><td><code>UNCONFIGURED</code>, <code>CONFIGURING</code>, <code>CONFIGURED</code> or <code>RECOVERY_REQUIRED</code>. Presence of a JSON file alone is not sufficient.</td></tr>
+          <tr><td>Server identity</td><td>The public identity includes installation, server, site and pairing identifiers. Workstations verify the expected server identity before completing setup.</td></tr>
+          <tr><td>Database</td><td>Use the database configuration service. Do not construct a second URL in a worker or setup page.</td></tr>
+          <tr><td>Secrets</td><td>Passwords use the protected Zirp secret mechanism. Never log a password or credential-bearing connection URL.</td></tr>
+          <tr><td>Windows data</td><td>Application data and logs are under <code>%ProgramData%\SmartParkEdge\</code>; the install directory contains code and bundled runtimes.</td></tr>
+          <tr><td>Client mode</td><td>Operator Workstations apply paired server metadata, open the remote API and remove/avoid local server tasks.</td></tr>
         </tbody>
       </table>
     </section>
 
+    <section id="api">
+      <h2>API and health checks</h2>
+      <p>These endpoints are intended for diagnostics and deployment verification. They do not replace authentication for operational routes.</p>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /health/live</code></td><td>Process is answering HTTP.</td></tr>
+          <tr><td><code>GET /health/ready</code></td><td>Site is configured and ready for service.</td></tr>
+          <tr><td><code>GET /health/database</code></td><td>Safe database engine/state, migration revision/head, status and latency. Never returns a password.</td></tr>
+          <tr><td><code>GET /api/...</code></td><td>Authenticated parking, camera, session, receipt and administration APIs.</td></tr>
+        </tbody>
+      </table>
+      <p>When the API is exposed beyond localhost, use the private LAN rules supplied by the installer and place TLS/reverse-proxy policy under the site’s network owner. Do not expose the development server or database directly to the public Internet.</p>
+    </section>
+
+    <section id="development">
+      <h2>Development, validation and test packaging</h2>
+      <p>This section is for Zirp maintainers and technicians validating a release. It is deliberately separate from the production install path.</p>
+      <h3>Local development</h3>
+      <pre><code>python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.site_service</code></pre>
+      <p>Use SQLite for local development only unless you are explicitly testing the PostgreSQL deployment path. Run the focused deployment, packaging and pipeline tests before a field test.</p>
+      <h3>Windows test package</h3>
+      <p>The USB/portable package is a test and distribution artifact for maintainers. It is not the production documentation or the end-user installation contract.</p>
+      <pre><code>./packaging/make_windows_kit.sh
+python3 packaging/verify_windows_kit.py dist/SmartParkEdge-Install/payload
+python3 -m pytest tests/test_production_deployment.py tests/test_windows_packaging.py tests/test_windows_ready.py</code></pre>
+      <p>The package contains the offline Python runtimes, vendor SDK payload, FFmpeg, MediaMTX, FastALPR models, wheels and commissioning tools. Camera Lab, field acceptance, startup checks and wipe scripts belong to testing/maintenance; do not ask a normal parking operator to run them.</p>
+      <h3>Release discipline</h3>
+      <ul>
+        <li>Keep the tested Windows wheel set, ONNX models, FFmpeg, MediaMTX and vendor DLL family together.</li>
+        <li>Run compile, focused tests, kit verification and real hardware acceptance before publishing a release.</li>
+        <li>Do not independently upgrade Qt, ONNX, the camera SDK DLLs or the 32-bit host on a site.</li>
+        <li>When adding an adapter, add its configuration, health behavior, failure isolation and acceptance tests together.</li>
+      </ul>
+      <p>Additional maintainer references are included beside this page: <a href="#" data-doc="DEPLOYMENT.md">DEPLOYMENT.md</a>, <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">POSTGRESQL-PREREQUISITE.md</a>, <a href="#" data-doc="DATABASE_CONFIGURATION.md">DATABASE_CONFIGURATION.md</a>, <a href="#" data-doc="MEDIA-ARCHITECTURE.md">MEDIA-ARCHITECTURE.md</a>, <a href="#" data-doc="CAMERA-DELIVERY-DIAGNOSTICS.md">CAMERA-DELIVERY-DIAGNOSTICS.md</a> and <a href="#" data-doc="MIGRATION-AND-ROLLBACK.md">MIGRATION-AND-ROLLBACK.md</a>.</p>
+    </section>
+
     <footer class="site-footer">
-      <p data-i18n="footer_p">SmartPark Edge user guide.</p>
-      <p data-i18n="footer_v">Version 0.3</p>
+      <p>Zirp production documentation · Maintained with the release source tree.</p>
+      <p>Last reviewed: 2026-10-27. Confirm site-specific release notes and hardware acceptance records before handover.</p>
     </footer>
   </main>
 </div>
-<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

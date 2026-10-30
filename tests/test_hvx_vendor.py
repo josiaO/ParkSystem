@@ -8,6 +8,8 @@ from app.services.rtsp_probe import vendor_candidates
 class VendorPackageTests(unittest.TestCase):
     def test_ocxconfig_package_is_pe32_x86(self):
         vendor = resolve_vendor_dir()
+        if not (vendor / "NetSDK.dll").exists():
+            self.skipTest("SmartPark HVX vendor DLLs are supplied separately for the target site")
         self.assertTrue((vendor / "NetSDK.dll").exists(), vendor)
         pe = pe_image_info(vendor / "NetSDK.dll")
         self.assertTrue(pe["ok"] and pe["x86"])
@@ -220,6 +222,18 @@ class VendorPackageTests(unittest.TestCase):
         self.assertTrue(hvx_host._is_peer_disconnect(ConnectionResetError(10054, "forcibly closed")))
         self.assertTrue(hvx_host._is_peer_disconnect(OSError("[WinError 10054] An existing connection was forcibly closed by the remote host")))
         self.assertFalse(hvx_host._is_peer_disconnect(OSError("SDK connection failed")))
+
+    def test_hvx_http_server_has_bounded_request_admission(self):
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_host
+
+        self.assertTrue(issubclass(hvx_host.BoundedHTTPServer, hvx_host.HTTPServer))
+        self.assertEqual(hvx_host.BoundedHTTPServer.request_queue_size, 64)
+        self.assertIn("ThreadPoolExecutor", hvx_host.BoundedHTTPServer.__init__.__code__.co_names)
+        self.assertIn("BoundedSemaphore", hvx_host.BoundedHTTPServer.__init__.__code__.co_names)
 
     def test_vendor_candidates_use_configured_credentials(self):
         xs = vendor_candidates("192.168.1.49", "admin", "secret")

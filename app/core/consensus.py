@@ -191,7 +191,7 @@ class ConsensusTrack:
         if not single_ok and (len(self.readings) < self.min_reads or len(exact) < self.min_agreeing):
             # Similar reads raise the winner's share but do not replace an exact
             # agreeing read; two identical texts are still required unless one
-            # read already meets the high-confidence threshold (ParkWatch snap).
+            # read already meets the high-confidence threshold.
             decision.reason = "waiting for agreeing read"
             return decision
         if share < self.min_share:

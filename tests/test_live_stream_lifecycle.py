@@ -11,7 +11,8 @@ from app.api_main import camera_live
 def test_cancelled_live_startup_releases_its_camera_lease():
     acquire = Mock()
     release = Mock()
-    with patch("app.api_main._camera_live_spec", return_value=SimpleNamespace(id=2)), \
+    with patch("app.api_main._camera_for_node"), \
+         patch("app.api_main._camera_live_spec", return_value=SimpleNamespace(id=2)), \
          patch("app.api_main.acquire_live", acquire), \
          patch("app.api_main.release_live", release), \
          patch("app.api_main.get_state", return_value=SimpleNamespace(jpeg=b"")), \

@@ -1,6 +1,6 @@
 """Plate-engine contract.
 
-ParkWatch read every lane JPEG through one helper (`LPRHelper.Recognize` /
+The legacy camera software read every lane JPEG through one helper (`LPRHelper.Recognize` /
 `RecognizeAll`) and could point that helper at a different library. SmartPark
 keeps the same split: the camera supplies the picture, a `PlateEngine` returns
 the plate. Parking never imports a vendor SDK.

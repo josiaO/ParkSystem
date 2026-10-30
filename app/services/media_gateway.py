@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,7 @@ from app.services.ffmpeg_profiles import (
     profile_args,
 )
 from app.services.frame_grab import ffmpeg_bin
+from app.services.ffmpeg_recovery import drain_stderr
 from app.services.http_snapshot import grab_http_snapshot
 from app.services.hvx_client import HVXHostClient
 from app.services.latest_frame import FrameSample, LatestFrameBuffer
@@ -37,6 +39,7 @@ from app.services.stream_roles import (
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
+log = logging.getLogger("smartpark")
 
 
 def take_latest_jpeg(buf: bytes) -> tuple[bytes, bytes]:
@@ -57,24 +60,6 @@ def live_scale_filter(scale: int) -> str:
     """Fit inside the requested width. A smaller substream is not enlarged."""
     width = max(160, min(int(scale), 1920))
     return f"scale={width}:-2:force_original_aspect_ratio=decrease"
-
-
-async def _drain_stderr(stream, sink: bytearray, limit: int = 4096) -> None:
-    """Read FFmpeg logs while frames flow. An unread stderr pipe stalls the decoder."""
-    if stream is None:
-        return
-    try:
-        while True:
-            chunk = await stream.read(1024)
-            if not chunk:
-                return
-            sink.extend(chunk)
-            if len(sink) > limit:
-                del sink[: len(sink) - limit]
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return
 
 
 @dataclass(frozen=True)
@@ -529,7 +514,15 @@ class LocalMediaGateway:
             "last_error": row.last_error,
         }
 
-    def publish_detect(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "") -> FrameSample | None:
+    def publish_detect(
+        self,
+        camera_id: int,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        sampled: bool = False,
+    ) -> FrameSample | None:
         """Fill only the DETECT buffer (MediaMTX local RTSP consumer)."""
         if jpeg[:2] != JPEG_SOI:
             return None
@@ -542,10 +535,12 @@ class LocalMediaGateway:
             self._sessions[camera_id] = row
         now = time.monotonic()
         detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
-        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
+        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
         interval = 1.0 / max(ai_fps, 1.0)
         latest_detect = row.detect.latest()
-        if latest_detect is not None and (now - latest_detect.received_at) < interval:
+        # ``mediamtx_detect`` already owns the one admission clock for its
+        # source stream.  ``sampled=True`` prevents a second clock here.
+        if not sampled and latest_detect is not None and (now - latest_detect.received_at) < interval:
             row.frames_dropped_ai += 1
             return latest_detect
         if latest_detect is not None and latest_detect.jpeg == jpeg:
@@ -609,6 +604,7 @@ class LocalMediaGateway:
         row.reconnects += 1
         row.state = "RECONNECTING"
         row.last_error = "stale or frozen video"
+        log.warning("camera=%s media decoder stale; restarting decoder=%s reconnect=%s", row.spec.id, row.decoder_restarts, row.reconnects)
         pids = list(row.child_pids)
         row.child_pids.clear()
         row.ffmpeg_pid = None
@@ -662,7 +658,7 @@ class LocalMediaGateway:
         if detect:
             now = sample.received_at
             detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
-            ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
+            ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
             interval = 1.0 / max(ai_fps, 1.0)
             latest_detect = row.detect.latest()
             if latest_detect is None or (now - latest_detect.received_at) >= interval:
@@ -729,6 +725,7 @@ class LocalMediaGateway:
         row.decoder_restarts += 1
         wait = min(float(reconnect_for(row.spec.id).record_failure(error)), 8.0)
         row._restart_not_before = time.monotonic() + wait
+        log.warning("camera=%s media reconnect=%s decoder_restart=%s wait_s=%.1f error=%s", row.spec.id, row.reconnects, row.decoder_restarts, wait, str(error)[:300])
         await self._reap_children(row)
         await asyncio.sleep(wait)
 
@@ -947,13 +944,19 @@ class LocalMediaGateway:
             session.child_pids.add(proc.pid)
             session.ffmpeg_pid = proc.pid
         errors = bytearray()
-        stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, errors))
+        fault_event = asyncio.Event()
+        fault_detail: list[str] = []
+        stderr_task = asyncio.create_task(
+            drain_stderr(proc.stderr, errors, fault_event=fault_event, fault_detail=fault_detail)
+        )
         buf = b""
         timeout = float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         try:
             while True:
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "live decoder H264 fault")
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError("live decoder produced no complete frame")
@@ -961,6 +964,8 @@ class LocalMediaGateway:
                 if not chunk:
                     text = errors.decode(errors="replace").strip()
                     raise RuntimeError(text[-300:] or "ffmpeg live stream ended")
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "live decoder H264 fault")
                 buf += chunk
                 if len(buf) > 2_000_000:
                     start = buf.rfind(JPEG_SOI)

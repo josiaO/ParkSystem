@@ -127,8 +127,8 @@ async def reconcile(db_factory) -> dict[str, int]:
     """Start/stop pollers to match the database. Cheap; call every few seconds."""
     with db_factory() as db:
         rows = list(db.scalars(select(Camera).where(Camera.adapter_id == "onvif")).all())
-        from app.services.node_scope import camera_in_recognition_scope
-        wanted = {row.id: row for row in rows if wants_events(row) and camera_in_recognition_scope(row, db=db)}
+        from app.services.node_scope import camera_active_on_this_installation
+        wanted = {row.id: row for row in rows if wants_events(row) and camera_active_on_this_installation(row, db=db)}
         # detach values we need after the session closes
         for row in wanted.values():
             db.expunge(row)

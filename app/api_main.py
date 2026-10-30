@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import json
 import logging
 import time
 
@@ -12,12 +13,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import settings
 from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
 from .domain.site import DEFAULT_SITE_ID
-from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
+from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, Node, NodeGateAssignment, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraFramingUpdate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
@@ -26,7 +27,7 @@ from .schemas import (
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
     RecognitionScopeUpdate,
 )
-from .security import authenticate_user, create_session, current_user, oauth2_scheme, require, require_any, require_media, revoke_session, user_permissions
+from .security import authenticate_processing_node, authenticate_user, create_session, current_node, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
 from .infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
 from .infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
@@ -36,7 +37,7 @@ from .services.redaction import redact_text
 log = logging.getLogger("smartpark")
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
-from .services.captures import capture_dict, latest_for_camera, list_captures, list_recent_detections, persist_event, should_persist_vehicle_capture
+from .services.captures import captures_for_sessions, capture_dict, latest_for_camera, latest_for_cameras, list_captures, list_recent_detections, persist_event, should_persist_vehicle_capture
 from .services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from .services.gates import controller
 from .services.led_udp import send_led_text
@@ -64,6 +65,7 @@ from .services.simulation import (
     save_parking_settings, session_dict as sim_session_dict, take_receipt,
 )
 from .services.users import create_user, delete_user, load_user, load_users, update_user, user_dict
+from .services.node_authorization import hash_node_credential, issue_node_session, verify_node_credential
 from .services.access import ensure_access_plans, lookup_entitlement, plan_dict, vehicle_dict
 from .services.receipts import RECEIPT_POLICIES, issue_receipt, receipt_dict
 from .core.plate import normalize_plate
@@ -74,6 +76,120 @@ from .infrastructure.hardware.registry import camera_adapter_id, camera_connecti
 from .infrastructure.payments.ledger import list_transactions, transaction_dict
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+
+# Manual reads are operator tools, not part of the production recognition
+# pipeline.  Keep them single-flight so repeated button clicks cannot create a
+# second ONNX workload in the Site Service process.
+_manual_alpr_lock = asyncio.Lock()
+_manual_alpr_pending: asyncio.Task | None = None
+_local_alpr_pending: dict[int, asyncio.Task] = {}
+_live_still_digests: dict[str, str] = {}
+
+
+def _camera_for_node(db: Session, camera_id: int, *, action: str = "access") -> Camera:
+    """Load a camera only when this process owns its gate.
+
+    Recognition/connect already used the node scope, but the live API used to
+    accept any camera id.  That made a node request another node's local
+    MediaMTX/SDK path and could make the UI show the wrong gate.  Keep the
+    boundary here, immediately before any operation that can touch a camera
+    or its media producer.
+    """
+    camera = get_camera_or_404(db, camera_id)
+    from .services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope, is_processing_node
+
+    # The Site Server owns the complete registry and may inspect/configure any
+    # camera, but it must not touch the hardware plane of a gate assigned to
+    # an Edge Node.  Keep non-hardware registry reads/configuration global.
+    registry_actions = {
+        "camera-read", "viewer-state", "stream-telemetry", "stream-profile-update",
+        "framing-update", "recognition-commissioning-read",
+    }
+    if not is_processing_node() and (action in registry_actions or camera_active_on_this_installation(camera, db=db)):
+        return camera
+    if is_processing_node() and camera_in_recognition_scope(camera, db=db):
+        return camera
+    scope = None
+    try:
+        from .services.node_scope import describe_recognition_scope
+
+        scope = describe_recognition_scope(db)
+    except Exception:
+        scope = {}
+    log.warning(
+        "node scope denied action=%s camera_id=%s camera_gate_id=%s node_id=%s assigned_gate_id=%s",
+        action,
+        camera.id,
+        camera.gate_id,
+        getattr(settings, "node_id", ""),
+        scope.get("gate_id") if isinstance(scope, dict) else None,
+    )
+    raise HTTPException(
+        status_code=409 if not is_processing_node() else 403,
+        detail=(
+            "This camera is operated by another Edge Node. Use the owning node for hardware actions."
+            if not is_processing_node()
+            else "This camera belongs to another node's assigned gate. Connect to the owning node or assign this PC to the camera's gate."
+        ),
+    )
+
+
+def _processing_node_gate_id(db: Session, *, required: bool = True) -> int | None:
+    """Return this process's dynamic gate assignment, never a hardcoded ID."""
+    from .services.node_scope import is_processing_node, recognition_gate_id
+
+    if not is_processing_node():
+        return None
+    assigned = sorted(_processing_node_gate_ids(db, required=required))
+    gate_id = assigned[0] if len(assigned) == 1 else None
+    if gate_id is None and required:
+        raise HTTPException(409, "Assign this Processing Node to a gate before adding or controlling cameras.")
+    return int(gate_id) if gate_id is not None else None
+
+
+def _processing_node_gate_ids(db: Session, *, required: bool = True) -> set[int]:
+    from .services.node_scope import authoritative_node_gate_ids, is_processing_node, recognition_gate_id
+
+    if not is_processing_node():
+        return set()
+    assigned = set(authoritative_node_gate_ids(db))
+    if assigned:
+        return assigned
+    legacy = recognition_gate_id(db)
+    if legacy is not None:
+        return {int(legacy)}
+    if required:
+        raise HTTPException(409, "Assign this Processing Node to a gate before adding or controlling cameras.")
+    return set()
+
+
+def _gate_for_node(db: Session, gate_id: int, *, action: str = "access") -> Gate:
+    """Load a gate only when this installation owns its camera lane."""
+    gate = get_gate_or_404(db, gate_id)
+    from .services.node_scope import authoritative_node_gate_ids, is_processing_node
+    assigned_gate_ids = authoritative_node_gate_ids(db)
+    node_gate_id = _processing_node_gate_id(db, required=False)
+
+    if is_processing_node() and ((assigned_gate_ids and int(gate.id) not in assigned_gate_ids) or (not assigned_gate_ids and (node_gate_id is None or int(gate.id) != int(node_gate_id)))):
+        log.warning(
+            "node scope denied action=%s gate_id=%s node_id=%s assigned_gate_id=%s",
+            action, gate.id, getattr(settings, "node_id", ""), node_gate_id,
+        )
+        raise HTTPException(403, "This gate belongs to another node. Use the owning Processing Node or the Site Server.")
+    return gate
+
+
+def _camera_mutation_for_node(db: Session, camera_id: int, *, action: str) -> Camera:
+    """Guard a camera mutation and ensure it belongs to this node's gate."""
+    return _camera_for_node(db, camera_id, action=action)
+
+
+def _consume_background_task(task: asyncio.Task) -> None:
+    """Consume a detached timeout task's exception so it is never orphaned."""
+    try:
+        task.result()
+    except BaseException:
+        pass
 
 
 DEFAULT_ROLES = {
@@ -95,7 +211,72 @@ DEFAULT_ROLES = {
         "kiosk.use", "sessions.view", "payments.view", "payments.create",
         "dashboard.view",
     ]),
+    # Use this role for the local node login. The installation-level guard in
+    # app.security remains authoritative even if somebody accidentally uses a
+    # broader shared-database token on a Processing Node.
+    "Processing Node": ",".join([
+        "cameras.view", "cameras.manage", "cameras.connect", "gates.view",
+        "gates.open", "gates.open_simulated", "hardware.view",
+    ]),
 }
+
+
+async def _diagnostic_heartbeat_loop() -> None:
+    """Write one compact, redacted health snapshot for Windows support bundles.
+
+    This intentionally samples state rather than frames.  It makes reconnects,
+    frozen producers, decoder errors, and worker ownership visible without
+    turning the service log into a per-frame trace.
+    """
+    from .services.media_gateway import gateway
+    from .services.recognition_worker import worker_health
+
+    previous_signature = None
+    while True:
+        try:
+            media_rows = gateway.live_metrics()
+            worker = worker_health()
+            cameras = []
+            for row in media_rows:
+                cameras.append({
+                    "camera_id": row.get("camera_id"),
+                    "state": row.get("connection_state"),
+                    "pumping": bool(row.get("pumping")),
+                    "fps": row.get("fps"),
+                    "frame_age_ms": row.get("live_frame_age_ms"),
+                    "reconnects": row.get("reconnects", 0),
+                    "decoder_restarts": row.get("decoder_restarts", 0),
+                    "frozen": bool(row.get("frozen")),
+                    "queue_depth": row.get("queue_depth", 0),
+                    "warnings": list(row.get("warnings") or [])[:4],
+                })
+            degraded = [row for row in cameras if row["frozen"] or row["state"] not in {"STREAMING", "READY"} or row["warnings"]]
+            snapshot = {
+                "event": "runtime-heartbeat",
+                "cameras": cameras,
+                "camera_count": len(cameras),
+                "degraded_camera_ids": [row["camera_id"] for row in degraded],
+                "worker": {
+                    "ok": bool(worker.get("ok")),
+                    "state": worker.get("state"),
+                    "heartbeat_age_seconds": worker.get("heartbeat_age_seconds"),
+                    "claimed_camera_ids": worker.get("claimed_camera_ids") or [],
+                    "camera_states": [
+                        {key: value for key, value in item.items() if key in {"camera_id", "state", "last_error", "reconnects", "stale_dropped", "recognition_stalls", "recognition_restarts"}}
+                        for item in (worker.get("cameras") or []) if isinstance(item, dict)
+                    ],
+                },
+            }
+            signature = json.dumps(snapshot, sort_keys=True, default=str)
+            if signature != previous_signature or degraded or not snapshot["worker"]["ok"]:
+                level = log.warning if degraded or not snapshot["worker"]["ok"] else log.info
+                level("RUNTIME %s", signature)
+                previous_signature = signature
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("RUNTIME heartbeat failed: %s", redact_text(repr(exc)))
+        await asyncio.sleep(30.0)
 
 
 def ensure_roles(db: Session):
@@ -108,6 +289,17 @@ def ensure_roles(db: Session):
     db.commit()
 
 
+async def _warmup_alpr_background() -> None:
+    """Load the local detector before the first vehicle reaches a lane."""
+    from .services.alpr import warmup
+
+    try:
+        result = await asyncio.to_thread(warmup)
+        log.info("FastALPR warm-up ready: %s", result)
+    except Exception as exc:
+        log.error("FastALPR warm-up failed: %s", redact_text(f"{type(exc).__name__}: {exc}"), exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .services.logging_setup import configure_logging
@@ -117,26 +309,94 @@ async def lifespan(app: FastAPI):
     set_process_name("SmartParkSiteService")
     set_startup_state("STARTING")
     install_asyncio_exception_filter()
-    ensure_schema()
     from .db import engine
+    from .services.node_scope import is_processing_node
+
+    processing_node = is_processing_node()
+    if processing_node:
+        # A Processing Node joins an already-initialized Site Server database.
+        # It must never run migrations, bootstrap an admin, create default site
+        # data, repair tariffs/modules, or rewrite central topology on startup.
+        from .migrations.runner import status as schema_status
+
+        schema = schema_status(engine)
+        if not schema.get("up_to_date"):
+            raise RuntimeError(
+                "Processing Node requires the Site Server database schema to be current; "
+                "run the upgrade on the Site Server first."
+            )
+    else:
+        ensure_schema()
     log.info("Site database ready: %s", engine.url.render_as_string(hide_password=True))
     with SessionLocal() as db:
-        ensure_roles(db)
-        ensure_bootstrap_admin(db)
-        ensure_car1_tariff(db)
-        ensure_access_plans(db)
-        from .services.modules import ensure_modules_initialized
+        # Site-scoped rows (tariffs, access plans, cameras and gates) all have
+        # a foreign key to sites.  PostgreSQL enforces that relationship
+        # immediately, so the parent site must exist before any default row is
+        # inserted.  SQLite often hid this ordering bug because foreign-key
+        # enforcement is not enabled in every local/test connection.
         from .services.topology import ensure_default_site, sync_gate_lanes_from_cameras
 
-        ensure_modules_initialized(db)
-        ensure_default_site(db)
-        sync_gate_lanes_from_cameras(db)
-        from .services.secrets_migration import migrate_plaintext_secrets
+        if not processing_node:
+            ensure_default_site(db)
+            ensure_roles(db)
+            ensure_bootstrap_admin(db)
+            ensure_car1_tariff(db)
+            ensure_access_plans(db)
+            from .services.modules import ensure_modules_initialized
+
+            ensure_modules_initialized(db)
+            sync_gate_lanes_from_cameras(db)
+            from .services.secrets_migration import migrate_plaintext_secrets
+
+            try:
+                migrate_plaintext_secrets(db)
+            except Exception as exc:  # a secret-store problem must not stop parking
+                log.warning("secrets migration skipped: %s", exc)
+        else:
+            log.info("Processing Node startup is read-only for central bootstrap, schema, modules, tariffs, and topology")
+            from .services.node_scope import ensure_processing_node_registry
+
+            node = ensure_processing_node_registry(db)
+            if node is not None:
+                log.info(
+                    "Processing Node registry identity=%s status=%s site_id=%s; gate ownership remains centrally assigned",
+                    node.node_id,
+                    node.status,
+                    node.site_id,
+                )
+            else:
+                log.warning("Processing Node identity=%s is not registered; shared Site Server database has no site row or registry write failed", settings.node_id)
+        from .services.node_scope import describe_recognition_scope
 
         try:
-            migrate_plaintext_secrets(db)
-        except Exception as exc:  # a secret-store problem must not stop parking
-            log.warning("secrets migration skipped: %s", exc)
+            scope = describe_recognition_scope(db)
+            log.info(
+                "NODE ownership node_id=%s node_role=%s deployment_profile=%s database=%s media_dir=%s assigned_gate_id=%s camera_ids=%s",
+                settings.node_id,
+                settings.node_role,
+                settings.deployment_profile,
+                engine.url.get_backend_name(),
+                settings.media_dir,
+                scope.get("gate_id"),
+                [row.get("id") for row in scope.get("cameras") or []],
+            )
+        except Exception as exc:
+            log.warning("NODE ownership scope unavailable: %s", redact_text(repr(exc)))
+    alpr_warmup_task = None
+    try:
+        alpr = alpr_status()
+        log.info(
+            "FastALPR startup installed=%s available=%s detector=%s ocr=%s detail=%s",
+            alpr.get("installed"),
+            alpr.get("available"),
+            (alpr.get("models") or {}).get("detector"),
+            (alpr.get("models") or {}).get("ocr"),
+            alpr.get("detail"),
+        )
+        if alpr.get("available"):
+            alpr_warmup_task = asyncio.create_task(_warmup_alpr_background(), name="alpr-warmup")
+    except Exception as exc:
+        log.error("FastALPR startup check failed: %s", redact_text(f"{type(exc).__name__}: {exc}"), exc_info=True)
     mark_core_ready()
     start_idle_watch()
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
@@ -152,12 +412,17 @@ async def lifespan(app: FastAPI):
     from .services import onvif_runtime
     onvif_runtime.set_persist(_onvif_capture)
     onvif_events = asyncio.create_task(_onvif_events_loop(), name="onvif-events")
+    diagnostics = asyncio.create_task(_diagnostic_heartbeat_loop(), name="diagnostic-heartbeat")
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events):
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics)
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if alpr_warmup_task is not None:
+            alpr_warmup_task.cancel()
+            await asyncio.gather(alpr_warmup_task, return_exceptions=True)
         await onvif_runtime.shutdown()
         stop_live_pumps()
         from .services.hvx_client import close_host_clients
@@ -194,11 +459,16 @@ async def _redacted_unhandled_exception(request: Request, exc: Exception):
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
     from .services.modules import ensure_modules_initialized, load_config, navigation_items
+    from .services.node_scope import is_processing_node
 
-    user = authenticate_user(db, username, password)
+    processing_node = is_processing_node()
+    user = authenticate_processing_node(db, username, password) if processing_node else authenticate_user(db, username, password)
     token = create_session(db, user)
-    ensure_modules_initialized(db)
-    perms = user_permissions(user)
+    if not processing_node:
+        ensure_modules_initialized(db)
+    # Human permissions are independent of installation role. Machine runtime
+    # calls use the separate node principal/session API.
+    perms = processing_node_permissions(user_permissions(user))
     cfg = load_config(db)
     return LoginResponse(
         token=token,
@@ -236,6 +506,39 @@ def mediamtx_reader():
     return FileResponse(WEB_DIR / "mediamtx-reader.js", media_type="application/javascript")
 
 
+@app.get("/assets/zirp-logo.png", include_in_schema=False)
+def zirp_logo():
+    return FileResponse(WEB_DIR / "assets" / "zirp-logo.png", media_type="image/png")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(WEB_DIR / "assets" / "zirp.ico", media_type="image/x-icon")
+
+
+@app.get("/downloads/zirp-installer.zip", include_in_schema=False)
+def download_zirp_installer():
+    """Download a clean installer package for another LAN computer.
+
+    This endpoint deliberately excludes ``settings.data_dir``.  It can be
+    linked from the unauthenticated login page because the archive contains
+    application/runtime files only, never this site's database or secrets.
+    """
+    try:
+        from .services.installer_download import build_installer_archive
+
+        archive = build_installer_archive()
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        log.warning("LAN installer download unavailable: %s", redact_text(str(exc)))
+        raise HTTPException(404, "The installer package is not available on this installation") from exc
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename="Zirp-Installer.zip",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/health")
 def health():
     from .services.health import live
@@ -265,6 +568,15 @@ def health_ready():
     return body
 
 
+@app.get("/health/database")
+def health_database():
+    """Non-secret database readiness for the deployment wizard and support staff."""
+    from .services.health import database_health
+
+    body = database_health()
+    return JSONResponse(body, status_code=200 if body.get("state") == "HEALTHY" else 503)
+
+
 @app.get("/health/details")
 def health_details(_: User = Depends(require("hardware.view"))):
     from .services.health import details
@@ -275,7 +587,7 @@ def health_details(_: User = Depends(require("hardware.view"))):
 def health_diagnostics(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
     """Support bundle: health, schema, secrets backend, cameras. Always redacted."""
     from .services.diagnostics import bundle
-    return bundle(db)
+    return bundle(db, local_only=True)
 
 
 @app.get("/health/realtime")
@@ -288,8 +600,8 @@ async def health_realtime(request: Request, db: Session = Depends(get_db), _: Us
     from .services.lane_timing import timeline_metrics
 
     cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
-    from app.services.node_scope import camera_in_recognition_scope
-    cameras = [camera for camera in cameras if camera_in_recognition_scope(camera, db=db)]
+    from app.services.node_scope import camera_active_on_this_installation
+    cameras = [camera for camera in cameras if camera_active_on_this_installation(camera, db=db)]
     rows = []
     for camera in cameras:
         endpoint = await get_live_endpoint(int(camera.id), db)
@@ -367,7 +679,7 @@ def camera_viewer_state(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    get_camera_or_404(db, camera_id)
+    _camera_for_node(db, camera_id, action="viewer-state")
     transport = str((payload or {}).get("transport") or "").upper()
     allowed = {"WEBRTC", "MEDIAMTX_WEBRTC", "MJPEG", "DIRECT_MJPEG", "SNAPSHOT", "OFFLINE"}
     remember_viewer_transport(camera_id, transport if transport in allowed else "")
@@ -376,6 +688,25 @@ def camera_viewer_state(
 
 @app.get("/auth/setup")
 def auth_setup(db: Session = Depends(get_db)):
+    from .services.node_scope import is_processing_node
+    if is_processing_node():
+        # This endpoint historically created the bootstrap administrator when
+        # queried. A node must never be able to bootstrap or reveal the site's
+        # administrator, even though it uses the shared database for runtime
+        # events.
+        from .deployment import load_deployment_config
+
+        config = load_deployment_config()
+        return {
+            "ready": True,
+            "username": config.node_username,
+            "password": "",
+            "first_run": False,
+            "bootstrap_user_present": True,
+            "bootstrap_password_ok": False,
+            "usernames": [config.node_username] if config.node_username else [],
+            "hint": "Sign in with this Processing Node's configured account. Site Administrator accounts cannot sign in here.",
+        }
     return setup_status(db)
 
 
@@ -399,10 +730,9 @@ def logout(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get
 @app.get("/auth/me")
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     from .services.modules import ensure_modules_initialized, load_config, navigation_items
-    from .security import user_permissions
-
+    from .security import processing_node_permissions, user_permissions
     ensure_modules_initialized(db)
-    perms = user_permissions(user)
+    perms = processing_node_permissions(user_permissions(user))
     cfg = load_config(db)
     return {
         "id": user.id,
@@ -416,6 +746,165 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         },
         "navigation": navigation_items(db, perms),
     }
+
+
+def _node_response(db: Session, node: Node, *, token: str | None = None) -> dict:
+    assignments = db.scalars(
+        select(NodeGateAssignment).where(
+            NodeGateAssignment.node_id == node.id,
+            NodeGateAssignment.enabled == True,  # noqa: E712
+        )
+    ).all()
+    body = {
+        "node_id": node.node_id,
+        "name": node.name,
+        "site_id": node.site_id,
+        "node_type": node.node_type,
+        "status": node.status,
+        "capabilities": node.capabilities or {},
+        "version": node.version,
+        "assigned_gate_ids": [int(row.gate_id) for row in assignments],
+    }
+    if token:
+        body.update({"token": token, "access_token": token, "token_type": "bearer"})
+    return body
+
+
+@app.post("/node/auth")
+def node_login(payload: dict = Body(default_factory=dict), db: Session = Depends(get_db)):
+    """Authenticate a physical runtime with its revocable node credential."""
+    node_id = str(payload.get("node_id") or "").strip()
+    credential = str(payload.get("credential") or payload.get("secret") or "")
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None or node.status != "ACTIVE" or node.revoked_at is not None or not verify_node_credential(node.credential_hash, credential):
+        raise HTTPException(status_code=401, detail="Invalid node identity or credential")
+    token = issue_node_session(db, node)
+    return _node_response(db, node, token=token)
+
+
+@app.get("/node/me")
+def node_me(principal=Depends(current_node), db: Session = Depends(get_db)):
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    return _node_response(db, node)
+
+
+@app.get("/node/config")
+def node_config(principal=Depends(current_node), db: Session = Depends(get_db)):
+    """Return only central configuration scoped to this node's assignments."""
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    gate_ids = sorted({int(row.gate_id) for row in node.assignments if row.enabled})
+    cameras = db.scalars(select(Camera).where(Camera.gate_id.in_(gate_ids))).all() if gate_ids else []
+    return {
+        "node": _node_response(db, node),
+        "gates": [{"id": gate.id, "name": gate.name, "site_id": gate.site_id} for gate in db.scalars(select(Gate).where(Gate.id.in_(gate_ids))).all()] if gate_ids else [],
+        "cameras": [{"id": camera.id, "name": camera.name, "gate_id": camera.gate_id, "lane_direction": camera.lane_direction} for camera in cameras],
+    }
+
+
+@app.post("/node/heartbeat")
+def node_heartbeat(payload: dict = Body(default_factory=dict), principal=Depends(current_node), db: Session = Depends(get_db)):
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    node.last_seen_at = datetime.now(timezone.utc)
+    if payload.get("version") is not None:
+        node.version = str(payload["version"])[:80]
+    db.commit()
+    return {"ok": True, "server_time": datetime.now(timezone.utc).isoformat(), **_node_response(db, node)}
+
+
+@app.get("/nodes")
+def list_nodes(db: Session = Depends(get_db), _: User = Depends(require("settings.view"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    return [_node_response(db, node) for node in db.scalars(select(Node).order_by(Node.id)).all()]
+
+
+@app.post("/nodes")
+def register_node(payload: dict = Body(default_factory=dict), db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node_id = str(payload.get("node_id") or "").strip()
+    credential = str(payload.get("credential") or "")
+    if not node_id or len(credential) < 16:
+        raise HTTPException(status_code=422, detail="node_id and a node credential of at least 16 characters are required")
+    site_id = int(payload.get("site_id") or DEFAULT_SITE_ID)
+    if db.get(Site, site_id) is None:
+        raise HTTPException(status_code=404, detail="Site not found")
+    if db.scalar(select(Node).where(Node.node_id == node_id)) is not None:
+        raise HTTPException(status_code=409, detail="Node identity already exists")
+    node = Node(
+        node_id=node_id,
+        site_id=site_id,
+        name=str(payload.get("name") or node_id)[:160],
+        node_type=str(payload.get("node_type") or "EDGE_NODE")[:40],
+        credential_hash=hash_node_credential(credential),
+        capabilities=dict(payload.get("capabilities") or {}),
+        version=str(payload.get("version") or "")[:80],
+    )
+    db.add(node)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Node identity already exists") from None
+    db.refresh(node)
+    return _node_response(db, node)
+
+
+@app.put("/nodes/{node_id}/assignments")
+def assign_node_gate(node_id: str, payload: dict = Body(default_factory=dict), db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    gate_id = int(payload.get("gate_id") or 0)
+    gate = db.get(Gate, gate_id)
+    if gate is None:
+        raise HTTPException(status_code=404, detail="Gate not found")
+    if int(gate.site_id) != int(node.site_id):
+        raise HTTPException(status_code=409, detail="Gate belongs to a different site")
+    if bool(payload.get("replace", False)):
+        for existing in db.scalars(select(NodeGateAssignment).where(NodeGateAssignment.node_id == node.id)).all():
+            existing.enabled = False
+    row = db.scalar(select(NodeGateAssignment).where(NodeGateAssignment.node_id == node.id, NodeGateAssignment.gate_id == gate.id))
+    if row is None:
+        row = NodeGateAssignment(node_id=node.id, gate_id=gate.id, enabled=bool(payload.get("enabled", True)))
+        db.add(row)
+    else:
+        row.enabled = bool(payload.get("enabled", True))
+    db.commit()
+    return _node_response(db, node)
+
+
+@app.post("/nodes/{node_id}/revoke")
+def revoke_node(node_id: str, db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    node.status = "REVOKED"
+    node.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return _node_response(db, node)
 
 
 @app.get("/modules")
@@ -435,9 +924,9 @@ def modules_profiles(_: User = Depends(require("settings.view"))):
 @app.get("/modules/navigation")
 def modules_navigation(user: User = Depends(current_user), db: Session = Depends(get_db)):
     from .services.modules import navigation_items
-    from .security import user_permissions
+    from .security import processing_node_permissions, user_permissions
 
-    return {"navigation": navigation_items(db, user_permissions(user))}
+    return {"navigation": navigation_items(db, processing_node_permissions(user_permissions(user)))}
 
 
 @app.get("/modules/health")
@@ -536,8 +1025,12 @@ def onboarding_step_route(
 
 @app.get("/cameras")
 def list_cameras(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    rows = db.scalars(select(Camera).order_by(Camera.id)).all()
-    return [camera_dict(c) for c in rows]
+    rows = _management_camera_rows(db)
+    # A central Site Server must be able to configure/assign cameras before it
+    # has a gate owner.  This list is still only a management view: all media,
+    # connect, snapshot, and recognition endpoints enforce the stricter node
+    # ownership boundary immediately before touching a camera.
+    return [camera_dict(c, db=db) for c in rows]
 
 
 @app.get("/cameras/discover")
@@ -551,6 +1044,9 @@ async def discover_cameras(
 
 @app.post("/cameras/seed-site")
 def seed_site_cameras(payload: dict | None = Body(default=None), db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
+    from .services.node_scope import is_processing_node
+    if is_processing_node():
+        raise HTTPException(403, "Processing Nodes cannot seed or replace the central site layout. Add cameras for the assigned gate only.")
     if settings.deployment_profile != "DEVELOPMENT" and (payload or {}).get("confirm_test_data") is not True:
         raise HTTPException(409, "Confirm loading example camera records with confirm_test_data=true, or discover/manually add cameras.")
     created, skipped, gates = _import_site_layout(db, user)
@@ -558,7 +1054,7 @@ def seed_site_cameras(payload: dict | None = Body(default=None), db: Session = D
         "created": [camera_dict(c) for c in created],
         "skipped": skipped,
         "gates": [gate_dict(g) for g in gates],
-        "cameras": [camera_dict(c) for c in db.scalars(select(Camera).order_by(Camera.id)).all()],
+        "cameras": [camera_dict(c, db=db) for c in _management_camera_rows(db)],
         "note": (
             "Example setup records only. Review and edit addresses, names and gate assignments before use. "
             "Existing cameras are preserved. No cameras are connected and recognition ownership is unchanged."
@@ -572,6 +1068,7 @@ async def import_discovered_cameras(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
+    node_gate_ids = _processing_node_gate_ids(db)
     payload = payload or CameraImport()
     username = (payload.username or "admin").strip() or "admin"
     password = payload.password if payload.password is not None else "admin"
@@ -605,6 +1102,15 @@ async def import_discovered_cameras(
     for spec in specs:
         spec["username"] = spec.get("username") or username
         spec["password"] = spec.get("password") or password
+        if node_gate_ids:
+            requested_gate = spec.get("gate_id")
+            if requested_gate not in (None, "", 0, "0") and int(requested_gate) not in node_gate_ids:
+                raise HTTPException(403, "This camera is assigned to another gate. Use the Site Server to reassign it.")
+            if requested_gate in (None, "", 0, "0"):
+                if len(node_gate_ids) != 1:
+                    raise HTTPException(409, "Select an assigned gate when importing cameras on a multi-gate node.")
+                requested_gate = next(iter(node_gate_ids))
+            spec["gate_id"] = int(requested_gate)
     created, skipped = _import_camera_specs(db, user, specs)
     connected = []
     if payload.connect:
@@ -625,15 +1131,17 @@ async def import_discovered_cameras(
         "created": [camera_dict(c) for c in created],
         "skipped": skipped,
         "connected": connected,
-        "cameras": [camera_dict(c) for c in db.scalars(select(Camera).order_by(Camera.id)).all()],
+        "cameras": [camera_dict(c, db=db) for c in db.scalars(
+            select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+        ).all()],
     }
 
 
 @app.post("/cameras/sdk/connect-all")
 async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     rows = db.scalars(select(Camera).where(Camera.enabled == True).order_by(Camera.id)).all()
-    from .services.node_scope import camera_in_recognition_scope
-    rows = [camera for camera in rows if camera_in_recognition_scope(camera, db=db)]
+    from .services.node_scope import camera_active_on_this_installation
+    rows = [camera for camera in rows if camera_active_on_this_installation(camera, db=db)]
     results = []
     connected = 0
     skipped = 0
@@ -657,7 +1165,7 @@ async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(re
     }
 
 
-def camera_dict(c: Camera):
+def camera_dict(c: Camera, db: Session | None = None):
     gate = c.gate
     lane_name = None if gate is None else gate.name
     from .services.stream_roles import public_profiles
@@ -665,6 +1173,7 @@ def camera_dict(c: Camera):
     from .domain.cameras import camera_type_for
     native = adapter_has_native_plates(c)
     from .services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
+    from .services.node_scope import camera_active_on_this_installation
     canonical = camera_recognition_mode(c)
     if canonical == LOCAL_ONLY:
         recog = "FASTALPR_ONLY"
@@ -679,7 +1188,10 @@ def camera_dict(c: Camera):
         "id": c.id, "name": c.name, "ip_address": c.ip_address, "sdk_port": c.sdk_port,
         "site_id": getattr(c, "site_id", None) or DEFAULT_SITE_ID,
         "username": c.username, "gate_id": c.gate_id, "gate_name": lane_name,
-        "credentials_ref": getattr(c, "credentials_ref", "") or "",
+        # Secret-store references are internal implementation details. They
+        # are not credentials, but returning them teaches a node how the
+        # server stores camera secrets and is unnecessary for the UI. The
+        # camera password is never returned.
         "password_configured": bool(c.has_password()) if hasattr(c, "has_password") else False,
         "lane_name": lane_name or "",
         "side": side_label(c.lane_direction),
@@ -710,7 +1222,21 @@ def camera_dict(c: Camera):
             "camera": "Online" if c.status in (CameraStatus.SDK_CONNECTED.value, CameraStatus.VIDEO_CONNECTED.value) else "Offline",
         },
         "last_error": c.last_error, "last_seen_at": c.last_seen_at, "enabled": c.enabled,
+        # The Site Server may expose all records for management, but the
+        # browser must not automatically open another node's local producer.
+        # Direct media endpoints enforce the same boundary independently.
+        "stream_allowed": bool(camera_active_on_this_installation(c, db=db)),
     }
+
+
+def _management_camera_rows(db: Session) -> list[Camera]:
+    """Rows visible in this installation's camera management plane."""
+    from .services.node_scope import camera_visible_in_management
+
+    rows = db.scalars(
+        select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+    ).all()
+    return [camera for camera in rows if camera_visible_in_management(camera, db=db)]
 
 
 def _camera_onvif_brief(c: Camera) -> dict:
@@ -790,9 +1316,20 @@ def gate_dict(g: Gate):
 def commit_or_conflict(db: Session, message: str):
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(409, message)
+        # Do not hide PostgreSQL foreign-key/site failures behind the old
+        # duplicate-name message.  The browser displays this detail and the
+        # redacted constraint is also written to the Site Service log, making
+        # failed manual commissioning diagnosable on Windows.
+        detail = str(getattr(exc, "orig", None) or exc).replace("\n", " ")[:500]
+        log.warning("database integrity conflict: %s; detail=%s", message, detail)
+        lowered = detail.lower()
+        if "duplicate" in lowered or "unique" in lowered:
+            raise HTTPException(409, message)
+        if "foreign key" in lowered or "violates" in lowered:
+            raise HTTPException(409, "Camera references a site or gate that no longer exists. Refresh the gates and try again.")
+        raise HTTPException(409, f"Could not save camera: {detail}")
 
 
 def get_camera_or_404(db: Session, camera_id: int) -> Camera:
@@ -857,6 +1394,46 @@ async def _native_capture_for_camera(camera: Camera) -> dict:
     if captured_at <= 0 or (time.time() - captured_at) > float(settings.live_plate_fresh_seconds):
         return native_from_sdk_capture(None)
     return native_from_sdk_capture(capture)
+
+
+async def _worker_owns_continuous_reads(camera_id: int) -> bool:
+    """Read worker ownership without blocking the Site Service event loop."""
+    from .recognition_worker import worker_owns_software_reads
+
+    try:
+        return bool(await asyncio.to_thread(worker_owns_software_reads, int(camera_id)))
+    except Exception:
+        # A missing/stale worker heartbeat must not make the camera API fail.
+        # The caller can use the bounded local fallback in that case.
+        return False
+
+
+async def _manual_alpr_read(jpeg: bytes, *, camera_label: str) -> dict:
+    """Run one operator-requested read without blocking the async API loop.
+
+    The continuous recognition worker is checked by the callers first.  This
+    path is only a fallback for commissioning/native-only cameras, and is
+    deliberately single-flight because ONNX CPU inference is not free on the
+    Windows edge machine.
+    """
+    global _manual_alpr_pending
+    if _manual_alpr_lock.locked() or (_manual_alpr_pending is not None and not _manual_alpr_pending.done()):
+        raise HTTPException(409, "Recognition is already running; wait for the current result")
+    async with _manual_alpr_lock:
+        from .services.inference_thread import run_inference
+        work = asyncio.create_task(run_inference(recognize_frame, jpeg, camera_label=camera_label))
+        _manual_alpr_pending = work
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(work),
+                timeout=float(getattr(settings, "alpr_timeout_seconds", 15.0) or 15.0),
+            )
+        except asyncio.TimeoutError as exc:
+            work.add_done_callback(_consume_background_task)
+            raise HTTPException(504, "Recognition timed out; the live stream was not restarted") from exc
+        finally:
+            if work.done():
+                _manual_alpr_pending = None
 
 
 async def _discover_cameras(db: Session, *, scan_lan: bool = False) -> dict:
@@ -952,15 +1529,29 @@ def _import_site_layout(db: Session, user: User) -> tuple[list[Camera], list[dic
 
 
 def _import_camera_specs(db: Session, user: User, specs: list[dict], *, preserve_existing: bool = False) -> tuple[list[Camera], list[dict]]:
+    node_gate_ids = _processing_node_gate_ids(db)
     existing_ips = {c.ip_address: c for c in db.scalars(select(Camera)).all()}
     existing_names = {c.name for c in existing_ips.values()}
     created: list[Camera] = []
     skipped: list[dict] = []
     defaults = site_camera_defaults()
     for spec in specs:
+        if node_gate_ids:
+            requested_gate = spec.get("gate_id")
+            if requested_gate not in (None, "", 0, "0") and int(requested_gate) not in node_gate_ids:
+                raise HTTPException(403, "This camera belongs to another gate. Use the Site Server to assign it.")
+            spec = dict(spec)
+            if requested_gate in (None, "", 0, "0"):
+                if len(node_gate_ids) != 1:
+                    raise HTTPException(409, "Select an assigned gate when importing cameras on a multi-gate node.")
+                requested_gate = next(iter(node_gate_ids))
+            spec["gate_id"] = int(requested_gate)
         ip = spec["ip_address"]
         if ip in existing_ips:
             camera = existing_ips[ip]
+            if node_gate_ids and int(camera.gate_id or 0) not in node_gate_ids:
+                skipped.append({"ip_address": ip, "reason": "camera belongs to another gate", "camera_id": camera.id, "updated": False})
+                continue
             if preserve_existing or settings.deployment_profile != "DEVELOPMENT":
                 skipped.append({"ip_address": ip, "reason": "already added", "camera_id": camera.id, "updated": False})
                 continue
@@ -1059,8 +1650,8 @@ async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise
     # filter.  Connect-all already filters its query, but this helper is also
     # used by the per-camera endpoint and onboarding flow; keep those paths
     # from opening an SDK/RTSP session for another node's gate.
-    from .services.node_scope import camera_in_recognition_scope, describe_recognition_scope
-    if not camera_in_recognition_scope(camera, db=db):
+    from .services.node_scope import camera_active_on_this_installation, describe_recognition_scope
+    if not camera_active_on_this_installation(camera, db=db):
         scope = describe_recognition_scope(db)
         return {
             **camera_dict(camera),
@@ -1426,13 +2017,18 @@ async def _run_local_alpr(
     jpeg = jpeg or b""
     if jpeg[:2] != b"\xff\xd8":
         return None
+    pending = _local_alpr_pending.get(int(camera.id))
+    if pending is not None and not pending.done():
+        return {"ok": False, "backend": "fastalpr", "error": "busy", "detail": "recognition already running"}
+    if pending is not None and pending.done():
+        _local_alpr_pending.pop(int(camera.id), None)
     native = native or {}
     from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
     if camera_recognition_mode(camera) == LOCAL_ONLY:
         native = {}
         plate_crop = b""
-    from .services.node_scope import camera_in_recognition_scope
-    if not force and not camera_in_recognition_scope(camera, db=db):
+    from .services.node_scope import camera_active_on_this_installation
+    if not force and not camera_active_on_this_installation(camera, db=db):
         return None
     if not should_run_local(
         native_plate=str(native.get("plate") or ""),
@@ -1454,19 +2050,29 @@ async def _run_local_alpr(
         return None
     _mark_local_alpr(camera.id)
     jpeg = ticket.jpeg or jpeg
+    abandon = asyncio.Event()
+    work = asyncio.create_task(_run_local_alpr_locked(
+        db, camera, jpeg, native=native, presence=presence, image_id=image_id,
+        force=force, plate_crop=plate_crop, ticket=ticket, abandon=abandon,
+    ))
+    _local_alpr_pending[int(camera.id)] = work
     try:
         alpr = await asyncio.wait_for(
-            _run_local_alpr_locked(
-                db, camera, jpeg, native=native, presence=presence, image_id=image_id,
-                force=force, plate_crop=plate_crop, ticket=ticket,
-            ),
+            asyncio.shield(work),
             timeout=float(getattr(settings, "alpr_timeout_seconds", 15.0) or 15.0),
         )
         return alpr
     except asyncio.CancelledError:
+        if not work.done():
+            await work
         runtime.finish(ticket, plate="")
         raise
     except asyncio.TimeoutError:
+        # The native thread continues in the background, but this camera is
+        # explicitly marked busy until that task drains. No duplicate ONNX
+        # call or stale result is admitted for the same lane.
+        abandon.set()
+        work.add_done_callback(_consume_background_task)
         runtime.recover(int(camera.id))
         runtime.lane(int(camera.id)).last_error = "FastALPR crop recognition timed out."
         from .services.health import note_worker_failure
@@ -1478,6 +2084,9 @@ async def _run_local_alpr(
         from .services.health import note_worker_failure
         note_worker_failure("alpr", str(exc))
         return {"ok": False, "backend": "fastalpr", "plates": [], "detail": str(exc), "error": str(exc)}
+    finally:
+        if work.done() and _local_alpr_pending.get(int(camera.id)) is work:
+            _local_alpr_pending.pop(int(camera.id), None)
 
 
 def _alpr_busy() -> bool:
@@ -1508,6 +2117,7 @@ async def _run_local_alpr_locked(
     force: bool = False,
     plate_crop: bytes = b"",
     ticket=None,
+    abandon: asyncio.Event | None = None,
 ) -> dict | None:
     from app.services.inference_thread import run_inference
     native = native or {}
@@ -1550,6 +2160,11 @@ async def _run_local_alpr_locked(
             detect_zoom=framing["detect_zoom"],
             detected_boxes=boxes,
         )
+    # A timed-out API request may outlive its dependency-scoped SQLAlchemy
+    # session while this native call drains. Do not touch the closed session,
+    # persist a late result, or update lane state from an abandoned task.
+    if abandon is not None and abandon.is_set():
+        return {"ok": False, "backend": "fastalpr", "error": "timeout", "detail": "recognition timeout"}
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     if alpr.get("ok") is False:
         runtime.lane(int(camera.id)).last_error = redact_text(str(alpr.get("detail") or "FastALPR crop recognition failed"))
@@ -1607,14 +2222,36 @@ def validate_gate_mode(mode: str) -> str:
 
 @app.get("/cameras/{camera_id}")
 def get_camera(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    return camera_dict(get_camera_or_404(db, camera_id))
+    return camera_dict(_camera_for_node(db, camera_id, action="camera-read"), db=db)
 
 
 @app.post("/cameras")
 def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
+    # Camera rows are site-scoped in PostgreSQL.  Do this at the boundary as
+    # well as during application startup so manual adds also work when a
+    # service was started from a maintenance command or a partially upgraded
+    # database.
+    from .services.topology import ensure_default_site
+
+    site = ensure_default_site(db)
+    node_gate_ids = _processing_node_gate_ids(db)
+    requested_gate_id = payload.gate_id
+    if node_gate_ids:
+        if requested_gate_id is None and len(node_gate_ids) == 1:
+            requested_gate_id = next(iter(node_gate_ids))
+        if requested_gate_id is not None and int(requested_gate_id) not in node_gate_ids:
+            raise HTTPException(403, "A Processing Node can add cameras only to its assigned gate.")
+        if requested_gate_id is None:
+            raise HTTPException(409, "Select one of this node's assigned gates for the camera.")
+    gate = None
+    if requested_gate_id is not None:
+        gate = get_gate_or_404(db, requested_gate_id)
+        if int(gate.site_id or DEFAULT_SITE_ID) != int(site.id):
+            raise HTTPException(409, "Selected gate belongs to a different site. Refresh the gate list and try again.")
     c = Camera(
         name=payload.name, ip_address=payload.ip_address, sdk_port=payload.sdk_port,
-        username=payload.username, password_secret=payload.password or settings.default_camera_password, gate_id=payload.gate_id,
+        username=payload.username, password_secret=payload.password or settings.default_camera_password, gate_id=requested_gate_id,
+        site_id=int(gate.site_id if gate is not None else site.id),
         lane_direction=payload.lane_direction, controller_ip=payload.controller_ip, display_ip=payload.display_ip,
         rtsp_url=payload.rtsp_url, adapter_id=payload.adapter_id or "hvx",
         connection_mode=(payload.connection_mode or "DIRECT").upper(),
@@ -1633,12 +2270,13 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: Us
     commit_or_conflict(db, "A camera with that name already exists")
     db.refresh(c)
     write_audit(db, user, "camera.create", "camera", str(c.id), f"Created {c.name} {c.ip_address}")
-    return camera_dict(c)
+    return camera_dict(c, db=db)
 
 
 @app.patch("/cameras/{camera_id}")
 def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_mutation_for_node(db, camera_id, action="camera-update")
+    node_gate_ids = _processing_node_gate_ids(db)
     data = payload.model_dump(exclude_unset=True)
     if data.get("password") in (None, ""):
         data.pop("password", None)
@@ -1646,8 +2284,14 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
         data["password_secret"] = data.pop("password")
     if "rtsp_url" in data and data["rtsp_url"] and data["rtsp_url"] == redact_text(c.rtsp_url or ""):
         data.pop("rtsp_url")  # masked value round-tripped from the edit form; keep the stored URL
+    if node_gate_ids and "gate_id" in data and data["gate_id"] in (None, "", 0, "0"):
+        raise HTTPException(403, "A Processing Node cannot remove a camera from its assigned gate.")
+    if node_gate_ids and "gate_id" in data and int(data["gate_id"]) not in node_gate_ids:
+        raise HTTPException(403, "A Processing Node cannot move a camera to another gate.")
     if "gate_id" in data and data["gate_id"] is not None:
-        get_gate_or_404(db, data["gate_id"])
+        gate = get_gate_or_404(db, data["gate_id"])
+        if int(gate.site_id or DEFAULT_SITE_ID) != int(c.site_id or DEFAULT_SITE_ID):
+            raise HTTPException(409, "Selected gate belongs to a different site. Refresh the gate list and try again.")
     if data.get("adapter_id"):
         data["adapter_id"] = str(data["adapter_id"]).strip().lower()
     if data.get("connection_mode"):
@@ -1670,12 +2314,12 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
     commit_or_conflict(db, "A camera with that name already exists")
     db.refresh(c)
     write_audit(db, user, "camera.update", "camera", str(c.id), "Camera settings updated")
-    return camera_dict(c)
+    return camera_dict(c, db=db)
 
 
 @app.delete("/cameras/{camera_id}")
 async def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_mutation_for_node(db, camera_id, action="camera-delete")
     name = c.name
     ref = getattr(c, "credentials_ref", "") or ""
     # Removing a row must also release its physical/session owners. Otherwise
@@ -1703,8 +2347,17 @@ async def delete_camera(camera_id: int, db: Session = Depends(get_db), user: Use
         # Cleanup is best effort: an unavailable host/sidecar must not prevent
         # removal of a stale camera record.
         log.warning("camera %s media cleanup failed during delete: %s", c.id, exc)
-    db.delete(c)
-    db.commit()
+    try:
+        db.delete(c)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        detail = str(getattr(exc, "orig", None) or exc).replace("\n", " ")[:500]
+        log.warning("camera delete blocked camera_id=%s: %s", camera_id, detail)
+        raise HTTPException(
+            409,
+            "This camera has parking history and cannot be deleted. Disable it or edit its address instead.",
+        ) from None
     if ref:
         from .infrastructure.secrets import secret_store
         try:
@@ -1742,18 +2395,23 @@ async def hvx_info(_: User = Depends(require("hardware.view"))):
 @app.get("/devices")
 def list_registered_devices(db: Session = Depends(get_db), _: User = Depends(require("hardware.view"))):
     """Projection of cameras/gates. Not a second hardware store."""
-    return {"devices": devices_as_dicts(db), "edge_agent": edge_agent_status()}
+    devices = devices_as_dicts(db)
+    from .services.node_scope import is_processing_node
+    node_gate_id = _processing_node_gate_id(db, required=False)
+    if is_processing_node():
+        devices = [row for row in devices if int(row.get("gate_id") or 0) == node_gate_id]
+    return {"devices": devices, "edge_agent": edge_agent_status()}
 
 
 @app.post("/cameras/{camera_id}/sdk/connect")
 async def sdk_connect(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="sdk-connect")
     return await apply_camera_connect(c, db, user, raise_on_host_error=False)
 
 
 @app.post("/cameras/{camera_id}/sdk/disconnect")
 async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c=db.get(Camera, camera_id)
+    c = _camera_for_node(db, camera_id, action="sdk-disconnect")
     if not c: raise HTTPException(404, "Camera not found")
     if c.sdk_handle is not None:
         try: await HVXHostClient().disconnect(c.sdk_handle, force=True)
@@ -1772,7 +2430,7 @@ async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: Us
 
 @app.post("/cameras/{camera_id}/rtsp/probe")
 async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.connect"))):
-    c=get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="rtsp-probe")
     sdk = await _sdk_probe_status(c)
     http = await grab_http_snapshot(c.ip_address, c.username, c.password_secret)
     if http.get("ok"):
@@ -1816,7 +2474,7 @@ async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = De
 
 @app.get("/cameras/{camera_id}/streams")
 async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="stream-telemetry")
     from .services.media_gateway import gateway
     from .services.stream_roles import profile_warnings, public_profiles
     from .services.ffmpeg_profiles import list_profiles
@@ -1864,7 +2522,7 @@ async def update_camera_streams(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="stream-profile-update")
     from .services.ffmpeg_profiles import normalize_profile, normalize_transport
     from .services.stream_roles import ROLE_DETECT, ROLE_LIVE, merge_profiles
     if payload.ffmpeg_profile:
@@ -1899,7 +2557,7 @@ def update_camera_framing(
     """Save the detection zone and zoom for any camera, not only HVX/OcxConfig."""
     from .services.camera_framing import apply_framing, framing_from_profiles
 
-    camera = get_camera_or_404(db, camera_id)
+    camera = _camera_for_node(db, camera_id, action="framing-update")
     try:
         camera.stream_profiles = apply_framing(
             camera.stream_profiles,
@@ -1915,7 +2573,7 @@ def update_camera_framing(
 
 @app.post("/cameras/{camera_id}/onvif/discover")
 async def camera_onvif_discover(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="onvif-discover")
     from .services.stream_discover import discover_camera_streams
     from .services.stream_roles import merge_profiles
     from .services.onvif_profile import apply_discovery
@@ -1947,7 +2605,7 @@ def _public_onvif_discovery(onvif: dict) -> dict:
 @app.patch("/cameras/{camera_id}/onvif/events")
 async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     """Enable/disable Profile M plate-event pulling for a camera that advertises it."""
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="onvif-events-toggle")
     from .services.onvif_profile import set_events_enabled
     try:
         set_events_enabled(c, bool(payload.get("enabled")))
@@ -1961,7 +2619,7 @@ async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session 
 @app.post("/cameras/{camera_id}/onvif/events/pull")
 async def camera_onvif_events_pull(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     """Hardware-lab diagnostic: one subscribe → pull → unsubscribe round trip."""
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="onvif-events-pull")
     profile = dict(c.onvif_profile or {})
     events_url = str(profile.get("events_url") or "")
     if not events_url:
@@ -2055,7 +2713,7 @@ def camera_recognition_commissioning(
     """Side-effect-free recognition/media diagnostics for one camera."""
     from .services.recognition_commissioning import commissioning_snapshot
 
-    camera = get_camera_or_404(db, camera_id)
+    camera = _camera_for_node(db, camera_id, action="recognition-commissioning")
     return commissioning_snapshot(db, camera)
 
 
@@ -2068,7 +2726,7 @@ async def camera_recognition_commissioning_read(
     """Run one software plate read without creating sessions or controlling gates."""
     from .services.recognition_commissioning import diagnostic_read
 
-    camera = get_camera_or_404(db, camera_id)
+    camera = _camera_for_node(db, camera_id, action="recognition-commissioning-read")
     result = await asyncio.to_thread(diagnostic_read, db, camera)
     write_audit(
         db, user, "camera.recognition_diagnostic", "camera", str(camera.id),
@@ -2183,20 +2841,27 @@ async def alpr_recognize_upload(
     jpeg = await file.read()
     if not jpeg:
         raise HTTPException(400, "Empty image")
-    result = recognize_frame(jpeg, camera_label=file.filename or "upload")
+    result = await _manual_alpr_read(jpeg, camera_label=file.filename or "upload")
     return result
 
 
 @app.post("/cameras/{camera_id}/alpr/recognize")
 async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="manual-alpr")
+    if await _worker_owns_continuous_reads(c.id):
+        # The worker already has the bounded MediaMTX decoder and owns the
+        # model session for this camera.  Starting a second detector here is a
+        # common cause of stream skips and missed vehicles on Windows.
+        raise HTTPException(409, "Continuous recognition owns this camera; use the latest worker result")
     grabbed = await live_snapshot(c)
     if not grabbed.get("ok"):
         write_audit(db, user, "camera.alpr", "camera", str(c.id), grabbed.get("error") or "no frame")
         raise HTTPException(409, grabbed.get("error") or "Could not grab a live frame")
     remember_frame(c.id, grabbed["jpeg"], url=grabbed.get("url") or "", url_redacted=grabbed.get("url_redacted") or "")
     persist_video(db, c, grabbed.get("url"))
-    result = recognize_frame(grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}")
+    result = await _manual_alpr_read(
+        grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
+    )
     native = await _native_capture_for_camera(c)
     local = local_from_fastalpr(result)
     fused = resolve_readings(
@@ -2257,7 +2922,7 @@ def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "L
 
 def _camera_live_spec(camera_id: int) -> CameraLiveSpec:
     with short_session() as db:
-        c = get_camera_or_404(db, camera_id)
+        c = _camera_for_node(db, camera_id, action="live-spec")
         return _live_spec(c)
 
 
@@ -2268,7 +2933,7 @@ async def camera_live_endpoint(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    get_camera_or_404(db, camera_id)
+    _camera_for_node(db, camera_id, action="live-endpoint")
     from app.infrastructure.media import registry as media_registry
     endpoint = await media_registry.get_live_endpoint(camera_id, db)
     from app.services.whep import browser_endpoint
@@ -2289,7 +2954,7 @@ async def camera_whep_signaling(
     camera_id: int, request: Request, session_id: str = "",
     db: Session = Depends(get_db), _: User = Depends(require("cameras.view")),
 ):
-    get_camera_or_404(db, camera_id)
+    _camera_for_node(db, camera_id, action="whep")
     from app.services.mediamtx import live_endpoint
     from app.services.whep import proxy_signaling
     path = live_endpoint(camera_id)["mediamtx_path"]
@@ -2300,7 +2965,8 @@ _snapshot_status_checked: set[int] = set()
 
 
 @app.get("/cameras/{camera_id}/snapshot.jpg")
-async def camera_snapshot(camera_id: int, _: User = Depends(require_media("cameras.view"))):
+async def camera_snapshot(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
+    _camera_for_node(db, camera_id, action="snapshot")
     spec = pumping_spec(camera_id) or _camera_live_spec(camera_id)
     # A snapshot is a temporary live consumer. This guarantees that MediaMTX
     # or the SDK producer is already supplying the shared latest-frame cache;
@@ -2372,14 +3038,16 @@ async def _camera_snapshot_with_live_lease(camera_id: int, spec: CameraLiveSpec)
 
 
 @app.post("/cameras/{camera_id}/live/watch")
-def watch_camera_live(camera_id: int, _: User = Depends(require_media("cameras.view"))):
+def watch_camera_live(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
+    _camera_for_node(db, camera_id, action="live-watch")
     spec = _camera_live_spec(camera_id)
     watch_live(spec)
     return {"ok": True, "camera_id": camera_id, "viewers": viewers_for(camera_id)}
 
 
 @app.post("/cameras/{camera_id}/live/unwatch")
-def unwatch_camera_live(camera_id: int, _: User = Depends(require_media("cameras.view"))):
+def unwatch_camera_live(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
+    _camera_for_node(db, camera_id, action="live-unwatch")
     release_live(camera_id)
     return {"ok": True, "camera_id": camera_id, "viewers": viewers_for(camera_id)}
 
@@ -2387,7 +3055,7 @@ def unwatch_camera_live(camera_id: int, _: User = Depends(require_media("cameras
 @app.post("/cameras/{camera_id}/snapshot/capture")
 async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.view"))):
     """Grab one live JPEG and save a car snapshot only when a vehicle/plate is present."""
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="snapshot-capture")
     spec = _live_spec(c)
     touch_live(spec)
     grabbed = await snapshot_for_camera(
@@ -2397,7 +3065,46 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")
     jpeg = grabbed["jpeg"]
     native = await _native_capture_for_camera(c)
-    alpr = await asyncio.to_thread(recognize_frame, jpeg, camera_label=f"cam-{c.id}-snap")
+    alpr = fresh_alpr(c.id)
+    worker_owned = await _worker_owns_continuous_reads(c.id)
+    if worker_owned:
+        # Do not launch a competing detector/OCR call from the API process.
+        # The worker's event is already the authoritative production read and
+        # its evidence is persisted asynchronously through the outbox.
+        local = local_from_fastalpr(alpr)
+        fused = resolve_readings(
+            native_plate=native.get("plate") or "",
+            native_confidence=float(native.get("confidence") or 0),
+            local_plate=local.get("plate") or "",
+            local_confidence=float(local.get("confidence") or 0),
+            mode=fusion_mode(c),
+        )
+        latest = latest_for_camera(db, c.id)
+        recent = False
+        if latest is not None and latest.created_at is not None:
+            created = latest.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            recent = (datetime.now(timezone.utc) - created).total_seconds() <= max(
+                4.0, float(getattr(settings, "live_plate_fresh_seconds", 4.0) or 4.0),
+            )
+        if recent and latest is not None and fused.resolved_plate and latest.plate == fused.resolved_plate:
+            write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
+            return {
+                "ok": True,
+                "camera_id": c.id,
+                "bytes": len(jpeg),
+                "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
+                "capture": capture_dict(latest),
+                "plate": latest.plate or fused.resolved_plate or "",
+                "recognition": "worker",
+            }
+        raise HTTPException(
+            409,
+            "Continuous recognition is processing this camera; snapshot capture did not start a competing model read",
+        )
+    if alpr is None:
+        alpr = await _manual_alpr_read(jpeg, camera_label=f"cam-{c.id}-snap")
     local = local_from_fastalpr(alpr)
     fused = resolve_readings(
         native_plate=native.get("plate") or "",
@@ -2436,7 +3143,16 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
 
 
 @app.get("/cameras/{camera_id}/live.mjpeg")
-async def camera_live(camera_id: int, role: str = "LIVE", _: User = Depends(require_media("cameras.view"))):
+async def camera_live(camera_id: int, role: str = "LIVE", db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
+    _camera_for_node(db, camera_id, action="mjpeg")
+    # The MJPEG response can remain open for hours.  Do not keep the request's
+    # SQLAlchemy session checked out for the lifetime of that stream: with the
+    # old behavior four live panes plus plate polling exhausted PostgreSQL's
+    # 5+5 pool and made unrelated recognition queries fail with QueuePool
+    # timeouts.  The generator reads only the in-memory frame cache.
+    close = getattr(db, "close", None)
+    if close is not None:
+        close()
     spec = _camera_live_spec(camera_id)
     wanted = (role or "LIVE").upper()
     if wanted in {"MAIN", "EVIDENCE"}:
@@ -2492,7 +3208,7 @@ async def camera_preview(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="preview")
     cached = get_state(c.id)
     live = live_is_current(c.id)
     grabbed = {"ok": live, "jpeg": cached.jpeg, "url_redacted": cached.url_redacted}
@@ -2535,12 +3251,12 @@ async def camera_preview(
 
 @app.get("/cameras/{camera_id}/plates")
 async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="plates")
     from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
     native = {} if camera_recognition_mode(c) == LOCAL_ONLY else await _native_capture_for_camera(c)
     payload = _plate_payload(c, native, fresh_alpr(c.id), db)
-    from .services.node_scope import camera_in_recognition_scope
-    if not camera_in_recognition_scope(c, db=db):
+    from .services.node_scope import camera_active_on_this_installation
+    if not camera_active_on_this_installation(c, db=db):
         payload["recognition"]["last_error"] = "View only: assign this PC to this camera's gate under Devices to enable recognition."
     latest = latest_for_camera(db, c.id)
     payload["evidence"] = capture_dict(latest) if latest else None
@@ -2558,7 +3274,7 @@ async def correct_camera_plate(
     from .core.plate import apply_site_plate, normalize_plate
     from .services.captures import apply_operator_plate_correction
 
-    camera = get_camera_or_404(db, camera_id)
+    camera = _camera_for_node(db, camera_id, action="plate-correction")
     row = db.get(VehicleCapture, int(payload.capture_id)) if payload.capture_id else latest_for_camera(db, camera.id)
     if row is None or row.camera_id != camera.id:
         raise HTTPException(404, "No vehicle capture to correct")
@@ -2600,7 +3316,7 @@ async def correct_camera_plate(
 
 @app.get("/cameras/{camera_id}/presence")
 async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="presence-read")
     gpio = None
     pins: list[dict] = []
     if c.sdk_handle is not None:
@@ -2621,7 +3337,7 @@ async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: 
         "pins": pins,
         "last_car": get_state(c.id).last_car or None,
         "note": (
-            "You do not need to know the GPIO number. SmartPark scans camera GPIO IN pins 1–7 "
+            "You do not need to know the GPIO number. Zirp scans camera GPIO IN pins 1–7 "
             "(not the barrier output on 0) and locks onto the pin that changes when a car hits the loop. "
             "If the camera already snaps on the coil, that image callback is enough even without GPIO. "
             "POST this URL with occupied=true to simulate a car on the loop."
@@ -2636,7 +3352,7 @@ async def post_camera_presence(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.connect")),
 ):
-    c = get_camera_or_404(db, camera_id)
+    c = _camera_for_node(db, camera_id, action="presence-write")
     edge = coil_watch.observe(c.id, occupied, source="api")
     write_audit(db, user, "camera.presence", "camera", str(c.id), f"occupied={occupied}")
     if edge.rising and c.sdk_handle is not None:
@@ -2660,7 +3376,7 @@ async def _read_presence_now(camera_id: int, handle: int) -> None:
         await hvx.snapshot_trigger(handle)
     except Exception:
         pass
-    await asyncio.sleep(0.2)  # ParkWatch CaptureWaitTime=200ms
+    await asyncio.sleep(0.2)  # Allow the camera capture callback to settle.
     await _drain_camera_events(camera_id, handle)
     with short_session() as db:
         camera = db.get(Camera, camera_id)
@@ -2693,7 +3409,18 @@ def serve_media(kind: str, name: str, _: User = Depends(require("cameras.view"))
 
 @app.get("/gates")
 def list_gates(db: Session = Depends(get_db), _: User = Depends(require("gates.view"))):
-    return [gate_dict(g) for g in db.scalars(select(Gate).order_by(Gate.id)).all()]
+    rows = [gate_dict(g) for g in db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()]
+    from .services.node_scope import is_processing_node
+    node_gate_id = _processing_node_gate_id(db, required=False)
+    if is_processing_node():
+        # Gate names/IDs are read-only site metadata needed for assignment;
+        # foreign camera details are not exposed to a Processing Node.
+        for row in rows:
+            if node_gate_id is None or int(row.get("id") or 0) != node_gate_id:
+                row["cameras"] = []
+    return rows
 
 
 @app.get("/runtime/recognition-scope")
@@ -2706,15 +3433,18 @@ def get_recognition_scope(db: Session = Depends(get_db), _: User = Depends(requi
 def put_recognition_owner(
     payload: RecognitionScopeUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require("settings.manage")),
+    user: User = Depends(require("settings.manage", processing_node_allowed=True)),
 ):
     """Explicit administrator assignment; browsing video never changes ownership."""
-    from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    from .services.node_scope import authoritative_node_gate_ids, env_recognition_gate_id, node_registry_present, set_recognition_gate_id
     pinned = env_recognition_gate_id()
     if pinned is not None and payload.gate_id != pinned:
         raise HTTPException(409, "This computer is pinned by SMARTPARK_RECOGNITION_GATE_ID.")
     if payload.gate_id is None or payload.gate_id <= 0:
         raise HTTPException(422, "Assign this PC to one gate with entry and exit cameras.")
+    assigned = authoritative_node_gate_ids(db)
+    if node_registry_present(db) and (not assigned or int(payload.gate_id) not in assigned):
+        raise HTTPException(409, "This node's gate assignment is controlled centrally by the Site Server.")
     if db.get(Gate, payload.gate_id) is None:
         raise HTTPException(404, "Gate not found")
     body = set_recognition_gate_id(payload.gate_id, db)
@@ -2729,11 +3459,14 @@ def post_recognition_scope(
     user: User = Depends(require_any("cameras.connect", "cameras.manage", "gates.view")),
 ):
     """This PC processes one gate's entry+exit. Other gates stay idle until chosen."""
-    from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    from .services.node_scope import authoritative_node_gate_ids, env_recognition_gate_id, node_registry_present, set_recognition_gate_id
     if settings.deployment_profile == "PRODUCTION":
         raise HTTPException(409, "Production ownership is configured by SMARTPARK_RECOGNITION_GATE_ID or the persisted node setting, not the browser lane selector.")
     if env_recognition_gate_id() is not None and payload.gate_id not in (None, env_recognition_gate_id()):
         raise HTTPException(409, "This computer is pinned to one gate by SMARTPARK_RECOGNITION_GATE_ID.")
+    assigned = authoritative_node_gate_ids(db)
+    if node_registry_present(db) and payload.gate_id not in (None, *assigned):
+        raise HTTPException(409, "This node's gate assignment is controlled centrally by the Site Server.")
     if payload.gate_id is not None:
         gate = db.get(Gate, int(payload.gate_id))
         if gate is None:
@@ -2745,8 +3478,8 @@ def post_recognition_scope(
 
 
 async def _persist_capture_event(db: Session, camera: Camera, capture: dict | None, jpeg: bytes, crop: bytes) -> dict | None:
-    from .services.node_scope import camera_in_recognition_scope
-    if not camera_in_recognition_scope(camera, db=db):
+    from .services.node_scope import camera_active_on_this_installation
+    if not camera_active_on_this_installation(camera, db=db):
         return None
     from .services.recognition_runtime import runtime
     lane = runtime.lane(int(camera.id))
@@ -2905,6 +3638,10 @@ def _publish_live_still(camera_id: int, kind: str, jpeg: bytes) -> str:
     import hashlib
     import os
     import tempfile
+    digest = hashlib.blake2s(jpeg, digest_size=8).hexdigest()
+    if _live_still_digests.get(relative) == digest and path.is_file():
+        log.debug("live evidence write skipped duplicate camera_id=%s kind=%s", camera_id, kind)
+        return f"/media/{relative}?v={digest}"
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as tmp:
         tmp.write(jpeg)
         temporary = tmp.name
@@ -2913,7 +3650,8 @@ def _publish_live_still(camera_id: int, kind: str, jpeg: bytes) -> str:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    return f"/media/{relative}?v={hashlib.blake2s(jpeg, digest_size=8).hexdigest()}"
+    _live_still_digests[relative] = digest
+    return f"/media/{relative}?v={digest}"
 
 
 def _show_camera_read(
@@ -2928,7 +3666,7 @@ def _show_camera_read(
     """Put the camera's plate, crop, and box on the live lane immediately.
 
     FastALPR may still refine the plate. The operator should see the same
-    crop ParkWatch paints on the picture as soon as the camera callback arrives.
+        crop the camera callback paints on the picture as soon as it arrives.
     """
     if not plate and not overlay:
         return
@@ -3041,7 +3779,13 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             capture_key = capture_token
             if image_id:
                 capture_key = f"{capture_token}:image:{image_id}" if capture_token else f"image:{image_id}"
-            lane.note_native_capture(capture_key)
+            lane.note_native_capture(
+                capture_key,
+                plate=native_plate if real_native else "",
+                repeat_window_seconds=float(
+                    getattr(settings, "native_repeat_window_seconds", 8.0) or 8.0
+                ),
+            )
             coil_watch.observe(camera_id, True, source="image-callback")
             lane.visit.observe(presence=True, plate=native_plate if real_native else "", native_event=True)
             capture["visit_id"] = lane.visit.visit_id
@@ -3079,8 +3823,8 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 native_plates=adapter_has_native_plates(row),
                 camera=row,
             ):
-                # ParkWatch InALPR: this SDK callback is the capture trigger.
-                # FastALPR reads the JPEG even when the camera sent no plate text.
+                # The camera callback is the capture trigger. FastALPR reads the
+                # JPEG even when the camera sent no plate text.
                 frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
                 await _run_local_alpr(
                     db, row, frame, native=native, presence=True,
@@ -3133,7 +3877,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     """
     from app.services.inference_thread import run_inference
     from .services.alpr import locate_plate_boxes
-    from .services.camera_framing import framing_from_profiles, gate_for
+    from .services.camera_framing import best_arrival_box, framing_from_profiles, gate_for
     from .services.recognition_runtime import runtime
 
     if not _detect_due(int(camera.id)):
@@ -3152,7 +3896,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         return False
     runtime.lane(int(camera.id)).last_error = ""
     gate.prepared = (hash(jpeg), boxes)
-    phase = gate.observe(boxes[0] if boxes else None, time.monotonic())
+    phase = gate.observe(best_arrival_box(boxes), time.monotonic())
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
         return True
@@ -3195,7 +3939,7 @@ def _current_recognition_jpeg(camera_id: int) -> bytes:
 
 
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
-    """FastALPR samples the latest detect JPEG the way ParkWatch SimpleLPR did.
+    """FastALPR samples the latest detect JPEG from the shared camera mailbox.
 
     Camera = picture source. FastALPR = plate engine (InALPR/OutALPR). Latest-frame
     mailbox bounds OCR. Do not poll HVX live_jpeg here — that stacked SDK grabs
@@ -3428,7 +4172,8 @@ async def _payments_reconcile_loop():
     from .services.health import note_worker_failure
     from .services.modules import is_enabled
 
-    if settings.node_role == "CLIENT":
+    from .services.node_scope import is_processing_node
+    if settings.node_role == "CLIENT" or is_processing_node():
         return
 
     while True:
@@ -3452,7 +4197,7 @@ async def _restore_hvx_sessions(info: dict) -> None:
     if not info.get("available") or not isinstance(info.get("connections"), list):
         return
     connected = {int(row["handle"]): str(row.get("ip") or "") for row in info["connections"]}
-    from .services.node_scope import camera_in_recognition_scope
+    from .services.node_scope import camera_active_on_this_installation
     with short_session() as db:
         # sdk_handle is stored with the shared camera record, so it can also
         # describe a session owned by a different lane PC.  Never restore
@@ -3462,7 +4207,7 @@ async def _restore_hvx_sessions(info: dict) -> None:
             camera for camera in db.scalars(
                 select(Camera).where(Camera.enabled == True, Camera.sdk_handle.is_not(None))
             ).all()
-            if camera_in_recognition_scope(camera, db=db)
+            if camera_active_on_this_installation(camera, db=db)
         ]
     for camera in cameras:
         if connected.get(int(camera.sdk_handle)) == camera.ip_address:
@@ -3490,7 +4235,7 @@ async def _disconnect_out_of_scope_hvx_sessions(info: dict) -> None:
     connections = info.get("connections") if isinstance(info, dict) else None
     if not isinstance(connections, list):
         return
-    from .services.node_scope import camera_in_recognition_scope
+    from .services.node_scope import camera_active_on_this_installation
     ips = {str(row.get("ip") or "") for row in connections if row.get("ip")}
     if not ips:
         return
@@ -3505,7 +4250,7 @@ async def _disconnect_out_of_scope_hvx_sessions(info: dict) -> None:
             for row in connections
             if row.get("handle") is not None
             and str(row.get("ip") or "") in cameras
-            and not camera_in_recognition_scope(cameras[str(row.get("ip") or "")], db=db)
+            and not camera_active_on_this_installation(cameras[str(row.get("ip") or "")], db=db)
         ]
     if not stale_handles:
         return
@@ -3602,26 +4347,42 @@ async def _camera_event_loop():
     from .config import settings as cfg
 
     poll = float(getattr(cfg, "camera_event_poll_seconds", 0.25) or 0.25)
+    config_refresh = max(2.0, poll * 8.0)
+    last_config_refresh = 0.0
+    config_loaded = False
+    rows: list[Camera] = []
+    active: list[Camera] = []
+    hvx_specs: list[tuple[int, int]] = []
+    ipcam_ids: list[int] = []
+    inactive_ids: set[int] = set()
     while True:
         try:
-            with short_session() as db:
-                from .services.modules import is_enabled
-                from .services.node_scope import camera_in_recognition_scope
-                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
-                active = [c for c in rows if camera_in_recognition_scope(c, db=db)]
-                active_ids = {int(c.id) for c in active}
-                idle_camera_ids = [int(c.id) for c in rows if int(c.id) not in active_ids]
-                hvx_specs = [
-                    (int(c.id), int(c.sdk_handle))
-                    for c in active
-                    if c.sdk_handle is not None
-                ]
-                ipcam_ids = [
-                    int(c.id) for c in active
-                    if c.sdk_handle is None and c.status in {
-                        CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
-                    }
-                ]
+            now = time.monotonic()
+            refresh = not config_loaded or (now - last_config_refresh) >= config_refresh
+            clear_inactive_ids: set[int] = set()
+            if refresh:
+                with short_session() as db:
+                    from .services.modules import is_enabled
+                    from .services.node_scope import camera_active_on_this_installation
+                    rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
+                    active = [c for c in rows if camera_active_on_this_installation(c, db=db)]
+                    active_ids = {int(c.id) for c in active}
+                    new_inactive = {int(c.id) for c in rows if int(c.id) not in active_ids}
+                    clear_inactive_ids = new_inactive - inactive_ids
+                    inactive_ids = new_inactive
+                    hvx_specs = [
+                        (int(c.id), int(c.sdk_handle))
+                        for c in active
+                        if c.sdk_handle is not None
+                    ]
+                    ipcam_ids = [
+                        int(c.id) for c in active
+                        if c.sdk_handle is None and c.status in {
+                            CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
+                        }
+                    ]
+                last_config_refresh = now
+                config_loaded = True
             async def service_hvx(camera_id: int, handle: int) -> None:
                 started_one = time.perf_counter()
                 camera_breaker = breaker(f"hvx-camera-{camera_id}")
@@ -3687,7 +4448,7 @@ async def _camera_event_loop():
             )
             jobs.extend(
                 asyncio.create_task(clear_inactive_camera(camera_id), name=f"camera-idle-{camera_id}")
-                for camera_id in idle_camera_ids
+                for camera_id in clear_inactive_ids
             )
             jobs.extend(
                 asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
@@ -3726,7 +4487,7 @@ async def _camera_event_loop():
             note_worker_failure("camera-events", str(exc))
             await asyncio.sleep(1.0)
             continue
-        await asyncio.sleep(poll)
+        await asyncio.sleep(poll if (hvx_specs or ipcam_ids) else config_refresh)
 
 
 async def _ingest_camera_event(db: Session, camera: Camera) -> dict | None:
@@ -3747,7 +4508,7 @@ def _side_payload(camera: Camera | None, last: dict | None) -> dict | None:
     }
 
 
-async def _lane_view_dict(db: Session, gate: Gate) -> dict:
+async def _lane_view_dict(db: Session, gate: Gate, latest_by_camera: dict[int, VehicleCapture] | None = None) -> dict:
     by_side: dict[str, Camera] = {}
     extras: list[Camera] = []
     for camera in gate.cameras or []:
@@ -3760,7 +4521,7 @@ async def _lane_view_dict(db: Session, gate: Gate) -> dict:
     def last_for(camera: Camera | None) -> dict | None:
         if camera is None:
             return None
-        latest = latest_for_camera(db, camera.id)
+        latest = (latest_by_camera or {}).get(int(camera.id)) if latest_by_camera is not None else latest_for_camera(db, camera.id)
         return capture_dict(latest) if latest else None
 
     entry_last = last_for(by_side.get("ENTRY"))
@@ -3785,20 +4546,36 @@ async def _lane_view_dict(db: Session, gate: Gate) -> dict:
 
 @app.get("/lanes")
 def list_lanes(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    return [gate_dict(g) for g in db.scalars(select(Gate).order_by(Gate.id)).all()]
+    gates = db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()
+    node_gate_id = _processing_node_gate_id(db, required=False)
+    from .services.node_scope import is_processing_node
+    if is_processing_node():
+        gates = [g for g in gates if node_gate_id is not None and int(g.id) == int(node_gate_id)]
+    return [gate_dict(g) for g in gates]
 
 
 @app.get("/lanes/overview")
 async def lanes_overview(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    gates = db.scalars(select(Gate).order_by(Gate.id)).all()
-    lanes = [await _lane_view_dict(db, gate) for gate in gates]
+    gates = db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()
+    node_gate_id = _processing_node_gate_id(db, required=False)
+    from .services.node_scope import is_processing_node
+    if is_processing_node():
+        gates = [g for g in gates if node_gate_id is not None and int(g.id) == int(node_gate_id)]
+    camera_ids = [camera.id for gate in gates for camera in (gate.cameras or [])]
+    latest_by_camera = latest_for_cameras(db, camera_ids)
+    lanes = [await _lane_view_dict(db, gate, latest_by_camera) for gate in gates]
     return {"lanes": lanes}
 
 
 @app.get("/lanes/{gate_id}/view")
 async def lane_view(gate_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    gate = get_gate_or_404(db, gate_id)
-    return await _lane_view_dict(db, gate)
+    gate = _gate_for_node(db, gate_id, action="lane-view")
+    latest_by_camera = latest_for_cameras(db, [camera.id for camera in (gate.cameras or [])])
+    return await _lane_view_dict(db, gate, latest_by_camera)
 
 
 @app.get("/captures")
@@ -3808,12 +4585,20 @@ def get_captures(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
+    node_gate_id = _processing_node_gate_id(db, required=False)
+    from .services.node_scope import is_processing_node
+    if is_processing_node():
+        if node_gate_id is None:
+            return []
+        if gate_id is not None and int(gate_id) != int(node_gate_id):
+            raise HTTPException(403, "A Processing Node can read captures only for its assigned gate.")
+        gate_id = node_gate_id
     return [capture_dict(row) for row in list_recent_detections(db, gate_id=gate_id, limit=limit)]
 
 
 @app.get("/gates/{gate_id}")
 def get_gate(gate_id: int, db: Session = Depends(get_db), _: User = Depends(require("gates.view"))):
-    return gate_dict(get_gate_or_404(db, gate_id))
+    return gate_dict(_gate_for_node(db, gate_id, action="gate-view"))
 
 
 @app.post("/gates")
@@ -3854,7 +4639,7 @@ def delete_gate(gate_id: int, db: Session = Depends(get_db), user: User = Depend
 
 @app.post("/gates/{gate_id}/open")
 async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    g = get_gate_or_404(db, gate_id)
+    g = _gate_for_node(db, gate_id, action="gate-open")
     cameras = list(g.cameras or [])
     result = await controller().open(
         g, cameras, payload.reason,
@@ -3871,9 +4656,7 @@ async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depe
 
 @app.post("/cameras/{camera_id}/led")
 async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    camera = db.get(Camera, camera_id)
-    if not camera:
-        raise HTTPException(404, "Camera not found")
+    camera = _camera_for_node(db, camera_id, action="led-write")
     result = await send_led_text(camera.display_ip or "", payload.text, dry_run=payload.dry_run)
     write_audit(db, user, "led.write", "camera", str(camera.id), result.message)
     db.commit()
@@ -3884,9 +4667,7 @@ async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(ge
 
 @app.post("/cameras/{camera_id}/barrier/open")
 async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    camera = db.get(Camera, camera_id)
-    if not camera:
-        raise HTTPException(404, "Camera not found")
+    camera = _camera_for_node(db, camera_id, action="barrier-open")
     gate = camera.gate or Gate(id=0, name=camera.name)
     result = await controller().open(
         gate, [camera], payload.reason,
@@ -3986,7 +4767,9 @@ def close_session(session_id: int, db: Session = Depends(get_db), user: User = D
 
 @app.get("/sessions")
 def list_sessions(db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use"))):
-    return [session_dict(row) for row in db.scalars(select(ParkingSession).order_by(ParkingSession.id.desc()).limit(100)).all()]
+    rows = db.scalars(select(ParkingSession).order_by(ParkingSession.id.desc()).limit(100)).all()
+    captures = captures_for_sessions(db, rows)
+    return [sim_session_dict(row, captures.get(int(row.id)), lookup_capture=False) for row in rows]
 
 
 @app.get("/sessions/{session_id}/receipt")
@@ -5025,11 +5808,11 @@ async def printer_test(
         entry_gate="Simulation",
         public_reference=token,
         public_url=public_url,
-        payment_instructions="SmartPark thermal printer test ticket. Scan the QR code.",
-        body_text="SmartPark test receipt\nPlate: T000TST\n",
+        payment_instructions="Zirp thermal printer test ticket. Scan the QR code.",
+        body_text="Zirp test receipt\nPlate: T000TST\n",
         qr_payload=public_url,
         qr_png=_qr_png(public_url),
-        lines=["SmartPark test receipt"],
+        lines=["Zirp test receipt"],
     )
     adapter = printer_adapter(cfg.get("printer_adapter"), printer_name=cfg.get("printer_name") or "")
     printed = await adapter.print_receipt(document)
@@ -5041,7 +5824,9 @@ async def printer_test(
 @app.get("/access-plans")
 def list_access_plans(db: Session = Depends(get_db), _: User = Depends(require("subscribers.view"))):
     ensure_access_plans(db)
-    return [plan_dict(row) for row in db.scalars(select(AccessPlan).order_by(AccessPlan.id)).all()]
+    return [plan_dict(row) for row in db.scalars(
+        select(AccessPlan).options(selectinload(AccessPlan.vehicles)).order_by(AccessPlan.id)
+    ).all()]
 
 
 @app.post("/access-plans")
@@ -5077,7 +5862,9 @@ def update_access_plan(plan_id: int, payload: AccessPlanUpdate, db: Session = De
 @app.get("/vehicles")
 def list_vehicles(db: Session = Depends(get_db), _: User = Depends(require("subscribers.view"))):
     ensure_access_plans(db)
-    return [vehicle_dict(row) for row in db.scalars(select(RegisteredVehicle).order_by(RegisteredVehicle.plate)).all()]
+    return [vehicle_dict(row) for row in db.scalars(
+        select(RegisteredVehicle).options(joinedload(RegisteredVehicle.plan)).order_by(RegisteredVehicle.plate)
+    ).all()]
 
 
 @app.post("/vehicles")

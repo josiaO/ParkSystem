@@ -82,6 +82,8 @@ def make_sdk():
     sdk._video_locks = {}
     sdk._video_diagnostics = {}
     sdk._video_handles = {8}
+    sdk._video_retry_handles = set()
+    sdk._video_retry_at = {}
     sdk._video_threads = {}
     sdk._video_running = True
     sdk._hidden_hwnd = Mock(return_value=123)
@@ -93,32 +95,16 @@ def make_sdk():
     return sdk
 
 
-def test_failed_video_start_keeps_a_recovery_pump_and_retries_only_that_camera():
+def test_failed_video_start_is_not_advertised_as_live_and_keeps_a_retry_lane():
     sdk = make_sdk()
     sdk.dll.Net_StartVideo.side_effect = [7, 7, 7, 0]
     assert not sdk.start_video(7)["ok"]
-    assert 7 in sdk._video_handles
-    # The real clock advances during the native decoder warm-up. This test
-    # controls monotonic time, so allow the first read immediately.
-    sdk._video_diagnostics[7]["jpeg_not_before"] = 0.0
+    assert 7 not in sdk._video_handles
+    assert 7 in sdk._video_retry_handles
     sdk._ensure_camera_pump.assert_called_once_with(7)
-    clock = [100.0]
-    reads = []
-    def read(handle):
-        reads.append(handle)
-        clock[0] += 6 if len(reads) == 1 else .1
-        if len(reads) == 1:
-            return b""
-        sdk._video_running = False
-        return JPEG
-    sdk._get_jpg_buffer = read
-    with patch("tools.hvx_sdk_host.hvx_sdk.time.monotonic", side_effect=lambda: clock[0]), \
-         patch("tools.hvx_sdk_host.hvx_sdk.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + max(float(seconds), 0.1))):
-        sdk._camera_video_loop(7)
-        assert sdk.live_jpeg_for(7) == JPEG
-    assert sdk.dll.Net_StartVideo.call_count == 4
-    assert all(call.args[0] == 7 for call in sdk.dll.Net_StartVideo.call_args_list)
-    sdk.dll.Net_StopVideo.assert_called_once_with(7)
+    assert sdk.dll.Net_StartVideo.call_count == 3
+    assert sdk.dll.Net_StopVideo.call_count == 2
+    assert sdk.live_jpeg_for(7) == b""
     assert sdk._last_live_jpeg[8] == JPEG + b"neighbor"
     sdk.dll.Net_ImageSnap.assert_not_called()
     sdk.dll.Net_DisConnCamera.assert_not_called()

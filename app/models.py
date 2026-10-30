@@ -104,6 +104,37 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 
+class Node(Base):
+    """Central registry identity for one physical Edge Node.
+
+    This is intentionally separate from ``User``. A node credential can
+    authenticate a runtime, but it is never a human RBAC identity.
+    """
+    __tablename__ = "nodes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    node_type: Mapped[str] = mapped_column(String(40), default="EDGE_NODE")
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", index=True)
+    credential_hash: Mapped[str] = mapped_column(String(300), default="")
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)
+    version: Mapped[str] = mapped_column(String(80), default="")
+    last_seen_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    assignments: Mapped[list["NodeGateAssignment"]] = relationship(back_populates="node", cascade="all, delete-orphan")
+
+
+class NodeAuthSession(Base):
+    """Revocable bearer session issued to a node runtime."""
+    __tablename__ = "node_auth_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(AwareDateTime())
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+
+
 class Site(Base):
     __tablename__ = "sites"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -140,6 +171,19 @@ class Gate(Base):
     cameras: Mapped[list["Camera"]] = relationship(back_populates="gate")
     sessions: Mapped[list["ParkingSession"]] = relationship(back_populates="gate", foreign_keys="ParkingSession.gate_id")
     lanes: Mapped[list["Lane"]] = relationship(back_populates="gate")
+    node_assignments: Mapped[list["NodeGateAssignment"]] = relationship(back_populates="gate")
+
+
+class NodeGateAssignment(Base):
+    """Authoritative central ownership of a physical gate by a node."""
+    __tablename__ = "node_gate_assignments"
+    __table_args__ = (UniqueConstraint("node_id", "gate_id", name="uq_node_gate_assignment"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id"), index=True)
+    gate_id: Mapped[int] = mapped_column(ForeignKey("gates.id"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    node: Mapped[Node] = relationship(back_populates="assignments")
+    gate: Mapped[Gate] = relationship(back_populates="node_assignments")
 
 
 class Lane(Base):
@@ -294,6 +338,18 @@ class ParkingSession(Base):
             sqlite_where=text("visit_id != '' AND camera_id IS NOT NULL"),
             postgresql_where=text("visit_id != '' AND camera_id IS NOT NULL"),
         ),
+        # Exit callbacks are retried by cameras and by the durable outbox. The
+        # lifecycle code is already idempotent, but the database should also
+        # reject two sessions claiming the same physical exit event.
+        Index(
+            "uq_parking_sessions_site_exit_event",
+            "site_id",
+            "exit_event_id",
+            unique=True,
+            sqlite_where=text("exit_event_id != ''"),
+            postgresql_where=text("exit_event_id != ''"),
+        ),
+        Index("ix_parking_sessions_site_status_plate", "site_id", "status", "plate"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     site_id: Mapped[int] = mapped_column(
@@ -387,6 +443,8 @@ class VehicleCapture(Base):
         Index("uq_vehicle_captures_camera_visit", "camera_id", "visit_id", unique=True,
               sqlite_where=text("visit_id != '' AND camera_id IS NOT NULL"),
               postgresql_where=text("visit_id != '' AND camera_id IS NOT NULL")),
+        Index("ix_vehicle_captures_camera_image", "camera_id", "image_id"),
+        Index("ix_vehicle_captures_camera_latest", "camera_id", "id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     camera_id: Mapped[int | None] = mapped_column(ForeignKey("cameras.id"), nullable=True, index=True)
@@ -449,6 +507,15 @@ class RegisteredVehicle(Base):
 class Receipt(Base):
     """Issued parking slip. Printer adapter is simulated until a device is attached."""
     __tablename__ = "receipts"
+    __table_args__ = (
+        Index(
+            "uq_receipts_print_job_id",
+            "print_job_id",
+            unique=True,
+            sqlite_where=text("print_job_id != ''"),
+            postgresql_where=text("print_job_id != ''"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int | None] = mapped_column(ForeignKey("parking_sessions.id"), nullable=True, index=True)
     plate: Mapped[str] = mapped_column(String(32), default="", index=True)
@@ -502,7 +569,10 @@ class GateCommandRecord(Base):
 class PaymentIntent(Base):
     """Request to collect money. Not paid until a verified transaction succeeds."""
     __tablename__ = "payment_intents"
-    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_payment_intent_idempotency"),)
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_payment_intent_idempotency"),
+        Index("ix_payment_intents_provider_status_id", "provider_id", "status", "id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int | None] = mapped_column(ForeignKey("parking_sessions.id"), nullable=True, index=True)
     provider_id: Mapped[str] = mapped_column(String(40), default="kiosk_manual")
@@ -522,6 +592,7 @@ class PaymentTransaction(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_payment_txn_idempotency"),
         UniqueConstraint("provider_transaction_id", name="uq_payment_provider_txn"),
+        Index("ix_payment_transactions_session_status", "session_id", "status"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     intent_id: Mapped[int | None] = mapped_column(ForeignKey("payment_intents.id"), nullable=True, index=True)

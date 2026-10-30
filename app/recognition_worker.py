@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import sys
+import tempfile
 import time
 
 
 from app.core.consensus import ConsensusTrack, TrackDecision
+
+
+log = logging.getLogger("smartpark")
 
 
 class PlateTrack(ConsensusTrack):
@@ -93,6 +99,35 @@ def _worker_ready(camera_id: int) -> bool:
     return False
 
 
+def _worker_claim_has_live_frames(camera_id: int, health: dict) -> bool:
+    """Keep ownership with a stalled worker while its decoder is still live.
+
+    The worker reports ``STALLED`` while a slow/native inference call drains.
+    Falling back in that window starts a second ONNX owner and makes both
+    recognition and camera timing worse. A transitional claim is accepted only
+    when the worker has actually delivered a recent frame; a frame-less worker
+    still permits the Site Service fallback.
+    """
+    from app.config import settings
+
+    if not health.get("ok"):
+        return False
+    claimed = {int(value) for value in (health.get("claimed_camera_ids") or []) if str(value).isdigit()}
+    if int(camera_id) not in claimed:
+        return False
+    for row in health.get("cameras") or []:
+        if not isinstance(row, dict) or int(row.get("camera_id") or -1) != int(camera_id):
+            continue
+        if str(row.get("state") or "") not in {"STREAMING", "STALLED", "DEGRADED"}:
+            return False
+        try:
+            age = time.time() - float(row.get("last_frame_at") or 0)
+        except (TypeError, ValueError):
+            return False
+        return 0 <= age <= 2.0 * max(float(settings.stale_stream_seconds), 2.0)
+    return False
+
+
 def worker_owns_software_reads(camera_id: int) -> bool:
     """True when this worker, not the Site Service loop, should run FastALPR."""
     camera_id = int(camera_id)
@@ -104,12 +139,14 @@ def worker_owns_software_reads(camera_id: int) -> bool:
     from app.infrastructure.media.registry import mediamtx_detect_active
     from app.services.flags import flags
 
+    health = worker_health()
     with SessionLocal() as db:
         from app.models import Camera
         camera = db.get(Camera, camera_id)
         enabled = (bool(flags(db).get("fastalpr_new_pipeline_enabled"))
                    and camera is not None and _software_camera(camera, db)
-                   and mediamtx_detect_active(camera_id, db) and _worker_ready(camera_id))
+                   and mediamtx_detect_active(camera_id, db)
+                   and (_worker_ready(camera_id) or _worker_claim_has_live_frames(camera_id, health)))
     _owns_cache[camera_id] = (now, enabled)
     return enabled
 
@@ -123,24 +160,26 @@ def publish_recognition(event: dict) -> dict:
 
 def _publish_frame(event: dict, jpeg: bytes) -> dict:
     """Archive evidence once per consensus event, not on each decoder frame."""
-    from app.config import settings
-    from app.services.captures import _crop_from_bbox
+    from app.services.captures import _crop_from_bbox, _enhance_crop_jpeg, _write_jpeg
+
+    if not event.get("vehicle_detected", True) or not event.get("normalized_plate"):
+        raise ValueError("recognition event has no vehicle plate")
+    box = event.get("bbox")
+    if not isinstance(box, dict) or not isinstance(box.get("crop"), dict):
+        raise ValueError("recognition event has no valid plate box")
 
     identifier = str(event["event_id"])
     if not identifier.isalnum() or len(identifier) > 64:
         raise ValueError("Invalid recognition event ID")
-    relative = f"snapshots/recognition-{identifier}.jpg"
-    path = settings.media_dir / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(jpeg)
-    event["image_ref"] = f"/media/{relative}"
+    relative = f"recognition-{identifier}.jpg"
+    saved = _write_jpeg("snapshots", relative, jpeg)
+    event["image_ref"] = f"/media/{saved}"
     crop = _crop_from_bbox(jpeg, event.get("bbox"))
+    crop = _enhance_crop_jpeg(crop) or crop
     if crop:
-        relative_crop = f"crops/recognition-{identifier}.jpg"
-        crop_path = settings.media_dir / relative_crop
-        crop_path.parent.mkdir(parents=True, exist_ok=True)
-        crop_path.write_bytes(crop)
-        event["plate_crop_ref"] = f"/media/{relative_crop}"
+        relative_crop = f"recognition-{identifier}.jpg"
+        saved_crop = _write_jpeg("crops", relative_crop, crop)
+        event["plate_crop_ref"] = f"/media/{saved_crop}"
     return publish_recognition(event)
 
 
@@ -179,8 +218,8 @@ def _camera_rows() -> list[dict]:
                 continue
             if not media_mtx_for_camera(int(camera.id), db) or not _software_camera(camera, db):
                 continue
-            from app.services.node_scope import camera_in_recognition_scope
-            if not camera_in_recognition_scope(camera, db=db):
+            from app.services.node_scope import camera_active_on_this_installation
+            if not camera_active_on_this_installation(camera, db=db):
                 continue
             from app.services.ocr_policy import camera_recognition_mode
 
@@ -209,9 +248,61 @@ def _write_health(body: dict) -> None:
     body["resources"] = {**snapshot(), "decoder_count": sum(bool(row.get("decoder_pid")) for row in body.get("cameras", []))}
     path = settings.data_dir / "recognition-worker.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({**body, "updated_at": time.time()}), encoding="utf-8")
-    temporary.replace(path)
+    # Windows can have the previous fixed ``recognition-worker.tmp`` held by
+    # a second scheduled worker or by a health reader.  A unique temp file
+    # prevents one stale process from crashing the recognition worker; if the
+    # final replace is temporarily denied, keep the last good heartbeat and
+    # let the next loop retry.
+    temporary: str | None = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix="recognition-worker-", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({**body, "updated_at": time.time()}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    except (OSError, PermissionError) as exc:
+        log.warning("recognition health write skipped: %s", exc)
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _configure_worker_runtime() -> bool:
+    """Apply the installed deployment before importing the ORM/model graph.
+
+    The Site and Media services already do this. The recognition worker is a
+    separate process, so without the same step it silently opens the default
+    SQLite database even when the setup wizard selected another database.
+    """
+    from app.database_config import apply_runtime_database_config
+    from app.deployment import load_deployment_config
+    from app.config import settings
+
+    deployment = load_deployment_config()
+    if not getattr(deployment, "runs_local_gate_runtime", getattr(deployment, "is_server", False)) or not deployment.configured:
+        print("Recognition Worker is disabled until a configured Site Server exists.", file=sys.stderr)
+        return False
+    apply_runtime_database_config(deployment.database)
+    os.environ.setdefault("SMARTPARK_ALPR_CACHE_DIR", str(settings.data_dir / "model-cache"))
+    return True
+
+
+def _warmup_retry_delay(failures: int) -> float:
+    """Bound detector retry pressure while retaining eventual recovery."""
+    return min(60.0, float(2 ** min(max(1, int(failures)), 6)))
+
+
+def _fatal_native_load_error(exc: BaseException) -> bool:
+    """A broken ORT/DLL load cannot recover by re-importing in this process."""
+    detail = f"{type(exc).__name__}: {exc}".lower()
+    return isinstance(exc, (ImportError, OSError)) and (
+        "onnxruntime" in detail or "dll load failed" in detail or "pybind11_state" in detail
+    )
 
 
 async def _infer_camera(
@@ -247,7 +338,7 @@ async def _infer_camera(
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
     detect_roi = str(camera.get("detect_roi") or "") or None
     detect_zoom = camera.get("detect_zoom")
-    from app.services.camera_framing import gate_for
+    from app.services.camera_framing import best_arrival_box, gate_for
 
     arrival = gate_for(camera_id)
     track = PlateTrack(
@@ -315,7 +406,8 @@ async def _infer_camera(
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                stats["last_error"] = type(exc).__name__
+                stats["last_error"] = str(exc)[:300] or type(exc).__name__
+                log.warning("camera=%s recognition decoder failed: %s", camera_id, stats["last_error"])
             finally:
                 if stream is not None:
                     try:
@@ -326,12 +418,14 @@ async def _infer_camera(
             if not stop.is_set():
                 stats["state"] = "RECONNECTING"
                 stats["reconnects"] = int(stats.get("reconnects", 0)) + 1
+                log.warning("camera=%s recognition decoder reconnecting attempt=%s backoff_s=%.1f", camera_id, stats["reconnects"], backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(8.0, backoff * 2)
 
     last_probe = 0.0
     probe_failures = 0
     confirmed_visit_id = lane.visit.visit_id if lane.visit.state == "EVENT_PUBLISHED" else ""
+    pending_inference: asyncio.Task | None = None
 
     async def _with_limiter(call, captured_at: float = 0.0):
         async def fresh_call():
@@ -349,9 +443,26 @@ async def _infer_camera(
             call.close()
 
     async def _infer() -> None:
-        nonlocal last_probe, probe_failures, confirmed_visit_id
+        nonlocal last_probe, probe_failures, confirmed_visit_id, pending_inference
         stall = float(getattr(settings, "recognition_worker_stall_seconds", 5.0) or 5.0)
         while not stop.is_set():
+            # A timeout cannot stop an ONNX call already running in a native
+            # thread. Keep that call owned by this lane and wait for it to
+            # drain before admitting another frame; this bounds CPU pressure
+            # without freezing the decoder or the other camera lanes.
+            if pending_inference is not None:
+                if not pending_inference.done():
+                    stats["state"] = "STALLED"
+                    await asyncio.sleep(0.05)
+                    continue
+                try:
+                    pending_inference.result()
+                except Exception as exc:
+                    stats["last_error"] = type(exc).__name__
+                pending_inference = None
+                stats["recognition_inflight"] = False
+                if not stop.is_set():
+                    stats["state"] = "READY"
             try:
                 await asyncio.wait_for(ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -491,7 +602,7 @@ async def _infer_camera(
                     stats["timeline"] = {"visit_id": lane.visit.visit_id, "camera_id": camera_id,
                                          "direction": camera.get("lane_direction", "ENTRY")}
                     mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
-            phase = arrival.observe(boxes[0] if boxes else None, time.monotonic())
+            phase = arrival.observe(best_arrival_box(boxes), time.monotonic())
             stats["arrival"] = phase
             if phase == "absent":
                 runtime.finish(ticket, plate="")
@@ -517,24 +628,30 @@ async def _infer_camera(
             mark("frame_selected", timeline, at=ticket.recognition_started_at)
             mark("detector_started", timeline, at=located.get("detector_started_at", ticket.recognition_started_at))
             mark("detector_complete", timeline, at=located.get("detector_finished_at"))
+            provider_task = asyncio.create_task(_with_limiter(provider.process({
+                "jpeg": ticket.jpeg,
+                "camera_id": camera_id,
+                "site_id": camera.get("site_id"),
+                "camera_label": f"worker-{camera_id}",
+                "lane_id": camera.get("lane_id"),
+                "plate_policy": camera.get("plate_policy") or {},
+                "detect_roi": detect_roi,
+                "detect_zoom": detect_zoom,
+                "plate_boxes": boxes if located.get("available") else None,
+            }), ticket.captured_at))
             try:
-                event = await asyncio.wait_for(
-                    _with_limiter(provider.process({
-                        "jpeg": ticket.jpeg,
-                        "camera_id": camera_id,
-                        "site_id": camera.get("site_id"),
-                        "camera_label": f"worker-{camera_id}",
-                        "lane_id": camera.get("lane_id"),
-                        "plate_policy": camera.get("plate_policy") or {},
-                        "detect_roi": detect_roi,
-                        "detect_zoom": detect_zoom,
-                        "plate_boxes": boxes if located.get("available") else None,
-                    }), ticket.captured_at),
-                    timeout=stall,
-                )
+                # Shield is intentional: timeout must not cancel the provider,
+                # whose underlying ONNX thread cannot be stopped safely.
+                event = await asyncio.wait_for(asyncio.shield(provider_task), timeout=stall)
+            except asyncio.CancelledError:
+                if not provider_task.done():
+                    await provider_task
+                raise
             except asyncio.TimeoutError:
                 stats["last_error"] = "stall-timeout"
                 stats["state"] = "STALLED"
+                log.warning("camera=%s recognition inference stalled after %.1fs; draining native call before retry", camera_id, stall)
+                pending_inference = provider_task
                 runtime.recover(camera_id)
                 arrival.rearm()
                 stats["recognition_stalls"] = int(stats.get("recognition_stalls") or 0) + 1
@@ -545,6 +662,7 @@ async def _infer_camera(
                 arrival.rearm()
                 stats["last_error"] = type(exc).__name__
                 stats["state"] = "DEGRADED"
+                log.warning("camera=%s recognition inference failed: %s", camera_id, stats["last_error"])
                 await asyncio.sleep(interval)
                 continue
             plate = str(event.get("normalized_plate") or "")
@@ -648,14 +766,18 @@ async def _loop() -> None:
 
     tasks: dict[int, tuple[asyncio.Event, asyncio.Task, dict]] = {}
     configurations: dict[int, dict] = {}
-    # CPUExecutionProvider sessions support concurrent Run() calls. Bound the
-    # parallelism so one slow camera cannot block every other lane while also
-    # avoiding CPU oversubscription.
-    inference_limiter = asyncio.Semaphore(int(settings.recognition_max_concurrency))
+    # The runtime scheduler is the single admission controller for native
+    # recognition.  Do not add a process-wide asyncio semaphore here: a native
+    # call that stalls cannot be cancelled safely and would keep that semaphore
+    # occupied, delaying unrelated cameras.  FairInferenceScheduler admits at
+    # most one call per camera and releases a stalled lane through the watchdog,
+    # so other cameras keep decoding and recognizing independently.
     from app.services.recognition_runtime import runtime
     retiring: dict[int, asyncio.Task] = {}
     warmup_task: asyncio.Task | None = None
     warmup_status: dict = {"ready": False}
+    warmup_failures = 0
+    warmup_retry_at = 0.0
     from sqlalchemy.exc import OperationalError
     try:
         while True:
@@ -669,18 +791,40 @@ async def _loop() -> None:
                 _write_health({"enabled": False, "state": "WAITING_FOR_DATABASE", "cameras": []})
                 await asyncio.sleep(1.0)
                 continue
-            claimed_camera_ids = [int(row["id"]) for row in wanted]
-            if wanted and warmup_task is None:
+            candidate_camera_ids = [int(row["id"]) for row in wanted]
+            if wanted and warmup_task is None and time.monotonic() >= warmup_retry_at:
                 from app.services.alpr import warmup
                 warmup_task = asyncio.create_task(asyncio.to_thread(warmup))
             if warmup_task is not None and warmup_task.done():
                 try:
                     warmup_status = warmup_task.result()
+                    warmup_failures = 0
+                    warmup_retry_at = 0.0
                 except Exception as exc:
-                    warmup_status = {"ready": False, "error": type(exc).__name__}
+                    warmup_failures += 1
+                    fatal_native_error = _fatal_native_load_error(exc)
+                    delay = None if fatal_native_error else _warmup_retry_delay(warmup_failures)
+                    warmup_retry_at = float("inf") if fatal_native_error else time.monotonic() + delay
+                    warmup_status = {
+                        "ready": False,
+                        "error": type(exc).__name__,
+                        "detail": str(exc)[:400],
+                        "retry_in_seconds": delay,
+                        "restart_required": fatal_native_error,
+                    }
+                    if fatal_native_error:
+                        log.exception("FastALPR native runtime failed; recognition disabled until worker restart")
+                    else:
+                        log.exception("FastALPR warm-up failed; retrying in %.1fs", delay)
+                    try:
+                        from app.services.alpr import unload_engine
+                        unload_engine()
+                    except Exception:
+                        log.debug("Could not unload the failed FastALPR engine", exc_info=True)
                     warmup_task = None
             if not warmup_status.get("ready"):
                 wanted = []
+            claimed_camera_ids = candidate_camera_ids
             for camera_id, old_task in list(retiring.items()):
                 if old_task.done():
                     await asyncio.gather(old_task, return_exceptions=True)
@@ -722,7 +866,7 @@ async def _loop() -> None:
                 configurations[camera_id] = row
                 tasks[camera_id] = (
                     stop,
-                    asyncio.create_task(_infer_camera(row, stop, stats, inference_limiter), name=f"worker-cam-{camera_id}"),
+                    asyncio.create_task(_infer_camera(row, stop, stats), name=f"worker-cam-{camera_id}"),
                     stats,
                 )
             _write_health({"enabled": enabled, "warmup": warmup_status, "scope": scope,
@@ -754,6 +898,8 @@ def main() -> int:
     if not acquire_instance_lock("recognition-worker"):
         print("SmartPark Recognition Worker is already running.", file=sys.stderr)
         return 0
+    if not _configure_worker_runtime():
+        return 2
     print("Recognition worker reads MediaMTX cam{id}_detect when fastalpr_new_pipeline_enabled=true.")
     asyncio.run(_loop())
     return 0

@@ -44,6 +44,9 @@ def site_policy(db: Session | None = None) -> dict[str, Any]:
     merged = _bundled_defaults()
     if db is None:
         return merged
+    cached = db.info.get("smartpark.site_policy") if hasattr(db, "info") else None
+    if isinstance(cached, dict):
+        return dict(cached)
     row = db.get(SiteSetting, "site")
     if row and isinstance(row.value, dict):
         for key, value in row.value.items():
@@ -52,6 +55,8 @@ def site_policy(db: Session | None = None) -> dict[str, Any]:
     lang = str(merged.get("language") or "en").split("-", 1)[0].lower()
     merged["language"] = lang if lang in SUPPORTED_LANGUAGES else "en"
     merged["currency"] = str(merged.get("currency") or "USD").upper()[:8]
+    if hasattr(db, "info"):
+        db.info["smartpark.site_policy"] = dict(merged)
     return merged
 
 
@@ -82,6 +87,8 @@ def save_site_policy(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     else:
         row.value = current
     db.commit()
+    if hasattr(db, "info"):
+        db.info.pop("smartpark.site_policy", None)
     return site_policy(db)
 
 
