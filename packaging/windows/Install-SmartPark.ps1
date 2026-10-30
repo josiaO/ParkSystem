@@ -52,6 +52,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     }
 }
 $KitRoot = $PSScriptRoot
+$SupportRoot = Join-Path $KitRoot "support"
 $Payload = Join-Path $KitRoot "payload"
 if (-not (Test-Path (Join-Path $Payload "app"))) {
     # The Site Server can publish a clean archive of its installed runtime.
@@ -80,6 +81,15 @@ if (Test-Path $buildInfo) {
     Write-Host "Kit build: $((Get-Content -LiteralPath $buildInfo -Raw -Encoding UTF8).Trim())"
 }
 Write-Host ""
+
+function Get-KitSupportFile {
+    param([string]$Name)
+    foreach ($base in @($SupportRoot, $KitRoot)) {
+        $candidate = Join-Path $base $Name
+        if (Test-Path $candidate) { return $candidate }
+    }
+    throw "The installer support file '$Name' is missing from the package."
+}
 
 function Stop-SmartParkProcesses {
     param([string]$Root)
@@ -256,13 +266,43 @@ if ($LASTEXITCODE -ne 0) { throw "Installed Python dependencies are incompatible
 # Fail the installation with the native error while it is still visible. A
 # broken ONNX Runtime DLL otherwise leaves the site running but recognition
 # permanently unavailable, with the failure only appearing in a background log.
+# Keep stdout and stderr in a file rather than piping them through Out-String:
+# Windows PowerShell can turn native stderr into a NativeCommandError and can
+# leave $LASTEXITCODE stale when the pipeline is interrupted. That used to
+# hide the real missing-DLL message from field technicians.
 $env:SMARTPARK_HOME = $InstallDir
 $env:PATH = "$InstallDir\python64;$InstallDir\python64\Scripts;$InstallDir\vendor;$env:PATH"
-$ortImport = & $Py64 -c "import onnxruntime as ort; print(ort.__version__)" 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) {
-    throw "ONNX Runtime DLL self-test failed. Recognition cannot start until the Windows runtime is repaired: $($ortImport.Trim())"
+
+function Invoke-OnnxRuntimeProbe {
+    $probeLog = Join-Path ([IO.Path]::GetTempPath()) ("SmartPark-onnxruntime-{0}.log" -f $PID)
+    Remove-Item -LiteralPath $probeLog -Force -ErrorAction SilentlyContinue
+    & $Py64 -c "import onnxruntime as ort; print(ort.__version__)" *> $probeLog
+    $exitCode = $LASTEXITCODE
+    $output = if (Test-Path $probeLog) { Get-Content -LiteralPath $probeLog -Raw -ErrorAction SilentlyContinue } else { "" }
+    Remove-Item -LiteralPath $probeLog -Force -ErrorAction SilentlyContinue
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Output = if ($null -eq $output) { "" } else { $output.Trim() }
+    }
 }
-Write-Host ("ONNX Runtime self-test passed: {0}" -f $ortImport.Trim())
+
+$ortProbe = Invoke-OnnxRuntimeProbe
+if ($ortProbe.ExitCode -ne 0 -and (Test-Path $BundledRedist)) {
+    # A local DLL set can be present but still be incomplete for a particular
+    # Windows image (especially Universal CRT components). Repair the machine
+    # runtime once, then run the probe again before aborting the installation.
+    Write-Host "ONNX Runtime native self-test failed; repairing the bundled Microsoft Visual C++ x64 runtime..."
+    $redist = Start-Process -FilePath $BundledRedist -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
+    if ($redist.ExitCode -notin @(0, 1638, 3010)) {
+        throw "Microsoft Visual C++ runtime repair failed with exit code $($redist.ExitCode)."
+    }
+    $ortProbe = Invoke-OnnxRuntimeProbe
+}
+if ($ortProbe.ExitCode -ne 0) {
+    $detail = if ([string]::IsNullOrWhiteSpace($ortProbe.Output)) { "No diagnostic text was returned by Python." } else { $ortProbe.Output }
+    throw "ONNX Runtime DLL self-test failed (exit code $($ortProbe.ExitCode)). Recognition cannot start until the Windows runtime is repaired: $detail"
+}
+Write-Host ("ONNX Runtime self-test passed: {0}" -f $ortProbe.Output)
 
 $Py32 = Join-Path $InstallDir "python32\python.exe"
 $Wheels32 = Join-Path $InstallDir "wheels32"
@@ -508,7 +548,7 @@ Write-Host 'Zirp removed. Camera database is still in %ProgramData%\SmartParkEdg
 "@
 Set-Content -Path $Uninstall -Value $UninstallBody -Encoding ASCII
 
-$svcScript = Join-Path $KitRoot "Install-SmartParkServices.ps1"
+$svcScript = Get-KitSupportFile "Install-SmartParkServices.ps1"
 $deploymentPath = Join-Path $env:ProgramData "SmartParkEdge\deployment.json"
 $databasePath = Join-Path $env:ProgramData "SmartParkEdge\smartpark.db"
 $freshDeployment = -not (Test-Path $deploymentPath) -and -not (Test-Path $databasePath)
@@ -580,14 +620,14 @@ if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
 foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
-    $src = Join-Path $KitRoot $helper
+    $src = Get-KitSupportFile $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force
     }
 }
 # Keep the installer entry points in the installed runtime so a Site Server
 # can republish the same approved package over the LAN without a USB drive.
-foreach ($launcher in @("Install-SmartPark.ps1", "Install-SmartPark.bat", "Install-SmartPark-Server.bat", "Install-SmartPark-Node.bat", "Install-SmartPark-Client.bat")) {
+foreach ($launcher in @("Install-SmartPark.ps1", "Install-SmartPark.bat")) {
     $src = Join-Path $KitRoot $launcher
     $dest = Join-Path $InstallDir $launcher
     if ((Test-Path $src) -and ([IO.Path]::GetFullPath($src) -ne [IO.Path]::GetFullPath($dest))) {

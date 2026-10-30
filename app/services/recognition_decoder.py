@@ -45,12 +45,18 @@ def require_local_mediamtx(url: str) -> str:
 
 
 def decoder_command(url: str, *, sample_fps: float, scale: int = 960) -> list[str]:
-    """Remux is MediaMTX's job. This command only decodes, at the sample rate."""
+    """Decode the local RTSP path without adding a second frame-drop stage.
+
+    ``sample_fps`` remains part of the public API for callers and telemetry,
+    but the decoder must preserve source cadence.  The recognition lane has a
+    bounded latest-frame mailbox and its own admission clock; an FFmpeg
+    ``fps=`` filter here would drop frames before that mailbox can choose the
+    freshest useful plate view, creating a second sampling gate.
+    """
     binary = ffmpeg_bin()
     if not binary:
         raise RuntimeError("ffmpeg is not installed")
     local = require_local_mediamtx(url)
-    fps = max(1.0, min(float(sample_fps), 10.0))
     width = max(160, min(int(scale), 1920))
     return [
         binary,
@@ -62,12 +68,15 @@ def decoder_command(url: str, *, sample_fps: float, scale: int = 960) -> list[st
         "-flags", "low_delay",
         "-probesize", "1000000",
         "-analyzeduration", "1000000",
+        "-max_delay", "100000",
         "-threads", "1",
         "-i", local,
         "-threads", "1",
         "-filter_threads", "1",
         "-an",
-        "-vf", f"fps={fps:g},scale={width}:-2",
+        "-vf", f"scale={width}:-2",
+        "-vsync", "0",
+        "-flush_packets", "1",
         "-f", "image2pipe",
         "-vcodec", "mjpeg",
         "-q:v", "8",

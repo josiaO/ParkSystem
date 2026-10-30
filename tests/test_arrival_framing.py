@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.camera_framing import ArrivalGate, apply_framing, framing_from_profiles, parse_detect_zoom
+from app.services.camera_framing import ArrivalGate, apply_framing, best_arrival_box, framing_from_profiles, parse_detect_zoom
 from app.services.stream_roles import merge_profiles, public_profiles
 
 
@@ -50,6 +50,23 @@ class ArrivalGateTests(unittest.TestCase):
         self.assertEqual(gate.observe(box, 0.3), "ready")
         gate.rearm()
         self.assertEqual(gate.observe(box, 0.4), "ready")
+
+    def test_far_plate_waits_for_readable_distance_then_has_bounded_fallback(self):
+        gate = ArrivalGate(stable_seconds=0.2, min_plate_width_px=64, far_fallback_seconds=1.0)
+        far = _box(20, 70)
+        self.assertEqual(gate.observe(far, 0.0), "moving")
+        self.assertEqual(gate.observe(far, 0.3), "far")
+        self.assertEqual(gate.observe(far, 1.3), "ready")
+
+    def test_arrival_prefers_largest_plate_box(self):
+        small = {**_box(10, 70), "confidence": 0.99}
+        large = {**_box(20, 140), "confidence": 0.70}
+        self.assertIs(best_arrival_box([small, large]), large)
+
+    def test_near_plate_gets_fast_read_opportunity_while_moving(self):
+        gate = ArrivalGate(stable_seconds=0.8, min_plate_width_px=64)
+        self.assertEqual(gate.observe(_box(10, 80), 0.0), "moving")
+        self.assertEqual(gate.observe(_box(60, 140), 0.1), "ready")
 
 
 class FramingTests(unittest.TestCase):

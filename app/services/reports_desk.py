@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
     AuditLog,
@@ -397,7 +397,11 @@ def _seasons(db: Session) -> list[dict]:
     now = datetime.now(timezone.utc)
     soon = now + timedelta(days=14)
     listed = []
-    for row in db.scalars(select(RegisteredVehicle).order_by(RegisteredVehicle.plate)).all():
+    for row in db.scalars(
+        select(RegisteredVehicle)
+        .options(joinedload(RegisteredVehicle.plan))
+        .order_by(RegisteredVehicle.plate)
+    ).all():
         until = row.valid_until
         if until and until.tzinfo is None:
             until = until.replace(tzinfo=timezone.utc)

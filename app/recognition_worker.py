@@ -160,24 +160,26 @@ def publish_recognition(event: dict) -> dict:
 
 def _publish_frame(event: dict, jpeg: bytes) -> dict:
     """Archive evidence once per consensus event, not on each decoder frame."""
-    from app.config import settings
-    from app.services.captures import _crop_from_bbox
+    from app.services.captures import _crop_from_bbox, _enhance_crop_jpeg, _write_jpeg
+
+    if not event.get("vehicle_detected", True) or not event.get("normalized_plate"):
+        raise ValueError("recognition event has no vehicle plate")
+    box = event.get("bbox")
+    if not isinstance(box, dict) or not isinstance(box.get("crop"), dict):
+        raise ValueError("recognition event has no valid plate box")
 
     identifier = str(event["event_id"])
     if not identifier.isalnum() or len(identifier) > 64:
         raise ValueError("Invalid recognition event ID")
-    relative = f"snapshots/recognition-{identifier}.jpg"
-    path = settings.media_dir / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(jpeg)
-    event["image_ref"] = f"/media/{relative}"
+    relative = f"recognition-{identifier}.jpg"
+    saved = _write_jpeg("snapshots", relative, jpeg)
+    event["image_ref"] = f"/media/{saved}"
     crop = _crop_from_bbox(jpeg, event.get("bbox"))
+    crop = _enhance_crop_jpeg(crop) or crop
     if crop:
-        relative_crop = f"crops/recognition-{identifier}.jpg"
-        crop_path = settings.media_dir / relative_crop
-        crop_path.parent.mkdir(parents=True, exist_ok=True)
-        crop_path.write_bytes(crop)
-        event["plate_crop_ref"] = f"/media/{relative_crop}"
+        relative_crop = f"recognition-{identifier}.jpg"
+        saved_crop = _write_jpeg("crops", relative_crop, crop)
+        event["plate_crop_ref"] = f"/media/{saved_crop}"
     return publish_recognition(event)
 
 
@@ -282,7 +284,7 @@ def _configure_worker_runtime() -> bool:
     from app.config import settings
 
     deployment = load_deployment_config()
-    if not deployment.is_server or not deployment.configured:
+    if not getattr(deployment, "runs_local_gate_runtime", getattr(deployment, "is_server", False)) or not deployment.configured:
         print("Recognition Worker is disabled until a configured Site Server exists.", file=sys.stderr)
         return False
     apply_runtime_database_config(deployment.database)
@@ -336,7 +338,7 @@ async def _infer_camera(
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
     detect_roi = str(camera.get("detect_roi") or "") or None
     detect_zoom = camera.get("detect_zoom")
-    from app.services.camera_framing import gate_for
+    from app.services.camera_framing import best_arrival_box, gate_for
 
     arrival = gate_for(camera_id)
     track = PlateTrack(
@@ -600,7 +602,7 @@ async def _infer_camera(
                     stats["timeline"] = {"visit_id": lane.visit.visit_id, "camera_id": camera_id,
                                          "direction": camera.get("lane_direction", "ENTRY")}
                     mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
-            phase = arrival.observe(boxes[0] if boxes else None, time.monotonic())
+            phase = arrival.observe(best_arrival_box(boxes), time.monotonic())
             stats["arrival"] = phase
             if phase == "absent":
                 runtime.finish(ticket, plate="")

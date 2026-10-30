@@ -13,6 +13,14 @@ from .common import Worker, action_label, is_technician
 from .presentation import configure_table, label_for
 from .live_pane import CameraLivePane
 
+
+def runtime_api():
+    """Use this PC's local operational API for camera and gate hardware."""
+    # Keep lightweight desktop fixtures and older operator clients compatible;
+    # the production ApiClient always exposes the split runtime plane.
+    resolver = getattr(api, "runtime_client", None)
+    return resolver() if callable(resolver) else api
+
 class CameraDialog(QDialog):
     def __init__(self, camera=None):
         super().__init__(); self.camera=camera; self.setWindowTitle("Edit Camera" if camera else "Add Camera")
@@ -53,7 +61,7 @@ class CameraDialog(QDialog):
         self.controller=QLineEdit(); self.display=QLineEdit()
         self.gate=QComboBox(); self.gate.addItem("No gate — monitoring only", None)
         try:
-            for g in api.get("/gates"): self.gate.addItem(g["name"], g["id"])
+            for g in runtime_api().get("/gates"): self.gate.addItem(g["name"], g["id"])
         except Exception:
             pass
         if camera:
@@ -202,7 +210,7 @@ class Cameras(QWidget):
         if row<0: return None
         return int(self.table.item(row,0).text())
     def refresh(self):
-        try: rows=api.get("/cameras")
+        try: rows=runtime_api().get("/cameras")
         except Exception as e: QMessageBox.warning(self,"Cameras",str(e)); return
         self.rows=rows
         self.table.setRowCount(len(rows))
@@ -232,20 +240,20 @@ class Cameras(QWidget):
         answer=QMessageBox.question(self, "Load example cameras", "Add example gates and cameras as a setup shortcut? Review and edit their addresses and assignments before use. Existing cameras are preserved. This does not connect cameras or assign recognition to this PC.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        worker=Worker(api.seed_site)
+        worker=Worker(runtime_api().seed_site)
         worker.done.connect(lambda result: (QMessageBox.information(self, "Example cameras", f"Added {len(result.get('created', []))} cameras; kept {len(result.get('skipped', []))} existing cameras. Review the setup before connecting."), self.refresh()))
         worker.failed.connect(lambda error: QMessageBox.critical(self, "Example cameras", error))
         self._keep(worker)
         worker.start()
 
     def discover(self):
-        w=Worker(lambda: api.get("/cameras/discover?scan_lan=true", timeout=45)); w.done.connect(self._show_discover); w.failed.connect(lambda e:QMessageBox.critical(self,"Discover",e)); self._keep(w); w.start()
+        w=Worker(lambda: runtime_api().get("/cameras/discover?scan_lan=true", timeout=45)); w.done.connect(self._show_discover); w.failed.connect(lambda e:QMessageBox.critical(self,"Discover",e)); self._keep(w); w.start()
     def onboard(self):
         ip, ok = QInputDialog.getText(self, "Add Camera", "Camera address")
         if not ok or not str(ip).strip():
             return
         payload={"ip_address": str(ip).strip(), "username": "admin", "password": "admin"}
-        w=Worker(lambda: api.post("/cameras/onboard/probe", payload, timeout=20))
+        w=Worker(lambda: runtime_api().post("/cameras/onboard/probe", payload, timeout=20))
         w.done.connect(self._show_onboard); w.failed.connect(lambda e:QMessageBox.critical(self,"Onboard",e)); self._keep(w); w.start()
     def _show_onboard(self, data):
         data=data or {}
@@ -259,7 +267,7 @@ class Cameras(QWidget):
             idx=dlg.recognition.findData(str(data.get("recognition_mode")))
             if idx>=0: dlg.recognition.setCurrentIndex(idx)
         if dlg.exec()==QDialog.DialogCode.Accepted and api.can("cameras.manage"):
-            w=Worker(lambda: api.post("/cameras", dlg.payload())); w.done.connect(lambda _: self.refresh()); w.failed.connect(lambda e:QMessageBox.critical(self,"Add Camera",e)); self._keep(w); w.start()
+            w=Worker(lambda: runtime_api().post("/cameras", dlg.payload())); w.done.connect(lambda _: self.refresh()); w.failed.connect(lambda e:QMessageBox.critical(self,"Add Camera",e)); self._keep(w); w.start()
     def _show_discover(self, data):
         rows=data.get("cameras") or []
         lines=[
@@ -290,7 +298,7 @@ class Cameras(QWidget):
                 for r in ipcams
             ],
         }
-        w=Worker(lambda: api.post("/cameras/import-discovered", payload, timeout=60))
+        w=Worker(lambda: runtime_api().post("/cameras/import-discovered", payload, timeout=60))
         w.done.connect(lambda body: (
             QMessageBox.information(self,"IP cameras", f"Added {len(body.get('created') or [])}. Connected {sum(1 for x in (body.get('connected') or []) if x.get('status')=='VIDEO_CONNECTED')}. HVX unchanged."),
             self.refresh(),
@@ -318,20 +326,20 @@ class Cameras(QWidget):
     def add_camera(self):
         d=CameraDialog()
         if d.exec():
-            try: api.post("/cameras",d.payload()); self.refresh()
+            try: runtime_api().post("/cameras",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Add camera",str(e))
     def edit_camera(self):
         cam=self.selected_camera()
         if not cam: QMessageBox.information(self,"Edit camera","Select a camera first."); return
         d=CameraDialog(cam)
         if d.exec():
-            try: api.patch(f"/cameras/{cam['id']}",d.payload()); self.refresh()
+            try: runtime_api().patch(f"/cameras/{cam['id']}",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Edit camera",str(e))
     def delete_camera(self):
         cam=self.selected_camera()
         if not cam: QMessageBox.information(self,"Delete camera","Select a camera first."); return
         if QMessageBox.question(self,"Delete camera",f"Delete {cam['name']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/cameras/{cam['id']}"); self.refresh()
+        try: runtime_api().delete(f"/cameras/{cam['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete camera",str(e))
     def _run(self, fn, title):
         cid=self.selected_id()
@@ -342,15 +350,15 @@ class Cameras(QWidget):
         self._maybe_start_pair()
         cid=self.selected_id()
         if cid is not None: self._load_streams(cid)
-    def sdk_connect(self): self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/connect", timeout=25),"Connect")
+    def sdk_connect(self): self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/sdk/connect", timeout=25),"Connect")
     def sdk_disconnect(self):
         if QMessageBox.question(self, "Disconnect camera", "Disconnect this camera? Live video for it stops until someone connects it again.") != QMessageBox.Yes:
             return
-        self._run(lambda cid: api.post(f"/cameras/{cid}/sdk/disconnect"), "Disconnect camera")
-    def rtsp_probe(self): self._run(lambda cid: api.post(f"/cameras/{cid}/rtsp/probe"),"RTSP Probe")
-    def onvif_discover(self): self._run(lambda cid: api.post(f"/cameras/{cid}/onvif/discover", timeout=20),"ONVIF profiles")
-    def fastalpr(self): self._run(lambda cid: api.post(f"/cameras/{cid}/alpr/recognize", timeout=30),"FastALPR")
-    def capture_snapshot(self): self._run(lambda cid: api.post(f"/cameras/{cid}/snapshot/capture", timeout=12),"Snapshot")
+        self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/sdk/disconnect"), "Disconnect camera")
+    def rtsp_probe(self): self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/rtsp/probe"),"RTSP Probe")
+    def onvif_discover(self): self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/onvif/discover", timeout=20),"ONVIF profiles")
+    def fastalpr(self): self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/alpr/recognize", timeout=30),"FastALPR")
+    def capture_snapshot(self): self._run(lambda cid: runtime_api().post(f"/cameras/{cid}/snapshot/capture", timeout=12),"Snapshot")
     def open_this_side(self):
         self.command_barrier("open")
     def close_this_side(self):
@@ -365,7 +373,7 @@ class Cameras(QWidget):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(runtime_api().post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
     def _keep(self, worker):
         self._workers.append(worker)
@@ -387,7 +395,7 @@ class Cameras(QWidget):
         self._refresh_recognition_scope()
     def _refresh_recognition_scope(self):
         def work():
-            return api.get("/runtime/recognition-scope", timeout=8)
+            return runtime_api().get("/runtime/recognition-scope", timeout=8)
         w=Worker(work)
         w.done.connect(self._show_recognition_scope)
         w.failed.connect(lambda error: self.scope_hint.setText(f"Recognition status unavailable: {error}"))
@@ -400,7 +408,7 @@ class Cameras(QWidget):
         if QMessageBox.question(self, "Assign recognition", f"Assign this PC to {self.lane.currentText()} entry and exit only? Other gates will not be recognized on this PC.") != QMessageBox.Yes:
             return
         self.assign_node.setEnabled(False)
-        worker=Worker(lambda: api.put("/runtime/recognition-owner", {"gate_id": gid}, timeout=8))
+        worker=Worker(lambda: runtime_api().put("/runtime/recognition-owner", {"gate_id": gid}, timeout=8))
         worker.done.connect(self._show_recognition_scope)
         worker.failed.connect(lambda error: QMessageBox.critical(self, "Recognition assignment failed", error))
         worker.finished.connect(lambda: self.assign_node.setEnabled(True))
@@ -526,7 +534,7 @@ class Cameras(QWidget):
         for pane in self._all_panes():
             pane.shutdown()
     def _load_streams(self, cid):
-        s=Worker(lambda: api.get(f"/cameras/{cid}/streams", timeout=8))
+        s=Worker(lambda: runtime_api().get(f"/cameras/{cid}/streams", timeout=8))
         s.done.connect(self._show_streams); self._keep(s); s.start()
     def _show_streams(self, data):
         payload=data if isinstance(data, dict) else {}

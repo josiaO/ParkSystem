@@ -161,7 +161,7 @@ class SetupWizard(QWizard):
         test.clicked.connect(self._test_connection)
         form.addRow("Server address", self.server_url)
         form.addRow("Site label", self.client_site_name)
-        self.node_credentials_box = QGroupBox("Processing Node account")
+        self.node_credentials_box = QGroupBox("Edge Node credential")
         node_form = QFormLayout(self.node_credentials_box)
         self.node_username = QLineEdit(self.current.node_username or self._default_node_username())
         self.node_password = QLineEdit()
@@ -169,7 +169,7 @@ class SetupWizard(QWizard):
         self.node_password_confirm = QLineEdit()
         self.node_password_confirm.setEchoMode(QLineEdit.EchoMode.Password)
         self.node_credentials_hint = _label(
-            "This account belongs only to this Processing Node. It is not the Site Server administrator account."
+            "This credential belongs only to this physical Edge Node. It is not a human or Site Administrator account."
         )
         self.node_credentials_status = _label("")
         node_form.addRow("Node username", self.node_username)
@@ -507,7 +507,7 @@ class SetupWizard(QWizard):
             return False
 
     def _create_admin(self, db_config: DatabaseConfig) -> bool:
-        from sqlalchemy import create_engine, select
+        from sqlalchemy import create_engine, func, select
         from sqlalchemy.orm import Session
 
         from app.database_config import database_url
@@ -545,55 +545,64 @@ class SetupWizard(QWizard):
             engine.dispose()
 
     def _provision_node_account(self, db_config: DatabaseConfig) -> None:
-        """Create the node's least-privilege login in the shared site DB.
+        """Create/update the node identity in the central registry.
 
-        A node must never use the Site Administrator account.  The account is
-        created with only the built-in Processing Node role and its password is
-        stored only as an Argon2 hash in the users table; the plaintext remains
-        in the wizard only long enough to create that hash.
+        Node credentials are machine credentials, not a restricted human
+        User. The plaintext is used only to create an Argon2 hash and to save
+        a protected local secret reference for the future node client.
         """
-        from sqlalchemy import create_engine, select
-        from sqlalchemy.orm import Session, selectinload
+        from sqlalchemy import create_engine, func, select
+        from sqlalchemy.orm import Session
 
         from app.database_config import database_url
-        from app.models import Role, User, UserRole, UserStatus
-        from app.security import hash_password
+        from app.models import Node, Role, Site, User, UserRole
+        from app.services.node_authorization import hash_node_credential
 
         engine = create_engine(database_url(db_config, password=self.pg_password.text() or None), future=True)
         try:
             with Session(engine) as db:
+                site = db.scalar(select(Site).order_by(Site.id))
+                if site is None:
+                    raise RuntimeError("The Site Server has no site to pair this node with.")
+                identity = str(settings.node_id).strip()
+                node = db.scalar(select(Node).where(Node.node_id == identity))
+                if node is None:
+                    node = Node(node_id=identity, site_id=site.id, node_type="EDGE_NODE")
+                    db.add(node)
+                node.name = f"Edge Node ({socket.gethostname()})"
+                node.site_id = site.id
+                node.status = "ACTIVE"
+                node.revoked_at = None
+                node.credential_hash = hash_node_credential(self.node_password.text())
+                # The machine credential remains in ``nodes``.  The desktop
+                # login also needs a scoped RBAC session, so maintain one
+                # idempotent Processing Node user with the same credential.
+                # Never overwrite a human account that happens to use the
+                # requested username.
                 role = db.scalar(select(Role).where(Role.name == "Processing Node"))
                 if role is None:
-                    raise RuntimeError(
-                        "The Site Server is missing the Processing Node role. "
-                        "Update the Site Server before pairing this node."
-                    )
-                username = self.node_username.text().strip()
-                user = db.scalar(
-                    select(User)
-                    .options(selectinload(User.roles).selectinload(UserRole.role))
-                    .where(User.username == username)
-                )
-                if user is not None:
-                    role_names = {link.role.name for link in user.roles}
-                    if role_names - {"Processing Node"}:
+                    raise RuntimeError("The Processing Node role is missing from the Site Server database.")
+                node_username = self.node_username.text().strip()
+                ui_user = db.scalar(select(User).where(func.lower(User.username) == node_username.casefold()))
+                if ui_user is not None:
+                    existing_roles = {link.role.name for link in ui_user.roles if link.role is not None}
+                    if existing_roles and "Processing Node" not in existing_roles:
                         raise RuntimeError(
-                            f"Node username '{username}' already belongs to another role. Choose a different node username."
+                            f"Node username '{node_username}' already belongs to a human account. Choose a different node username."
                         )
-                    user.password_hash = hash_password(self.node_password.text())
-                    user.status = UserStatus.ACTIVE.value
-                    user.full_name = f"Processing Node ({socket.gethostname()})"
-                    user.roles.clear()
-                    user.roles.append(UserRole(role=role))
+                    ui_user.password_hash = hash_node_credential(self.node_password.text())
+                    ui_user.status = "ACTIVE"
                 else:
-                    user = User(
-                        username=username,
+                    ui_user = User(
+                        username=node_username,
                         full_name=f"Processing Node ({socket.gethostname()})",
-                        password_hash=hash_password(self.node_password.text()),
-                        status=UserStatus.ACTIVE.value,
+                        password_hash=hash_node_credential(self.node_password.text()),
+                        status="ACTIVE",
                     )
-                    user.roles.append(UserRole(role=role))
-                    db.add(user)
+                    db.add(ui_user)
+                    db.flush()
+                if not any(link.role_id == role.id for link in ui_user.roles):
+                    db.add(UserRole(user_id=ui_user.id, role_id=role.id))
                 db.commit()
         finally:
             engine.dispose()

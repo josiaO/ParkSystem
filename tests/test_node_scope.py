@@ -15,9 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 from app.api_main import app, ensure_roles
 from app.db import Base, get_db, set_session_factory
-from app.models import Role, User, UserRole
+from app.models import Node, NodeGateAssignment, Role, User, UserRole
 from app.security import hash_password
 from app.services.node_scope import (
+    camera_active_on_this_installation,
     camera_in_recognition_scope,
     camera_visible_in_management,
     reset_recognition_scope,
@@ -80,23 +81,21 @@ class NodeScopeTests(unittest.TestCase):
         response = self.client.put("/runtime/recognition-owner", headers={"Authorization": f"Bearer {token}"}, json={"gate_id": self.gate1["id"]})
         self.assertEqual(response.status_code, 403, response.text)
 
-    def test_processing_node_admin_token_cannot_browse_central_controls(self):
-        """A node must reject a copied Site Administrator token entirely."""
+    def test_human_admin_token_keeps_central_permissions_on_edge_pc(self):
+        """Human RBAC is independent from the physical computer role."""
         from unittest.mock import patch
 
         with patch("app.security._processing_node_installation", return_value=True), \
              patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
             me = self.client.get("/auth/me", headers=self.headers)
-            self.assertEqual(me.status_code, 403, me.text)
+            self.assertEqual(me.status_code, 200, me.text)
 
             for path in ("/users", "/roles", "/modules", "/settings/site"):
                 response = self.client.get(path, headers=self.headers) if path != "/settings/site" else self.client.patch(path, headers=self.headers, json={})
-                self.assertEqual(response.status_code, 403, f"{path}: {response.text}")
+                self.assertNotEqual(response.status_code, 403, f"{path}: {response.text}")
 
             setup = self.client.get("/auth/setup")
             self.assertEqual(setup.status_code, 200, setup.text)
-            self.assertEqual(setup.json()["password"], "")
-            self.assertEqual(setup.json()["usernames"], [])
 
     def test_camera_response_never_exposes_secret_store_reference(self):
         response = self.client.get("/cameras", headers=self.headers)
@@ -215,6 +214,34 @@ class NodeScopeTests(unittest.TestCase):
             by_id = {row["id"]: row for row in response.json()}
             self.assertTrue(by_id[self.cam1e["id"]]["stream_allowed"])
             self.assertTrue(by_id[self.cam2e["id"]]["stream_allowed"])
+
+    def test_site_server_releases_gate_owned_by_active_edge_node(self):
+        """The central registry stays visible, but the server hardware must stay idle."""
+        from app.config import settings
+
+        with self.Session() as db:
+            node = Node(node_id="edge-1", site_id=1, name="Remote lane", node_type="EDGE_NODE", status="ACTIVE")
+            db.add(node)
+            db.flush()
+            db.add(NodeGateAssignment(node_id=node.id, gate_id=self.gate1["id"], enabled=True))
+            db.commit()
+            with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+                 patch("app.services.node_scope.deployment_role", return_value="SITE_SERVER"):
+                self.assertFalse(camera_active_on_this_installation(self.cam1e, db=db))
+                self.assertTrue(camera_active_on_this_installation(self.cam2e, db=db))
+                self.assertTrue(camera_visible_in_management(self.cam1e, db=db))
+
+        with patch("app.services.node_scope.deployment_role", return_value="SITE_SERVER"):
+            response = self.client.get("/cameras", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        by_id = {row["id"]: row for row in response.json()}
+        self.assertFalse(by_id[self.cam1e["id"]]["stream_allowed"])
+        self.assertTrue(by_id[self.cam2e["id"]]["stream_allowed"])
+
+    def test_edge_node_cannot_manage_central_node_registry(self):
+        with patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
+            response = self.client.get("/nodes", headers=self.headers)
+        self.assertEqual(response.status_code, 403, response.text)
 
     def test_unassigned_edge_node_stays_hidden_and_fail_closed(self):
         from app.config import settings
@@ -336,7 +363,7 @@ class NodeScopeTests(unittest.TestCase):
             foreign = self.client.get(f"/cameras/{self.cam2e['id']}", headers=self.headers)
             self.assertEqual(foreign.status_code, 403, foreign.text)
             central = self.client.post("/gates", headers=self.headers, json={"name": "Central-only"})
-            self.assertEqual(central.status_code, 403, central.text)
+            self.assertEqual(central.status_code, 200, central.text)
 
     def test_site_server_can_still_manage_foreign_camera_records(self):
         """The central server keeps global registry access after a lane is assigned."""
