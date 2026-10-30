@@ -1,6 +1,6 @@
-# SmartPark Edge
+Zirp
 
-SmartPark Edge is a **plate-first parking system**. Cameras read number plates, the Site Server opens or holds the barrier, casual drivers get a receipt, and registered plates (season, VIP, staff) can open automatically.
+Zirp is a **plate-first parking system**. Cameras read number plates, the Site Server opens or holds the barrier, casual drivers get a receipt, and registered plates (season, VIP, staff) can open automatically.
 
 The **desktop app and Site Service** run on Windows and Linux. A small **32-bit Windows process** talks to the HVX camera vendor SDK so the main app can stay 64-bit — that host cannot run on Linux. On Linux the desktop still opens; IP cameras use RTSP/HTTP and FastALPR.
 
