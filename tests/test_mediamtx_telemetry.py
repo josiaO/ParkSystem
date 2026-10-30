@@ -74,6 +74,8 @@ class PathPlanTests(unittest.TestCase):
         self.assertIn("webrtcLocalUDPAddress: :8189", body)
         self.assertIn("webrtcIPsFromInterfaces: yes", body)
         self.assertIn("webrtcAllowOrigin: '*'", body)
+        self.assertIn("writeQueueSize: 256", body)
+        self.assertNotIn("udpReadBufferSize", body)
         self.assertNotIn("webrtcAllowOrigins:", body)
 
     def test_generated_config_writes_one_path_per_distinct_upstream(self):

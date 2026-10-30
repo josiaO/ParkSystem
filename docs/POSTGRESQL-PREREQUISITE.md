@@ -122,7 +122,7 @@ Use the Deployment Configuration wizard for the real installation; it validates 
 8. Open SmartPark Deployment Configuration, select **Site Server**, select **PostgreSQL**, enter the database values, select **Test Database**, then apply the configuration.
 
 For a Processing Node, do not install or select SQLite. Start the Site Server
-first, run `Install-SmartPark-Node.bat` on the node PC, enter the Site Server's
+first, run `Install-SmartPark.bat` on the node PC and choose `EDGE_NODE`, then enter the Site Server's
 LAN address when asked for the Site Server connection, and enter that same
 server's PostgreSQL host, port, database and dedicated login. The node tests
 the existing schema but does not initialize a local database, run migrations or
@@ -253,7 +253,7 @@ real authentication and schema test.
 
 On the Processing Node PC:
 
-1. Run `Install-SmartPark-Node.bat`.
+1. Run `Install-SmartPark.bat` and choose `EDGE_NODE`.
 2. On **Site Server connection**, enter `http://192.168.10.20:8760` and press
    **Test Connection**. The identity must show the expected site server.
 3. On **Database**, PostgreSQL is forced. Enter:

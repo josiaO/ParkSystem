@@ -182,6 +182,21 @@ class StaleAndPhantomPlateTests(unittest.TestCase):
         self.assertFalse(lane.visit.event_published)
         self.assertEqual(lane.visit.state, IDLE)
 
+    def test_repeated_native_plate_image_ids_stay_in_one_visit(self):
+        rt = RecognitionRuntime(max_concurrency=1)
+        lane = rt.lane(51)
+        lane.visit.observe(presence=True, plate="T111AAA")
+        self.assertTrue(lane.visit.mark_published("T111AAA"))
+        first_visit = lane.visit.visit_id
+        self.assertFalse(lane.note_native_capture(
+            "capture-1:image:1", plate="T111AAA", now=10.0,
+        ))
+        self.assertFalse(lane.note_native_capture(
+            "capture-2:image:2", plate="T111AAA", now=12.0,
+        ))
+        self.assertEqual(lane.visit.visit_id, first_visit)
+        self.assertTrue(lane.visit.event_published)
+
 
 class VisitAndSessionTests(unittest.TestCase):
     def setUp(self):

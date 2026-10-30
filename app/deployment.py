@@ -65,17 +65,41 @@ class DeploymentConfig:
     paired_site_id: str = ""
     paired_server_id: str = ""
     site_name: str = "Parking Site"
-    # A Processing Node has its own application account.  This is only the
-    # username; the password is hashed in the shared database during node
-    # provisioning and is never written to deployment.json.
+    # A node stores only an identity and protected credential reference. Human
+    # users are separate central sessions and are never serialized here.
     node_username: str = ""
+    node_credential_ref: str = ""
     machine_name: str = ""
     configured_at: str = ""
     database: DatabaseConfig = field(default_factory=default_database_config)
 
     @property
-    def is_server(self) -> bool:
+    def is_site_server(self) -> bool:
+        """Whether this installation is the central SmartPark authority."""
+        return self.role == SITE_SERVER
+
+    @property
+    def runs_local_gate_runtime(self) -> bool:
+        """Whether this machine owns local hardware/runtime processes."""
         return self.role in {SITE_SERVER, EDGE_NODE}
+
+    @property
+    def uses_remote_site_server(self) -> bool:
+        """Whether the central API is hosted by another machine."""
+        return self.role in {EDGE_NODE, OPERATOR_CLIENT}
+
+    @property
+    def is_operator_workstation(self) -> bool:
+        return self.role == OPERATOR_CLIENT
+
+    @property
+    def is_server(self) -> bool:
+        """Compatibility alias for older runtime callers.
+
+        This intentionally means *central Site Server*, not "runs a local
+        process".  Local-runtime callers use ``runs_local_gate_runtime``.
+        """
+        return self.is_site_server
 
     @property
     def is_operator_client(self) -> bool:
@@ -110,6 +134,7 @@ def _from_mapping(data: dict) -> DeploymentConfig:
         paired_server_id=str(data.get("paired_server_id") or ""),
         site_name=str(data.get("site_name") or settings.site_name),
         node_username=str(data.get("node_username") or ""),
+        node_credential_ref=str(data.get("node_credential_ref") or ""),
         machine_name=str(data.get("machine_name") or socket.gethostname()),
         configured_at=str(data.get("configured_at") or ""),
         database=database_config_from_mapping(data.get("database")),
@@ -175,8 +200,8 @@ def save_deployment_config(config: DeploymentConfig | dict, *, state: str | None
             "configured": next_state == CONFIGURED,
             "state": next_state,
             "installation_id": resolved.installation_id or _stable_installation_id(),
-            "server_id": resolved.server_id or (str(settings.node_id) if resolved.is_server else ""),
-            "site_id": resolved.site_id or (str(uuid.uuid4()) if resolved.is_server else ""),
+            "server_id": resolved.server_id or (str(settings.node_id) if resolved.is_site_server else ""),
+            "site_id": resolved.site_id or (str(uuid.uuid4()) if resolved.is_site_server else ""),
             "client_id": resolved.client_id or (str(uuid.uuid4()) if resolved.is_operator_client else ""),
             "machine_name": resolved.machine_name or socket.gethostname(),
             "configured_at": resolved.configured_at or datetime.now(timezone.utc).isoformat(),
@@ -210,11 +235,30 @@ def ensure_legacy_config_saved() -> DeploymentConfig:
     return config
 
 
-def server_base_url(config: DeploymentConfig | None = None) -> str:
+def central_server_base_url(config: DeploymentConfig | None = None) -> str:
+    """Resolve the central control-plane API target.
+
+    Site Server and Edge Node are deliberately different here: an Edge Node
+    uses its configured paired server, while its local runtime is addressed
+    through ``local_node_runtime_url``.
+    """
     config = config or load_deployment_config()
-    if config.is_operator_client:
+    if config.uses_remote_site_server:
         return config.server_base_url
     return f"http://127.0.0.1:{int(config.server_bind_port or settings.api_port)}"
+
+
+def local_node_runtime_url(config: DeploymentConfig | None = None) -> str:
+    """Resolve the local operational-plane runtime, if this PC owns one."""
+    config = config or load_deployment_config()
+    if not config.runs_local_gate_runtime:
+        return ""
+    return f"http://127.0.0.1:{int(config.server_bind_port or settings.api_port)}"
+
+
+def server_base_url(config: DeploymentConfig | None = None) -> str:
+    """Backward-compatible name for the central API target."""
+    return central_server_base_url(config)
 
 
 def public_server_identity(config: DeploymentConfig | None = None) -> dict:

@@ -165,6 +165,16 @@ class GatewayIsolationTests(unittest.TestCase):
         self.assertGreaterEqual(row["frames_sampled_ai"], 1)
         stop_live_pumps()
 
+    def test_already_sampled_detect_frame_bypasses_second_admission_clock(self):
+        gw = LocalMediaGateway()
+        first = JPEG + b"1"
+        second = JPEG + b"2"
+        gw.publish_detect(10, first, source="mediamtx")
+        self.assertIs(gw.publish_detect(10, second, source="mediamtx"), gw.peek_detect(10))
+        sampled = gw.publish_detect(10, second, source="mediamtx", sampled=True)
+        self.assertEqual(sampled.jpeg, second)
+        self.assertEqual(gw.peek_detect(10).jpeg, second)
+
     def test_rtsp_producer_role_constants_resolve(self):
         """Regression: missing ROLE_EVIDENCE crashed every RTSP live pump."""
         from app.services import media_gateway as mg

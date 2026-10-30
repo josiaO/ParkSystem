@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import AccessDecision, Gate, GateCommandRecord, ParkingSession
@@ -84,7 +85,22 @@ def record_gate_command(
         message=message or "",
     )
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # A retry can race the first writer. command_uuid is the durable
+        # idempotency key, so return the winner rather than surfacing a 500.
+        db.rollback()
+        existing = db.scalar(select(GateCommandRecord).where(GateCommandRecord.command_uuid == key))
+        if existing is None:
+            raise
+        if bool(ok) and not existing.ok:
+            existing.ok = True
+            existing.message = message or existing.message
+            existing.dry_run = bool(dry_run)
+            db.commit()
+            db.refresh(existing)
+        return existing
     db.refresh(row)
     return row
 

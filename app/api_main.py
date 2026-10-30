@@ -13,12 +13,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import settings
 from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
 from .domain.site import DEFAULT_SITE_ID
-from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Tariff, User, VehicleCapture
+from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, Node, NodeGateAssignment, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraFramingUpdate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
@@ -27,7 +27,7 @@ from .schemas import (
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
     RecognitionScopeUpdate,
 )
-from .security import authenticate_user, create_session, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, revoke_session, user_permissions
+from .security import authenticate_processing_node, authenticate_user, create_session, current_node, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
 from .infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
 from .infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
@@ -37,7 +37,7 @@ from .services.redaction import redact_text
 log = logging.getLogger("smartpark")
 from .services.audit import write_audit
 from .services.bootstrap import ensure_bootstrap_admin, setup_status
-from .services.captures import capture_dict, latest_for_camera, list_captures, list_recent_detections, persist_event, should_persist_vehicle_capture
+from .services.captures import captures_for_sessions, capture_dict, latest_for_camera, latest_for_cameras, list_captures, list_recent_detections, persist_event, should_persist_vehicle_capture
 from .services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
 from .services.gates import controller
 from .services.led_udp import send_led_text
@@ -65,6 +65,7 @@ from .services.simulation import (
     save_parking_settings, session_dict as sim_session_dict, take_receipt,
 )
 from .services.users import create_user, delete_user, load_user, load_users, update_user, user_dict
+from .services.node_authorization import hash_node_credential, issue_node_session, verify_node_credential
 from .services.access import ensure_access_plans, lookup_entitlement, plan_dict, vehicle_dict
 from .services.receipts import RECEIPT_POLICIES, issue_receipt, receipt_dict
 from .core.plate import normalize_plate
@@ -95,11 +96,18 @@ def _camera_for_node(db: Session, camera_id: int, *, action: str = "access") -> 
     or its media producer.
     """
     camera = get_camera_or_404(db, camera_id)
-    from .services.node_scope import camera_in_recognition_scope, is_processing_node
+    from .services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope, is_processing_node
 
-    # The Site Server owns the complete registry and may inspect/manage any
-    # camera.  Only an EDGE_NODE has a physical media/recognition boundary.
-    if not is_processing_node() or camera_in_recognition_scope(camera, db=db):
+    # The Site Server owns the complete registry and may inspect/configure any
+    # camera, but it must not touch the hardware plane of a gate assigned to
+    # an Edge Node.  Keep non-hardware registry reads/configuration global.
+    registry_actions = {
+        "camera-read", "viewer-state", "stream-telemetry", "stream-profile-update",
+        "framing-update", "recognition-commissioning-read",
+    }
+    if not is_processing_node() and (action in registry_actions or camera_active_on_this_installation(camera, db=db)):
+        return camera
+    if is_processing_node() and camera_in_recognition_scope(camera, db=db):
         return camera
     scope = None
     try:
@@ -117,10 +125,11 @@ def _camera_for_node(db: Session, camera_id: int, *, action: str = "access") -> 
         scope.get("gate_id") if isinstance(scope, dict) else None,
     )
     raise HTTPException(
-        status_code=403,
+        status_code=409 if not is_processing_node() else 403,
         detail=(
-            "This camera belongs to another node's assigned gate. "
-            "Connect to the owning node or assign this PC to the camera's gate."
+            "This camera is operated by another Edge Node. Use the owning node for hardware actions."
+            if not is_processing_node()
+            else "This camera belongs to another node's assigned gate. Connect to the owning node or assign this PC to the camera's gate."
         ),
     )
 
@@ -131,19 +140,37 @@ def _processing_node_gate_id(db: Session, *, required: bool = True) -> int | Non
 
     if not is_processing_node():
         return None
-    gate_id = recognition_gate_id(db)
+    assigned = sorted(_processing_node_gate_ids(db, required=required))
+    gate_id = assigned[0] if len(assigned) == 1 else None
     if gate_id is None and required:
         raise HTTPException(409, "Assign this Processing Node to a gate before adding or controlling cameras.")
     return int(gate_id) if gate_id is not None else None
 
 
+def _processing_node_gate_ids(db: Session, *, required: bool = True) -> set[int]:
+    from .services.node_scope import authoritative_node_gate_ids, is_processing_node, recognition_gate_id
+
+    if not is_processing_node():
+        return set()
+    assigned = set(authoritative_node_gate_ids(db))
+    if assigned:
+        return assigned
+    legacy = recognition_gate_id(db)
+    if legacy is not None:
+        return {int(legacy)}
+    if required:
+        raise HTTPException(409, "Assign this Processing Node to a gate before adding or controlling cameras.")
+    return set()
+
+
 def _gate_for_node(db: Session, gate_id: int, *, action: str = "access") -> Gate:
     """Load a gate only when this installation owns its camera lane."""
     gate = get_gate_or_404(db, gate_id)
+    from .services.node_scope import authoritative_node_gate_ids, is_processing_node
+    assigned_gate_ids = authoritative_node_gate_ids(db)
     node_gate_id = _processing_node_gate_id(db, required=False)
-    from .services.node_scope import is_processing_node
 
-    if is_processing_node() and (node_gate_id is None or int(gate.id) != int(node_gate_id)):
+    if is_processing_node() and ((assigned_gate_ids and int(gate.id) not in assigned_gate_ids) or (not assigned_gate_ids and (node_gate_id is None or int(gate.id) != int(node_gate_id)))):
         log.warning(
             "node scope denied action=%s gate_id=%s node_id=%s assigned_gate_id=%s",
             action, gate.id, getattr(settings, "node_id", ""), node_gate_id,
@@ -262,6 +289,17 @@ def ensure_roles(db: Session):
     db.commit()
 
 
+async def _warmup_alpr_background() -> None:
+    """Load the local detector before the first vehicle reaches a lane."""
+    from .services.alpr import warmup
+
+    try:
+        result = await asyncio.to_thread(warmup)
+        log.info("FastALPR warm-up ready: %s", result)
+    except Exception as exc:
+        log.error("FastALPR warm-up failed: %s", redact_text(f"{type(exc).__name__}: {exc}"), exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .services.logging_setup import configure_logging
@@ -316,6 +354,18 @@ async def lifespan(app: FastAPI):
                 log.warning("secrets migration skipped: %s", exc)
         else:
             log.info("Processing Node startup is read-only for central bootstrap, schema, modules, tariffs, and topology")
+            from .services.node_scope import ensure_processing_node_registry
+
+            node = ensure_processing_node_registry(db)
+            if node is not None:
+                log.info(
+                    "Processing Node registry identity=%s status=%s site_id=%s; gate ownership remains centrally assigned",
+                    node.node_id,
+                    node.status,
+                    node.site_id,
+                )
+            else:
+                log.warning("Processing Node identity=%s is not registered; shared Site Server database has no site row or registry write failed", settings.node_id)
         from .services.node_scope import describe_recognition_scope
 
         try:
@@ -332,6 +382,21 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:
             log.warning("NODE ownership scope unavailable: %s", redact_text(repr(exc)))
+    alpr_warmup_task = None
+    try:
+        alpr = alpr_status()
+        log.info(
+            "FastALPR startup installed=%s available=%s detector=%s ocr=%s detail=%s",
+            alpr.get("installed"),
+            alpr.get("available"),
+            (alpr.get("models") or {}).get("detector"),
+            (alpr.get("models") or {}).get("ocr"),
+            alpr.get("detail"),
+        )
+        if alpr.get("available"):
+            alpr_warmup_task = asyncio.create_task(_warmup_alpr_background(), name="alpr-warmup")
+    except Exception as exc:
+        log.error("FastALPR startup check failed: %s", redact_text(f"{type(exc).__name__}: {exc}"), exc_info=True)
     mark_core_ready()
     start_idle_watch()
     # MediaMTX has one owner: SmartParkMediaService.  The Site Service only
@@ -351,9 +416,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics):
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics)
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if alpr_warmup_task is not None:
+            alpr_warmup_task.cancel()
+            await asyncio.gather(alpr_warmup_task, return_exceptions=True)
         await onvif_runtime.shutdown()
         stop_live_pumps()
         from .services.hvx_client import close_host_clients
@@ -393,38 +462,14 @@ def _login_response(db: Session, username: str, password: str) -> LoginResponse:
     from .services.node_scope import is_processing_node
 
     processing_node = is_processing_node()
-    if processing_node:
-        # A node must authenticate with the account provisioned for this
-        # physical node. Do not allow a Site Administrator (or any other
-        # shared-database user) to sign in through the node UI, even though
-        # the node uses the Site Server database for its scoped runtime.
-        from .deployment import load_deployment_config
-
-        expected = load_deployment_config().node_username.strip().casefold()
-        supplied = str(username or "").strip().casefold()
-        if not expected:
-            raise HTTPException(
-                status_code=503,
-                detail="This Processing Node has no node account. Run its deployment wizard again and create one.",
-            )
-        if supplied != expected:
-            raise HTTPException(
-                status_code=403,
-                detail="This Processing Node requires its own configured node account; Site Administrator accounts cannot sign in here.",
-            )
-    user = authenticate_user(db, username, password)
+    user = authenticate_processing_node(db, username, password) if processing_node else authenticate_user(db, username, password)
     token = create_session(db, user)
     if not processing_node:
         ensure_modules_initialized(db)
-    # Do not hand a Processing Node the Site Server's full administrator
-    # permission set. API guards enforce this again for every request, but the
-    # response must also keep the node UI from advertising central controls.
+    # Human permissions are independent of installation role. Machine runtime
+    # calls use the separate node principal/session API.
     perms = processing_node_permissions(user_permissions(user))
-    cfg = load_config(db) if not processing_node else {
-        "profile": "PROCESSING_NODE",
-        "enabled": ["camera.management", "media.streaming", "hardware.control"],
-        "onboarding_completed": True,
-    }
+    cfg = load_config(db)
     return LoginResponse(
         token=token,
         access_token=token,
@@ -686,17 +731,9 @@ def logout(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     from .services.modules import ensure_modules_initialized, load_config, navigation_items
     from .security import processing_node_permissions, user_permissions
-    from .services.node_scope import is_processing_node
-
-    processing_node = is_processing_node()
-    if not processing_node:
-        ensure_modules_initialized(db)
+    ensure_modules_initialized(db)
     perms = processing_node_permissions(user_permissions(user))
-    cfg = load_config(db) if not processing_node else {
-        "profile": "PROCESSING_NODE",
-        "enabled": ["camera.management", "media.streaming", "hardware.control"],
-        "onboarding_completed": True,
-    }
+    cfg = load_config(db)
     return {
         "id": user.id,
         "username": user.username,
@@ -709,6 +746,165 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
         },
         "navigation": navigation_items(db, perms),
     }
+
+
+def _node_response(db: Session, node: Node, *, token: str | None = None) -> dict:
+    assignments = db.scalars(
+        select(NodeGateAssignment).where(
+            NodeGateAssignment.node_id == node.id,
+            NodeGateAssignment.enabled == True,  # noqa: E712
+        )
+    ).all()
+    body = {
+        "node_id": node.node_id,
+        "name": node.name,
+        "site_id": node.site_id,
+        "node_type": node.node_type,
+        "status": node.status,
+        "capabilities": node.capabilities or {},
+        "version": node.version,
+        "assigned_gate_ids": [int(row.gate_id) for row in assignments],
+    }
+    if token:
+        body.update({"token": token, "access_token": token, "token_type": "bearer"})
+    return body
+
+
+@app.post("/node/auth")
+def node_login(payload: dict = Body(default_factory=dict), db: Session = Depends(get_db)):
+    """Authenticate a physical runtime with its revocable node credential."""
+    node_id = str(payload.get("node_id") or "").strip()
+    credential = str(payload.get("credential") or payload.get("secret") or "")
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None or node.status != "ACTIVE" or node.revoked_at is not None or not verify_node_credential(node.credential_hash, credential):
+        raise HTTPException(status_code=401, detail="Invalid node identity or credential")
+    token = issue_node_session(db, node)
+    return _node_response(db, node, token=token)
+
+
+@app.get("/node/me")
+def node_me(principal=Depends(current_node), db: Session = Depends(get_db)):
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    return _node_response(db, node)
+
+
+@app.get("/node/config")
+def node_config(principal=Depends(current_node), db: Session = Depends(get_db)):
+    """Return only central configuration scoped to this node's assignments."""
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    gate_ids = sorted({int(row.gate_id) for row in node.assignments if row.enabled})
+    cameras = db.scalars(select(Camera).where(Camera.gate_id.in_(gate_ids))).all() if gate_ids else []
+    return {
+        "node": _node_response(db, node),
+        "gates": [{"id": gate.id, "name": gate.name, "site_id": gate.site_id} for gate in db.scalars(select(Gate).where(Gate.id.in_(gate_ids))).all()] if gate_ids else [],
+        "cameras": [{"id": camera.id, "name": camera.name, "gate_id": camera.gate_id, "lane_direction": camera.lane_direction} for camera in cameras],
+    }
+
+
+@app.post("/node/heartbeat")
+def node_heartbeat(payload: dict = Body(default_factory=dict), principal=Depends(current_node), db: Session = Depends(get_db)):
+    node = db.get(Node, principal.node_pk)
+    if node is None:
+        raise HTTPException(status_code=401, detail="Node unavailable")
+    node.last_seen_at = datetime.now(timezone.utc)
+    if payload.get("version") is not None:
+        node.version = str(payload["version"])[:80]
+    db.commit()
+    return {"ok": True, "server_time": datetime.now(timezone.utc).isoformat(), **_node_response(db, node)}
+
+
+@app.get("/nodes")
+def list_nodes(db: Session = Depends(get_db), _: User = Depends(require("settings.view"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    return [_node_response(db, node) for node in db.scalars(select(Node).order_by(Node.id)).all()]
+
+
+@app.post("/nodes")
+def register_node(payload: dict = Body(default_factory=dict), db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node_id = str(payload.get("node_id") or "").strip()
+    credential = str(payload.get("credential") or "")
+    if not node_id or len(credential) < 16:
+        raise HTTPException(status_code=422, detail="node_id and a node credential of at least 16 characters are required")
+    site_id = int(payload.get("site_id") or DEFAULT_SITE_ID)
+    if db.get(Site, site_id) is None:
+        raise HTTPException(status_code=404, detail="Site not found")
+    if db.scalar(select(Node).where(Node.node_id == node_id)) is not None:
+        raise HTTPException(status_code=409, detail="Node identity already exists")
+    node = Node(
+        node_id=node_id,
+        site_id=site_id,
+        name=str(payload.get("name") or node_id)[:160],
+        node_type=str(payload.get("node_type") or "EDGE_NODE")[:40],
+        credential_hash=hash_node_credential(credential),
+        capabilities=dict(payload.get("capabilities") or {}),
+        version=str(payload.get("version") or "")[:80],
+    )
+    db.add(node)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Node identity already exists") from None
+    db.refresh(node)
+    return _node_response(db, node)
+
+
+@app.put("/nodes/{node_id}/assignments")
+def assign_node_gate(node_id: str, payload: dict = Body(default_factory=dict), db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    gate_id = int(payload.get("gate_id") or 0)
+    gate = db.get(Gate, gate_id)
+    if gate is None:
+        raise HTTPException(status_code=404, detail="Gate not found")
+    if int(gate.site_id) != int(node.site_id):
+        raise HTTPException(status_code=409, detail="Gate belongs to a different site")
+    if bool(payload.get("replace", False)):
+        for existing in db.scalars(select(NodeGateAssignment).where(NodeGateAssignment.node_id == node.id)).all():
+            existing.enabled = False
+    row = db.scalar(select(NodeGateAssignment).where(NodeGateAssignment.node_id == node.id, NodeGateAssignment.gate_id == gate.id))
+    if row is None:
+        row = NodeGateAssignment(node_id=node.id, gate_id=gate.id, enabled=bool(payload.get("enabled", True)))
+        db.add(row)
+    else:
+        row.enabled = bool(payload.get("enabled", True))
+    db.commit()
+    return _node_response(db, node)
+
+
+@app.post("/nodes/{node_id}/revoke")
+def revoke_node(node_id: str, db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.node_scope import site_server_can_manage_unassigned_cameras
+
+    if not site_server_can_manage_unassigned_cameras():
+        raise HTTPException(status_code=403, detail="Edge Node assignments are managed from the Site Server.")
+
+    node = db.scalar(select(Node).where(Node.node_id == node_id))
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    node.status = "REVOKED"
+    node.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return _node_response(db, node)
 
 
 @app.get("/modules")
@@ -872,7 +1068,7 @@ async def import_discovered_cameras(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
-    node_gate_id = _processing_node_gate_id(db)
+    node_gate_ids = _processing_node_gate_ids(db)
     payload = payload or CameraImport()
     username = (payload.username or "admin").strip() or "admin"
     password = payload.password if payload.password is not None else "admin"
@@ -906,11 +1102,15 @@ async def import_discovered_cameras(
     for spec in specs:
         spec["username"] = spec.get("username") or username
         spec["password"] = spec.get("password") or password
-        if node_gate_id is not None:
+        if node_gate_ids:
             requested_gate = spec.get("gate_id")
-            if requested_gate not in (None, "", 0, "0") and int(requested_gate) != node_gate_id:
+            if requested_gate not in (None, "", 0, "0") and int(requested_gate) not in node_gate_ids:
                 raise HTTPException(403, "This camera is assigned to another gate. Use the Site Server to reassign it.")
-            spec["gate_id"] = node_gate_id
+            if requested_gate in (None, "", 0, "0"):
+                if len(node_gate_ids) != 1:
+                    raise HTTPException(409, "Select an assigned gate when importing cameras on a multi-gate node.")
+                requested_gate = next(iter(node_gate_ids))
+            spec["gate_id"] = int(requested_gate)
     created, skipped = _import_camera_specs(db, user, specs)
     connected = []
     if payload.connect:
@@ -931,7 +1131,9 @@ async def import_discovered_cameras(
         "created": [camera_dict(c) for c in created],
         "skipped": skipped,
         "connected": connected,
-        "cameras": [camera_dict(c) for c in db.scalars(select(Camera).order_by(Camera.id)).all()],
+        "cameras": [camera_dict(c, db=db) for c in db.scalars(
+            select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+        ).all()],
     }
 
 
@@ -1031,7 +1233,9 @@ def _management_camera_rows(db: Session) -> list[Camera]:
     """Rows visible in this installation's camera management plane."""
     from .services.node_scope import camera_visible_in_management
 
-    rows = db.scalars(select(Camera).order_by(Camera.id)).all()
+    rows = db.scalars(
+        select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+    ).all()
     return [camera for camera in rows if camera_visible_in_management(camera, db=db)]
 
 
@@ -1325,23 +1529,27 @@ def _import_site_layout(db: Session, user: User) -> tuple[list[Camera], list[dic
 
 
 def _import_camera_specs(db: Session, user: User, specs: list[dict], *, preserve_existing: bool = False) -> tuple[list[Camera], list[dict]]:
-    node_gate_id = _processing_node_gate_id(db)
+    node_gate_ids = _processing_node_gate_ids(db)
     existing_ips = {c.ip_address: c for c in db.scalars(select(Camera)).all()}
     existing_names = {c.name for c in existing_ips.values()}
     created: list[Camera] = []
     skipped: list[dict] = []
     defaults = site_camera_defaults()
     for spec in specs:
-        if node_gate_id is not None:
+        if node_gate_ids:
             requested_gate = spec.get("gate_id")
-            if requested_gate not in (None, "", 0, "0") and int(requested_gate) != node_gate_id:
+            if requested_gate not in (None, "", 0, "0") and int(requested_gate) not in node_gate_ids:
                 raise HTTPException(403, "This camera belongs to another gate. Use the Site Server to assign it.")
             spec = dict(spec)
-            spec["gate_id"] = node_gate_id
+            if requested_gate in (None, "", 0, "0"):
+                if len(node_gate_ids) != 1:
+                    raise HTTPException(409, "Select an assigned gate when importing cameras on a multi-gate node.")
+                requested_gate = next(iter(node_gate_ids))
+            spec["gate_id"] = int(requested_gate)
         ip = spec["ip_address"]
         if ip in existing_ips:
             camera = existing_ips[ip]
-            if node_gate_id is not None and int(camera.gate_id or 0) != node_gate_id:
+            if node_gate_ids and int(camera.gate_id or 0) not in node_gate_ids:
                 skipped.append({"ip_address": ip, "reason": "camera belongs to another gate", "camera_id": camera.id, "updated": False})
                 continue
             if preserve_existing or settings.deployment_profile != "DEVELOPMENT":
@@ -2026,12 +2234,15 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: Us
     from .services.topology import ensure_default_site
 
     site = ensure_default_site(db)
-    node_gate_id = _processing_node_gate_id(db)
+    node_gate_ids = _processing_node_gate_ids(db)
     requested_gate_id = payload.gate_id
-    if node_gate_id is not None:
-        if requested_gate_id is not None and int(requested_gate_id) != node_gate_id:
+    if node_gate_ids:
+        if requested_gate_id is None and len(node_gate_ids) == 1:
+            requested_gate_id = next(iter(node_gate_ids))
+        if requested_gate_id is not None and int(requested_gate_id) not in node_gate_ids:
             raise HTTPException(403, "A Processing Node can add cameras only to its assigned gate.")
-        requested_gate_id = node_gate_id
+        if requested_gate_id is None:
+            raise HTTPException(409, "Select one of this node's assigned gates for the camera.")
     gate = None
     if requested_gate_id is not None:
         gate = get_gate_or_404(db, requested_gate_id)
@@ -2065,7 +2276,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: Us
 @app.patch("/cameras/{camera_id}")
 def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
     c = _camera_mutation_for_node(db, camera_id, action="camera-update")
-    node_gate_id = _processing_node_gate_id(db)
+    node_gate_ids = _processing_node_gate_ids(db)
     data = payload.model_dump(exclude_unset=True)
     if data.get("password") in (None, ""):
         data.pop("password", None)
@@ -2073,9 +2284,9 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
         data["password_secret"] = data.pop("password")
     if "rtsp_url" in data and data["rtsp_url"] and data["rtsp_url"] == redact_text(c.rtsp_url or ""):
         data.pop("rtsp_url")  # masked value round-tripped from the edit form; keep the stored URL
-    if node_gate_id is not None and "gate_id" in data and data["gate_id"] in (None, "", 0, "0"):
+    if node_gate_ids and "gate_id" in data and data["gate_id"] in (None, "", 0, "0"):
         raise HTTPException(403, "A Processing Node cannot remove a camera from its assigned gate.")
-    if node_gate_id is not None and "gate_id" in data and int(data["gate_id"]) != node_gate_id:
+    if node_gate_ids and "gate_id" in data and int(data["gate_id"]) not in node_gate_ids:
         raise HTTPException(403, "A Processing Node cannot move a camera to another gate.")
     if "gate_id" in data and data["gate_id"] is not None:
         gate = get_gate_or_404(db, data["gate_id"])
@@ -2934,6 +3145,14 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
 @app.get("/cameras/{camera_id}/live.mjpeg")
 async def camera_live(camera_id: int, role: str = "LIVE", db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
     _camera_for_node(db, camera_id, action="mjpeg")
+    # The MJPEG response can remain open for hours.  Do not keep the request's
+    # SQLAlchemy session checked out for the lifetime of that stream: with the
+    # old behavior four live panes plus plate polling exhausted PostgreSQL's
+    # 5+5 pool and made unrelated recognition queries fail with QueuePool
+    # timeouts.  The generator reads only the in-memory frame cache.
+    close = getattr(db, "close", None)
+    if close is not None:
+        close()
     spec = _camera_live_spec(camera_id)
     wanted = (role or "LIVE").upper()
     if wanted in {"MAIN", "EVIDENCE"}:
@@ -3190,7 +3409,9 @@ def serve_media(kind: str, name: str, _: User = Depends(require("cameras.view"))
 
 @app.get("/gates")
 def list_gates(db: Session = Depends(get_db), _: User = Depends(require("gates.view"))):
-    rows = [gate_dict(g) for g in db.scalars(select(Gate).order_by(Gate.id)).all()]
+    rows = [gate_dict(g) for g in db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()]
     from .services.node_scope import is_processing_node
     node_gate_id = _processing_node_gate_id(db, required=False)
     if is_processing_node():
@@ -3215,12 +3436,15 @@ def put_recognition_owner(
     user: User = Depends(require("settings.manage", processing_node_allowed=True)),
 ):
     """Explicit administrator assignment; browsing video never changes ownership."""
-    from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    from .services.node_scope import authoritative_node_gate_ids, env_recognition_gate_id, node_registry_present, set_recognition_gate_id
     pinned = env_recognition_gate_id()
     if pinned is not None and payload.gate_id != pinned:
         raise HTTPException(409, "This computer is pinned by SMARTPARK_RECOGNITION_GATE_ID.")
     if payload.gate_id is None or payload.gate_id <= 0:
         raise HTTPException(422, "Assign this PC to one gate with entry and exit cameras.")
+    assigned = authoritative_node_gate_ids(db)
+    if node_registry_present(db) and (not assigned or int(payload.gate_id) not in assigned):
+        raise HTTPException(409, "This node's gate assignment is controlled centrally by the Site Server.")
     if db.get(Gate, payload.gate_id) is None:
         raise HTTPException(404, "Gate not found")
     body = set_recognition_gate_id(payload.gate_id, db)
@@ -3235,11 +3459,14 @@ def post_recognition_scope(
     user: User = Depends(require_any("cameras.connect", "cameras.manage", "gates.view")),
 ):
     """This PC processes one gate's entry+exit. Other gates stay idle until chosen."""
-    from .services.node_scope import env_recognition_gate_id, set_recognition_gate_id
+    from .services.node_scope import authoritative_node_gate_ids, env_recognition_gate_id, node_registry_present, set_recognition_gate_id
     if settings.deployment_profile == "PRODUCTION":
         raise HTTPException(409, "Production ownership is configured by SMARTPARK_RECOGNITION_GATE_ID or the persisted node setting, not the browser lane selector.")
     if env_recognition_gate_id() is not None and payload.gate_id not in (None, env_recognition_gate_id()):
         raise HTTPException(409, "This computer is pinned to one gate by SMARTPARK_RECOGNITION_GATE_ID.")
+    assigned = authoritative_node_gate_ids(db)
+    if node_registry_present(db) and payload.gate_id not in (None, *assigned):
+        raise HTTPException(409, "This node's gate assignment is controlled centrally by the Site Server.")
     if payload.gate_id is not None:
         gate = db.get(Gate, int(payload.gate_id))
         if gate is None:
@@ -3552,7 +3779,13 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             capture_key = capture_token
             if image_id:
                 capture_key = f"{capture_token}:image:{image_id}" if capture_token else f"image:{image_id}"
-            lane.note_native_capture(capture_key)
+            lane.note_native_capture(
+                capture_key,
+                plate=native_plate if real_native else "",
+                repeat_window_seconds=float(
+                    getattr(settings, "native_repeat_window_seconds", 8.0) or 8.0
+                ),
+            )
             coil_watch.observe(camera_id, True, source="image-callback")
             lane.visit.observe(presence=True, plate=native_plate if real_native else "", native_event=True)
             capture["visit_id"] = lane.visit.visit_id
@@ -3644,7 +3877,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     """
     from app.services.inference_thread import run_inference
     from .services.alpr import locate_plate_boxes
-    from .services.camera_framing import framing_from_profiles, gate_for
+    from .services.camera_framing import best_arrival_box, framing_from_profiles, gate_for
     from .services.recognition_runtime import runtime
 
     if not _detect_due(int(camera.id)):
@@ -3663,7 +3896,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         return False
     runtime.lane(int(camera.id)).last_error = ""
     gate.prepared = (hash(jpeg), boxes)
-    phase = gate.observe(boxes[0] if boxes else None, time.monotonic())
+    phase = gate.observe(best_arrival_box(boxes), time.monotonic())
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
         return True
@@ -4114,26 +4347,42 @@ async def _camera_event_loop():
     from .config import settings as cfg
 
     poll = float(getattr(cfg, "camera_event_poll_seconds", 0.25) or 0.25)
+    config_refresh = max(2.0, poll * 8.0)
+    last_config_refresh = 0.0
+    config_loaded = False
+    rows: list[Camera] = []
+    active: list[Camera] = []
+    hvx_specs: list[tuple[int, int]] = []
+    ipcam_ids: list[int] = []
+    inactive_ids: set[int] = set()
     while True:
         try:
-            with short_session() as db:
-                from .services.modules import is_enabled
-                from .services.node_scope import camera_active_on_this_installation
-                rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
-                active = [c for c in rows if camera_active_on_this_installation(c, db=db)]
-                active_ids = {int(c.id) for c in active}
-                idle_camera_ids = [int(c.id) for c in rows if int(c.id) not in active_ids]
-                hvx_specs = [
-                    (int(c.id), int(c.sdk_handle))
-                    for c in active
-                    if c.sdk_handle is not None
-                ]
-                ipcam_ids = [
-                    int(c.id) for c in active
-                    if c.sdk_handle is None and c.status in {
-                        CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
-                    }
-                ]
+            now = time.monotonic()
+            refresh = not config_loaded or (now - last_config_refresh) >= config_refresh
+            clear_inactive_ids: set[int] = set()
+            if refresh:
+                with short_session() as db:
+                    from .services.modules import is_enabled
+                    from .services.node_scope import camera_active_on_this_installation
+                    rows = list(db.scalars(select(Camera).where(Camera.enabled == True)).all()) if is_enabled("recognition.alpr", db) else []
+                    active = [c for c in rows if camera_active_on_this_installation(c, db=db)]
+                    active_ids = {int(c.id) for c in active}
+                    new_inactive = {int(c.id) for c in rows if int(c.id) not in active_ids}
+                    clear_inactive_ids = new_inactive - inactive_ids
+                    inactive_ids = new_inactive
+                    hvx_specs = [
+                        (int(c.id), int(c.sdk_handle))
+                        for c in active
+                        if c.sdk_handle is not None
+                    ]
+                    ipcam_ids = [
+                        int(c.id) for c in active
+                        if c.sdk_handle is None and c.status in {
+                            CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
+                        }
+                    ]
+                last_config_refresh = now
+                config_loaded = True
             async def service_hvx(camera_id: int, handle: int) -> None:
                 started_one = time.perf_counter()
                 camera_breaker = breaker(f"hvx-camera-{camera_id}")
@@ -4199,7 +4448,7 @@ async def _camera_event_loop():
             )
             jobs.extend(
                 asyncio.create_task(clear_inactive_camera(camera_id), name=f"camera-idle-{camera_id}")
-                for camera_id in idle_camera_ids
+                for camera_id in clear_inactive_ids
             )
             jobs.extend(
                 asyncio.create_task(service_ipcam(camera_id), name=f"ipcam-event-{camera_id}")
@@ -4238,7 +4487,7 @@ async def _camera_event_loop():
             note_worker_failure("camera-events", str(exc))
             await asyncio.sleep(1.0)
             continue
-        await asyncio.sleep(poll)
+        await asyncio.sleep(poll if (hvx_specs or ipcam_ids) else config_refresh)
 
 
 async def _ingest_camera_event(db: Session, camera: Camera) -> dict | None:
@@ -4259,7 +4508,7 @@ def _side_payload(camera: Camera | None, last: dict | None) -> dict | None:
     }
 
 
-async def _lane_view_dict(db: Session, gate: Gate) -> dict:
+async def _lane_view_dict(db: Session, gate: Gate, latest_by_camera: dict[int, VehicleCapture] | None = None) -> dict:
     by_side: dict[str, Camera] = {}
     extras: list[Camera] = []
     for camera in gate.cameras or []:
@@ -4272,7 +4521,7 @@ async def _lane_view_dict(db: Session, gate: Gate) -> dict:
     def last_for(camera: Camera | None) -> dict | None:
         if camera is None:
             return None
-        latest = latest_for_camera(db, camera.id)
+        latest = (latest_by_camera or {}).get(int(camera.id)) if latest_by_camera is not None else latest_for_camera(db, camera.id)
         return capture_dict(latest) if latest else None
 
     entry_last = last_for(by_side.get("ENTRY"))
@@ -4297,7 +4546,9 @@ async def _lane_view_dict(db: Session, gate: Gate) -> dict:
 
 @app.get("/lanes")
 def list_lanes(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    gates = db.scalars(select(Gate).order_by(Gate.id)).all()
+    gates = db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()
     node_gate_id = _processing_node_gate_id(db, required=False)
     from .services.node_scope import is_processing_node
     if is_processing_node():
@@ -4307,19 +4558,24 @@ def list_lanes(db: Session = Depends(get_db), _: User = Depends(require("cameras
 
 @app.get("/lanes/overview")
 async def lanes_overview(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    gates = db.scalars(select(Gate).order_by(Gate.id)).all()
+    gates = db.scalars(
+        select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
+    ).all()
     node_gate_id = _processing_node_gate_id(db, required=False)
     from .services.node_scope import is_processing_node
     if is_processing_node():
         gates = [g for g in gates if node_gate_id is not None and int(g.id) == int(node_gate_id)]
-    lanes = [await _lane_view_dict(db, gate) for gate in gates]
+    camera_ids = [camera.id for gate in gates for camera in (gate.cameras or [])]
+    latest_by_camera = latest_for_cameras(db, camera_ids)
+    lanes = [await _lane_view_dict(db, gate, latest_by_camera) for gate in gates]
     return {"lanes": lanes}
 
 
 @app.get("/lanes/{gate_id}/view")
 async def lane_view(gate_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     gate = _gate_for_node(db, gate_id, action="lane-view")
-    return await _lane_view_dict(db, gate)
+    latest_by_camera = latest_for_cameras(db, [camera.id for camera in (gate.cameras or [])])
+    return await _lane_view_dict(db, gate, latest_by_camera)
 
 
 @app.get("/captures")
@@ -4383,10 +4639,7 @@ def delete_gate(gate_id: int, db: Session = Depends(get_db), user: User = Depend
 
 @app.post("/gates/{gate_id}/open")
 async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    node_gate_id = _processing_node_gate_id(db)
-    if node_gate_id is not None and int(gate_id) != node_gate_id:
-        raise HTTPException(403, "A Processing Node can control only its assigned gate.")
-    g = get_gate_or_404(db, gate_id)
+    g = _gate_for_node(db, gate_id, action="gate-open")
     cameras = list(g.cameras or [])
     result = await controller().open(
         g, cameras, payload.reason,
@@ -4514,7 +4767,9 @@ def close_session(session_id: int, db: Session = Depends(get_db), user: User = D
 
 @app.get("/sessions")
 def list_sessions(db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use"))):
-    return [session_dict(row) for row in db.scalars(select(ParkingSession).order_by(ParkingSession.id.desc()).limit(100)).all()]
+    rows = db.scalars(select(ParkingSession).order_by(ParkingSession.id.desc()).limit(100)).all()
+    captures = captures_for_sessions(db, rows)
+    return [sim_session_dict(row, captures.get(int(row.id)), lookup_capture=False) for row in rows]
 
 
 @app.get("/sessions/{session_id}/receipt")
@@ -5569,7 +5824,9 @@ async def printer_test(
 @app.get("/access-plans")
 def list_access_plans(db: Session = Depends(get_db), _: User = Depends(require("subscribers.view"))):
     ensure_access_plans(db)
-    return [plan_dict(row) for row in db.scalars(select(AccessPlan).order_by(AccessPlan.id)).all()]
+    return [plan_dict(row) for row in db.scalars(
+        select(AccessPlan).options(selectinload(AccessPlan.vehicles)).order_by(AccessPlan.id)
+    ).all()]
 
 
 @app.post("/access-plans")
@@ -5605,7 +5862,9 @@ def update_access_plan(plan_id: int, payload: AccessPlanUpdate, db: Session = De
 @app.get("/vehicles")
 def list_vehicles(db: Session = Depends(get_db), _: User = Depends(require("subscribers.view"))):
     ensure_access_plans(db)
-    return [vehicle_dict(row) for row in db.scalars(select(RegisteredVehicle).order_by(RegisteredVehicle.plate)).all()]
+    return [vehicle_dict(row) for row in db.scalars(
+        select(RegisteredVehicle).options(joinedload(RegisteredVehicle.plan)).order_by(RegisteredVehicle.plate)
+    ).all()]
 
 
 @app.post("/vehicles")

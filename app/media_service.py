@@ -107,7 +107,7 @@ def main() -> int:
     from app.database_config import apply_runtime_database_config
 
     deployment = load_deployment_config()
-    if not deployment.is_server or not deployment.configured:
+    if not deployment.runs_local_gate_runtime or not deployment.configured:
         print("Media Service is disabled until a configured Site Server exists.", file=sys.stderr)
         return 2
     apply_runtime_database_config(deployment.database)

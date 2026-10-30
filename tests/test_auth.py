@@ -112,8 +112,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.post("/auth/logout", headers=headers).status_code, 200)
         self.assertEqual(self.client.get("/auth/me", headers=headers).status_code, 401)
 
-    def test_processing_node_requires_its_configured_account(self):
-        from fastapi import HTTPException
+    def test_human_account_is_not_bound_to_installation_role(self):
         from app.api_main import _login_response
 
         with self.Session() as db:
@@ -128,18 +127,14 @@ class AuthTests(unittest.TestCase):
             db.add(UserRole(user_id=node.id, role_id=node_role.id))
             db.commit()
 
-        with patch("app.services.node_scope.is_processing_node", return_value=True), patch(
+        with patch("app.services.node_scope.is_processing_node", return_value=False), patch(
             "app.deployment.load_deployment_config",
             return_value=DeploymentConfig(node_username="node-test"),
         ):
             with self.Session() as db:
-                with self.assertRaises(HTTPException) as error:
-                    _login_response(db, "admin", "correct-horse")
-                self.assertEqual(error.exception.status_code, 403)
-                self.assertIn("node account", str(error.exception.detail).lower())
-
-                response = _login_response(db, "node-test", "node-password-123")
-                self.assertEqual(response.username, "node-test")
+                response = _login_response(db, "admin", "correct-horse")
+                self.assertEqual(response.username, "admin")
+                self.assertEqual(response.permissions, ["*"])
 
 
 if __name__ == "__main__":

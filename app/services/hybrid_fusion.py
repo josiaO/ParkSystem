@@ -129,6 +129,8 @@ async def offer_native(db, camera, native: dict, *, jpeg: bytes = b"", crop: byt
     camera_id = int(camera.id)
     _stats["native_offered"] += 1
     payload = {**(native or {}), "event_id": str((capture or {}).get("event_id") or "")}
+    payload["image_ref"] = (capture or {}).get("image_ref")
+    payload["plate_crop_ref"] = (capture or {}).get("plate_crop_ref")
     candidate = Candidate(SOURCE_NATIVE, str(native.get("plate") or ""), float(native.get("confidence") or 0), time.monotonic(), payload)
     _evidence[camera_id] = _Evidence(jpeg=jpeg or b"", crop=crop or b"", capture=dict(capture or {}))
     outcomes = _coordinator.offer(camera_id, candidate, now=time.monotonic(),
@@ -149,6 +151,9 @@ async def offer_local(db, camera, recognized: dict, *, jpeg: bytes = b"", crop: 
         "source": "fastalpr",
         "event_id": str(recognized.get("event_id") or ""),
         "consensus": consensus,
+        "image_ref": recognized.get("image_ref"),
+        "plate_crop_ref": recognized.get("plate_crop_ref"),
+        "visit_id": recognized.get("visit_id") or "",
     }
     candidate = Candidate(SOURCE_LOCAL, str(payload["plate"]), payload["confidence"], time.monotonic(), payload,
                           consensus=bool(consensus.get("publish") or int(consensus.get("agreeing") or 0) >= 2))

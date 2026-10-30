@@ -60,7 +60,7 @@ def main() -> int:
     import logging
 
     deployment = load_deployment_config()
-    if not deployment.is_server:
+    if not deployment.runs_local_gate_runtime:
         print("Operator Workstation does not start SmartPark Site Service.", file=sys.stderr)
         return 2
     if not deployment.configured or deployment.state != CONFIGURED:
@@ -90,8 +90,8 @@ def main() -> int:
     import uvicorn
     from app.api_main import app
 
-    bind_host = deployment.server_bind_host if deployment.is_server else settings.api_host
-    bind_port = int(deployment.server_bind_port or settings.api_port) if deployment.is_server else settings.api_port
+    bind_host = deployment.server_bind_host if deployment.runs_local_gate_runtime else settings.api_host
+    bind_port = int(deployment.server_bind_port or settings.api_port) if deployment.runs_local_gate_runtime else settings.api_port
     uvicorn.run(
         app,
         host=bind_host,

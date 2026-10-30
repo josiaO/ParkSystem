@@ -190,7 +190,7 @@ class Login(QDialog):
                     from app.desktop.launch import ensure_background_services, wait_for_api
 
                     config = load_deployment_config()
-                    if config.is_server:
+                    if config.runs_local_gate_runtime:
                         # Safe to call again: the launcher verifies the API
                         # health endpoint and uses the Site Service lock.
                         ensure_background_services(config=config)
@@ -204,7 +204,19 @@ class Login(QDialog):
                     e = retry_error
             text=str(e)
             if "401" in text or "Invalid username" in text:
-                if len(self.pwd.text()) < 12:
+                try:
+                    from app.deployment import EDGE_NODE, load_deployment_config
+                    edge_node_login = load_deployment_config().role == EDGE_NODE
+                except Exception:
+                    edge_node_login = False
+                if edge_node_login and len(self.pwd.text()) >= 12:
+                    text = (
+                        "Invalid Processing Node username or password.\n\n"
+                        "Use the node username and password entered in this PC's deployment wizard. "
+                        "The Site Server administrator password is intentionally not accepted on an Edge Node. "
+                        "If the node was reinstalled, run deployment configuration again to set a new node password."
+                    )
+                elif len(self.pwd.text()) < 12:
                     text = (
                         "Authentication failed. The Processing Node password must be at least 12 characters.\n\n"
                         "Enter this Processing Node's configured account password. The Site Server administrator "
@@ -421,7 +433,7 @@ class Gates(QWidget):
         sc1=QShortcut(QKeySequence("1"), self); sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc1.activated.connect(lambda: self.arm_side("ENTRY"))
         sc2=QShortcut(QKeySequence("2"), self); sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc2.activated.connect(lambda: self.arm_side("EXIT"))
     def refresh(self):
-        try: rows=api.get("/gates")
+        try: rows=api.runtime_client().get("/gates")
         except Exception: rows=[]
         self.rows=rows
         self.table.setRowCount(len(rows))
@@ -478,20 +490,20 @@ class Gates(QWidget):
     def add_gate(self):
         d=GateDialog()
         if d.exec():
-            try: api.post("/gates",d.payload()); self.refresh()
+            try: api.runtime_client().post("/gates",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Gate",str(e))
     def edit_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Edit gate","Select a gate first."); return
         d=GateDialog(gate)
         if d.exec():
-            try: api.patch(f"/gates/{gate['id']}",d.payload()); self.refresh()
+            try: api.runtime_client().patch(f"/gates/{gate['id']}",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Edit gate",str(e))
     def delete_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Delete gate","Select a gate first."); return
         if QMessageBox.question(self,"Delete gate",f"Delete {gate['name']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/gates/{gate['id']}"); self.refresh()
+        try: api.runtime_client().delete(f"/gates/{gate['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete gate",str(e))
     def open_gate(self,gid,side):
         self.command_gate(gid, side, "open")
@@ -503,7 +515,7 @@ class Gates(QWidget):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(api.runtime_client().post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
     def write_led(self):
         gate=self.selected_gate()
@@ -514,7 +526,7 @@ class Gates(QWidget):
         if not ok or not text: return
         try:
             first=cams[0]
-            QMessageBox.information(self,"LED",str(api.post(f"/cameras/{first['id']}/led",{"text":text})))
+            QMessageBox.information(self,"LED",str(api.runtime_client().post(f"/cameras/{first['id']}/led",{"text":text})))
         except Exception as e: QMessageBox.critical(self,"LED",str(e))
 
 
@@ -1409,7 +1421,7 @@ class OnboardingWizard(QWidget):
 
     def _discover(self):
         try:
-            data = api.get("/cameras/discover?scan_lan=true")
+            data = api.runtime_client().get("/cameras/discover?scan_lan=true")
             cams = data.get("cameras") if isinstance(data, dict) else data
             n = len(cams) if isinstance(cams, list) else 0
             self.hw_info.setPlainText(f"{n} camera(s) found.\nOpen Devices to add and connect them.")

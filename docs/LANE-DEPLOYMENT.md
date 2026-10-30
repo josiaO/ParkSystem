@@ -125,8 +125,8 @@ SMARTPARK_SHARED_MEDIA_DIR='\\SERVER_NAME\SmartParkMedia'
 ```
 
 Start the server first to initialize the schema and site. On the second PC,
-run `Install-SmartPark-Node.bat` (or choose `N` in `Install-SmartPark.bat`).
-That installer locks the wizard to Processing Node, asks for the existing Site
+run `Install-SmartPark.bat` and choose `EDGE_NODE` (Processing Node) in the
+role setup. The installer locks the wizard to Processing Node, asks for the existing Site
 Server address, hides SQLite, and checks the same PostgreSQL database without
 migrating it. The node starts with no ownership and therefore opens no camera.
 After login, assign its gate in Live Gates. Its installation/node identity

@@ -514,7 +514,15 @@ class LocalMediaGateway:
             "last_error": row.last_error,
         }
 
-    def publish_detect(self, camera_id: int, jpeg: bytes, *, source: str = "", url: str = "") -> FrameSample | None:
+    def publish_detect(
+        self,
+        camera_id: int,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        sampled: bool = False,
+    ) -> FrameSample | None:
         """Fill only the DETECT buffer (MediaMTX local RTSP consumer)."""
         if jpeg[:2] != JPEG_SOI:
             return None
@@ -527,10 +535,12 @@ class LocalMediaGateway:
             self._sessions[camera_id] = row
         now = time.monotonic()
         detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
-        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
+        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
         interval = 1.0 / max(ai_fps, 1.0)
         latest_detect = row.detect.latest()
-        if latest_detect is not None and (now - latest_detect.received_at) < interval:
+        # ``mediamtx_detect`` already owns the one admission clock for its
+        # source stream.  ``sampled=True`` prevents a second clock here.
+        if not sampled and latest_detect is not None and (now - latest_detect.received_at) < interval:
             row.frames_dropped_ai += 1
             return latest_detect
         if latest_detect is not None and latest_detect.jpeg == jpeg:
@@ -648,7 +658,7 @@ class LocalMediaGateway:
         if detect:
             now = sample.received_at
             detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
-            ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 5.0) or 5.0)
+            ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
             interval = 1.0 / max(ai_fps, 1.0)
             latest_detect = row.detect.latest()
             if latest_detect is None or (now - latest_detect.received_at) >= interval:

@@ -785,6 +785,11 @@
       <div id="page-settings" class="hidden">
         <p class="muted">Site name, timezone, currency, and language. Technical stream and hardware options stay in Hardware Lab.</p>
         <div class="card card-b" id="settings-summary"><p class="muted">Loading site settings…</p></div>
+        <div class="card card-b" id="node-management" style="margin-top:12px;display:none">
+          <h3 style="margin-top:0">Edge Node camera ownership</h3>
+          <p class="muted">Assign each Edge Node to the gate whose cameras it should operate. The Site Server keeps the cameras visible for management but will not open cameras owned by an active node.</p>
+          <div id="node-management-body"><p class="muted">Loading Edge Nodes…</p></div>
+        </div>
       </div>
 
       <div id="page-sessions" class="hidden">
@@ -3743,6 +3748,62 @@
         <p class="muted" style="margin-top:12px">Change these during setup, or in Testing &amp; Simulation when you have permission.</p>`;
       } catch (e) {
         box.innerHTML = `<div class="empty-state"><b>Settings unavailable</b><p>${e.message}</p></div>`;
+      }
+
+      const nodeCard = document.getElementById("node-management");
+      const nodeBody = document.getElementById("node-management-body");
+      if (!nodeCard || !nodeBody || !can("settings.manage")) return;
+      try {
+        const [nodes, gates] = await Promise.all([api("/nodes"), api("/gates")]);
+        nodeCard.style.display = "block";
+        const escapeHtml = (value) => String(value == null ? "" : value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const gateList = Array.isArray(gates) ? gates : [];
+        const gateName = new Map(gateList.map((gate) => [Number(gate.id), gate.name || `Gate ${gate.id}`]));
+        if (!Array.isArray(nodes) || !nodes.length) {
+          nodeBody.innerHTML = `<div class="empty-state"><b>No Edge Nodes registered</b><p>Install the node role on the remote PC and complete its setup first.</p></div>`;
+          return;
+        }
+        const options = gateList.map((gate) => `<option value="${Number(gate.id)}">${escapeHtml(gate.name || `Gate ${gate.id}`)}</option>`).join("");
+        nodeBody.innerHTML = nodes.map((node) => {
+          const assigned = (node.assigned_gate_ids || []).map((id) => gateName.get(Number(id)) || `Gate ${id}`);
+          return `<div class="card" style="margin-top:10px;padding:12px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+            <div><b>${escapeHtml(node.name || node.node_id)}</b><div class="muted">${escapeHtml(node.node_id)} · ${escapeHtml(node.status || "UNKNOWN")} · ${assigned.length ? `Assigned: ${escapeHtml(assigned.join(", "))}` : "Unassigned"}</div></div>
+            <div style="display:flex;gap:8px;align-items:center"><select data-node-gate="${escapeHtml(node.node_id)}" ${options ? "" : "disabled"}>${options || "<option>No gates available</option>"}</select><button type="button" data-node-assign="${escapeHtml(node.node_id)}" ${options ? "" : "disabled"}>Assign gate</button></div>
+          </div>`;
+        }).join("");
+        nodeBody.querySelectorAll("[data-node-assign]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const nodeId = button.dataset.nodeAssign;
+            const select = nodeBody.querySelector(`[data-node-gate="${CSS.escape(nodeId)}"]`);
+            const gateId = Number(select && select.value);
+            if (!nodeId || !gateId) return;
+            button.disabled = true;
+            try {
+              await api(`/nodes/${encodeURIComponent(nodeId)}/assignments`, {
+                method: "PUT",
+                body: JSON.stringify({ gate_id: gateId, enabled: true, replace: true }),
+              });
+              toast("Node gate assignment saved.", "info");
+              await loadSettingsPage();
+            } catch (error) {
+              toast(error.message || "Could not assign the gate.", "warn");
+            } finally {
+              button.disabled = false;
+            }
+          });
+        });
+      } catch (e) {
+        if (e && e.status === 403) {
+          nodeCard.style.display = "none";
+          return;
+        }
+        nodeCard.style.display = "block";
+        nodeBody.innerHTML = `<div class="empty-state"><b>Edge Node assignments unavailable</b><p>${e.message}</p></div>`;
       }
     }
 

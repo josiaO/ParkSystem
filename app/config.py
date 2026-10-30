@@ -84,9 +84,10 @@ class Settings(BaseSettings):
     snapshot_cache_seconds: float = 0.05
     stale_stream_seconds: float = 2.5
     stream_read_timeout_seconds: float = 3.0
-    detect_fps: float = 5.0
-    # Recognition samples a stopped vehicle. This is not the camera or browser FPS.
-    recognition_sample_fps: float = 4.0
+    # Bounded AI admission cadence. Decoders preserve source cadence; these
+    # values are the one sampling clock used before inference.
+    detect_fps: float = 8.0
+    recognition_sample_fps: float = 8.0
     # Latest-frame OCR latency budget. The frame mailbox remains bounded; this
     # only prevents a valid read from being rejected while inference finishes
     # on a busy Windows CPU.
@@ -103,6 +104,10 @@ class Settings(BaseSettings):
     recognition_model_threads: int = 0
     alpr_cpu_threads: int = 2
     recognition_absence_reset_seconds: float = 0.6
+    # Native HVX callbacks can report the same vehicle under several image IDs
+    # while it remains over the trigger line. Keep those callbacks in one visit
+    # instead of turning each image ID into another persisted capture.
+    native_repeat_window_seconds: float = 8.0
     recognition_worker_stall_seconds: float = 5.0
     live_plate_fresh_seconds: float = 4.0
     # Direct/MJPEG preview is independent from recognition_sample_fps.
@@ -133,6 +138,9 @@ class Settings(BaseSettings):
     alpr_detector_confidence: float = 0.26
     alpr_crop_padding_ratio: float = 0.18
     alpr_ocr_target_width: int = 320
+    # Wait for a useful plate size, with a bounded fallback for fast vehicles.
+    alpr_min_capture_plate_width_px: int = 64
+    alpr_capture_far_fallback_seconds: float = 1.5
     # SmartPark recognition zone (车牌识别区): skip sky / far field.
     # Normalized x1,y1,x2,y2. "off" uses the full frame.
     alpr_detect_roi: str = "0.06,0.18,0.94,0.92"
@@ -301,6 +309,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "recognition_absence_reset_seconds",
+        "native_repeat_window_seconds",
         "parking_event_poll_seconds",
         "recognition_departure_check_seconds",
         "recognition_worker_stall_seconds",
@@ -343,13 +352,21 @@ class Settings(BaseSettings):
             raise ValueError("ALPR detector/crop ratios must be between 0 and 1")
         return score
 
-    @field_validator("alpr_ocr_target_width")
+    @field_validator("alpr_ocr_target_width", "alpr_min_capture_plate_width_px")
     @classmethod
     def _alpr_crop_width(cls, value: int) -> int:
         width = int(value)
-        if not 96 <= width <= 1024:
-            raise ValueError("SMARTPARK_ALPR_OCR_TARGET_WIDTH must be between 96 and 1024")
+        if not 24 <= width <= 1024:
+            raise ValueError("SmartPark ALPR pixel widths must be between 24 and 1024")
         return width
+
+    @field_validator("alpr_capture_far_fallback_seconds")
+    @classmethod
+    def _alpr_far_fallback(cls, value: float) -> float:
+        seconds = float(value)
+        if not 0.0 <= seconds <= 10.0:
+            raise ValueError("SMARTPARK_ALPR_CAPTURE_FAR_FALLBACK_SECONDS must be between 0 and 10")
+        return seconds
 
     @field_validator("alpr_detect_roi")
     @classmethod

@@ -35,9 +35,6 @@ _PACKAGE_FILES = (
     "get-pip.py",
     "Install-SmartPark.ps1",
     "Install-SmartPark.bat",
-    "Install-SmartPark-Server.bat",
-    "Install-SmartPark-Node.bat",
-    "Install-SmartPark-Client.bat",
     "Install-SmartParkServices.ps1",
 )
 _SKIP_PARTS = {"__pycache__", ".git", ".pytest_cache"}

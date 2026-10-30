@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import uuid
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -457,6 +458,17 @@ def _boost_contrast(bgr):
     return cv2.cvtColor(cv2.merge((light, a, b)), cv2.COLOR_LAB2BGR)
 
 
+def _low_light(crop_bgr) -> bool:
+    """Use one enhanced OCR pass for dark/IR plates instead of two passes."""
+    try:
+        import cv2
+        import numpy as np
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+        return float(np.mean(gray)) < 78.0 or float(np.percentile(gray, 90)) < 125.0
+    except Exception:
+        return False
+
+
 def _crop_bgr(bgr, bbox, *, pad_ratio: float = 0.12):
     """Crop plate region with padding. Returns (crop_bgr, xyxy_used)."""
     h, w = bgr.shape[:2]
@@ -506,9 +518,11 @@ def _save_crop_bgr(crop_bgr) -> str | None:
         rgb = crop_bgr[:, :, ::-1]
         folder = settings.media_dir / "crops"
         folder.mkdir(parents=True, exist_ok=True)
-        dest = folder / f"{uuid.uuid4().hex}.jpg"
-        Image.fromarray(rgb).save(dest, quality=95)
-        return dest.relative_to(settings.media_dir).as_posix()
+        output = BytesIO()
+        Image.fromarray(rgb).save(output, format="JPEG", quality=95)
+        from app.services.captures import _write_jpeg
+        data = output.getvalue()
+        return _write_jpeg("crops", f"ocr-{hashlib.sha256(data).hexdigest()[:24]}.jpg", data)
     except Exception:
         return None
 
@@ -765,7 +779,8 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
         crop_ready = time.monotonic()
-        ocr_input = _prepare_ocr_crop(crop, enhance=False)
+        low_light = _low_light(crop)
+        ocr_input = _prepare_ocr_crop(crop, enhance=low_light)
         ocr_started = time.monotonic()
         try:
             ocr = engine.ocr.predict(ocr_input)
@@ -773,13 +788,20 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
             raise RuntimeError(f"FastALPR plate-crop OCR failed: {exc}") from exc
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
-        if text and conf < float(settings.recognition_high_confidence) and accept_ocr_plate(plate, conf, bbox=bbox, image_size=(image_w, image_h)):
+        accepted = accept_ocr_plate(plate, conf, bbox=bbox, image_size=(image_w, image_h))
+        # The first normal-light pass is cheap. Retry exactly once on an
+        # enhanced crop when it is empty or weak; the old condition retried
+        # only already-accepted text, losing plates that needed enhancement.
+        if not low_light and (not accepted or conf < float(settings.recognition_high_confidence)):
             try:
-                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop))
+                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop, enhance=True))
                 enhanced_text, enhanced_conf = _ocr_result_text(enhanced)
                 enhanced_plate, _rank = _apply_country_profile(enhanced_text, enhanced_conf)
-                if enhanced_conf > conf and accept_ocr_plate(enhanced_plate, enhanced_conf, bbox=bbox, image_size=(image_w, image_h)):
-                    text, conf, plate = enhanced_text, enhanced_conf, enhanced_plate
+                enhanced_ok = accept_ocr_plate(
+                    enhanced_plate, enhanced_conf, bbox=bbox, image_size=(image_w, image_h)
+                )
+                if enhanced_ok and (not accepted or enhanced_conf > conf):
+                    text, conf, plate, accepted = enhanced_text, enhanced_conf, enhanced_plate, True
             except Exception:
                 pass
         ocr_finished = time.monotonic()
@@ -796,7 +818,9 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
                 plate_raw=text,
                 plate_normalized=plate,
                 plate_confidence=raw_conf,
-                plate_crop_path=_save_crop_bgr(crop) if save_crops else None,
+                # Save the readable view used by OCR, not the raw tiny plate
+                # rectangle. The full vehicle snapshot remains unchanged.
+                plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(crop, enhance=True)) if save_crops else None,
                 bbox=box,
                 detector_confidence=_detection_score(detection),
                 timings={"crop_ms": round((crop_ready - crop_started) * 1000, 1),
@@ -871,7 +895,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
             plate_raw=text,
             plate_normalized=plate,
             plate_confidence=raw_conf,
-            plate_crop_path=_save_crop_bgr(bgr),
+            plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(bgr, enhance=True)),
             bbox=None,
         )
         return {
