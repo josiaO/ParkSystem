@@ -80,7 +80,7 @@ def upstream_role_uris(
     main = _pick_hvx_main(candidates)
     # SDK role rows describe callbacks/JPEG buffers and are not playable RTSP
     # sources.  Keep them for control/recognition metadata while MediaMTX uses
-    # the video and subvideo paths recovered from ParkWatch.
+    # the vendor camera's main and subvideo paths.
     live = rtsp_role(ROLE_LIVE, sub or main)
     detect = rtsp_role(ROLE_DETECT, sub or live)
     evidence = rtsp_role(ROLE_EVIDENCE, main if main and main != (live or sub) else "")
@@ -130,6 +130,23 @@ def source_config_for_camera(camera) -> dict[str, Any]:
 
 def sync_camera(camera, *, db=None) -> dict[str, Any]:
     from app.infrastructure.media.registry import register_camera_source, unregister_camera_source
+
+    if db is not None:
+        from app.services.node_scope import camera_active_on_this_installation
+
+        if not camera_active_on_this_installation(camera, db=db):
+            # A node must never register a path for a camera owned by another
+            # node.  Besides leaking video, that leaves a local MediaMTX path
+            # which can be mistaken for a healthy producer by the UI.
+            try:
+                unregister_camera_source(int(camera.id))
+            except Exception:
+                pass
+            return {
+                "registered": False,
+                "camera_id": int(camera.id),
+                "reason": "Camera is outside this node's assigned gate",
+            }
 
     cfg = source_config_for_camera(camera)
     if not str(cfg.get("uri") or "").startswith("rtsp://"):

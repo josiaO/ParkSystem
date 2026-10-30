@@ -40,6 +40,10 @@ class CameraLivePane(QFrame):
         self._zone=(0.06, 0.18, 0.94, 0.92)
         self._zone_edit=False
         self._zone_drag=None
+
+    def _runtime_api(self):
+        resolver = getattr(api, "runtime_client", None)
+        return resolver() if callable(resolver) else api
     def _on_video(self):
         if self._zone_edit:
             return
@@ -111,7 +115,7 @@ class CameraLivePane(QFrame):
         roi=f"{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}"
         zoom=self.zoom.value()/10
         try:
-            data=api.put(f"/cameras/{cid}/framing", {"detect_roi": roi, "detect_zoom": zoom})
+            data=self._runtime_api().put(f"/cameras/{cid}/framing", {"detect_roi": roi, "detect_zoom": zoom})
         except Exception as exc:
             self.status.setText(str(exc))
             return
@@ -303,7 +307,7 @@ class CameraLivePane(QFrame):
         cid=self.camera_id()
         if cid is None or self._snap_busy: return
         self._snap_busy=True
-        w=Worker(lambda: api.get_bytes(f"/cameras/{cid}/snapshot.jpg", timeout=3))
+        w=Worker(lambda: self._runtime_api().get_bytes(f"/cameras/{cid}/snapshot.jpg", timeout=3))
         w.done.connect(self._queue_live_frame); w.failed.connect(self._live_fail); w.finished.connect(lambda: setattr(self,"_snap_busy",False)); self._keep(w); w.start()
     def _consume_live_frame(self):
         stream = self.sender()
@@ -350,7 +354,7 @@ class CameraLivePane(QFrame):
         if cid is None or self._alpr_busy: return
         self._alpr_busy=True
         generation=self._live_gen
-        w=Worker(lambda: api.get(f"/cameras/{cid}/plates", timeout=8))
+        w=Worker(lambda: self._runtime_api().get(f"/cameras/{cid}/plates", timeout=8))
         w.done.connect(lambda data: self._show_alpr(data) if cid == self.camera_id() and generation == self._live_gen else None)
         w.failed.connect(lambda error: self.status.setText(error) if cid == self.camera_id() and generation == self._live_gen else None)
         w.finished.connect(lambda: setattr(self,"_alpr_busy",False)); self._keep(w); w.start()
@@ -430,7 +434,7 @@ class CameraLivePane(QFrame):
         if self._evidence_loaded.get(label) == key or self._evidence_requests.get(label) == key:
             return
         self._evidence_requests[label]=key
-        worker=Worker(lambda: api.get_bytes(path, timeout=8))
+        worker=Worker(lambda: self._runtime_api().get_bytes(path, timeout=8))
         def current():
             return key[:2] == (self.camera_id(), self._live_gen) and self._evidence_requests.get(label) == key
         def loaded(jpeg):
@@ -462,7 +466,7 @@ class CameraLivePane(QFrame):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(self._runtime_api().post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
 
     def correct_plate(self):
@@ -476,7 +480,7 @@ class CameraLivePane(QFrame):
             return
         try:
             body={"plate": text.strip() or current, "capture_id": shown.get("id"), "confirm": True}
-            data=api.post(f"/cameras/{cam['id']}/plate-corrections", body, timeout=20)
+            data=self._runtime_api().post(f"/cameras/{cam['id']}/plate-corrections", body, timeout=20)
             QMessageBox.information(self,"Plate",str((data or {}).get("message") or data))
             self._tick_alpr()
         except Exception as e:

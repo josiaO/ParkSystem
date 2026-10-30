@@ -1,6 +1,6 @@
 """FastALPR plate engine.
 
-This is the reader that replaces ParkWatch SimpleLPR. The camera still snaps
+This is SmartPark's local software reader. The camera still snaps
 the JPEG. This engine finds the plate, crops it, and reads the characters.
 
 Swap or retrain by dropping a model pack (detector ONNX + OCR ONNX + OCR

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .api import api
 from .presentation import label_for
+from app.branding import PRODUCT_NAME
 
 
 REPORTS = (
@@ -208,14 +209,14 @@ class ReportsPage(QWidget):
         if not self.body.toPlainText().strip():
             QMessageBox.information(self, "Reports", "Show a report first.")
             return
-        print_text(self, "SmartPark report", self.body.toPlainText())
+        print_text(self, f"{PRODUCT_NAME} report", self.body.toPlainText())
 
     def print_pack(self):
         sheets = (self.pack or {}).get("reports") or []
         if not sheets:
             QMessageBox.information(self, "Reports", "Show a report first, then print all.")
             return
-        print_text(self, "SmartPark audit pack", "\n\n".join(format_sheet(sheet) for sheet in sheets))
+        print_text(self, f"{PRODUCT_NAME} audit pack", "\n\n".join(format_sheet(sheet) for sheet in sheets))
 
     def download(self):
         kind = self.kind.currentData() or "payments"

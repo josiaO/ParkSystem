@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sys
 import time
 import traceback
 import httpx
 from PySide6.QtCore import QDate, Qt, QSize, QThread, QTime, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextDocument
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
@@ -25,6 +26,7 @@ from .shell import DesktopShell
 
 from .common import (Worker, _stop_thread, action_label, available_screen, fit_window_to_screen,
                      is_technician, deployment_kind, source_label, money_label, method_label)
+from app.branding import PRODUCT_NAME, PRODUCT_TAGLINE
 
 
 def _qr_png_from_sources(qr_url="", qr_payload=""):
@@ -132,11 +134,11 @@ from .streams import MjpegStream, pop_latest_mjpeg, _pop_raw_jpegs
 
 class Login(QDialog):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("SmartPark Edge — Sign In")
+        super().__init__(); self.setWindowTitle(f"{PRODUCT_NAME} — Sign In")
         self.setMinimumWidth(360); self.setMaximumWidth(460)
         l=QVBoxLayout(self); l.setContentsMargins(28,28,28,28); l.setSpacing(8)
-        brand=QLabel("SmartPark Edge"); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
-        tag=QLabel("Vehicle intelligence · edge platform")
+        brand=QLabel(PRODUCT_NAME); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
+        tag=QLabel(PRODUCT_TAGLINE)
         tag.setObjectName("muted")
         title=QLabel("Sign in"); title.setStyleSheet("font-size:22px;font-weight:700;margin-top:10px")
         self.sub=QLabel("Sign in with the first-run admin password shown at setup")
@@ -166,20 +168,69 @@ class Login(QDialog):
         except Exception:
             pass
     def login(self):
+        def is_connection_failure(exc) -> bool:
+            text = str(exc).lower()
+            return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)) or any(
+                marker in text for marker in ("winerror 10061", "connection refused", "connecterror")
+            )
+
         try:
+            # The wizard may have just replaced deployment.json. Refresh the
+            # endpoint immediately before the first authentication request.
+            from .api import configure_base_url
+
+            configure_base_url()
             api.login(self.user.text().strip(), self.pwd.text())
             self.accept()
+            return
         except Exception as e:
+            if is_connection_failure(e):
+                try:
+                    from app.deployment import load_deployment_config
+                    from app.desktop.launch import ensure_background_services, wait_for_api
+
+                    config = load_deployment_config()
+                    if config.runs_local_gate_runtime:
+                        # Safe to call again: the launcher verifies the API
+                        # health endpoint and uses the Site Service lock.
+                        ensure_background_services(config=config)
+                    else:
+                        wait_for_api(timeout=20.0, base_url=api.base_url)
+                    configure_base_url()
+                    api.login(self.user.text().strip(), self.pwd.text())
+                    self.accept()
+                    return
+                except Exception as retry_error:
+                    e = retry_error
             text=str(e)
             if "401" in text or "Invalid username" in text:
-                text = (
-                    "Invalid username or password.\n\n"
-                    "admin / first-run password only works on a fresh database. "
-                    "This PC already has an admin account. "
-                    "Reset it with: python -m app.cli reset-admin"
-                )
+                try:
+                    from app.deployment import EDGE_NODE, load_deployment_config
+                    edge_node_login = load_deployment_config().role == EDGE_NODE
+                except Exception:
+                    edge_node_login = False
+                if edge_node_login and len(self.pwd.text()) >= 12:
+                    text = (
+                        "Invalid Processing Node username or password.\n\n"
+                        "Use the node username and password entered in this PC's deployment wizard. "
+                        "The Site Server administrator password is intentionally not accepted on an Edge Node. "
+                        "If the node was reinstalled, run deployment configuration again to set a new node password."
+                    )
+                elif len(self.pwd.text()) < 12:
+                    text = (
+                        "Authentication failed. The Processing Node password must be at least 12 characters.\n\n"
+                        "Enter this Processing Node's configured account password. The Site Server administrator "
+                        "password cannot be used here."
+                    )
+                else:
+                    text = (
+                        "Invalid username or password.\n\n"
+                        "admin / first-run password only works on a fresh database. "
+                        "This PC already has an admin account. "
+                        "Reset it with: python -m app.cli reset-admin"
+                    )
             elif "Connection" in text or "ConnectError" in text or "8760" in text:
-                text = f"Cannot reach the SmartPark Site Server at {api.base_url}. Check the connection or open deployment configuration."
+                text = f"Cannot reach the {PRODUCT_NAME} Site Server at {api.base_url}. Check the connection or open deployment configuration."
             QMessageBox.critical(self,"Sign in failed",text)
 
 
@@ -382,7 +433,7 @@ class Gates(QWidget):
         sc1=QShortcut(QKeySequence("1"), self); sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc1.activated.connect(lambda: self.arm_side("ENTRY"))
         sc2=QShortcut(QKeySequence("2"), self); sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc2.activated.connect(lambda: self.arm_side("EXIT"))
     def refresh(self):
-        try: rows=api.get("/gates")
+        try: rows=api.runtime_client().get("/gates")
         except Exception: rows=[]
         self.rows=rows
         self.table.setRowCount(len(rows))
@@ -439,20 +490,20 @@ class Gates(QWidget):
     def add_gate(self):
         d=GateDialog()
         if d.exec():
-            try: api.post("/gates",d.payload()); self.refresh()
+            try: api.runtime_client().post("/gates",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Gate",str(e))
     def edit_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Edit gate","Select a gate first."); return
         d=GateDialog(gate)
         if d.exec():
-            try: api.patch(f"/gates/{gate['id']}",d.payload()); self.refresh()
+            try: api.runtime_client().patch(f"/gates/{gate['id']}",d.payload()); self.refresh()
             except Exception as e: QMessageBox.critical(self,"Edit gate",str(e))
     def delete_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Delete gate","Select a gate first."); return
         if QMessageBox.question(self,"Delete gate",f"Delete {gate['name']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/gates/{gate['id']}"); self.refresh()
+        try: api.runtime_client().delete(f"/gates/{gate['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete gate",str(e))
     def open_gate(self,gid,side):
         self.command_gate(gid, side, "open")
@@ -464,7 +515,7 @@ class Gates(QWidget):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
+            try: QMessageBox.information(self,"Barrier",str(api.runtime_client().post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
     def write_led(self):
         gate=self.selected_gate()
@@ -475,7 +526,7 @@ class Gates(QWidget):
         if not ok or not text: return
         try:
             first=cams[0]
-            QMessageBox.information(self,"LED",str(api.post(f"/cameras/{first['id']}/led",{"text":text})))
+            QMessageBox.information(self,"LED",str(api.runtime_client().post(f"/cameras/{first['id']}/led",{"text":text})))
         except Exception as e: QMessageBox.critical(self,"LED",str(e))
 
 
@@ -1308,7 +1359,7 @@ class OnboardingWizard(QWidget):
         self.rec_mode = QComboBox()
         for mid, label in [
             ("NATIVE_ONLY", "Use camera recognition"),
-            ("FASTALPR_ONLY", "Use SmartPark AI recognition"),
+            ("FASTALPR_ONLY", f"Use {PRODUCT_NAME} AI recognition"),
             ("HYBRID", "Use both"),
             ("VIDEO_ONLY", "Video only"),
         ]:
@@ -1370,7 +1421,7 @@ class OnboardingWizard(QWidget):
 
     def _discover(self):
         try:
-            data = api.get("/cameras/discover?scan_lan=true")
+            data = api.runtime_client().get("/cameras/discover?scan_lan=true")
             cams = data.get("cameras") if isinstance(data, dict) else data
             n = len(cams) if isinstance(cams, list) else 0
             self.hw_info.setPlainText(f"{n} camera(s) found.\nOpen Devices to add and connect them.")
@@ -1744,7 +1795,7 @@ class MainWindow(DesktopShell):
         super().__init__()
         import platform
         system = platform.system() or "desktop"
-        self.setWindowTitle(f"SmartPark  ·  {system}")
+        self.setWindowTitle(f"{PRODUCT_NAME}  ·  {system}")
         self.pages=[]
         self._makers=[]
         if api.nav_page("dashboard"):
@@ -1917,7 +1968,13 @@ class MainWindow(DesktopShell):
 
 
 def main():
-    app=QApplication(sys.argv); app.setApplicationName("SmartPark Edge")
+    app=QApplication(sys.argv); app.setApplicationName(PRODUCT_NAME)
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    icon = assets / "zirp.ico"
+    if not icon.is_file():
+        icon = assets / "zirp-logo.png"
+    if icon.is_file():
+        app.setWindowIcon(QIcon(str(icon)))
     font = QFont()
     font.setPointSize(10)
     app.setFont(font)
@@ -1927,7 +1984,8 @@ def main():
     config = ensure_legacy_config_saved()
     if not config.configured:
         from .setup import SetupWizard
-        wizard = SetupWizard(config)
+        role_lock = str(os.environ.get("SMARTPARK_ROLE_LOCKED") or "").upper() or None
+        wizard = SetupWizard(config, role_locked=role_lock)
         if wizard.exec() != QDialog.DialogCode.Accepted:
             return 0
         config = load_deployment_config()
@@ -1937,23 +1995,55 @@ def main():
             from app.desktop.launch import ensure_background_services
             ensure_background_services(config=config)
         except Exception as exc:
-            QMessageBox.critical(None, "SmartPark Edge", f"The SmartPark Site Server could not start.\n\n{exc}")
+            QMessageBox.critical(None, PRODUCT_NAME, f"The {PRODUCT_NAME} Site Server could not start.\n\n{exc}")
             return 1
     else:
-        try:
-            import httpx
-            response = httpx.get(f"{api.base_url}/health/live", timeout=3)
-            response.raise_for_status()
-            identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
-            identity.raise_for_status()
-            identity_body = identity.json()
-            if config.server_id and identity_body.get("server_id") != config.server_id:
-                raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
-            if config.installation_id and identity_body.get("installation_id") != config.installation_id:
-                raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
-        except Exception as exc:
-            QMessageBox.critical(None, "SmartPark Operator Workstation", f"The SmartPark Site Server could not be reached.\n\nServer: {api.base_url}\n\n{exc}")
-            return 1
+        from app.desktop.launch import disable_background_services
+
+        disable_background_services()
+        while True:
+            try:
+                import httpx
+                response = httpx.get(f"{api.base_url}/health/live", timeout=3)
+                response.raise_for_status()
+                identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
+                identity.raise_for_status()
+                identity_body = identity.json()
+                if config.paired_server_id:
+                    if identity_body.get("server_installation_id", identity_body.get("installation_id")) != config.paired_server_id:
+                        raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+                elif config.server_id and identity_body.get("server_id") != config.server_id:
+                    # Compatibility with v1 client metadata, where server_id
+                    # was the server's public site identity.
+                    raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+                if config.paired_site_id and identity_body.get("site_id", identity_body.get("server_id")) != config.paired_site_id:
+                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+                elif not config.paired_server_id and config.installation_id and identity_body.get("installation_id") != config.installation_id:
+                    # Compatibility with v1 clients that stored the server
+                    # installation ID in installation_id.
+                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+                break
+            except Exception as exc:
+                prompt = QMessageBox(None)
+                prompt.setIcon(QMessageBox.Icon.Warning)
+                prompt.setWindowTitle(f"{PRODUCT_NAME} Operator Workstation")
+                prompt.setText(f"{PRODUCT_NAME} Site Server unavailable")
+                prompt.setInformativeText(f"Server: {api.base_url}\n\n{exc}")
+                retry = prompt.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
+                change = prompt.addButton("Change Server", QMessageBox.ButtonRole.ActionRole)
+                prompt.addButton("Exit", QMessageBox.ButtonRole.RejectRole)
+                prompt.exec()
+                if prompt.clickedButton() is retry:
+                    continue
+                if prompt.clickedButton() is change:
+                    from .setup import SetupWizard
+
+                    wizard = SetupWizard(config)
+                    if wizard.exec() == QDialog.DialogCode.Accepted:
+                        config = load_deployment_config()
+                        configure_base_url()
+                        continue
+                return 1
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()

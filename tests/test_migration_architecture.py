@@ -59,7 +59,8 @@ class PlatePolicyTests(unittest.TestCase):
 class FlagAndSiteTests(unittest.TestCase):
     def test_defaults_keep_working_path_authoritative(self):
         cfg = flags()
-        # Env/settings prefer MediaMTX; DEFAULT_FLAGS remain the rollback snapshot.
+        # Main's stable runtime defaults use MediaMTX/FastALPR, with the
+        # registry retaining the direct path as its compatibility fallback.
         self.assertTrue(cfg["media_gateway_enabled"])
         self.assertTrue(cfg["fastalpr_new_pipeline_enabled"])
         self.assertTrue(cfg["webrtc_live_enabled"])
@@ -131,7 +132,9 @@ class MediaGatewayWrapTests(unittest.TestCase):
         asyncio.run(gw.unregister_source(9))
 
     def test_mediamtx_missing_binary_does_not_claim_ok(self):
-        self.assertFalse(mediamtx.health()["ok"] or mediamtx.running())
+        with patch.object(mediamtx, "mediamtx_bin", return_value=None), \
+             patch.object(mediamtx, "_external_running", return_value=False):
+            self.assertFalse(mediamtx.health()["ok"] or mediamtx.running())
         self.assertIn("optional", mediamtx.health()["note"].lower())
 
     def test_registry_live_endpoint_stays_direct_legacy(self):

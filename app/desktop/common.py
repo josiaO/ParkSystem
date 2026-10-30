@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QCoreApplication, QThread, Signal
 from PySide6.QtGui import QGuiApplication
+from app.branding import PRODUCT_NAME
 from .api import api
 from .presentation import prepare_page
 
@@ -69,9 +70,9 @@ def source_label(source):
     if "operator" in text:
         return "Operator"
     if "hybrid" in text or "fusion" in text:
-        return "Camera + SmartPark"
+        return f"Camera + {PRODUCT_NAME}"
     if "fast" in text or "local" in text:
-        return "SmartPark AI"
+        return f"{PRODUCT_NAME} AI"
     if "native" in text or "camera" in text or "sdk" in text:
         return "Camera"
     return str(source) if is_technician() else "Recognition"

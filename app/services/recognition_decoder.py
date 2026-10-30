@@ -12,6 +12,7 @@ from contextlib import aclosing
 from urllib.parse import urlparse
 
 from app.services.frame_grab import ffmpeg_bin
+from app.services.ffmpeg_recovery import drain_stderr
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _JPEG_SOI = b"\xff\xd8"
@@ -44,50 +45,43 @@ def require_local_mediamtx(url: str) -> str:
 
 
 def decoder_command(url: str, *, sample_fps: float, scale: int = 960) -> list[str]:
-    """Remux is MediaMTX's job. This command only decodes, at the sample rate."""
+    """Decode the local RTSP path without adding a second frame-drop stage.
+
+    ``sample_fps`` remains part of the public API for callers and telemetry,
+    but the decoder must preserve source cadence.  The recognition lane has a
+    bounded latest-frame mailbox and its own admission clock; an FFmpeg
+    ``fps=`` filter here would drop frames before that mailbox can choose the
+    freshest useful plate view, creating a second sampling gate.
+    """
     binary = ffmpeg_bin()
     if not binary:
         raise RuntimeError("ffmpeg is not installed")
     local = require_local_mediamtx(url)
-    fps = max(1.0, min(float(sample_fps), 10.0))
     width = max(160, min(int(scale), 1920))
     return [
         binary,
         "-hide_banner",
         "-loglevel", "error",
         "-rtsp_transport", "tcp",
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt",
+        "-err_detect", "ignore_err",
         "-flags", "low_delay",
         "-probesize", "1000000",
         "-analyzeduration", "1000000",
+        "-max_delay", "100000",
         "-threads", "1",
         "-i", local,
         "-threads", "1",
         "-filter_threads", "1",
         "-an",
-        "-vf", f"fps={fps:g},scale={width}:-2",
+        "-vf", f"scale={width}:-2",
+        "-vsync", "0",
+        "-flush_packets", "1",
         "-f", "image2pipe",
         "-vcodec", "mjpeg",
         "-q:v", "8",
         "pipe:1",
     ]
-
-
-async def _drain_bounded(stream, sink: bytearray, limit: int = 4096) -> None:
-    if stream is None:
-        return
-    try:
-        while True:
-            chunk = await stream.read(1024)
-            if not chunk:
-                return
-            sink.extend(chunk)
-            if len(sink) > limit:
-                del sink[: len(sink) - limit]
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
@@ -139,7 +133,11 @@ class RecognitionDecoder:
             self.pid = None
             raise RuntimeError("recognition decoder produced no output")
         errors = bytearray()
-        stderr_task = asyncio.create_task(_drain_bounded(proc.stderr, errors))
+        fault_event = asyncio.Event()
+        fault_detail: list[str] = []
+        stderr_task = asyncio.create_task(
+            drain_stderr(proc.stderr, errors, fault_event=fault_event, fault_detail=fault_detail)
+        )
         buf = b""
         from app.config import settings
 
@@ -148,6 +146,8 @@ class RecognitionDecoder:
         deadline = loop.time() + timeout
         try:
             while True:
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "recognition decoder H264 fault")
                 # Partial bytes must not keep a broken stream alive forever.
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -156,6 +156,8 @@ class RecognitionDecoder:
                 if not chunk:
                     text = errors.decode(errors="replace").strip()
                     raise RuntimeError(text[-300:] or "recognition decoder ended")
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "recognition decoder H264 fault")
                 buf += chunk
                 if len(buf) > 1_000_000:
                     start = buf.rfind(_JPEG_SOI)

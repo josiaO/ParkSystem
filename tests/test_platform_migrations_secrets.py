@@ -392,7 +392,7 @@ class PlatformApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
         self.assertNotIn("TopSecretPw1", res.text)
-        self.assertTrue(body["credentials_ref"].startswith("camera:"))
+        self.assertNotIn("credentials_ref", body)
         self.assertTrue(body["password_configured"])
         self.assertEqual(body["site_id"], 1)
         with self.Session() as db:
@@ -424,6 +424,7 @@ class PlatformApiTests(unittest.TestCase):
         self.assertEqual(body["cameras"][0]["rtsp_url"], "rtsp://admin:***@10.0.0.8/live")
         self.assertTrue(body["cameras"][0]["password_configured"])
         self.assertNotIn("password_secret", body["cameras"][0])
+        self.assertNotIn("credentials_ref", body["cameras"][0])
         res = self.client.get("/health/diagnostics")
         self.assertEqual(res.status_code, 401)
 

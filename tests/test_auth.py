@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from app.api_main import app, ensure_roles
 from app.db import Base, get_db
+from app.deployment import DeploymentConfig
 from app.models import Role, User, UserRole, UserStatus
 from app.security import hash_password
 
@@ -109,6 +111,30 @@ class AuthTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {token}"}
         self.assertEqual(self.client.post("/auth/logout", headers=headers).status_code, 200)
         self.assertEqual(self.client.get("/auth/me", headers=headers).status_code, 401)
+
+    def test_human_account_is_not_bound_to_installation_role(self):
+        from app.api_main import _login_response
+
+        with self.Session() as db:
+            node_role = db.scalar(select(Role).where(Role.name == "Processing Node"))
+            node = User(
+                username="node-test",
+                full_name="Processing Node",
+                password_hash=hash_password("node-password-123"),
+            )
+            db.add(node)
+            db.flush()
+            db.add(UserRole(user_id=node.id, role_id=node_role.id))
+            db.commit()
+
+        with patch("app.services.node_scope.is_processing_node", return_value=False), patch(
+            "app.deployment.load_deployment_config",
+            return_value=DeploymentConfig(node_username="node-test"),
+        ):
+            with self.Session() as db:
+                response = _login_response(db, "admin", "correct-horse")
+                self.assertEqual(response.username, "admin")
+                self.assertEqual(response.permissions, ["*"])
 
 
 if __name__ == "__main__":
