@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from app.db import Base
 from app.domain.site import DEFAULT_SITE_ID
 from app.models import Camera, Site
-from app.services.captures import persist_event
+from app.services.captures import captures_for_sessions, persist_event
 from app.services.simulation import _active_for_plate, create_entry, session_dict
 
 
@@ -49,6 +49,13 @@ class GatelessSessionTests(unittest.TestCase):
             self.assertEqual(row.camera_id, cam.id)
             self.assertTrue(row.public_token)
             self.assertIsNotNone(_active_for_plate(db, "T165EED"))
+
+    def test_session_list_capture_lookup_allows_manual_session_without_camera(self):
+        with self.Session() as db:
+            row = create_entry(db, plate="T700ABC", gate=None, side="ENTRY", camera=None, status="ACTIVE")
+            resolved = captures_for_sessions(db, [row])
+            self.assertIn(row.id, resolved)
+            self.assertIsNone(resolved[row.id])
 
     def test_handle_plate_event_without_gate(self):
         async def run():

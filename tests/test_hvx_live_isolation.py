@@ -30,10 +30,14 @@ class HvxLiveIsolationTests(unittest.TestCase):
         )
         cfg = source_config_for_camera(camera)
         self.assertFalse(str(cfg.get("uri") or "").startswith("rtsp://"))
+        self.assertTrue(cfg.get("native"))
+        self.assertEqual(cfg.get("provider"), "OcxConfig/NetSDK")
         with patch("app.infrastructure.media.registry.register_camera_source") as register, \
              patch("app.infrastructure.media.registry.unregister_camera_source") as unregister:
             out = sync_camera(camera)
         self.assertFalse(out.get("registered"))
+        self.assertTrue(out.get("native"))
+        self.assertEqual(out.get("provider"), "OcxConfig/NetSDK")
         register.assert_not_called()
         unregister.assert_called_once_with(3)
 

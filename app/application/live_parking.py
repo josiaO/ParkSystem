@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.application.entry_lane import EntryLaneController, policy_from_parking_settings
 from app.config import settings
+from app.domain.site import DEFAULT_SITE_ID
 from app.domain.recognition import (
     CONF_HIGH,
     CONF_LOW,
@@ -42,7 +43,7 @@ def event_from_capture(camera: Camera, row: VehicleCapture, *, source: str = "ca
     crop = (row.crop_path or "").replace("\\", "/")
     return NormalizedRecognitionEvent(
         event_id=event_id,
-        site_id=int(camera.site_id),
+        site_id=int(camera.site_id or DEFAULT_SITE_ID),
         camera_id=int(camera.id),
         lane_id=camera.lane_id,
         occurred_at=row.created_at.isoformat() if row.created_at else "",
@@ -73,9 +74,10 @@ async def handle_live_entry(
     source: str = "camera",
 ) -> dict:
     cfg = parking_settings(db)
+    adapter_name = str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated").strip().lower()
     policy = policy_from_parking_settings(cfg)
     printer = receipt_printer_for(
-        str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
+        adapter_name,
         str(cfg.get("printer_name") or settings.printer_name or ""),
     )
     controller = EntryLaneController(printer=printer)
@@ -110,7 +112,7 @@ async def handle_live_exit(
         db,
         plate=str(capture.plate or ""),
         event_id=str(capture.event_id or f"capture-{capture.id}"),
-        site_id=int(camera.site_id),
+        site_id=int(camera.site_id or DEFAULT_SITE_ID),
         gate=gate,
         camera=camera,
         lane_id=camera.lane_id,

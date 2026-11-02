@@ -13,6 +13,8 @@ from uuid import uuid4
 from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.db import release_connection
 from app.domain.parking_engine import (
     ACTIVE,
     ENTRY_AUTHORIZED,
@@ -46,6 +48,10 @@ def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     return LanePolicy(
         receipt_required_before_open=policy_requires_taken(resolved),
         print_receipt_on_entry=policy_should_print(resolved),
+        passage_sensing=str(
+            cfg.get("passage_sensing")
+            or ("WAIT_FOR_PASSAGE" if str(getattr(settings, "deployment_profile", "DEVELOPMENT")).upper() != "DEVELOPMENT" else "OPEN_COMMAND_COUNTS_AS_PASSED")
+        ).upper(),
         subscriber_skip_receipt=True,
     )
 
@@ -169,11 +175,34 @@ class EntryLaneController:
 
         need_receipt = bool(policy.receipt_required_before_open) and not subscriber
         skip_print = subscriber and not entitlement.print_receipt
-        should_print = (not skip_print) and (
+        from app.services.developer import printing_enabled
+        should_print = printing_enabled(db) and (not skip_print) and (
             policy.print_receipt_on_entry or need_receipt or auto_take or entitlement.print_receipt
         )
         if should_print:
-            printed = await print_entry_receipt(db, row, printer=self._printer(), policy=policy)
+            printer = self._printer()
+            if (
+                need_receipt
+                and str(getattr(settings, "deployment_profile", "DEVELOPMENT")).upper() != "DEVELOPMENT"
+                and str(getattr(printer, "id", "")).lower() in {"simulated", "simulated_kiosk"}
+            ):
+                record_access_decision(
+                    db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
+                    outcome="ASSISTANCE_REQUIRED", reason="production printer is simulated",
+                    parker_kind=parker_kind, barrier_opened=False,
+                )
+                return {
+                    "ok": False,
+                    "action": "ENTRY",
+                    "reason": "printer_not_configured",
+                    "created_session": True,
+                    "duplicate": False,
+                    "barrier_opened": False,
+                    "assistance_required": True,
+                    "session": snapshot(row),
+                    "message": "A physical receipt printer must be configured before this lane can open.",
+                }
+            printed = await print_entry_receipt(db, row, printer=printer, policy=policy)
             db.refresh(row)
             if printed.get("assistance_required") and need_receipt:
                 record_access_decision(
@@ -310,6 +339,46 @@ class EntryLaneController:
                 "source": source,
                 "message": "Gate command already applied.",
             }
+        from app.services.developer import automatic_gate_opening_enabled, gate_opening_enabled, printing_enabled
+        if policy.receipt_required_before_open and not printing_enabled(db):
+            record_access_decision(
+                db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
+                outcome="ASSISTANCE_REQUIRED", reason="developer printing disabled",
+                parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+            )
+            return {
+                "ok": False, "action": "ENTRY", "reason": "developer_printing_disabled",
+                "created_session": created, "duplicate": False, "barrier_opened": False,
+                "assistance_required": True, "session": snapshot(row),
+                "entitlement": entitlement.__dict__, "source": source,
+                "message": "Developer mode has printing disabled, so the receipt-required gate stays closed.",
+            }
+        if gate is not None and not automatic_gate_opening_enabled(db):
+            record_access_decision(
+                db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
+                outcome="DEVELOPER_BLOCKED", reason="automatic gate opening disabled",
+                parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+            )
+            return {
+                "ok": True, "action": "ENTRY", "reason": "developer_automatic_gate_disabled",
+                "created_session": created, "duplicate": False, "barrier_opened": False,
+                "assistance_required": False, "session": snapshot(row),
+                "entitlement": entitlement.__dict__, "source": source,
+                "message": "Developer mode is holding the automatic gate command; the session remains available for retry.",
+            }
+        if gate is not None and not gate_opening_enabled(db):
+            record_access_decision(
+                db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
+                outcome="DEVELOPER_BLOCKED", reason="gate opening disabled",
+                parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+            )
+            return {
+                "ok": True, "action": "ENTRY", "reason": "developer_gate_opening_disabled",
+                "created_session": created, "duplicate": False, "barrier_opened": False,
+                "assistance_required": False, "session": snapshot(row),
+                "entitlement": entitlement.__dict__, "source": source,
+                "message": "Developer mode has gate opening disabled; paper can be taken but the barrier will stay closed.",
+            }
         existing_command = row.open_command_uuid or ""
         command_uuid = command_uuid or existing_command or uuid4().hex
         if existing_command and source != "gate_retry":
@@ -343,6 +412,7 @@ class EntryLaneController:
             mark("gate_requested", command_uuid=command_uuid)
         if gate is not None and self.opener is not None:
             cameras = _cameras(gate, camera)
+            release_connection(db)
             opened = await self.opener(
                 db, gate, cameras, reason=f"entry {row.plate}", session=row, side="ENTRY",
                 command_uuid=command_uuid,
@@ -376,6 +446,7 @@ class EntryLaneController:
         elif gate is not None and self.opener is None:
             from app.services.simulation import _pulse_gate
             cameras = _cameras(gate, camera)
+            release_connection(db)
             opened = await _pulse_gate(
                 db, gate, cameras, reason=f"entry {row.plate}", side="ENTRY",
                 led_text="WELCOME", session=row, automatic=True,
@@ -403,11 +474,13 @@ class EntryLaneController:
         row = request_entry_open(db, row, command_uuid=command_uuid, policy=policy)
         if policy.passage_fallback():
             row = mark_vehicle_passed(db, row, policy=policy)
-        barrier_ok = bool(opened is None or (opened and opened.ok))
+        barrier_command_accepted = bool(opened is None or (opened and opened.ok))
+        passage_complete = policy.passage_fallback()
+        barrier_opened = barrier_command_accepted and gate is not None and passage_complete
         record_access_decision(
             db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
             outcome="ENTRY_AUTHORIZED", reason="entry complete",
-            parker_kind=row.parker_kind or "CASUAL", barrier_opened=barrier_ok and gate is not None,
+            parker_kind=row.parker_kind or "CASUAL", barrier_opened=barrier_opened,
         )
         return {
             "ok": True,
@@ -415,15 +488,20 @@ class EntryLaneController:
             "reason": "active",
             "created_session": created,
             "duplicate": False,
-            "barrier_opened": barrier_ok and gate is not None,
+            "barrier_opened": barrier_opened,
+            "barrier_command_accepted": barrier_command_accepted and gate is not None,
+            "passage_required": not passage_complete,
             "assistance_required": False,
             "session": snapshot(row),
             "barrier": opened.__dict__ if opened is not None else {"ok": False, "message": "No gate assigned — session saved, barrier skipped"},
             "entitlement": entitlement.__dict__,
             "source": source,
             "message": (
-                f"Registered {entitlement.kind} plate {row.plate} — barrier opened."
-                if entitlement.registered and gate is not None
-                else ("Barrier opening." if gate is not None else "Session saved. Assign this camera to a Gate to open barriers.")
+                f"Registered {entitlement.kind} plate {row.plate} — barrier command accepted; waiting for passage."
+                if entitlement.registered and gate is not None and not passage_complete
+                else (f"Registered {entitlement.kind} plate {row.plate} — barrier opened."
+                      if entitlement.registered and gate is not None
+                      else ("Barrier command accepted; waiting for passage." if gate is not None and not passage_complete
+                            else ("Barrier opening." if gate is not None else "Session saved. Assign this camera to a Gate to open barriers.")))
             ),
         }

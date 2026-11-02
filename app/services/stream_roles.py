@@ -95,7 +95,7 @@ def hvx_profiles(handle: int | None = None) -> dict[str, dict[str, Any]]:
         "uri": uri,
         "codec": "jpeg",
         "transport": "host",
-        "note": "Net_StartVideo + Net_GetJpgBuffer on the HVX host. Not RTSP.",
+        "note": "Net_StartVideo + decoded Net_SetDrawDataOut callback on the HVX host; Net_GetJpgBuffer is compatibility fallback. Not RTSP.",
     }
     return {
         ROLE_MAIN: {**sdk, "role": ROLE_MAIN, "stream_index": 0},

@@ -67,12 +67,26 @@ $TaskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 # installer may have created ProgramData files from an elevated process.
 # Grant that exact account Modify access so services can rotate logs, write
 # health state and update the model/cache directories after installation.
+# Do not recurse through the complete data tree here: a production site can
+# contain many gigabytes of retained snapshots and crops, and recursive ACL
+# repair made every upgrade look hung. The inheritable grant on the root is
+# enough for new runtime files; only the small operational folders are
+# repaired recursively when they already exist.
 $DataDir = Join-Path $env:ProgramData "SmartParkEdge"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 $dataGrant = "{0}:(OI)(CI)M" -f $TaskUser
-& icacls.exe $DataDir /grant $dataGrant /T /C /Q | Out-Null
+& icacls.exe $DataDir /grant $dataGrant /C /Q | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Could not grant $TaskUser Modify access to $DataDir. Services may not be able to rotate logs."
+}
+foreach ($runtimeFolder in @("logs", "model-cache")) {
+    $runtimePath = Join-Path $DataDir $runtimeFolder
+    if (Test-Path $runtimePath) {
+        & icacls.exe $runtimePath /grant $dataGrant /T /C /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not repair access to $runtimePath."
+        }
+    }
 }
 
 function Write-SmartParkLauncher {
@@ -80,6 +94,7 @@ function Write-SmartParkLauncher {
         [string]$BatName,
         [string]$PythonExe,
         [string]$Arguments,
+        [string]$LogName,
         [switch]$WaitForSite
     )
     $bat = Join-Path $InstallDir $BatName
@@ -102,6 +117,8 @@ if errorlevel 1 exit /b 1
 setlocal
 cd /d "$InstallDir"
 set "SMARTPARK_HOME=$InstallDir"
+set "SMARTPARK_LOG_DIR=$DataDir\logs"
+if not exist "%SMARTPARK_LOG_DIR%" mkdir "%SMARTPARK_LOG_DIR%" >nul 2>&1
 set "PYTHONPATH=%SMARTPARK_HOME%"
 set "SMARTPARK_HVX_VENDOR_DIR=%SMARTPARK_HOME%\vendor"
 if not defined SMARTPARK_DEPLOYMENT_PROFILE set "SMARTPARK_DEPLOYMENT_PROFILE=PRODUCTION"
@@ -111,7 +128,10 @@ if not defined SMARTPARK_NODE_ROLE set "SMARTPARK_NODE_ROLE=SERVER"
 $mtxLine
 set "PATH=%SMARTPARK_HOME%\python64;%SMARTPARK_HOME%\python64\Scripts;%SMARTPARK_HOME%\vendor;%PATH%"
 $waitForSiteLines
-"$PythonExe" $Arguments
+"$PythonExe" $Arguments >>"%SMARTPARK_LOG_DIR%\$LogName" 2>&1
+set "SMARTPARK_EXIT=%ERRORLEVEL%"
+echo [%DATE% %TIME%] $BatName exited with code %SMARTPARK_EXIT%>>"%SMARTPARK_LOG_DIR%\$LogName"
+exit /b %SMARTPARK_EXIT%
 "@ | Set-Content -Path $bat -Encoding ASCII
     return $bat
 }
@@ -122,6 +142,7 @@ function Register-SmartParkTask {
         [string]$Launcher,
         [string]$WorkingDirectory
     )
+    Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue
     # Quote the launcher. "SmartPark Edge" has a space; an unquoted set-chain
     # makes Start-ScheduledTask fail and the installer never opens the app.
@@ -146,9 +167,10 @@ function Start-SmartParkTask {
 }
 
 function Register-SmartParkFirewall {
-    # Only the Site Server needs inbound rules. Keep PostgreSQL, HVX, RTSP and
-    # MediaMTX's control/metrics ports local; operators need the API and the
-    # WebRTC signaling/ICE ports only.
+    # The Site Server needs inbound rules for the API and WebRTC media path.
+    # Windows Updates can change a NIC from Private to Public or disable an
+    # existing rule, so repair existing rules as well as creating missing ones.
+    # LocalSubnet keeps the rule scoped to the parking LAN on every profile.
     $rules = @(
         @{ Name = "SmartPark Site API"; Protocol = "TCP"; Port = 8760 }
     )
@@ -160,13 +182,19 @@ function Register-SmartParkFirewall {
         )
     }
     foreach ($rule in $rules) {
-        if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
-            try {
-                New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -Profile Private -RemoteAddress LocalSubnet | Out-Null
-                Write-Host ("Firewall: opened {0}/{1} to LocalSubnet on Private networks." -f $rule.Protocol, $rule.Port)
-            } catch {
-                Write-Warning ("Could not create firewall rule {0}: {1}" -f $rule.Name, $_.Exception.Message)
+        try {
+            $existing = @(Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)
+            if ($existing.Count -eq 0) {
+                New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -Profile Any -RemoteAddress LocalSubnet | Out-Null
+                Write-Host ("Firewall: opened {0}/{1} to LocalSubnet on all Windows profiles." -f $rule.Protocol, $rule.Port)
+            } else {
+                $existing | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any | Out-Null
+                $existing | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet | Out-Null
+                $existing | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol $rule.Protocol -LocalPort $rule.Port | Out-Null
+                Write-Host ("Firewall: repaired {0} for LocalSubnet on all Windows profiles." -f $rule.Name)
             }
+        } catch {
+            Write-Warning ("Could not create or repair firewall rule {0}: {1}" -f $rule.Name, $_.Exception.Message)
         }
     }
 }
@@ -222,15 +250,15 @@ function Wait-SmartParkHttp {
     throw "$Label did not return HTTP 200 from $Url within $TimeoutSeconds seconds. $diagnostic Check $logDir.$suffix"
 }
 
-$siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service"
-$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker" -WaitForSite
+$siteBat = Write-SmartParkLauncher -BatName "run-site-service.bat" -PythonExe $Py64 -Arguments "-m app.site_service" -LogName "site-service-launch.log"
+$recognitionBat = Write-SmartParkLauncher -BatName "run-recognition-worker.bat" -PythonExe $Py64 -Arguments "-m app.recognition_worker" -LogName "recognition-worker-launch.log" -WaitForSite
 $hostBat = ""
 if (Test-Path $Py32) {
-    $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`""
+    $hostBat = Write-SmartParkLauncher -BatName "run-hvx-host.bat" -PythonExe $Py32 -Arguments "`"$HostPy`"" -LogName "hvx-host-launch.log"
 }
 $mediaBat = ""
 if (Test-Path $MediaMtx) {
-$mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe $Py64 -Arguments "-m app.media_service" -WaitForSite
+$mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe $Py64 -Arguments "-m app.media_service" -LogName "media-service-launch.log" -WaitForSite
 }
 
 Write-Host "Registering SmartPark background tasks..."

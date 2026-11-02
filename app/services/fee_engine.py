@@ -104,10 +104,16 @@ def _charge_span(start: datetime, end: datetime, rules: dict[str, Any]) -> tuple
             if is_daytime(cursor, rules):
                 blocks = _blocks(seconds, int(rules["day_block_seconds"]))
                 part = blocks * int(rules["day_block_fee"])
+                maximum = int(rules.get("day_max") or 0)
+                if maximum > 0:
+                    part = min(part, maximum)
                 notes.append(f"day:{seconds}s/{blocks}blk={part}")
             else:
                 blocks = _blocks(seconds, int(rules["night_block_seconds"]))
                 part = blocks * int(rules["night_block_fee"])
+                maximum = int(rules.get("night_max") or 0)
+                if maximum > 0:
+                    part = min(part, maximum)
                 notes.append(f"night:{seconds}s/{blocks}blk={part}")
             total += part
         cursor = chunk_end
@@ -159,6 +165,21 @@ def _class_overlay(rules: dict[str, Any]) -> dict[str, Any]:
         merged.update(overlay)
     merged["car_type"] = car_type
     return merged
+
+
+def normalize_tariff_rules(rules: dict[str, Any] | None, *, car_type: str = "Car1") -> dict[str, Any]:
+    """Return a complete tariff snapshot for legacy or partially-filled rows.
+
+    Sessions freeze tariff JSON at entry. Older databases may contain a
+    partial snapshot, or a JSON value with one of the numeric fields set to
+    null. Preserve valid overrides while falling back to the Car1 defaults so
+    a public receipt or exit decision cannot fail with ``int(None)``.
+    """
+    merged = dict(CAR1_RULES)
+    if isinstance(rules, dict):
+        merged.update({key: value for key, value in rules.items() if value is not None})
+    merged["car_type"] = str(merged.get("car_type") or car_type or "Car1")
+    return _class_overlay(merged)
 
 
 def default_tariff_payload() -> dict[str, Any]:
@@ -284,6 +305,10 @@ def apply_tariff_editor(db: Session, updates: dict[str, Any]) -> Tariff:
 
 
 def load_active_rules(db: Session, car_type: str = "Car1", *, site_id: int = DEFAULT_SITE_ID) -> dict[str, Any]:
+    # Older databases can contain sessions created before site_id became
+    # mandatory.  Keep tariff lookup total at this boundary so a legacy
+    # session cannot turn into int(None) while its amount is being calculated.
+    site_id = int(site_id or DEFAULT_SITE_ID)
     wanted = car_type or "Car1"
     cache_key = f"smartpark.tariff:{int(site_id)}:{wanted}"
     cached = db.info.get(cache_key) if hasattr(db, "info") else None
@@ -301,13 +326,21 @@ def load_active_rules(db: Session, car_type: str = "Car1", *, site_id: int = DEF
             Tariff.active.is_(True),
         ).order_by(Tariff.id.desc()))
     if row and isinstance(row.rules, dict):
-        rules = dict(CAR1_RULES)
-        rules.update(row.rules)
+        rules = normalize_tariff_rules(row.rules, car_type=wanted)
         rules["currency"] = row.currency or rules.get("currency")
         rules["car_type"] = wanted
         result = _class_overlay(rules)
     else:
-        result = _class_overlay({**CAR1_RULES, "car_type": wanted})
+        result = normalize_tariff_rules(None, car_type=wanted)
+    # Tariff clock boundaries are site-local, while persisted timestamps are
+    # UTC.  Keep the timezone in every quote snapshot so all entry/exit paths
+    # calculate the same day/night boundary.
+    if not result.get("timezone"):
+        try:
+            from app.services.site_policy import site_policy
+            result["timezone"] = str(site_policy(db).get("timezone") or getattr(settings, "site_timezone", "UTC") or "UTC")
+        except Exception:
+            result["timezone"] = str(getattr(settings, "site_timezone", "UTC") or "UTC")
     if hasattr(db, "info"):
         db.info[cache_key] = dict(result)
     return result

@@ -256,6 +256,24 @@ def local_node_runtime_url(config: DeploymentConfig | None = None) -> str:
     return f"http://127.0.0.1:{int(config.server_bind_port or settings.api_port)}"
 
 
+def desktop_base_url(config: DeploymentConfig | None = None) -> str:
+    """Resolve the API used by the local desktop for its interactive session.
+
+    An Edge Node owns a local Site Service and shares the Site Server's
+    PostgreSQL database.  Its operator UI must therefore remain usable when
+    the central Site Server process is temporarily offline.  The local API
+    still enforces the node's assigned-gate scope, so this is not a bypass of
+    the central authorization model; it is the same API/data plane through
+    the node's local service.
+    """
+    config = config or load_deployment_config()
+    if config.role == EDGE_NODE:
+        local = local_node_runtime_url(config)
+        if local:
+            return local
+    return central_server_base_url(config)
+
+
 def server_base_url(config: DeploymentConfig | None = None) -> str:
     """Backward-compatible name for the central API target."""
     return central_server_base_url(config)

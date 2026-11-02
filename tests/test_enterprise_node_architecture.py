@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api_main import app
 from app.db import Base, get_db
-from app.deployment import EDGE_NODE, OPERATOR_CLIENT, SITE_SERVER, DeploymentConfig, central_server_base_url, local_node_runtime_url
+from app.deployment import EDGE_NODE, OPERATOR_CLIENT, SITE_SERVER, DeploymentConfig, central_server_base_url, desktop_base_url, local_node_runtime_url
 from app.models import Gate, Node, NodeGateAssignment, Site
 from app.services.node_authorization import NodePrincipal, assigned_gate_ids, hash_node_credential, node_owns_gate
 from app.security import processing_node_permissions
@@ -20,6 +20,7 @@ def test_deployment_separates_central_and_local_planes():
     assert edge.uses_remote_site_server
     assert central_server_base_url(edge) == "http://192.168.1.240:8760"
     assert local_node_runtime_url(edge) == "http://127.0.0.1:8760"
+    assert desktop_base_url(edge) == "http://127.0.0.1:8760"
 
     server = DeploymentConfig(role=SITE_SERVER, server_bind_port=8760)
     assert server.is_site_server
@@ -29,6 +30,7 @@ def test_deployment_separates_central_and_local_planes():
     workstation = DeploymentConfig(role=OPERATOR_CLIENT, server_base_url="http://server:8760")
     assert not workstation.runs_local_gate_runtime
     assert local_node_runtime_url(workstation) == ""
+    assert desktop_base_url(workstation) == "http://server:8760"
 
 
 def test_human_permissions_are_not_filtered_by_installation_role():

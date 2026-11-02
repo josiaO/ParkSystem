@@ -16,8 +16,9 @@ from app.services.hvx_client import HVXHostClient, HVXHostUnavailable
 class HVXCameraAdapter:
     id = "hvx"
 
-    def __init__(self, client: HVXHostClient | None = None):
+    def __init__(self, client: HVXHostClient | None = None, *, adapter_id: str = "hvx"):
         self._client = client
+        self.id = (adapter_id or "hvx").strip().lower() or "hvx"
 
     def _host(self) -> HVXHostClient:
         return self._client or HVXHostClient()
@@ -25,6 +26,8 @@ class HVXCameraAdapter:
     async def capabilities(self, device: CameraLike) -> dict[str, Any]:
         return {
             "adapter_id": self.id,
+            "vendor": "QY",
+            "engine": "ocxconfig_netsdk",
             "sdk_login": True,
             "native_plates": True,
             "live_jpeg": True,
@@ -72,6 +75,23 @@ class HVXCameraAdapter:
         if handle is None:
             return b""
         return await self._host().live_jpeg(int(handle))
+
+    async def detection_zones(self, device: CameraLike) -> dict[str, Any]:
+        handle = device.sdk_handle
+        if handle is None:
+            return {"ok": False, "adapter_id": self.id, "error": "not SDK-connected", "zones": []}
+        try:
+            state = await self._host().state(int(handle))
+        except HVXHostUnavailable as exc:
+            return {"ok": False, "adapter_id": self.id, "error": str(exc), "zones": []}
+        video = state.get("video_detect") if isinstance(state, dict) else None
+        return {"ok": bool(video and video.get("ok")), "adapter_id": self.id, **(video or {}), "zones": (video or {}).get("plate_region", [])}
+
+    async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]:
+        handle = device.sdk_handle
+        if handle is None:
+            return []
+        return await self._host().drain_events(int(handle)) or []
 
     async def disconnect(self, device: CameraLike) -> dict[str, Any]:
         handle = device.sdk_handle

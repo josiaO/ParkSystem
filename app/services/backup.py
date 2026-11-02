@@ -76,8 +76,8 @@ def save_backup_settings(db: Session, updates: dict[str, Any]) -> dict[str, Any]
         current["cloud_enabled"] = bool(updates["cloud_enabled"])
     if updates.get("cloud_url") is not None:
         url = str(updates["cloud_url"] or "").strip()
-        if url and not (url.startswith("https://") or url.startswith("http://")):
-            raise ValueError("Cloud backup address must start with http:// or https://")
+        if url and not url.startswith("https://"):
+            raise ValueError("Cloud backup address must use https://")
         current["cloud_url"] = url
     if updates.get("cloud_token") is not None:
         current["cloud_token"] = str(updates["cloud_token"])

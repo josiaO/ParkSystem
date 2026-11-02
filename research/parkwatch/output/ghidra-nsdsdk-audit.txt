@@ -1,0 +1,109 @@
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/ghidra-user
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/ghidra-user
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/ghidra-user
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/ghidra-user
+openjdk version "25.0.4.1" 2026-08-18
+OpenJDK Runtime Environment (build 25.0.4.1+1-1-24.04.4-Ubuntu)
+OpenJDK 64-Bit Server VM (build 25.0.4.1+1-1-24.04.4-Ubuntu, mixed mode)
+INFO  Using log config file: jar:file:/tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml (LoggingInitialization)  
+INFO  Using log file: /tmp/ghidra-user/.config/ghidra/ghidra_12.2_PUBLIC/application.log (LoggingInitialization)  
+INFO  Loading user preferences: /tmp/ghidra-user/.config/ghidra/ghidra_12.2_PUBLIC/preferences (Preferences)  
+INFO  Searching for classes... (ClassSearcher)  
+INFO  Class search complete (2031 ms) (ClassSearcher)  
+INFO  Initializing SSL Context (DefaultSSLContextInitializer)  
+INFO  Initializing Random Number Generator... (SecureRandomFactory)  
+INFO  Random Number Generator initialization complete: NativePRNGNonBlocking (SecureRandomFactory)  
+INFO  Loaded 120 trusted CA certificate(s) from /etc/ssl/certs/ca-certificates.crt (UnixSystemTrustKeyStoreUtil)  
+INFO  Loaded 120 trusted CA certificates from the OS trust store. (DefaultTrustManagerFactory)  
+INFO  Loaded 146 trusted CA certificates from the Java default trust store. (DefaultTrustManagerFactory)  
+INFO  Starting cache cleanup: /var/tmp/josiamosses-ghidra/fscache2 (FileCacheMaintenanceDaemon)  
+INFO  Finished cache cleanup, estimated storage used: 0 (FileCacheMaintenanceDaemon)  
+ERROR Unable to write file cache maintenance file: /var/tmp/josiamosses-ghidra/fscache2/.lastmaint (FileCacheMaintenanceDaemon) java.io.FileNotFoundException: /var/tmp/josiamosses-ghidra/fscache2/.lastmaint (Read-only file system)
+	at java.base/java.io.FileOutputStream.open0(Native Method)
+	at java.base/java.io.FileOutputStream.open(FileOutputStream.java:255)
+	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:210)
+	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:171)
+	at java.base/java.io.FileWriter.<init>(FileWriter.java:98)
+	at utilities.util.FileUtilities.writeStringToFile(FileUtilities.java:857)
+	at ghidra.formats.gfilesystem.FileCache$FileCacheMaintenanceDaemon.run(FileCache.java:328)
+ 
+INFO  Headless startup complete (3768 ms) (AnalyzeHeadless)  
+INFO  Class searcher loaded 60 extension points (19 false positives) (ClassSearcher)  
+INFO  HEADLESS Script Paths:
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Debug/Debugger-rmi-trace/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Debug/Debugger/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/Decompiler/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/MicrosoftCodeAnalyzer/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/DecompilerDependent/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/Swift/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/BSim/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Processors/JVM/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/FunctionID/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Processors/PIC/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/Base/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/GnuDemangler/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Processors/DATA/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/SystemEmulation/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Processors/8051/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/VersionTracking/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/WildcardAssembler/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/PDB/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/BytePatterns/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/FileFormats/ghidra_scripts
+    /home/josiamosses/Downloads/smartpark_edge_rebuild/research/parkwatch/scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Processors/Atmel/ghidra_scripts
+    /tmp/ghidra-12.2/ghidra_12.2_PUBLIC/Ghidra/Features/PyGhidra/ghidra_scripts (HeadlessAnalyzer)  
+INFO  HEADLESS: execution starts (HeadlessAnalyzer)  
+INFO  Opening existing project: /tmp/parkwatch-ghidra/ParkWatchFresh (HeadlessAnalyzer)  
+INFO  Opening project: /tmp/parkwatch-ghidra/ParkWatchFresh (HeadlessProject)  
+INFO  REPORT: Processing project file: /NsdSDKDll.dll (HeadlessAnalyzer)  
+INFO  REPORT: Execute script: FreshParkWatchAudit.java  (HeadlessAnalyzer)  
+INFO  SCRIPT: /home/josiamosses/Downloads/smartpark_edge_rebuild/research/parkwatch/scripts/FreshParkWatchAudit.java (HeadlessAnalyzer)  
+INFO  FreshParkWatchAudit.java> === FRESH PARKWATCH GHIDRA AUDIT === (GhidraScript)  
+INFO  FreshParkWatchAudit.java> PROGRAM NsdSDKDll.dll (GhidraScript)  
+INFO  FreshParkWatchAudit.java> LANGUAGE x86:LE:32:default COMPILER windows (GhidraScript)  
+INFO  FreshParkWatchAudit.java> IMAGE_BASE 10000000 EXECUTABLE /home/josiamosses/Downloads/smartpark_edge_rebuild/Current_ParkSystem_configs/ParkingSystem/ParkWatch/NsdSDKDll.dll (GhidraScript)  
+INFO  FreshParkWatchAudit.java> INTERESTING_SYMBOL_COUNT 0 (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c8b52 GetCurrentThreadId (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c948a ?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c94ce ?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c950c ?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEPAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c9570 ?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEXXZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c95e8 ?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEXXZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c962a ?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c966a ?str@?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@XZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c96f8 ??0?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@H@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c9748 ?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c978a ??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c97ca ?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105c9872 ??_D?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXXZ (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105ca4d8 ??$?6DU?$char_traits@D@std@@V?$allocator@D@1@@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@ABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105ca888 ??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105ca8d8 ?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105ca914 ?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cab6c _beginthreadex (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105caf1a _decode_pointer (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cb072 AVIStreamWrite (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cb084 AVIStreamSetFormat (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cb09a AVIFileCreateStreamW (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cb28a GetCommandLineW (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cbb8d NSD_CapturePicture (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cbbd7 NSD_CloseRemoteCapture (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cbc9b NSD_GetAllPreset (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cbef1 NSD_OpenRemoteCapture (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc287 NSD_RemoteCapture (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc30c NSD_RestoreVideo (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc3b3 NSD_SetRemotePlaybackDataCallBack (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc3d5 NSD_SetRemotePlaybackEventCallBack (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc3f8 NSD_SetStandardDataCallBack (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc581 NSD_TrafficSnapshot_Close (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc59b NSD_TrafficSnapshot_GetPic (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc5b6 NSD_TrafficSnapshot_Open (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc5cf NSD_TrafficSnapshot_Trigger (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc626 NSD_ZoomInVideo (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc636 NSD_ZoomInVideoEx (GhidraScript)  
+INFO  FreshParkWatchAudit.java> STRING @ 105cc654 NSD_ZoomOutVideo (GhidraScript)  
+INFO  FreshParkWatchAudit.java> INTERESTING_STRING_COUNT 39 (GhidraScript)  
+INFO  FreshParkWatchAudit.java> DECOMPILED_INTERESTING_FUNCTIONS 0 (GhidraScript)  
+INFO  FreshParkWatchAudit.java> === END FRESH PARKWATCH GHIDRA AUDIT === (GhidraScript)  
+INFO  REPORT: Save succeeded for processed file: /NsdSDKDll.dll (HeadlessAnalyzer)  

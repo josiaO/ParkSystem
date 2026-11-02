@@ -20,6 +20,11 @@ HOST="127.0.0.1"
 PORT=8765
 
 
+def _int_or(value, default: int) -> int:
+    """Convert JSON numbers while treating an explicit null as omitted."""
+    return int(default if value is None else value)
+
+
 class BoundedHTTPServer(HTTPServer):
     """Serve SDK requests without creating an unbounded thread per socket.
 
@@ -130,6 +135,15 @@ def reply_jpeg(handler, jpeg: bytes, status=200, headers=None):
     handler.wfile.write(jpeg)
 
 
+def reply_empty(handler, status=204, headers=None):
+    handler.send_response(status)
+    for name, value in (headers or {}).items():
+        handler.send_header(str(name), str(value))
+    handler.send_header("Content-Length", "0")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version="SmartParkHVXHost/0.1"
@@ -176,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/info":
             required = ["NetSDK.dll", "CommModule.dll", "PlaySdk.dll", "Log.dll", "RtspRecvSdk.dll", "DecodeSdk.dll"]
             files = {name: (VENDOR / name).exists() for name in required}
+            api_required = ["Net_Init", "Net_StartVideo", "Net_AddPlayWindow", "Net_SetDrawDataOut", "Net_GetJpgBuffer", "Net_FreeBuffer"]
+            api_available = {name: bool(sdk and hasattr(sdk.dll, name)) for name in api_required}
             return reply(self, 200, {
                 "available": sdk is not None,
                 "connections": sdk.connection_sessions() if sdk else [],
@@ -184,6 +200,20 @@ class Handler(BaseHTTPRequestHandler):
                 "platform": platform.platform(),
                 "vendor_dir": str(VENDOR),
                 "dll": "NetSDK.dll",
+                "stream_backend": "ocxconfig_netsdk",
+                "stream_delivery": [
+                    "Net_AddPlayWindow",
+                    "Net_SetDrawDataOut (primary decoded-frame callback)",
+                    "Net_GetJpgBuffer (compatibility fallback)",
+                ],
+                "latest_frame_policy": "bounded_latest_frame_drop_old",
+                "native_requirements": {
+                    "python_bits": 32,
+                    "vendor_files": files,
+                    "api": api_available,
+                    "primary_delivery": "Net_StartVideo -> Net_AddPlayWindow -> Net_SetDrawDataOut -> bounded latest JPEG",
+                    "fallback_delivery": "Net_GetJpgBuffer or PlaySdk HWND capture",
+                },
                 "files": files,
                 "missing": [name for name, present in files.items() if not present],
                 "sdk_control_port_default": 30000,
@@ -196,7 +226,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Net_QueryConnState",
                     "Net_FuntionListRsp then capability-selected stream type",
                     "Net_RegOffLineClient",
-                    "Net_StartVideo then Net_GetJpgBuffer",
+                    "Net_StartVideo -> Net_ShowPlateRegion -> Net_AddPlayWindow -> Net_SetDrawDataOut (primary)",
                     "Net_RegImageRecvEx2 then Net_RegImageRecvEx",
                 ],
             })
@@ -257,11 +287,15 @@ class Handler(BaseHTTPRequestHandler):
             if not sdk: return reply(self,503,{"error":startup_error})
             try:
                 handle=int(path.rsplit("/",1)[-1])
-                jpeg=sdk.live_jpeg_for(handle)
+                after = _int_or((query.get("after") or [0])[0], 0)
+                wait_ms = _int_or((query.get("wait_ms") or [0])[0], 0)
+                jpeg, seq = sdk.live_frame_for(handle, after_seq=after, wait_ms=wait_ms)
                 if not jpeg:
-                    return reply(self,404,{"error":"no live video frame yet — Net_StartVideo / Net_GetJpgBuffer",
-                                           "video": sdk.video_status(handle)})
-                return reply_jpeg(self, jpeg, headers={"X-Frame-Seq": sdk.live_frame_seq(handle)})
+                    return reply_empty(self, 204, headers={
+                        "X-Frame-Seq": seq,
+                        "X-Frame-Wait": "timeout" if after else "empty",
+                    })
+                return reply_jpeg(self, jpeg, headers={"X-Frame-Seq": seq})
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/state/"):
             if not sdk: return reply(self,503,{"error":startup_error})
@@ -289,7 +323,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path == "/connect":
             try:
-                result=sdk.add_and_connect(str(data["ip"]),int(data.get("port",30000)),int(data.get("timeout",3)),str(data.get("username","")),str(data.get("password","")))
+                result=sdk.add_and_connect(
+                    str(data["ip"]),
+                    _int_or(data.get("port", 30000), 30000),
+                    _int_or(data.get("timeout", 3), 3),
+                    str(data.get("username", "") or ""),
+                    str(data.get("password", "") or ""),
+                )
                 return reply(self,200,result)
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/disconnect/"):
@@ -309,18 +349,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path == "/gpio/write":
             try:
-                handle=int(data["handle"]); index=int(data.get("index",0)); value=int(data.get("value",1))
+                handle=int(data["handle"]); index=_int_or(data.get("index",0), 0); value=_int_or(data.get("value",1), 1)
                 rc=sdk.write_gpio(handle, index, value)
                 return reply(self,200,{"ok":rc==0,"rc":rc,"rc_name":describe_rc(rc),"handle":handle,"index":index,"value":value})
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path == "/gpio/pulse":
             try:
-                handle=int(data["handle"]); index=int(data.get("index",0)); pulse_ms=int(data.get("pulse_ms",500))
+                handle=int(data["handle"]); index=_int_or(data.get("index",0), 0); pulse_ms=_int_or(data.get("pulse_ms",500), 500)
                 return reply(self,200,sdk.gpio_pulse(handle, index, pulse_ms))
             except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path == "/gate-setup":
             try:
-                handle=int(data["handle"]); state=int(data.get("state",1)); index=int(data.get("index",0))
+                handle=int(data["handle"]); state=_int_or(data.get("state",1), 1); index=_int_or(data.get("index",0), 0)
                 rc=sdk.gate_setup(handle, state, index)
                 return reply(self,200,{"ok":rc==0,"rc":rc,"rc_name":describe_rc(rc),"handle":handle,"state":state,"index":index})
             except Exception as exc: return reply(self,500,{"error":str(exc)})

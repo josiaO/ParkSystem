@@ -64,6 +64,29 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(plate, "T285DQP")
         self.assertAlmostEqual(score, 0.30, places=2)
 
+    def test_tanzania_leading_t_confusion_is_profile_scoped(self):
+        from app.core.plate_policy import plate_policy_for
+
+        corrected = plate_policy_for("TZ").correct("7285DQP")
+        self.assertEqual(corrected["plate"], "T285DQP")
+        self.assertTrue(corrected["corrected"])
+        self.assertEqual(plate_policy_for("NONE").correct("7285DQP")["plate"], "7285DQP")
+
+    def test_full_panorama_recrop_wins_over_sdk_vehicle_crop(self):
+        from app.services import captures
+
+        expected = b"\xff\xd8panorama-recropy\xff\xd9"
+        with patch.object(captures, "_crop_from_bbox", return_value=expected) as recrop, \
+             patch.object(captures, "_looks_like_plate_crop", return_value=True):
+            result = captures._plate_jpeg(
+                b"\xff\xd8full-panorama\xff\xd9",
+                b"\xff\xd8soft-sdk-vehicle-crop\xff\xd9",
+                {"x1": 10, "y1": 20, "x2": 100, "y2": 50},
+                {},
+            )
+        self.assertEqual(result, expected)
+        recrop.assert_called_once()
+
     def test_overlay_prefers_native_uslpbox(self):
         native = native_from_sdk_capture({"plate": "T285DQP", "score": 90, "plate_box": [10, 20, 80, 50], "image_width": 640, "image_height": 480})
         local = {"plate": "T285DQP", "bbox": {"x1": 1, "y1": 2, "x2": 3, "y2": 4}, "source": "fastalpr"}
@@ -181,6 +204,23 @@ class PlateFusionTests(unittest.TestCase):
         engine = SimpleNamespace(ocr=FakeOcr())
         hits = _hits_from_detections(engine, frame, [ghost, zc, real])
         self.assertEqual([hit.plate_normalized for hit in hits], ["T277ECR"])
+
+    def test_departure_presence_uses_the_same_detector_confidence_floor(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.services import alpr
+
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        bbox = SimpleNamespace(x1=80, y1=100, x2=220, y2=140)
+        engine = SimpleNamespace(detector=Mock(return_value=[]))
+        engine.detector.predict.side_effect = [[SimpleNamespace(bounding_box=bbox, confidence=0.10)],
+                                                [SimpleNamespace(bounding_box=bbox, confidence=0.90)]]
+        with patch.object(alpr, "fastalpr_installed", return_value=True), \
+             patch.object(alpr, "_load_engine", return_value=engine), \
+             patch.object(alpr, "decode_alpr_image", return_value=frame):
+            self.assertFalse(alpr.plate_still_present(b"frame"))
+            self.assertTrue(alpr.plate_still_present(b"frame"))
 
     def test_crop_then_ocr_uses_padded_plate_not_full_frame(self):
         import numpy as np

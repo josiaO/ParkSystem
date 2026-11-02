@@ -3,29 +3,30 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from html import escape
 import asyncio
 import json
 import logging
 import time
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import settings
-from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal
+from .db import Base, engine, ensure_schema, get_db, short_session, SessionLocal, release_connection
 from .domain.site import DEFAULT_SITE_ID
-from .models import AccessPlan, AccessDecision, Camera, CameraStatus, Gate, GateMode, Node, NodeGateAssignment, ParkingSession, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
+from .models import AccessPlan, AccessDecision, AuditLog, Camera, CameraStatus, Gate, GateCommandRecord, GateMode, Node, NodeGateAssignment, ParkingEntryClaim, ParkingSession, PaymentIntent, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
 from .schemas import (
     CameraCreate, CameraFramingUpdate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
     SitePolicyUpdate, StreamProfilesUpdate, UserCreate, UserUpdate, AccessPlanCreate, AccessPlanUpdate, VehicleCreate, VehicleUpdate,
     VehicleBulkCreate, VehicleBulkDelete, TariffEditorUpdate, BackupSettingsUpdate,
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
-    RecognitionScopeUpdate,
+    RecognitionScopeUpdate, DeveloperSettingsUpdate, DeveloperDeleteRequest,
 )
 from .security import authenticate_processing_node, authenticate_user, create_session, current_node, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, revoke_session, user_permissions
 from .core.fusion import resolve_readings
@@ -83,6 +84,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 _manual_alpr_lock = asyncio.Lock()
 _manual_alpr_pending: asyncio.Task | None = None
 _local_alpr_pending: dict[int, asyncio.Task] = {}
+_local_watch_tasks: dict[int, asyncio.Task] = {}
 _live_still_digests: dict[str, str] = {}
 
 
@@ -232,8 +234,15 @@ async def _diagnostic_heartbeat_loop() -> None:
     from .services.recognition_worker import worker_health
 
     previous_signature = None
+    last_media_prune = 0.0
     while True:
         try:
+            if time.monotonic() - last_media_prune >= 6 * 3600:
+                from .services.captures import prune_unreferenced_media
+                with short_session() as db:
+                    cleanup = prune_unreferenced_media(db)
+                log.info("MEDIA retention cleanup scanned=%s removed=%s days=%s", cleanup["scanned"], cleanup["removed"], cleanup["retention_days"])
+                last_media_prune = time.monotonic()
             media_rows = gateway.live_metrics()
             worker = worker_health()
             cameras = []
@@ -876,8 +885,26 @@ def assign_node_gate(node_id: str, payload: dict = Body(default_factory=dict), d
     gate = db.get(Gate, gate_id)
     if gate is None:
         raise HTTPException(status_code=404, detail="Gate not found")
-    if int(gate.site_id) != int(node.site_id):
+    if int(gate.site_id or DEFAULT_SITE_ID) != int(node.site_id or DEFAULT_SITE_ID):
         raise HTTPException(status_code=409, detail="Gate belongs to a different site")
+    current_owner = db.scalar(
+        select(NodeGateAssignment)
+        .where(
+            NodeGateAssignment.gate_id == gate.id,
+            NodeGateAssignment.enabled.is_(True),
+            NodeGateAssignment.node_id != node.id,
+        )
+    )
+    if bool(payload.get("enabled", True)) and current_owner is not None:
+        owner = db.get(Node, current_owner.node_id)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Gate is already assigned to active node "
+                f"{owner.node_id if owner else current_owner.node_id}. "
+                "Disable that assignment before moving the gate."
+            ),
+        )
     if bool(payload.get("replace", False)):
         for existing in db.scalars(select(NodeGateAssignment).where(NodeGateAssignment.node_id == node.id)).all():
             existing.enabled = False
@@ -1072,6 +1099,8 @@ async def import_discovered_cameras(
     payload = payload or CameraImport()
     username = (payload.username or "admin").strip() or "admin"
     password = payload.password if payload.password is not None else "admin"
+    if str(getattr(settings, "deployment_profile", "DEVELOPMENT")).upper() != "DEVELOPMENT" and password.strip().lower() in {"", "admin"}:
+        raise HTTPException(422, "Set the real camera password before importing cameras in a non-development deployment.")
     specs = []
     if payload.cameras:
         for item in payload.cameras:
@@ -1139,8 +1168,11 @@ async def import_discovered_cameras(
 
 @app.post("/cameras/sdk/connect-all")
 async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+    from .services.developer import camera_connections_enabled
+    if not camera_connections_enabled(db):
+        return {"connected": 0, "attempted": 0, "skipped": 0, "results": [], "note": "Developer mode has camera connections disabled."}
     rows = db.scalars(select(Camera).where(Camera.enabled == True).order_by(Camera.id)).all()
-    from .services.node_scope import camera_active_on_this_installation
+    from .services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope
     rows = [camera for camera in rows if camera_active_on_this_installation(camera, db=db)]
     results = []
     connected = 0
@@ -2049,6 +2081,9 @@ async def _run_local_alpr(
     if ticket is None:
         return None
     _mark_local_alpr(camera.id)
+    # OCR is native/CPU work and may take several seconds. Do not keep the
+    # caller's PostgreSQL connection checked out while the inference task runs.
+    release_connection(db)
     jpeg = ticket.jpeg or jpeg
     abandon = asyncio.Event()
     work = asyncio.create_task(_run_local_alpr_locked(
@@ -2248,6 +2283,8 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: Us
         gate = get_gate_or_404(db, requested_gate_id)
         if int(gate.site_id or DEFAULT_SITE_ID) != int(site.id):
             raise HTTPException(409, "Selected gate belongs to a different site. Refresh the gate list and try again.")
+    if str(getattr(settings, "deployment_profile", "DEVELOPMENT")).upper() != "DEVELOPMENT" and (payload.password or "").strip().lower() in {"", "admin"}:
+        raise HTTPException(422, "Set the real camera password before adding cameras in a non-development deployment.")
     c = Camera(
         name=payload.name, ip_address=payload.ip_address, sdk_port=payload.sdk_port,
         username=payload.username, password_secret=payload.password or settings.default_camera_password, gate_id=requested_gate_id,
@@ -2403,9 +2440,28 @@ def list_registered_devices(db: Session = Depends(get_db), _: User = Depends(req
     return {"devices": devices, "edge_agent": edge_agent_status()}
 
 
+@app.get("/camera-adapters")
+def camera_adapter_catalog(_: User = Depends(require("cameras.view"))):
+    """Return the installed camera-engine adapters and their ownership model."""
+    from .infrastructure.hardware.cameras import adapter_catalog
+
+    return {
+        "adapters": adapter_catalog(),
+        "contract": {
+            "control": ["connect", "disconnect", "health", "capabilities"],
+            "media": ["live_sources", "latest_frame", "snapshot"],
+            "recognition": "FastALPR remains application-side unless an adapter reports native plate events",
+            "isolation": "Native vendor SDKs run behind a bounded host/process boundary",
+        },
+    }
+
+
 @app.post("/cameras/{camera_id}/sdk/connect")
 async def sdk_connect(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     c = _camera_for_node(db, camera_id, action="sdk-connect")
+    from .services.developer import camera_connections_enabled
+    if not camera_connections_enabled(db):
+        raise HTTPException(409, "Developer mode has camera connections disabled. No SDK connection was opened.")
     return await apply_camera_connect(c, db, user, raise_on_host_error=False)
 
 
@@ -2423,9 +2479,31 @@ async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: Us
         await gateway.unregister_stream(c.id)
     except Exception:
         pass
-    c.sdk_handle=None; c.status=CameraStatus.DISCOVERED.value; db.commit()
+    c.sdk_handle = None
+    c.status = CameraStatus.DISCOVERED.value
+    db.commit()
     write_audit(db, user, "camera.sdk_disconnect", "camera", str(c.id), "Disconnected SDK session")
     return camera_dict(c)
+
+
+async def _read_upload_limited(file: UploadFile, *, maximum_bytes: int = 12 * 1024 * 1024) -> bytes:
+    """Read an image upload with a hard memory bound."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(min(1024 * 1024, maximum_bytes - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > maximum_bytes:
+            raise HTTPException(413, "Image upload is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _require_development_simulation() -> None:
+    if str(getattr(settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT").upper() != "DEVELOPMENT":
+        raise HTTPException(404, "Simulation endpoints are disabled outside the development profile")
 
 
 @app.post("/cameras/{camera_id}/rtsp/probe")
@@ -2838,7 +2916,7 @@ async def alpr_recognize_upload(
     file: UploadFile = File(...),
     _: User = Depends(require("cameras.connect")),
 ):
-    jpeg = await file.read()
+    jpeg = await _read_upload_limited(file)
     if not jpeg:
         raise HTTPException(400, "Empty image")
     result = await _manual_alpr_read(jpeg, camera_label=file.filename or "upload")
@@ -2917,6 +2995,7 @@ def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "L
         need_detect=detect,
         live_role=live_role,
         stream_profiles=_resolve_stream_profiles(camera),
+        adapter_id=str(getattr(camera, "adapter_id", None) or "hvx").strip().lower() or "hvx",
     )
 
 
@@ -3319,17 +3398,19 @@ async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: 
     c = _camera_for_node(db, camera_id, action="presence-read")
     gpio = None
     pins: list[dict] = []
+    learned = coil_watch.learned_index(c.id)
+    configured_index = getattr(settings, "coil_gpio_index", None)
+    gpio_index = learned if learned is not None else configured_index
     if c.sdk_handle is not None:
         pins = await HVXHostClient().scan_gpio(int(c.sdk_handle), _coil_indexes(c.id))
-        gpio = next((row for row in pins if row.get("index") == coil_watch.learned_index(c.id)), None)
-        if gpio is None:
-            gpio = await HVXHostClient().read_gpio(int(c.sdk_handle), int(settings.coil_gpio_index))
-    learned = coil_watch.learned_index(c.id)
+        gpio = next((row for row in pins if row.get("index") == gpio_index), None)
+        if gpio is None and gpio_index is not None:
+            gpio = await HVXHostClient().read_gpio(int(c.sdk_handle), int(gpio_index))
     return {
         "camera_id": c.id,
         "occupied": coil_watch.occupied(c.id),
         "recent": coil_watch.recently_triggered(c.id),
-        "gpio_index": learned if learned is not None else int(settings.coil_gpio_index),
+        "gpio_index": gpio_index,
         "learned_index": learned,
         "scanning": learned is None,
         "active_value": int(settings.coil_active_value),
@@ -3354,6 +3435,8 @@ async def post_camera_presence(
 ):
     c = _camera_for_node(db, camera_id, action="presence-write")
     edge = coil_watch.observe(c.id, occupied, source="api")
+    if edge.falling:
+        await _complete_passage_from_sensor(c.id)
     write_audit(db, user, "camera.presence", "camera", str(c.id), f"occupied={occupied}")
     if edge.rising and c.sdk_handle is not None:
         await _read_presence_now(c.id, int(c.sdk_handle))
@@ -3366,7 +3449,7 @@ async def post_camera_presence(
     return {**edge.as_dict(), "last_car": get_state(c.id).last_car or None}
 
 
-async def _read_presence_now(camera_id: int, handle: int) -> None:
+async def _read_presence_now(camera_id: int, handle: int, *, background: bool = False) -> None:
     coil_watch.mark_triggered(camera_id)
     with short_session() as db:
         previous = latest_for_camera(db, camera_id)
@@ -3376,8 +3459,19 @@ async def _read_presence_now(camera_id: int, handle: int) -> None:
         await hvx.snapshot_trigger(handle)
     except Exception:
         pass
-    await asyncio.sleep(0.2)  # Allow the camera capture callback to settle.
-    await _drain_camera_events(camera_id, handle)
+    # Net_ImageSnap only queues the request; the JPEG arrives asynchronously
+    # through the image callback. Poll for a new callback briefly instead of
+    # assuming 200 ms is enough and OCR'ing an unrelated live frame.
+    wait_until = time.monotonic() + max(
+        0.2, float(getattr(settings, "capture_event_wait_seconds", 1.5) or 1.5)
+    )
+    while True:
+        drained = await _drain_camera_events(camera_id, handle, defer_local_alpr=background)
+        if isinstance(drained, int) and drained > 0:
+            return
+        if time.monotonic() >= wait_until:
+            break
+        await asyncio.sleep(0.05)
     with short_session() as db:
         camera = db.get(Camera, camera_id)
         if camera is None:
@@ -3385,10 +3479,34 @@ async def _read_presence_now(camera_id: int, handle: int) -> None:
         latest = latest_for_camera(db, camera.id)
         if latest and latest.plate and (latest.id, latest.image_id, latest.plate) != previous_key:
             return
+        # The live SDK read is external I/O; release the read connection first.
+        release_connection(db)
         jpeg = await hvx.live_jpeg(handle)
         if jpeg[:2] != b"\xff\xd8":
             jpeg = get_state(camera_id).jpeg
-        await _run_local_alpr(db, camera, jpeg, presence=True, force=True)
+        if background:
+            task = asyncio.create_task(
+                _run_presence_alpr_background(camera_id, jpeg),
+                name=f"camera-presence-alpr-{camera_id}",
+            )
+            task.add_done_callback(_consume_background_task)
+        else:
+            await _run_local_alpr(db, camera, jpeg, presence=True, force=True)
+
+
+async def _run_presence_alpr_background(camera_id: int, jpeg: bytes) -> None:
+    """Run the coil fallback without blocking the SDK callback poller."""
+    try:
+        with short_session() as db:
+            camera = db.get(Camera, camera_id)
+            if camera is not None:
+                release_connection(db)
+                await _run_local_alpr(db, camera, jpeg, presence=True, force=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from .services.health import note_worker_failure
+        note_worker_failure("camera-presence-recognition", str(exc))
 
 
 @app.get("/media/{kind}/{name}")
@@ -3524,7 +3642,9 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
         return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
     new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
-    entitlement = lookup_entitlement(db, row.plate, site_id=camera.site_id) if row and row.plate else None
+    # Fuzzy OCR correction is for operator assistance only.  Automatic
+    # barrier authority requires an exact normalized registered plate.
+    entitlement = lookup_entitlement(db, row.plate, site_id=camera.site_id, strict=True) if row and row.plate else None
     registered_auto = bool(
         entitlement and entitlement.registered and entitlement.auto_open
     )
@@ -3574,6 +3694,9 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
             return capture_dict(latest) if latest else None
         try:
             source_name = str((capture or {}).get("source") or "camera")
+            # Printing/payment/gate control may await hardware or a provider.
+            # Commit the capture checkpoint before entering that external path.
+            release_connection(db)
             if side == "ENTRY":
                 from .application.live_parking import handle_live_entry
                 result = await handle_live_entry(
@@ -3686,7 +3809,70 @@ def _show_camera_read(
     })
 
 
-async def _drain_camera_events(camera_id: int, handle: int) -> None:
+async def _process_native_capture(
+    camera_id: int,
+    capture: dict,
+    jpeg: bytes,
+    crop: bytes,
+    native: dict,
+    *,
+    presence: bool,
+    image_id: int,
+) -> None:
+    """Finish one native event without holding up callback ingestion.
+
+    The SDK callback queue is the capture boundary.  Database writes and local
+    ALPR are deliberately performed in a fresh session/task so a slow OCR call
+    cannot stop the next callback from being drained.
+    """
+    try:
+        with short_session() as db:
+            row = db.get(Camera, camera_id)
+            if row is None:
+                return
+            from .services.ocr_policy import NATIVE_ONLY, camera_recognition_mode
+            from .recognition_worker import worker_owns_software_reads
+            from .services import hybrid_fusion
+            from .core.plate import is_empty_scene_ocr
+
+            native_plate = str(native.get("plate") or "")
+            real_native = bool(native_plate) and not is_empty_scene_ocr(
+                native_plate, confidence=float(native.get("confidence") or 0),
+            )
+            if presence and real_native and hybrid_fusion.routes_camera(row, db):
+                release_connection(db)
+                await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
+                return
+
+            if presence and camera_recognition_mode(row) == NATIVE_ONLY:
+                await _persist_capture_event(db, row, capture, jpeg, crop)
+            # Software and hybrid modes must reach their FastALPR/fusion
+            # decision before native text can create a session or open a gate.
+            if presence and not worker_owns_software_reads(camera_id) and should_run_local(
+                native_plate=str(native.get("plate") or ""),
+                native_confidence=float(native.get("confidence") or 0),
+                presence=True,
+                native_plates=adapter_has_native_plates(row),
+                camera=row,
+            ):
+                frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
+                await _run_local_alpr(
+                    db, row, frame, native=native, presence=True,
+                    image_id=image_id, force=False, plate_crop=crop,
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from .services.health import note_worker_failure
+        note_worker_failure("camera-capture-processing", str(exc))
+
+
+async def _drain_camera_events(
+    camera_id: int,
+    handle: int,
+    *,
+    defer_local_alpr: bool = False,
+) -> int:
     hvx = HVXHostClient()
     try:
         events = await hvx.drain_events(handle)
@@ -3695,7 +3881,8 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
     if events is None:
         # Do not replay last_capture. The host keeps the previous callback in
         # state() after the car has left; re-ingesting it looks hardcoded.
-        return
+        return 0
+    processed = len(events)
     for capture in events:
         image_id = int(capture.get("image_id") or 0)
         plate = str(capture.get("plate") or "")
@@ -3759,7 +3946,11 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         plate_overlay = choose_overlay_box(native)
         if plate_overlay:
             remember_plate_box(camera_id, plate_overlay)
-        if crop[:2] != b"\xff\xd8" and plate_overlay and jpeg[:2] == b"\xff\xd8":
+        # Prefer a fresh crop from the full panorama whenever the native
+        # usLpBox is available. The SDK vehicle-picture buffer is frequently a
+        # lower-resolution/blurrier image, especially under headlight glare;
+        # using it first was the main source of unreadable persisted crops.
+        if plate_overlay and jpeg[:2] == b"\xff\xd8":
             fitted = fit_plate_box(
                 plate_overlay, jpeg,
                 src_w=int(native.get("image_width") or 0),
@@ -3767,7 +3958,9 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
             )
             if fitted:
                 from .services.captures import _crop_from_bbox
-                crop = _crop_from_bbox(jpeg, fitted)
+                recrop = _crop_from_bbox(jpeg, fitted)
+                if recrop[:2] == b"\xff\xd8":
+                    crop = recrop
         # A camera plate rectangle is a vehicle even when the plate text is empty.
         # Empty-scene OCR (ZC…) is not.
         presence = bool(native.get("have_vehicle") or real_native or plate_overlay)
@@ -3792,7 +3985,7 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
         with short_session() as db:
             row = db.get(Camera, camera_id)
             if row is None:
-                return
+                return processed
             from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
             local_only = camera_recognition_mode(row) == LOCAL_ONLY
             _show_camera_read(
@@ -3808,31 +4001,53 @@ async def _drain_camera_events(camera_id: int, handle: int) -> None:
                 # HYBRID with a live Recognition Worker: the native reading is one
                 # candidate; the worker's FastALPR reading arrives via the outbox.
                 # The coordinator persists exactly one fused capture per vehicle.
-                await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
+                if defer_local_alpr:
+                    task = asyncio.create_task(
+                        _process_native_capture(
+                            camera_id, dict(capture), jpeg, crop, dict(native),
+                            presence=presence, image_id=image_id,
+                        ),
+                        name=f"camera-capture-{camera_id}-{image_id}",
+                    )
+                    task.add_done_callback(_consume_background_task)
+                else:
+                    release_connection(db)
+                    await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=crop, capture=capture)
                 continue
-            from .services.ocr_policy import NATIVE_ONLY, camera_recognition_mode
-            if presence and camera_recognition_mode(row) == NATIVE_ONLY:
-                await _persist_capture_event(db, row, capture, jpeg, crop)
-            # Software and hybrid modes must reach their FastALPR/fusion
-            # decision before native text can create a session or open a gate.
-            from .recognition_worker import worker_owns_software_reads
-            if presence and not worker_owns_software_reads(camera_id) and should_run_local(
-                native_plate=str(native.get("plate") or ""),
-                native_confidence=float(native.get("confidence") or 0),
-                presence=True,
-                native_plates=adapter_has_native_plates(row),
-                camera=row,
-            ):
-                # The camera callback is the capture trigger. FastALPR reads the
-                # JPEG even when the camera sent no plate text.
-                frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
-                await _run_local_alpr(
-                    db, row, frame, native=native, presence=True,
-                    image_id=image_id, force=False, plate_crop=crop,
+            if defer_local_alpr:
+                task = asyncio.create_task(
+                    _process_native_capture(
+                        camera_id, dict(capture), jpeg, crop, dict(native),
+                        presence=presence, image_id=image_id,
+                    ),
+                    name=f"camera-capture-{camera_id}-{image_id}",
                 )
+                task.add_done_callback(_consume_background_task)
+            else:
+                from .services.ocr_policy import NATIVE_ONLY, camera_recognition_mode
+                if presence and camera_recognition_mode(row) == NATIVE_ONLY:
+                    await _persist_capture_event(db, row, capture, jpeg, crop)
+                # Software and hybrid modes must reach their FastALPR/fusion
+                # decision before native text can create a session or open a gate.
+                from .recognition_worker import worker_owns_software_reads
+                if presence and not worker_owns_software_reads(camera_id) and should_run_local(
+                    native_plate=str(native.get("plate") or ""),
+                    native_confidence=float(native.get("confidence") or 0),
+                    presence=True,
+                    native_plates=adapter_has_native_plates(row),
+                    camera=row,
+                ):
+                    # The camera callback is the capture trigger. FastALPR reads the
+                    # JPEG even when the camera sent no plate text.
+                    frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
+                    await _run_local_alpr(
+                        db, row, frame, native=native, presence=True,
+                        image_id=image_id, force=False, plate_crop=crop,
+                    )
+    return processed
 
 
-async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
+async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool = False) -> None:
     """Read camera GPIO IN (ground loop) and trigger a plate read on a rising edge."""
     hvx = HVXHostClient()
     active = int(getattr(settings, "coil_active_value", 1) or 1)
@@ -3863,9 +4078,49 @@ async def _poll_coil_and_read(camera_id: int, handle: int) -> None:
             coil_source=last_edge.source,
             coil_index=last_edge.index,
         )
+        if last_edge.falling:
+            await _complete_passage_from_sensor(camera_id)
     if not rising:
         return
-    await _read_presence_now(camera_id, handle)
+    if background:
+        task = asyncio.create_task(
+            _read_presence_now(camera_id, handle, background=True),
+            name=f"camera-snapshot-{camera_id}",
+        )
+        task.add_done_callback(_consume_background_task)
+    else:
+        await _read_presence_now(camera_id, handle, background=False)
+
+
+async def _complete_passage_from_sensor(camera_id: int) -> None:
+    """Complete an authorized lane only after its vehicle leaves the loop."""
+    from .application.entry_lane import policy_from_parking_settings
+    from .application.exit_lane import ExitLaneController
+    from .domain.parking_engine import GATE_OPEN_REQUESTED, EXIT_GATE_OPEN_REQUESTED
+    from .services.parking_sessions import mark_vehicle_passed
+    from .services.simulation import parking_settings
+
+    with short_session() as db:
+        camera = db.get(Camera, int(camera_id))
+        if camera is None:
+            return
+        policy = policy_from_parking_settings(parking_settings(db))
+        if (camera.lane_direction or "ENTRY").upper() == "EXIT":
+            rows = list(db.scalars(select(ParkingSession).where(
+                ParkingSession.exit_camera_id == camera.id,
+                ParkingSession.lifecycle == EXIT_GATE_OPEN_REQUESTED,
+            ).order_by(ParkingSession.id.desc()).limit(4)).all())
+            controller = ExitLaneController()
+            for row in rows:
+                await controller.vehicle_passed(db, row, policy=policy)
+        else:
+            rows = list(db.scalars(select(ParkingSession).where(
+                ParkingSession.camera_id == camera.id,
+                ParkingSession.lifecycle == GATE_OPEN_REQUESTED,
+            ).order_by(ParkingSession.id.desc()).limit(4)).all())
+            for row in rows:
+                mark_vehicle_passed(db, row, policy=policy, side="ENTRY")
+            db.commit()
 
 
 async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
@@ -3981,6 +4236,7 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         if camera is None or not software_ocr_enabled(camera):
             return
         from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
+        release_connection(db)
         native = {} if camera_recognition_mode(camera) == LOCAL_ONLY else await _native_capture_for_camera(camera)
         from .services.recognition_runtime import runtime
         # HVX last_capture plate text is not presence. Coil/visit/generic IP are.
@@ -3999,14 +4255,57 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             _alpr_fp[camera_id] = fp
 
 
+async def _local_watch_once(camera_id: int, handle: int) -> None:
+    try:
+        await _maybe_watch_local_alpr(camera_id, handle)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from .services.health import note_worker_failure
+        note_worker_failure("camera-software-recognition", str(exc))
+
+
+def _schedule_local_watch(camera_id: int, handle: int) -> None:
+    """Keep software sampling independent from the native capture poller."""
+    existing = _local_watch_tasks.get(int(camera_id))
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(
+        _local_watch_once(camera_id, handle),
+        name=f"camera-software-watch-{camera_id}",
+    )
+    _local_watch_tasks[int(camera_id)] = task
+
+    def _finished(done: asyncio.Task) -> None:
+        if _local_watch_tasks.get(int(camera_id)) is done:
+            _local_watch_tasks.pop(int(camera_id), None)
+        _consume_background_task(done)
+
+    task.add_done_callback(_finished)
+
+
 async def _outbox_loop():
     from .services.queues import parking_outbox
     from .services.health import note_worker_failure
 
+    last_token = None
+    pending_known = False
     while True:
+        sleep_for = float(settings.parking_event_poll_seconds)
         try:
             box = parking_outbox()
-            for item in box.pending(limit=20):
+            change_token = getattr(box, "change_token", None)
+            token = change_token() if callable(change_token) else None
+            # An empty durable queue does not need a SQLite SELECT on every
+            # tick. File metadata detects cross-process enqueue activity; the
+            # database is opened only after the outbox changes or work is
+            # already known to be pending.
+            if not pending_known and token is not None and token == last_token:
+                await asyncio.sleep(sleep_for)
+                continue
+            last_token = token
+            items = box.pending(limit=20)
+            for item in items:
                 payload = item.get("payload") or {}
                 from .services.events import recognition_from_outbox
                 recognized = recognition_from_outbox(item)
@@ -4026,6 +4325,7 @@ async def _outbox_loop():
                         if recognized is not None:
                             from .services.modules import is_enabled
                             if not is_enabled("recognition.alpr", db):
+                                sleep_for = max(1.0, sleep_for * 10)
                                 continue
                             camera = db.get(Camera, int(recognized.get("camera_id") or 0)) if recognized.get("camera_id") else None
                             if camera is None or not camera.enabled:
@@ -4052,6 +4352,7 @@ async def _outbox_loop():
                                         crop = evidence.read_bytes()
                             from .services import hybrid_fusion
                             if hybrid_fusion.routes_camera(camera, db):
+                                release_connection(db)
                                 await hybrid_fusion.offer_local(db, camera, recognized, jpeg=jpeg, crop=crop)
                                 box.ack(item["id"], processed_key=event_key)
                                 continue
@@ -4072,6 +4373,7 @@ async def _outbox_loop():
                         if not is_enabled("parking.sessions", db):
                             # Keep pending business work for an explicit profile
                             # re-enable rather than processing it while disabled.
+                            sleep_for = max(1.0, sleep_for * 10)
                             continue
                         camera = db.get(Camera, int(payload.get("camera_id") or 0)) if payload.get("camera_id") else None
                         if gate is None and camera is None and not payload.get("plate"):
@@ -4102,11 +4404,13 @@ async def _outbox_loop():
                     box.note_failure()
                     note_worker_failure("outbox", str(exc))
                     break
+            pending_known = bool(items)
+            last_token = box.change_token()
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
-        await asyncio.sleep(settings.parking_event_poll_seconds)
+        await asyncio.sleep(sleep_for)
 
 
 async def _fusion_flush_loop():
@@ -4142,6 +4446,7 @@ async def _onvif_capture(camera_id: int, capture: dict, jpeg: bytes) -> None:
         if row is None or not row.enabled:
             return
         if hybrid_fusion.routes_camera(row, db):
+            release_connection(db)
             await hybrid_fusion.offer_native(db, row, native, jpeg=jpeg, crop=b"", capture=capture)
             return
         await _persist_capture_event(db, row, capture, jpeg, b"")
@@ -4197,7 +4502,7 @@ async def _restore_hvx_sessions(info: dict) -> None:
     if not info.get("available") or not isinstance(info.get("connections"), list):
         return
     connected = {int(row["handle"]): str(row.get("ip") or "") for row in info["connections"]}
-    from .services.node_scope import camera_active_on_this_installation
+    from .services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope
     with short_session() as db:
         # sdk_handle is stored with the shared camera record, so it can also
         # describe a session owned by a different lane PC.  Never restore
@@ -4207,7 +4512,11 @@ async def _restore_hvx_sessions(info: dict) -> None:
             camera for camera in db.scalars(
                 select(Camera).where(Camera.enabled == True, Camera.sdk_handle.is_not(None))
             ).all()
-            if camera_active_on_this_installation(camera, db=db)
+            if (
+                camera_in_recognition_scope(camera, db=db)
+                if getattr(settings, "recognition_gate_id", None)
+                else camera_active_on_this_installation(camera, db=db)
+            )
         ]
     for camera in cameras:
         if connected.get(int(camera.sdk_handle)) == camera.ip_address:
@@ -4221,6 +4530,7 @@ async def _restore_hvx_sessions(info: dict) -> None:
         with short_session() as db:
             current = db.get(Camera, camera.id)
             if current is not None and current.enabled and current.sdk_handle is not None:
+                release_connection(db)
                 await apply_sdk_connect(current, db, None, raise_on_host_error=False)
 
 
@@ -4332,6 +4642,7 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
         if fp and _alpr_fp.get(camera_id) == fp:
             gateway.note_ai_sample(camera_id, dropped=True)
             return
+        release_connection(db)
         if not await _video_arrival_ready(camera, jpeg):
             gateway.note_ai_sample(camera_id, dropped=True)
             return
@@ -4348,6 +4659,7 @@ async def _camera_event_loop():
 
     poll = float(getattr(cfg, "camera_event_poll_seconds", 0.25) or 0.25)
     config_refresh = max(2.0, poll * 8.0)
+    idle_config_refresh = max(10.0, config_refresh * 5.0)
     last_config_refresh = 0.0
     config_loaded = False
     rows: list[Camera] = []
@@ -4386,17 +4698,18 @@ async def _camera_event_loop():
             async def service_hvx(camera_id: int, handle: int) -> None:
                 started_one = time.perf_counter()
                 camera_breaker = breaker(f"hvx-camera-{camera_id}")
-                # Software video recognition must survive an SDK/GPIO outage.
-                try:
-                    await _maybe_watch_local_alpr(camera_id, handle)
-                except Exception as exc:
-                    note_worker_failure("camera-software-recognition", str(exc))
+                # Software video recognition must survive an SDK/GPIO outage,
+                # but it must never occupy the native capture poller.
+                _schedule_local_watch(camera_id, handle)
                 if not camera_breaker.allow():
                     note_camera(camera_id, sdk_callback="circuit-open")
                     return
                 try:
-                    await _drain_camera_events(camera_id, handle)
-                    await _poll_coil_and_read(camera_id, handle)
+                    # Drain callback metadata first, then process OCR/persistence
+                    # in detached tasks. A slow FastALPR call cannot starve the
+                    # next camera callback or GPIO edge.
+                    await _drain_camera_events(camera_id, handle, defer_local_alpr=True)
+                    await _poll_coil_and_read(camera_id, handle, background=True)
                     camera_breaker.success()
                     note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
                 except Exception as exc:
@@ -4487,7 +4800,7 @@ async def _camera_event_loop():
             note_worker_failure("camera-events", str(exc))
             await asyncio.sleep(1.0)
             continue
-        await asyncio.sleep(poll if (hvx_specs or ipcam_ids) else config_refresh)
+        await asyncio.sleep(poll if (hvx_specs or ipcam_ids) else idle_config_refresh)
 
 
 async def _ingest_camera_event(db: Session, camera: Camera) -> dict | None:
@@ -4640,6 +4953,9 @@ def delete_gate(gate_id: int, db: Session = Depends(get_db), user: User = Depend
 @app.post("/gates/{gate_id}/open")
 async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
     g = _gate_for_node(db, gate_id, action="gate-open")
+    from .services.developer import gate_opening_enabled
+    if not gate_opening_enabled(db):
+        raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
     cameras = list(g.cameras or [])
     result = await controller().open(
         g, cameras, payload.reason,
@@ -4668,6 +4984,9 @@ async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(ge
 @app.post("/cameras/{camera_id}/barrier/open")
 async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
     camera = _camera_for_node(db, camera_id, action="barrier-open")
+    from .services.developer import gate_opening_enabled
+    if not gate_opening_enabled(db):
+        raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
     gate = camera.gate or Gate(id=0, name=camera.name)
     result = await controller().open(
         gate, [camera], payload.reason,
@@ -4718,8 +5037,14 @@ def patch_fee_tariff(
 @app.post("/fees/quote")
 def fee_quote(payload: FeeQuoteRequest, db: Session = Depends(get_db), _: User = Depends(require("fees.view"))):
     rules = load_active_rules(db, payload.car_type or "Car1")
-    exit_at = payload.exit_time or datetime.now(timezone.utc)
-    result = calculate_car1_fee(payload.entry_time, exit_at, rules)
+    # datetime-local controls intentionally omit an offset. Interpret those
+    # values in the configured site timezone instead of silently treating
+    # them as UTC.
+    from .services.site_policy import as_site_utc, site_policy
+    policy = site_policy(db)
+    entry_at = as_site_utc(payload.entry_time, policy)
+    exit_at = as_site_utc(payload.exit_time, policy) if payload.exit_time else datetime.now(timezone.utc)
+    result = calculate_car1_fee(entry_at, exit_at, rules)
     return result.__dict__
 
 
@@ -4840,11 +5165,26 @@ def get_site_policy(db: Session = Depends(get_db), _: User = Depends(require_any
     return site_policy(db)
 
 
+@app.get("/settings/clock")
+def get_site_clock(db: Session = Depends(get_db), _: User = Depends(require_any("settings.view", "dashboard.view"))):
+    from .services.site_policy import site_clock
+    return site_clock(db)
+
+
 @app.patch("/settings/site")
-def patch_site_policy(payload: SitePolicyUpdate, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
+def patch_site_policy(payload: SitePolicyUpdate, db: Session = Depends(get_db), user: User = Depends(require_any("settings.view", "settings.manage", "simulation.run"))):
     from .services.site_policy import save_site_policy
     data = {k: v for k, v in payload.model_dump().items() if v is not None}
-    saved = save_site_policy(db, data)
+    permissions = user_permissions(user)
+    if "*" not in permissions and "settings.manage" not in permissions and "simulation.run" not in permissions:
+        allowed = {"timezone", "locale", "language", "date_format", "time_format"}
+        forbidden = sorted(set(data) - allowed)
+        if forbidden:
+            raise HTTPException(403, "Only timezone and display locale can be changed with settings.view")
+    try:
+        saved = save_site_policy(db, data)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     write_audit(db, user, "settings.site", "site", "site", str(saved.get("timezone")))
     return saved
 
@@ -4861,6 +5201,161 @@ def patch_migration_flags(payload: MigrationFlagsUpdate, db: Session = Depends(g
     saved = save_flags(db, payload.model_dump(exclude_unset=True))
     write_audit(db, user, "settings.migration", "site", "migration", saved.get("live_view_provider") or "")
     return saved
+
+
+@app.get("/developer/settings")
+def get_developer_settings(db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.developer import developer_settings
+    return developer_settings(db)
+
+
+@app.patch("/developer/settings")
+def patch_developer_settings(
+    payload: DeveloperSettingsUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    from .services.developer import save_developer_settings
+    saved = save_developer_settings(db, payload.model_dump(exclude_unset=True))
+    # Apply the diagnostic verbosity immediately for the running Site Service;
+    # the persisted setting is also visible to worker processes on restart.
+    base_level = getattr(logging, str(getattr(settings, "log_level", "INFO") or "INFO").upper(), logging.INFO)
+    log.setLevel(logging.DEBUG if saved.get("developer_mode") and saved.get("logging_enabled") else base_level)
+    write_audit(db, user, "settings.developer", "site", "developer", str(saved))
+    return saved
+
+
+def _developer_destructive_guard(db: Session) -> None:
+    from .services.developer import destructive_tools_enabled
+    if not destructive_tools_enabled(db):
+        raise HTTPException(
+            409,
+            "Enable Developer mode and destructive tools in Developer Playground before deleting test data.",
+        )
+
+
+@app.get("/developer/summary")
+def get_developer_summary(db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
+    from .services.developer import developer_settings
+    tables = {
+        "cameras": Camera,
+        "gates": Gate,
+        "captures": VehicleCapture,
+        "sessions": ParkingSession,
+        "vehicles": RegisteredVehicle,
+        "receipts": Receipt,
+        "payments": PaymentTransaction,
+        "audit_logs": AuditLog,
+    }
+    counts = {name: int(db.scalar(select(func.count()).select_from(model)) or 0) for name, model in tables.items()}
+    return {"settings": developer_settings(db), "counts": counts}
+
+
+def _capture_media_path(raw: str):
+    """Return a capture media path only for the app's two-component paths."""
+    value = str(raw or "").replace("\\", "/").lstrip("/")
+    parts = Path(value).parts
+    if len(parts) != 2 or parts[0] not in {"snapshots", "crops", "annotated", "alpr", "recognition"}:
+        return None
+    candidate = settings.media_dir / parts[0] / parts[1]
+    try:
+        candidate.resolve().relative_to(settings.media_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _delete_capture_rows(db: Session, rows: list[VehicleCapture]) -> int:
+    removed = 0
+    for row in rows:
+        for raw in (row.snapshot_path, row.crop_path):
+            path = _capture_media_path(raw)
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        db.delete(row)
+        removed += 1
+    return removed
+
+
+@app.post("/developer/captures/bulk-delete")
+def developer_delete_captures(
+    payload: DeveloperDeleteRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    _developer_destructive_guard(db)
+    if not payload.confirm:
+        raise HTTPException(400, "Set confirm=true to delete capture evidence.")
+    rows = db.scalars(select(VehicleCapture).where(VehicleCapture.id.in_(payload.ids))).all()
+    removed = _delete_capture_rows(db, rows)
+    write_audit(db, user, "developer.delete", "vehicle_capture", "bulk", f"Deleted {removed} capture(s)")
+    db.commit()
+    return {"ok": True, "removed": removed}
+
+
+@app.delete("/developer/captures/{capture_id}")
+def developer_delete_capture(
+    capture_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    _developer_destructive_guard(db)
+    row = db.get(VehicleCapture, capture_id)
+    if row is None:
+        raise HTTPException(404, "Capture not found")
+    _delete_capture_rows(db, [row])
+    write_audit(db, user, "developer.delete", "vehicle_capture", str(capture_id), "Deleted capture")
+    db.commit()
+    return {"ok": True, "removed": 1}
+
+
+@app.post("/developer/sessions/bulk-delete")
+def developer_delete_sessions(
+    payload: DeveloperDeleteRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    _developer_destructive_guard(db)
+    if not payload.confirm:
+        raise HTTPException(400, "Set confirm=true to delete sessions and their test ledger rows.")
+    rows = db.scalars(select(ParkingSession).where(ParkingSession.id.in_(payload.ids))).all()
+    ids = [int(row.id) for row in rows]
+    if ids:
+        for model in (Receipt, AccessDecision, GateCommandRecord, PaymentTransaction, PaymentIntent, ParkingEntryClaim):
+            column = getattr(model, "session_id", None)
+            if column is not None:
+                for child in db.scalars(select(model).where(column.in_(ids))).all():
+                    db.delete(child)
+    removed = len(rows)
+    for row in rows:
+        db.delete(row)
+    write_audit(db, user, "developer.delete", "parking_session", "bulk", f"Deleted {removed} session(s)")
+    db.commit()
+    return {"ok": True, "removed": removed}
+
+
+@app.delete("/developer/sessions/{session_id}")
+def developer_delete_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    _developer_destructive_guard(db)
+    row = db.get(ParkingSession, session_id)
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    for model in (Receipt, AccessDecision, GateCommandRecord, PaymentTransaction, PaymentIntent, ParkingEntryClaim):
+        column = getattr(model, "session_id", None)
+        if column is not None:
+            for child in db.scalars(select(model).where(column == session_id)).all():
+                db.delete(child)
+    db.delete(row)
+    write_audit(db, user, "developer.delete", "parking_session", str(session_id), "Deleted session and test ledger rows")
+    db.commit()
+    return {"ok": True, "removed": 1}
 
 
 @app.get("/lanes/status")
@@ -4897,6 +5392,7 @@ async def cameras_onboard_test(payload: CameraOnboardTest, _: User = Depends(req
 
 @app.post("/sim/entry")
 async def sim_entry(payload: SimEntryRequest, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
+    _require_development_simulation()
     gate = get_gate_or_404(db, payload.gate_id)
     try:
         result = await handle_plate_event(
@@ -4917,7 +5413,8 @@ async def sim_capture(
     db: Session = Depends(get_db),
     user: User = Depends(require("simulation.run")),
 ):
-    jpeg = await file.read()
+    _require_development_simulation()
+    jpeg = await _read_upload_limited(file)
     if jpeg[:2] != b"\xff\xd8":
         try:
             from io import BytesIO
@@ -4988,6 +5485,7 @@ async def sim_capture(
 
 @app.post("/sim/sessions/{session_id}/receipt-taken")
 async def sim_receipt_taken(session_id: int, db: Session = Depends(get_db), user: User = Depends(require_any("simulation.run", "gates.open"))):
+    _require_development_simulation()
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
@@ -5069,6 +5567,7 @@ async def correct_session_plate(
 
 @app.post("/sim/sessions/{session_id}/pay")
 def sim_pay(session_id: int, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
+    _require_development_simulation()
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
@@ -5108,9 +5607,8 @@ def list_payments(db: Session = Depends(get_db), _: User = Depends(require_any("
 
 @app.post("/payments/mobile-money/webhook")
 async def mobile_money_webhook(request: Request, db: Session = Depends(get_db)):
-    """Verified aggregator callback only. A redirect/success URL must not mark paid."""
+    """Deprecated compatibility endpoint; never credits a parking session."""
     from .infrastructure.payments import payment_provider_for
-    from .infrastructure.payments.ledger import record_succeeded_payment, transaction_dict as txn_dict
 
     raw = await request.body()
     signature = request.headers.get("x-signature") or request.headers.get("x-smartpark-signature") or ""
@@ -5130,30 +5628,20 @@ async def mobile_money_webhook(request: Request, db: Session = Depends(get_db)):
     })
     if not verified.get("verified"):
         raise HTTPException(400, verified.get("error") or "Unverified webhook")
-    session_id = int(verified.get("session_id") or payload.get("session_id") or 0)
-    row = db.get(ParkingSession, session_id) if session_id else None
-    if row is None:
-        raise HTTPException(404, "Session not found")
-    amount = float(verified.get("amount") or payload.get("amount") or row.amount_due or 0)
-    recorded = record_succeeded_payment(
-        db, row,
-        amount=amount,
-        method="MOBILE_MONEY",
-        provider_id="mobile_money",
-        idempotency_key=str(verified.get("provider_ref") or payload.get("provider_ref") or f"mm:{row.id}:{amount}"),
+    # This compatibility endpoint cannot prove a provider transaction because
+    # the old adapter has no server-side status API.  Accepting its session_id
+    # and amount would let a signed-but-unbound callback credit any visit.
+    # Real deployments must use /api/webhooks/{flutterwave|clickpesa}, which
+    # binds the callback to a pending intent and queries the provider.
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy mobile-money callbacks are disabled; configure Flutterwave or ClickPesa and use the external payment-intent flow.",
     )
-    write_audit(db, None, "payments.webhook", "parking_session", str(row.id), f"mobile_money {amount}")
-    return {
-        "ok": True,
-        "verified": True,
-        "session": sim_session_dict(recorded["session"]),
-        "transaction": txn_dict(recorded["transaction"]),
-        "duplicate": bool(recorded.get("duplicate")),
-    }
 
 
 @app.post("/sim/exit")
 async def sim_exit_ep(payload: SimExitRequest, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
+    _require_development_simulation()
     gate = get_gate_or_404(db, payload.gate_id)
     result = await handle_exit(db, plate=payload.plate, gate=gate, side=payload.side)
     write_audit(db, user, "sim.exit", "gate", str(gate.id), payload.plate)
@@ -5166,6 +5654,7 @@ async def sim_exit_ep(payload: SimExitRequest, db: Session = Depends(get_db), us
 @app.get("/p/{token}", include_in_schema=False)
 def public_receipt(token: str, db: Session = Depends(get_db)):
     from app.services.public_pay import public_session_payload, session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
@@ -5176,68 +5665,223 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
     paid = float(data["amount_paid"])
     due = float(data["amount_due"])
     currency = data["currency"]
-    entry = row.entry_time.strftime("%d %b %Y %H:%M") if row.entry_time else "—"
+    entry = "—"
+    if row.entry_time:
+        try:
+            # public_session_payload is already projected into site-local
+            # time. Use that value so the phone receipt follows Settings.
+            entry = datetime.fromisoformat(str(data.get("entry_time"))).strftime("%d %b %Y %H:%M")
+        except (TypeError, ValueError):
+            entry = row.entry_time.strftime("%d %b %Y %H:%M")
     status_label = "PAID" if data["paid"] else data["status"]
-    pay_disabled = "disabled" if not data.get("payable") else ""
+    pay_disabled = "disabled" if not data.get("payable") or not data.get("online_payment_available") else ""
+    online_label = "Pay with mobile money" if external_pay else (
+        "Simulate mobile payment" if data.get("online_payment_available") else "Pay on phone (mobile unavailable)"
+    )
+    online_help = "" if data.get("online_payment_available") else (
+        "Mobile payment is not configured on this site. Use the kiosk or configure an external mobile-money provider."
+    )
+    success_display = "" if data.get("payment_stage") == "PAID" else " style=\"display:none\""
     stay = data.get("duration_label") or "—"
     image_note = data.get("image_note") or ""
     snapshot = data.get("snapshot_url") or ""
     crop = data.get("crop_url") or ""
+    display_site = escape(str(settings.site_name or settings.app_name or "SmartPark"))
+    display_plate = escape(str(row.plate or "—"))
+    display_entry = escape(str(entry))
+    display_gate = escape(str(data.get("entry_gate") or "—"))
+    display_status = escape(str(status_label))
+    display_currency = escape(str(currency))
+    display_token = escape(str(token))
+    logo_url = "/assets/zirp-logo.png"
     photo_block = ""
     if snapshot:
-        photo_block = f'<p><img class="car" src="{snapshot}" alt="Car at entry"></p>'
-        if crop:
-            photo_block += f'<p><img class="crop" src="{crop}" alt="Plate crop"></p>'
-    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pay — {row.plate}</title>
+        photo_block = f'<img class="vehicle-photo" src="{escape(str(snapshot), quote=True)}" alt="Vehicle captured at entry">'
+    else:
+        photo_block = '<div class="vehicle-photo vehicle-photo-empty"><span>Entry photo unavailable</span><small>Use the plate and visit details below.</small></div>'
+    crop_block = ""
+    if crop:
+        crop_block = f'<div class="crop-panel"><span class="eyebrow">Plate crop</span><img class="plate-crop" src="{escape(str(crop), quote=True)}" alt="Plate crop from entry camera"></div>'
+    image_note_class = "evidence-note warning" if data.get("image_matches_plate") is False else "evidence-note"
+    display_stay = escape(str(stay))
+    display_image_note = escape(str(image_note))
+    inside_label = "Still inside" if data.get("still_inside") else "Visit complete"
+    display_inside_label = escape(inside_label)
+    phone_field = (
+        '<label class="field-label" for="phone">Mobile number</label>'
+        '<input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX" style="display:block">'
+        if external_pay else
+        '<input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX" style="display:none">'
+    )
+    network_field = ""
+    if external_pay and str(data.get("mobile_provider") or "").lower() == "flutterwave":
+        network_field = (
+            '<label class="field-label" for="network">Mobile network</label>'
+            '<select id="network" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #dfe5ef;'
+            'border-radius:8px;margin-top:6px;font-size:16px">'
+            '<option value="">Select network</option>'
+            '<option value="airtel">Airtel</option>'
+            '<option value="tigo">Tigo</option>'
+            '<option value="halopesa">Halopesa</option>'
+            '<option value="vodacom">Vodacom</option>'
+            '</select>'
+        )
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pay — {display_plate}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-      body{{font:16px/1.45 system-ui,sans-serif;margin:0;background:#f5f7fb;color:#172033}}
-      main{{max-width:420px;margin:0 auto;padding:24px}}
-      .plate{{font-size:28px;letter-spacing:.12em;font-weight:700}}
-      .card{{background:#fff;border:1px solid #dfe5ef;border-radius:12px;padding:20px;margin:16px 0}}
-      .due{{font-size:26px;font-weight:700}}
-      .muted{{color:#5b6b82}}
-      .ok{{color:#0a7a3e;font-weight:700}}
-      img.qr{{width:168px;height:168px;background:#fff;padding:8px;border:1px solid #dfe5ef;border-radius:8px}}
-      img.car{{width:100%;max-height:220px;object-fit:contain;background:#0b1220;border-radius:8px}}
-      img.crop{{max-width:100%;max-height:72px;object-fit:contain;background:#fff;border:1px solid #dfe5ef;border-radius:6px}}
-      .btn{{display:block;width:100%;box-sizing:border-box;text-align:center;background:#1f5eff;color:#fff;
-           border:0;border-radius:8px;padding:14px;margin-top:12px;font-weight:600;font-size:16px;cursor:pointer}}
+      :root{{--navy:#0d1b34;--ink:#172033;--muted:#627189;--line:#dbe3ef;--bg:#f1f5fa;--blue:#1f5eff;--blue-dark:#1547c7;--green:#087a3e;--green-bg:#e9f8ef;--amber:#9a5b00;--amber-bg:#fff5df}}
+      *{{box-sizing:border-box}}
+      body{{font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--ink);overflow-x:hidden}}
+      .topbar{{background:var(--navy);color:#fff;border-bottom:4px solid #2f74ff}}
+      .topbar-inner{{max-width:1120px;margin:0 auto;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}}
+      .brand{{display:flex;align-items:center;gap:10px;min-width:0;font-weight:750;letter-spacing:-.02em;font-size:18px}}
+      .brand-logo{{width:38px;height:38px;flex:0 0 38px;border-radius:10px;background:#fff;display:grid;place-items:center;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.18)}}
+      .brand-logo img{{width:100%;height:100%;object-fit:contain;transform:scale(2.2);display:block}}
+      .brand-name{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+      .secure{{font-size:12px;color:#d7e5ff;display:flex;align-items:center;gap:6px;white-space:nowrap}}
+      .secure::before{{content:"";width:8px;height:8px;border-radius:50%;background:#53d88e;box-shadow:0 0 0 4px rgba(83,216,142,.14)}}
+      main{{max-width:1120px;margin:0 auto;padding:36px 24px 56px}}
+      .eyebrow{{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:750;color:var(--muted)}}
+      .heading{{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}}
+      h1{{font-size:31px;line-height:1.1;letter-spacing:-.04em;margin:7px 0 0;color:var(--navy)}}
+      .heading-copy{{max-width:650px}}
+      .heading-copy p{{margin:10px 0 0;color:var(--muted)}}
+      .site-label{{text-align:right;color:var(--muted);font-size:13px;max-width:220px}}
+      .summary{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px 18px;margin-bottom:20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
+      .summary .plate{{font-size:22px;letter-spacing:.1em;font-weight:800;color:var(--navy)}}
+      .summary-divider{{height:24px;width:1px;background:var(--line)}}
+      .status{{font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;border-radius:99px;padding:5px 10px;background:#edf2f8;color:var(--muted)}}
+      .status.paid{{color:var(--green);background:var(--green-bg)}}
+      .layout{{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(340px,.9fr);gap:20px;align-items:start}}
+      .card{{background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 4px 18px rgba(19,42,78,.04)}}
+      .card-head{{padding:19px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:flex-start;gap:14px}}
+      .card-head h2{{font-size:17px;margin:0;color:var(--navy);letter-spacing:-.02em}}
+      .card-head p{{margin:3px 0 0;color:var(--muted);font-size:13px}}
+      .card-body{{padding:22px}}
+      .vehicle-media{{display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:12px;margin-bottom:18px}}
+      .vehicle-photo{{width:100%;height:clamp(200px,24vw,250px);display:block;object-fit:cover;background:#101b2d;border-radius:10px}}
+      .vehicle-photo-empty{{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;color:#cad5e6;padding:20px;background:linear-gradient(145deg,#15243c,#263a5a)}}
+      .vehicle-photo-empty small{{color:#9fb0c8;margin-top:5px}}
+      .crop-panel{{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fafcff;display:flex;flex-direction:column;gap:8px;min-width:0}}
+      .plate-crop{{width:100%;height:75px;object-fit:contain;background:#fff;border-radius:6px}}
+      .platebox{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fbfcff}}
+      .platebox .plate{{font-size:25px;letter-spacing:.12em;font-weight:850;color:var(--navy)}}
+      .verified{{font-size:12px;font-weight:700;color:var(--green);background:var(--green-bg);border-radius:99px;padding:6px 9px;white-space:nowrap}}
+      .verified.warning{{color:var(--amber);background:var(--amber-bg)}}
+      .evidence-note{{margin:12px 0 20px;color:var(--muted);font-size:13px}}
+      .evidence-note.warning{{color:var(--amber)}}
+      .details{{display:grid;grid-template-columns:1fr 1fr;gap:15px 20px;border-top:1px solid var(--line);padding-top:18px}}
+      .detail-label{{display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px}}
+      .detail-value{{font-weight:650;color:var(--ink)}}
+      .amount-box{{margin-top:20px;border-radius:11px;background:#f5f8fd;padding:16px;display:flex;align-items:end;justify-content:space-between;gap:12px}}
+      .amount-box .due{{font-size:30px;line-height:1.1;font-weight:850;letter-spacing:-.04em;color:var(--navy)}}
+      .amount-box .paid{{font-size:12px;color:var(--muted);text-align:right}}
+      .notice{{border:1px solid #cfe0ff;background:#f1f6ff;color:#35527e;border-radius:10px;padding:12px 13px;font-size:13px;margin-bottom:18px}}
+      .notice b{{color:var(--navy)}}
+      .methods{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}}
+      .method{{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}}
+      .method.active{{border-color:#86a9ff;background:#f5f8ff;box-shadow:0 0 0 2px rgba(31,94,255,.09)}}
+      .method-title{{font-weight:750;color:var(--navy);font-size:13px}}
+      .method-sub{{font-size:12px;color:var(--muted);margin-top:2px}}
+      label.field-label{{display:block;font-size:12px;font-weight:700;color:var(--ink);margin:14px 0 6px}}
+      input,select{{font:inherit;width:100%;padding:12px 13px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;color:var(--ink)}}
+      input:focus,select:focus{{outline:3px solid rgba(31,94,255,.16);border-color:var(--blue)}}
+      .btn{{display:block;width:100%;min-height:48px;text-align:center;background:var(--blue);color:#fff;border:0;border-radius:9px;padding:13px 15px;margin-top:17px;font-weight:750;font-size:15px;cursor:pointer;transition:background .15s ease}}
+      .btn:hover{{background:var(--blue-dark)}}
       .btn:disabled{{opacity:.5;cursor:not-allowed}}
-      .btn.secondary{{background:#eef2f8;color:#172033;text-decoration:none}}
-      code{{background:#eef2f8;padding:2px 6px;border-radius:4px}}
-      #msg{{min-height:1.4em;margin-top:10px}}
+      .btn.secondary{{background:#eef2f8;color:var(--ink);text-decoration:none}}
+      .btn.secondary:hover{{background:#e2e9f3}}
+      #online-help,#msg{{min-height:1.4em;margin:10px 0 0;font-size:13px}}
+      .muted{{color:var(--muted)}}
+      .ok{{color:var(--green);font-weight:700}}
+      .success{{background:var(--green-bg);border:1px solid #9bd8b5;border-radius:14px;padding:21px;text-align:center;margin-top:20px}}
+      .success h2{{color:var(--green);margin:5px 0 7px;font-size:21px}}
+      .success .check{{width:45px;height:45px;margin:auto;border-radius:50%;display:grid;place-items:center;background:#c9f0d8;color:var(--green);font-size:27px;font-weight:800}}
+      .success p{{margin:5px 0}}
+      .kiosk-card{{margin-top:20px}}
+      .kiosk-content{{display:flex;align-items:center;gap:18px}}
+      img.qr{{width:142px;height:142px;flex:0 0 142px;background:#fff;padding:8px;border:1px solid var(--line);border-radius:9px}}
+      .kiosk-content p{{margin:0 0 9px;color:var(--muted);font-size:13px}}
+      code{{background:#eef2f8;padding:2px 6px;border-radius:4px;font-size:12px}}
+      .footer-note{{text-align:center;color:var(--muted);font-size:12px;margin:25px auto 0;max-width:620px}}
+      @media (max-width:760px){{
+        .topbar-inner,main{{padding-left:16px;padding-right:16px}}
+        .topbar-inner{{padding-top:13px;padding-bottom:13px}}
+        main{{padding-top:24px;padding-bottom:40px}}
+        .heading{{display:block}}
+        .site-label{{text-align:left;margin-top:12px}}
+        h1{{font-size:27px}}
+        .layout{{grid-template-columns:1fr}}
+        .vehicle-media{{grid-template-columns:1fr}}
+        .vehicle-photo{{height:clamp(205px,52vw,280px)}}
+        .crop-panel{{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:12px}}
+        .plate-crop{{height:64px}}
+      }}
+      @media (max-width:430px){{
+        .secure{{font-size:0;gap:0}}
+        .secure::before{{width:9px;height:9px}}
+        .card-head{{padding:16px}}
+        .card-body{{padding:16px}}
+        .summary{{padding:13px 15px;gap:7px 10px}}
+        .summary-divider{{display:none}}
+        .summary .plate{{font-size:20px;flex:1 0 100%}}
+        .methods{{grid-template-columns:1fr}}
+        .details{{gap:13px 12px}}
+        .amount-box{{align-items:flex-start;flex-direction:column}}
+        .amount-box .paid{{text-align:left}}
+        .kiosk-content{{align-items:stretch;flex-direction:column}}
+        img.qr{{width:min(180px,100%);height:auto;align-self:center}}
+      }}
     </style></head>
-    <body><main>
-    <p class="muted">{settings.site_name}</p>
-    <p class="plate">{row.plate}</p>
-    {photo_block}
-    <div class="card">
-      <p>Entry {entry}</p>
-      <p>Time inside <b id="stay">{stay}</b></p>
-      <p>{data['parker_kind']} · <span id="status">{status_label}</span></p>
-      <p class="due" id="due">{currency} {remaining:,.0f}</p>
-      <p class="muted">Paid {currency} {paid:,.0f} of {due:,.0f}.</p>
-      <p class="muted">{image_note}</p>
-      <p class="muted">Receipt code <code id="code">{token}</code></p>
-      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX"
-             class="{'' if external_pay else 'hidden'}" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #dfe5ef;border-radius:8px;margin-top:12px;font-size:16px;{'' if external_pay else 'display:none'}">
-      <button class="btn" id="pay-mobile" {pay_disabled}>Pay on phone (mobile)</button>
-      <a class="btn secondary" href="#kiosk">Pay at kiosk</a>
-      <p id="msg" class="muted"></p>
-    </div>
-    <p><img class="qr" src="/p/{token}/qr.png" alt="Payment QR"></p>
-    <div class="card" id="kiosk">
-      <p><b>Kiosk</b></p>
-      <p class="muted">Scan this same QR (or type code <code>{token}</code>) at the site kiosk. An operator confirms cash and the ledger updates immediately.</p>
-    </div>
-    <p class="muted">Lost paper is OK — the plate is the identity. This page is the payment link encoded in the receipt QR.</p>
+    <body><header class="topbar"><div class="topbar-inner">
+      <div class="brand"><span class="brand-logo"><img src="{logo_url}" alt=""></span><span class="brand-name">{display_site}</span></div>
+      <span class="secure">Secure payment page</span>
+    </div></header>
+    <main>
+      <div class="heading"><div class="heading-copy"><div class="eyebrow">Parking payment</div><h1>Review your visit</h1><p>Confirm the vehicle and entry details before you complete payment.</p></div><div class="site-label">Receipt link for this visit<br><span class="muted">Keep this page for exit</span></div></div>
+      <div class="summary"><span class="plate">{display_plate}</span><span class="summary-divider"></span><span class="muted">Entry gate: {display_gate}</span><span class="status {'paid' if data.get('paid') else ''}" id="status">{display_status}</span></div>
+      <div class="layout">
+        <section class="card" id="receipt-details"><div class="card-head"><div><h2>Vehicle &amp; visit</h2><p>Entry camera evidence and parking details</p></div><span class="eyebrow">Receipt</span></div>
+          <div class="card-body">
+            <div class="vehicle-media">{photo_block}{crop_block}</div>
+            <div class="platebox"><span class="plate">{display_plate}</span><span class="{'verified warning' if data.get('image_matches_plate') is False else 'verified'}">{'Review plate' if data.get('image_matches_plate') is False else 'Camera verified'}</span></div>
+            <p class="{image_note_class}">{display_image_note}</p>
+            <div class="details">
+              <div><span class="detail-label">Entry time</span><span class="detail-value">{display_entry}</span></div>
+              <div><span class="detail-label">Gate</span><span class="detail-value">{display_gate}</span></div>
+              <div><span class="detail-label">Time inside</span><span class="detail-value" id="stay">{display_stay}</span></div>
+              <div><span class="detail-label">Visit state</span><span class="detail-value" id="inside-state">{display_inside_label}</span></div>
+            </div>
+            <div class="amount-box"><div><span class="detail-label">Amount due</span><div class="due" id="due">{display_currency} {remaining:,.0f}</div></div><div class="paid">Paid {display_currency} {paid:,.0f}<br>of {display_currency} {due:,.0f}</div></div>
+          </div>
+        </section>
+        <section class="card"><div class="card-head"><div><h2>Complete payment</h2><p>Choose how you want to settle this visit</p></div></div>
+          <div class="card-body">
+            <div class="notice"><b>Check the details above first.</b><br>If the photo and plate do not match, ask the parking team to review the visit before paying.</div>
+            <div class="methods"><div class="method active"><div class="method-title">Mobile money</div><div class="method-sub">Fastest option</div></div><div class="method"><div class="method-title">At the kiosk</div><div class="method-sub">Cash or operator help</div></div></div>
+            {phone_field}
+            {network_field}
+            <button class="btn" id="pay-mobile" {pay_disabled}>{online_label}</button>
+            <p id="online-help" class="muted">{online_help}</p><p id="msg" class="muted"></p>
+            <a class="btn secondary" href="#kiosk">Use the kiosk instead</a>
+          </div>
+        </section>
+      </div>
+      <div class="success" id="success"{success_display}><div class="check">✓</div><h2 id="success-title">Payment successful</h2><p id="success-detail">{display_currency} {paid:,.0f} paid.</p><p class="ok" id="success-next">You may now proceed to the exit gate.</p><a class="btn secondary" href="#receipt-details">View receipt details</a></div>
+      <section class="card kiosk-card" id="kiosk"><div class="card-head"><div><h2>Need help or cash payment?</h2><p>The same receipt works at the site kiosk</p></div><span class="eyebrow">Fallback</span></div><div class="card-body kiosk-content"><img class="qr" src="/p/{display_token}/qr.png" alt="Payment QR"><div><p>Scan this QR or type code <code>{display_token}</code> at the kiosk. An operator can confirm cash and update the visit immediately.</p><a class="btn secondary" href="#receipt-details">Back to payment</a></div></div></section>
+      <p class="footer-note">Lost paper is OK — your vehicle plate and this secure receipt link identify the visit.</p>
     <script>
-      const token = {token!r};
+      const token = {json.dumps(str(token))};
       const externalPay = {'true' if external_pay else 'false'};
       const payBtn = document.getElementById("pay-mobile");
       const phoneInput = document.getElementById("phone");
+      const networkInput = document.getElementById("network");
       const msg = document.getElementById("msg");
+      const success = document.getElementById("success");
+      const successTitle = document.getElementById("success-title");
+      const successDetail = document.getElementById("success-detail");
+      const successNext = document.getElementById("success-next");
+      const onlineHelp = document.getElementById("online-help");
       let pendingSince = 0;
       const statusUrl = externalPay
         ? "/api/public/payment-status/" + encodeURIComponent(token)
@@ -5246,12 +5890,31 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         const res = await fetch(statusUrl);
         if (!res.ok) return;
         const data = await res.json();
-        document.getElementById("status").textContent = data.paid ? "PAID" : data.status;
+        const statusEl = document.getElementById("status");
+        statusEl.textContent = data.paid ? "PAID" : data.status;
+        statusEl.className = "status" + (data.paid ? " paid" : "");
         document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
         if (data.duration_label) document.getElementById("stay").textContent = data.duration_label;
+        if (data.still_inside !== undefined) document.getElementById("inside-state").textContent = data.still_inside ? "Still inside" : "Visit complete";
         const intent = data.intent || null;
         const waiting = externalPay && intent && intent.status === "PENDING" && !data.paid;
-        payBtn.disabled = !data.payable || waiting;
+        payBtn.disabled = !data.payable || !data.online_payment_available || waiting;
+        onlineHelp.textContent = data.online_payment_available
+          ? ""
+          : "Mobile payment is not configured on this site. Use the kiosk or ask staff to configure mobile money.";
+        if (data.payment_stage === "PAID") {{
+          success.style.display = "block";
+          successTitle.textContent = "Payment successful";
+          successDetail.textContent = data.currency + " " + Math.round(data.amount_paid).toLocaleString() + " paid.";
+          successNext.textContent = data.can_exit ? "You may now proceed to the exit gate." : "Payment recorded. Follow the exit-lane instructions.";
+        }} else if (data.payment_stage === "NO_PAYMENT_REQUIRED") {{
+          success.style.display = "block";
+          successTitle.textContent = "No payment required";
+          successDetail.textContent = "This visit is within the free period.";
+          successNext.textContent = data.can_exit ? "You may now proceed to the exit gate." : "Keep this receipt for exit.";
+        }} else {{
+          success.style.display = "none";
+        }}
         if (!data.payable) {{
           msg.textContent = data.pay_blocked_reason || (data.paid ? "Paid. You can leave when the exit camera reads your plate." : "Nothing to pay.");
           msg.className = data.paid ? "ok" : "muted";
@@ -5275,10 +5938,11 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
             const phone = (phoneInput && phoneInput.value || "").trim();
             if (!phone) throw new Error("Enter the mobile number that will pay.");
             msg.textContent = "Sending payment prompt to your phone…";
+            const network = (networkInput && networkInput.value || "").trim();
             res = await fetch("/api/public/payment-intents", {{
               method: "POST",
               headers: {{"Content-Type": "application/json"}},
-              body: JSON.stringify({{token: token, phone: phone}}),
+              body: JSON.stringify({{token: token, phone: phone, ...(network ? {{network: network}} : {{}})}}),
             }});
             data = await res.json();
             if (!res.ok) throw new Error(data.detail || data.error || "Payment could not be started");
@@ -5306,17 +5970,29 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       setInterval(refresh, externalPay ? 3000 : 5000);
     </script>
     </main></body></html>"""
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=privacy_headers())
 
 
 @app.get("/p/{token}/status")
 def public_receipt_status(token: str, db: Session = Depends(get_db)):
     from app.services.public_pay import public_session_payload, session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
-    return public_session_payload(db, row)
+    return JSONResponse(public_session_payload(db, row), headers=privacy_headers())
+
+
+@app.get("/s/{token}", include_in_schema=False)
+def public_receipt_short_link(token: str, db: Session = Depends(get_db)):
+    """Open the canonical receipt QR path in the public Driver page."""
+    from app.services.public_pay import session_by_public_token
+    from app.services.public_ingress import privacy_headers
+
+    if not session_by_public_token(db, token):
+        raise HTTPException(404, "Receipt not found")
+    return RedirectResponse(f"/p/{token}", headers=privacy_headers(), status_code=307)
 
 
 @app.post("/p/{token}/pay")
@@ -5327,6 +6003,7 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     Kiosk cash must use the authenticated kiosk endpoint instead.
     """
     from app.services.public_pay import pay_public_session, session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
@@ -5346,7 +6023,7 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
         raise HTTPException(400, str(exc))
     except Exception as exc:
         raise HTTPException(502, str(exc))
-    return result
+    return JSONResponse(result, headers=privacy_headers())
 
 
 # ---------------------------------------------------------------------------
@@ -5363,6 +6040,7 @@ async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session
     """
     from app.services import mobile_payments
     from app.services.public_pay import session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, payload.token)
     if not row:
@@ -5377,8 +6055,8 @@ async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if not result.get("ok"):
-        return JSONResponse(status_code=503, content={**result, "token": row.public_token})
-    return {**result, "token": row.public_token}
+        return JSONResponse(status_code=503, content={**result, "token": row.public_token}, headers=privacy_headers())
+    return JSONResponse({**result, "token": row.public_token}, headers=privacy_headers())
 
 
 @app.get("/api/public/payment-status/{token}")
@@ -5386,6 +6064,7 @@ def public_payment_status(token: str, db: Session = Depends(get_db)):
     """Read-only status for the phone page: session paid state + latest intent."""
     from app.services import mobile_payments
     from app.services.public_pay import public_session_payload, session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
@@ -5394,7 +6073,7 @@ def public_payment_status(token: str, db: Session = Depends(get_db)):
     latest = mobile_payments.latest_intent_for_session(db, row.id)
     body["intent"] = mobile_payments.intent_dict(latest) if latest else None
     body["mobile_provider"] = mobile_payments.active_mobile_provider_id()
-    return body
+    return JSONResponse(body, headers=privacy_headers())
 
 
 @app.post("/api/webhooks/{provider_id}")
@@ -5443,6 +6122,7 @@ async def kiosk_receipt_pay(
     try:
         result = await pay_public_session(
             db, row, method=payload.method or "KIOSK_CASH", amount=payload.amount, operator_id=user.id,
+            audience="operator",
         )
     except PermissionError as exc:
         raise HTTPException(403, str(exc))
@@ -5470,14 +6150,14 @@ async def exit_qr_scan(
     from app.application.exit_lane import ExitLaneController
     from app.application.entry_lane import policy_from_parking_settings
 
-    gate = db.get(Gate, int(payload.gate_id))
-    if gate is None or not gate.enabled:
+    gate = _gate_for_node(db, int(payload.gate_id), action="exit-qr-scan")
+    if not gate.enabled:
         raise HTTPException(404, "Exit gate not found or disabled")
-    camera = db.get(Camera, int(payload.camera_id)) if payload.camera_id else None
+    camera = _camera_for_node(db, int(payload.camera_id), action="exit-qr-scan") if payload.camera_id else None
     if camera is not None and camera.gate_id not in {None, gate.id}:
         raise HTTPException(409, "Camera is assigned to a different gate")
     site_id = int(payload.site_id or gate.site_id or DEFAULT_SITE_ID)
-    if int(gate.site_id) != site_id:
+    if int(gate.site_id or DEFAULT_SITE_ID) != site_id:
         raise HTTPException(409, "Gate does not belong to the requested site")
 
     out = await ExitLaneController().submit_qr(
@@ -5509,7 +6189,7 @@ def session_by_token(token: str, db: Session = Depends(get_db), _: User = Depend
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "No session for that receipt code")
-    return public_session_payload(db, row)
+    return public_session_payload(db, row, audience="operator")
 
 
 @app.get("/sessions/lookup")
@@ -5521,31 +6201,21 @@ def lookup_session(q: str = "", db: Session = Depends(get_db), _: User = Depends
     row = find_session(db, q)
     if not row:
         raise HTTPException(404, "No visit matches that QR code or plate")
-    return public_session_payload(db, row)
+    return public_session_payload(db, row, audience="operator")
 
 
 def _session_image(db: Session, token: str, kind: str):
-    from app.services.kiosk_lookup import image_fields
+    from app.services.kiosk_lookup import capture_for_session
     from app.services.preview import media_path
     from app.services.public_pay import session_by_public_token
+    from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
-    fields = image_fields(db, row)
-    url = fields.get("snapshot_url") if kind == "snapshot" else fields.get("crop_url")
-    if not url:
-        raise HTTPException(404, "No photo for this visit")
-    # url is /p/{token}/... — the file path lives on the capture row.
-    from sqlalchemy import select
-    from app.models import VehicleCapture
-    from app.core.plate import normalize_plate
-    plate = normalize_plate(row.plate)
-    capture = None
-    if plate:
-        capture = db.scalar(select(VehicleCapture).where(VehicleCapture.plate == plate).order_by(VehicleCapture.id.desc()))
-    if capture is None and row.camera_id:
-        capture = db.scalar(select(VehicleCapture).where(VehicleCapture.camera_id == row.camera_id).order_by(VehicleCapture.id.desc()))
+    # Resolve the exact capture used to build the presentation. Never fall
+    # back to the latest plate/camera capture: repeated visits may share both.
+    capture = capture_for_session(db, row)
     stored = (capture.snapshot_path if kind == "snapshot" else capture.crop_path) if capture else ""
     if not stored or "/" not in stored.replace("\\", "/"):
         raise HTTPException(404, "No photo for this visit")
@@ -5553,7 +6223,7 @@ def _session_image(db: Session, token: str, kind: str):
     path = media_path(folder, name)
     if path is None:
         raise HTTPException(404, "No photo for this visit")
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(path, media_type="image/jpeg", headers=privacy_headers())
 
 
 @app.get("/p/{token}/snapshot.jpg", include_in_schema=False)
@@ -5569,15 +6239,23 @@ def public_crop(token: str, db: Session = Depends(get_db)):
 @app.get("/p/{token}/qr.png", include_in_schema=False)
 def public_receipt_qr(token: str, db: Session = Depends(get_db)):
     row = db.scalar(select(Receipt).where(Receipt.public_token == token).order_by(Receipt.id.desc()))
+    from app.services.public_ingress import privacy_headers
     path = Path(row.qr_path) if row and row.qr_path else None
-    if path and path.exists():
-        return FileResponse(path, media_type="image/png")
+    if path:
+        root = settings.media_dir.joinpath("receipts").resolve()
+        candidate = path if path.is_absolute() else settings.media_dir.joinpath(path)
+        try:
+            safe_path = candidate.resolve()
+        except OSError:
+            safe_path = None
+        if safe_path and safe_path.is_relative_to(root) and safe_path.exists():
+            return FileResponse(safe_path, media_type="image/png", headers=privacy_headers())
     from app.domain.receipt_engine import session_qr_payload
     from app.services.receipts import _qr_png, resolve_public_base_url
     png = _qr_png(session_qr_payload(token, base_url=resolve_public_base_url(db)))
     if not png:
         raise HTTPException(404, "QR not available")
-    return Response(content=png, media_type="image/png")
+    return Response(content=png, media_type="image/png", headers=privacy_headers())
 
 
 @app.get("/reports/summary")
@@ -5702,7 +6380,7 @@ def dashboard_stats(db: Session = Depends(get_db), _: User = Depends(require_any
     from app.services.cache import dashboard_cache
     from app.services.runtime import startup_state
     from app.services.simulation import OPEN_STATUSES
-    from app.services.site_policy import site_policy, format_money
+    from app.services.site_policy import as_site_local, site_policy, format_money
     from app.services.lane_status import lane_operator_status
 
     cached = dashboard_cache.get("overview")
@@ -5717,7 +6395,9 @@ def dashboard_stats(db: Session = Depends(get_db), _: User = Depends(require_any
         select(func.count(ParkingSession.id)).where(ParkingSession.status.in_(tuple(OPEN_STATUSES)))
     ) or 0
     registered = db.scalar(select(func.count(RegisteredVehicle.id)).where(RegisteredVehicle.enabled.is_(True))) or 0
-    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Compute local midnight, then convert it to UTC for indexed DB queries.
+    local_now = as_site_local(datetime.now(timezone.utc), policy)
+    start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     entries_today = db.scalar(
         select(func.count(ParkingSession.id)).where(ParkingSession.entry_time >= start)
     ) or 0

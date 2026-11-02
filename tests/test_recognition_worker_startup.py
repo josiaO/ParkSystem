@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import json
+
 from unittest.mock import patch
 
 
@@ -33,6 +35,18 @@ def test_detector_retry_backoff_is_bounded():
 
     assert [_warmup_retry_delay(i) for i in (1, 2, 3)] == [2.0, 4.0, 8.0]
     assert _warmup_retry_delay(100) == 60.0
+
+
+def test_malformed_worker_timestamp_is_treated_as_stale(tmp_path):
+    from app import recognition_worker
+
+    heartbeat = tmp_path / "recognition-worker.json"
+    heartbeat.write_text(json.dumps({"enabled": True, "updated_at": "not-a-time", "cameras": []}), encoding="utf-8")
+    with patch.object(recognition_worker, "_health_paths", return_value=(heartbeat,)):
+        body = recognition_worker.worker_health()
+
+    assert body["ok"] is False
+    assert body["heartbeat_age_seconds"] > 6
 
 
 def test_onnx_dll_failure_is_restart_required_not_a_retry_loop():

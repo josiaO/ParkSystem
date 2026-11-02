@@ -267,8 +267,8 @@ def _check_match(intent: PaymentIntent, result: dict[str, Any]) -> str:
     except ValueError:
         return "provider did not report an amount"
     expected = to_decimal((intent.extra or {}).get("amount_expected") or intent.amount)
-    if got_amount < expected:
-        return f"amount below expected ({got_amount} < {expected})"
+    if got_amount != expected:
+        return f"amount mismatch (expected {expected}, got {got_amount})"
     return ""
 
 

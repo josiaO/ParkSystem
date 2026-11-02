@@ -10,6 +10,7 @@ from __future__ import annotations
 import socket
 import sys
 import re
+import logging
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,6 +32,10 @@ from app.deployment import (
     DeploymentConfig,
     save_deployment_config,
 )
+
+
+log = logging.getLogger("smartpark")
+NODE_SCHEMA_TABLES = ("nodes", "node_auth_sessions", "node_gate_assignments")
 
 
 def _label(text: str) -> QLabel:
@@ -155,6 +160,7 @@ class SetupWizard(QWizard):
             configured_url = "http://smartpark-server:8760"
         self.server_url = QLineEdit(configured_url or "http://smartpark-server:8760")
         self.server_url.setPlaceholderText("http://smartpark-server:8760")
+        self.server_url.editingFinished.connect(self._sync_node_database_host)
         self.client_site_name = QLineEdit(self.current.site_name or settings.site_name)
         self.test_status = _label("Not tested")
         test = QPushButton("Test Connection")
@@ -191,6 +197,22 @@ class SetupWizard(QWizard):
     def _node_credentials_visibility(self):
         visible = self.node_radio.isChecked()
         self.node_credentials_box.setVisible(visible)
+
+    def _sync_node_database_host(self):
+        """Use the paired Site Server host for PostgreSQL unless overridden."""
+        if not self.node_radio.isChecked() or not hasattr(self, "pg_host"):
+            return
+        try:
+            host = urlsplit(self.server_url.text().strip()).hostname or ""
+        except ValueError:
+            return
+        if not host or host.lower() in {"localhost", "127.0.0.1", "::1"}:
+            return
+        current = self.pg_host.text().strip()
+        auto_host = str(getattr(self, "_auto_database_host", "") or "")
+        if not current or current.lower() in {"localhost", "127.0.0.1", "::1"} or current == auto_host:
+            self.pg_host.setText(host)
+            self._auto_database_host = host
 
     def _validate_node_credentials(self) -> bool:
         if not self.node_radio.isChecked():
@@ -339,19 +361,23 @@ class SetupWizard(QWizard):
             self.postgres_radio.setEnabled(False)
             self.database_page.setTitle("Shared Site Server database")
             self.database_page.setSubTitle("A Processing Node joins the existing Site Server PostgreSQL database. It cannot use SQLite or initialize a local site database.")
-            self.database_network_hint.setText("Enter the PostgreSQL host used by the Site Server. The node tests the existing schema but does not run migrations or create an administrator.")
+            self.database_network_hint.setText(
+                "Enter the PostgreSQL host used by the Site Server, usually the same LAN address as the Site Server connection. "
+                "The Site Server HTTP port and PostgreSQL port are separate: PostgreSQL must listen on the LAN address, allow this node in pg_hba.conf, and allow TCP 5432 through Windows Firewall."
+            )
             try:
                 parsed = urlsplit(self.server_url.text().strip() if self.server_url.text().strip() else "")
                 server_host = parsed.hostname or ""
                 if server_host and server_host.lower() not in {"localhost", "127.0.0.1", "::1"} and self.pg_host.text().strip().lower() in {"", "localhost", "127.0.0.1", "::1"}:
                     self.pg_host.setText(server_host)
+                    self._auto_database_host = server_host
             except ValueError:
                 pass
         else:
             self.postgres_radio.setEnabled(True)
             self.database_page.setTitle("Database")
             self.database_page.setSubTitle("PostgreSQL is recommended for production. SQLite is automatic for testing and evaluation.")
-            self.database_network_hint.setText(f"Install PostgreSQL as a Windows service before testing. The Site Server owns this database. Use a dedicated {PRODUCT_NAME} login (not the postgres superuser).")
+            self.database_network_hint.setText("PostgreSQL is local to the Site Server. Processing Nodes require PostgreSQL LAN listening and Windows Firewall access on TCP 5432; 127.0.0.1 only works on this computer.")
         self._database_mode_changed(self.sqlite_radio.isChecked())
 
     def _database_config(self) -> DatabaseConfig:
@@ -450,13 +476,28 @@ class SetupWizard(QWizard):
             if config.is_sqlite and not self.sqlite_warning.isChecked():
                 self.db_status.setText("Acknowledge the SQLite testing/evaluation warning before continuing.")
                 return False
-            self.db_result = preflight(config, initialize=False, password=(self.pg_password.text() or None) if not config.is_sqlite else None)
+            self.db_result = preflight(
+                config,
+                initialize=False,
+                password=(self.pg_password.text() or None) if not config.is_sqlite else None,
+                required_tables=NODE_SCHEMA_TABLES if self.node_radio.isChecked() else (),
+            )
             if self.node_radio.isChecked() and self.db_result.get("ok") and not self.db_result.get("migration", {}).get("up_to_date"):
                 self.db_result["ok"] = False
                 self.db_result["error"] = "The Site Server database schema is not current. Run the upgrade on the Site Server first."
+            if not self.db_result.get("ok"):
+                log.warning(
+                    "Deployment database preflight failed role=%s engine=%s error=%s technical=%s checks=%s",
+                    "EDGE_NODE" if self.node_radio.isChecked() else "SITE_SERVER",
+                    config.engine,
+                    self.db_result.get("error", "unknown database preflight failure"),
+                    self.db_result.get("technical", ""),
+                    self.db_result.get("checks", []),
+                )
             self.db_status.setText(self._format_preflight(self.db_result))
             return bool(self.db_result.get("ok"))
         except Exception as exc:
+            log.exception("Deployment database test failed role=%s engine=%s", "EDGE_NODE" if self.node_radio.isChecked() else "SITE_SERVER", getattr(locals().get("config"), "engine", "unknown"))
             self.db_status.setText(f"Database configuration error: {exc}")
             return False
 
@@ -467,6 +508,8 @@ class SetupWizard(QWizard):
             lines.append(f"{row.get('name')}: {'PASS' if row.get('ok') else 'FAIL'}")
         if result.get("error"):
             lines.append(str(result["error"]))
+        if result.get("technical"):
+            lines.append(f"Technical: {result['technical']}")
         return "\n".join(lines)
 
     def _test_connection(self) -> bool:
@@ -482,9 +525,16 @@ class SetupWizard(QWizard):
             except ValueError:
                 pass
         try:
-            live = httpx.get(f"{url}/health/live", timeout=3.0)
+            parsed = urlsplit(url)
+            server_host = parsed.hostname or ""
+            server_port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+            if not server_host:
+                raise RuntimeError("Enter a valid Site Server host.")
+            with socket.create_connection((server_host, server_port), timeout=3.0):
+                pass
+            live = httpx.get(f"{url}/health/live", timeout=3.0, trust_env=False)
             live.raise_for_status()
-            identity = httpx.get(f"{url}/deployment/info", timeout=3.0)
+            identity = httpx.get(f"{url}/deployment/info", timeout=3.0, trust_env=False)
             identity.raise_for_status()
             self.server_identity = identity.json()
             accepted_roles = {SITE_SERVER} if self.node_radio.isChecked() else {SITE_SERVER, "EDGE_NODE"}
@@ -694,7 +744,12 @@ class SetupWizard(QWizard):
             # crash can be resumed as recovery-required, but can never start
             # the API against an implicit database selected by app.db import.
             save_deployment_config(candidate, state=CONFIGURING)
-            self.db_result = preflight(db_config, initialize=not self.node_radio.isChecked(), password=(self.pg_password.text() or None) if not db_config.is_sqlite else None)
+            self.db_result = preflight(
+                db_config,
+                initialize=not self.node_radio.isChecked(),
+                password=(self.pg_password.text() or None) if not db_config.is_sqlite else None,
+                required_tables=NODE_SCHEMA_TABLES if self.node_radio.isChecked() else (),
+            )
             if not self.db_result.get("ok"):
                 raise RuntimeError(self._format_preflight(self.db_result))
             if self.node_radio.isChecked():
@@ -715,9 +770,33 @@ class SetupWizard(QWizard):
                     ref=db_config.postgres_secret_reference or None,
                 )
                 db_config = DatabaseConfig(**{**db_config.to_mapping(), "postgres_secret_reference": secret_ref})
+
+            # The button/page test uses the password currently in the wizard.
+            # Windows services do not: they reopen deployment.json and resolve
+            # the protected secret from the service data directory. Verify
+            # that exact persisted-runtime path before publishing CONFIGURED;
+            # otherwise Finish can succeed while the first service start
+            # fails with a misleading generic connection error.
+            if db_config.engine == POSTGRESQL:
+                persisted_result = preflight(
+                    db_config,
+                    initialize=False,
+                    required_tables=NODE_SCHEMA_TABLES if self.node_radio.isChecked() else (),
+                )
+                if not persisted_result.get("ok"):
+                    raise RuntimeError(
+                        "PostgreSQL passed the direct test, but the saved service configuration "
+                        "could not reopen it. "
+                        f"{self._format_preflight(persisted_result)}"
+                    )
             candidate["database"] = db_config
             self.saved = save_deployment_config(candidate, state=CONFIGURED)
         except Exception as exc:
+            log.exception(
+                "Deployment setup failed role=%s database=%s",
+                "EDGE_NODE" if self.node_radio.isChecked() else "SITE_SERVER",
+                getattr(locals().get("db_config"), "display_name", "unknown"),
+            )
             try:
                 save_deployment_config(locals().get("candidate", {
                     "role": SITE_SERVER,

@@ -109,6 +109,14 @@ try {
 }
 Save-File (Join-Path $InstallDir "BUILD-INFO.txt") "BUILD-INFO.txt"
 Save-File (Join-Path $InstallDir "payload\BUILD-INFO.txt") "payload-BUILD-INFO.txt"
+try {
+    Save-Text "network-profile.txt" ((Get-NetConnectionProfile | Format-List | Out-String) + (Get-NetIPAddress -AddressFamily IPv4 | Format-Table IPAddress, InterfaceAlias, PrefixLength | Out-String))
+    $firewall = Get-NetFirewallRule -DisplayName "SmartPark Site API", "SmartPark MediaMTX WebRTC", "SmartPark MediaMTX ICE", "SmartPark MediaMTX ICE TCP" -ErrorAction SilentlyContinue |
+        Select-Object DisplayName, Enabled, Profile, Direction, Action
+    Save-Text "smartpark-firewall-rules.txt" ($firewall | Format-List | Out-String)
+} catch {
+    Save-Text "network-profile.txt" "Network diagnostics failed: $($_.Exception.Message)"
+}
 
 $Py64 = Join-Path $InstallDir "python64\python.exe"
 if (Test-Path -LiteralPath $Py64) {
@@ -172,7 +180,7 @@ foreach ($taskName in $taskNames) {
 Save-Text "scheduled-tasks.txt" ($taskReport -join "`r`n")
 
 $portReport = New-Object System.Collections.Generic.List[string]
-$ports = @(8760, 8765, 8554, 9997, 9998)
+$ports = @(8760, 5432, 8765, 8554, 9997, 9998)
 foreach ($port in $ports) {
     $portReport.Add("===== TCP $port =====")
     try {

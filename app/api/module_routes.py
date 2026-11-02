@@ -54,7 +54,6 @@ def modules_for_route(path: str) -> tuple[str, ...]:
 def module_dependency(modules: tuple[str, ...]):
     def check(db: Session = Depends(get_db)):
         from app.services.modules import is_enabled
-
         for module in modules:
             if not is_enabled(module, db):
                 raise HTTPException(status_code=404, detail=f"Module not enabled: {module}")

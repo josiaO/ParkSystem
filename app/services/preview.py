@@ -133,11 +133,15 @@ def remember_frame(
     fingerprint = hash(jpeg)
     changed = fingerprint != row.fingerprint
     row.jpeg = jpeg
-    row.captured_at = time.monotonic()
     row.fingerprint = fingerprint
     if changed:
         row.seq += 1
         now = time.monotonic()
+        # ``captured_at`` is the freshness timestamp, not merely the last
+        # time a caller observed bytes.  Keeping it unchanged for duplicate
+        # JPEGs prevents a frozen camera from looking healthy when the
+        # gateway session is temporarily unavailable.
+        row.captured_at = now
         if row._fps_at <= 0:
             row._fps_at = now
         row._fps_n += 1

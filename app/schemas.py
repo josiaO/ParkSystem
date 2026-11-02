@@ -257,6 +257,23 @@ class MigrationFlagsUpdate(BaseModel):
     recognition_pipeline: str | None = None
 
 
+class DeveloperSettingsUpdate(BaseModel):
+    developer_mode: bool | None = None
+    logging_enabled: bool | None = None
+    printing_enabled: bool | None = None
+    gate_opening_enabled: bool | None = None
+    automatic_gate_opening_enabled: bool | None = None
+    recognition_enabled: bool | None = None
+    capture_enabled: bool | None = None
+    camera_connections_enabled: bool | None = None
+    destructive_tools_enabled: bool | None = None
+
+
+class DeveloperDeleteRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+    confirm: bool = False
+
+
 class CameraOnboardProbe(BaseModel):
     ip_address: str
     username: str = "admin"

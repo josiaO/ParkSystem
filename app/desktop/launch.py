@@ -368,6 +368,62 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
     start_pipeline_services(root)
 
 
+def _end_scheduled_task(name: str) -> None:
+    """Stop one installed task if it is currently running."""
+    if os.name != "nt" or not _scheduled_task_exists(name):
+        return
+    try:
+        subprocess.run(
+            ["schtasks.exe", "/End", "/TN", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def stop_background_services(config=None) -> None:
+    """Stop local runtime owners before a saved deployment is reconfigured."""
+    global _site_service_process
+    port = int(getattr(config, "server_bind_port", None) or os.environ.get("SMARTPARK_API_PORT") or 8760)
+    if os.name == "nt":
+        # Stop consumers before their API and hardware host so no worker keeps
+        # an old database configuration alive during repair.
+        for name in (
+            "SmartPark Recognition Worker",
+            "SmartPark Media Service",
+            "SmartPark Site Service",
+            "SmartPark HVX Host",
+        ):
+            _end_scheduled_task(name)
+    process = _site_service_process
+    _site_service_process = None
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=8)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+    deadline = time.time() + 8.0
+    while time.time() < deadline and _port_open(port):
+        time.sleep(0.2)
+    if _port_open(port):
+        raise RuntimeError(
+            f"The previous local service still owns port {port}; the repaired configuration was not started."
+        )
+
+
+def restart_background_services(root: Path | None = None, config=None) -> None:
+    """Apply a repaired deployment file without leaving the old runtime live."""
+    stop_background_services(config=config)
+    ensure_background_services(root=root, config=config)
+
+
 def disable_background_services() -> None:
     """Remove transitional server tasks from an Operator Workstation."""
     if os.name != "nt":

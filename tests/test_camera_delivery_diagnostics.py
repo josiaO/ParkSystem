@@ -100,6 +100,8 @@ def sdk_reader(native):
     sdk._live_requested_at = {}
     sdk._function_lists = {}
     sdk._video_diagnostics = {}
+    sdk._native_jpeg_disabled_until = {}
+    sdk._window_last_jpeg = {}
     sdk._last_event_jpeg = {}
     sdk._last_event_crop = {}
     sdk._pending_events = {}
@@ -120,7 +122,7 @@ def test_sdk_failure_is_not_an_undifferentiated_empty_frame():
     assert video["frames_received"] == 0
 
 
-def test_windows_native_reader_uses_the_play_sdk_window_instead_of_jpg_polling():
+def test_windows_native_reader_uses_ocxconfig_jpg_polling_before_window_fallback():
     native = Mock(side_effect=OSError("the vendor JPEG poll must not run"))
     sdk = sdk_reader(native)
     sdk._hwnds[0] = 123
@@ -128,7 +130,38 @@ def test_windows_native_reader_uses_the_play_sdk_window_instead_of_jpg_polling()
          patch.object(sdk, "_capture_window_jpeg", return_value=b"\xff\xd8window\xff\xd9") as capture:
         assert sdk._get_jpg_buffer(0) == b"\xff\xd8window\xff\xd9"
     capture.assert_called_once_with(0)
-    native.assert_not_called()
+    native.assert_called_once()
+
+
+def test_qy_draw_callback_is_primary_and_does_not_poll_cached_jpeg():
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._draw_callbacks = {0: object()}
+    sdk._video_diagnostics = {
+        0: {
+            "draw_data_rc": 0,
+            "draw_data_registered_at": time.monotonic() - 3.0,
+            "draw_data_frames": 4,
+        }
+    }
+    sdk._draw_data_jpeg = Mock(return_value=b"\xff\xd8decoded\xff\xd9")
+    sdk._get_native_jpg_buffer = Mock(return_value=b"\xff\xd8cached\xff\xd9")
+    sdk._hwnds = {0: 123}
+    sdk._capture_window_jpeg = Mock(return_value=b"\xff\xd8window\xff\xd9")
+
+    assert sdk._get_jpg_buffer(0) == b"\xff\xd8decoded\xff\xd9"
+    sdk._get_native_jpg_buffer.assert_not_called()
+    sdk._capture_window_jpeg.assert_not_called()
+
+
+def test_qy_draw_callback_stale_frame_is_empty_not_a_replayed_cache():
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._draw_frames = {}
+    sdk._draw_frame_seq = {0: 3}
+    sdk._draw_encoded_seq = {0: 3}
+    sdk._last_live_jpeg = {0: b"\xff\xd8old\xff\xd9"}
+    assert sdk._draw_data_jpeg(0) == b""
 
 
 @pytest.mark.parametrize("blob,reason", [(b"", "EMPTY_BUFFER"), (b"not-jpeg", "INVALID_JPEG"), (b"\xff\xd8frame", "")])
@@ -206,6 +239,8 @@ def test_play_sdk_draw_data_callback_produces_jpeg_without_window_capture():
     assert jpeg.startswith(b"\xff\xd8")
     assert jpeg.endswith(b"\xff\xd9")
     assert sdk.video_status(0)["capture_mode"] == "sdk_draw_data"
+    assert sdk.video_status(0)["state"] == "LIVE"
+    assert sdk.video_status(0)["frames_received"] == 1
 
 
 def test_native_decoder_fault_reopens_only_that_camera():

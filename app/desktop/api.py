@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import httpx
-from app.deployment import central_server_base_url, local_node_runtime_url
+from app.deployment import central_server_base_url, desktop_base_url, local_node_runtime_url
 
 BASE = central_server_base_url()
 LOCAL_BASE = local_node_runtime_url()
@@ -20,6 +20,11 @@ def configure_local_runtime_url(value: str | None = None) -> str:
     global LOCAL_BASE
     LOCAL_BASE = str(value if value is not None else local_node_runtime_url()).rstrip("/")
     return LOCAL_BASE
+
+
+def configure_desktop_base_url() -> str:
+    """Point the desktop session at the correct local/central API plane."""
+    return configure_base_url(desktop_base_url())
 
 
 def stream_http_error(response: httpx.Response) -> str:
@@ -215,7 +220,11 @@ class ApiClient:
         return friendly.get(label, label)
 
     def login(self, username, password):
-        r=_check(httpx.post(f"{self.base_url}/auth/login", json={"username":username,"password":password}, timeout=5))
+        # Argon2 verification and the first database connection can be slower
+        # on a Windows field PC. Five seconds made a healthy node look like a
+        # network failure during startup. Keep this bounded and do not retry
+        # the POST, because retrying could create duplicate auth sessions.
+        r=_check(httpx.post(f"{self.base_url}/auth/login", json={"username":username,"password":password}, timeout=20, trust_env=False))
         data=r.json()
         self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
         self.navigation=list(data.get("navigation") or [])
@@ -232,19 +241,19 @@ class ApiClient:
             return data
 
     def get(self, path, timeout=8):
-        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
 
     def get_bytes(self, path, timeout=8):
-        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout)); return r.content
+        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout, trust_env=False)); return r.content
 
     def post(self, path, payload=None, timeout=15):
-        r=_check(httpx.post(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.post(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
 
     def put(self, path, payload=None, timeout=15):
-        r=_check(httpx.put(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout)); return r.json()
+        r=_check(httpx.put(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
 
     def post_file(self, path, files, data=None, timeout=30):
-        r=_check(httpx.post(self.base_url+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout))
+        r=_check(httpx.post(self.base_url+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout, trust_env=False))
         return r.json()
 
     def seed_site(self):
@@ -285,10 +294,10 @@ class ApiClient:
         }
 
     def patch(self, path, payload=None):
-        r=_check(httpx.patch(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=8)); return r.json()
+        r=_check(httpx.patch(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=8, trust_env=False)); return r.json()
 
     def delete(self, path):
-        r=_check(httpx.delete(self.base_url+path, headers=self._headers(), timeout=8)); return r.json()
+        r=_check(httpx.delete(self.base_url+path, headers=self._headers(), timeout=8, trust_env=False)); return r.json()
 
     def can(self, permission):
         return "*" in self.permissions or permission in self.permissions

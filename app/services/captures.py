@@ -16,7 +16,7 @@ import hashlib
 from io import BytesIO
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -163,23 +163,11 @@ def _write_jpeg(kind: str, name: str, data: bytes) -> str:
     if existing and (folder / existing).is_file():
         log.debug("evidence write skipped duplicate kind=%s existing=%s", kind, existing)
         return (Path(kind) / existing).as_posix()
-    # Build the index lazily, only when an evidence write occurs. This catches
-    # duplicates left by an earlier process without adding work to idle lanes.
-    if not index:
-        try:
-            for candidate in folder.iterdir():
-                if candidate.suffix.lower() != ".jpg" or not candidate.is_file():
-                    continue
-                try:
-                    index.setdefault(_media_signature(candidate.read_bytes()), candidate.name)
-                except OSError:
-                    continue
-        except OSError:
-            pass
-        existing = index.get(signature)
-        if existing and (folder / existing).is_file():
-            log.debug("evidence write skipped existing duplicate kind=%s existing=%s", kind, existing)
-            return (Path(kind) / existing).as_posix()
+    # Do not rebuild this index by reading every historical JPEG.  A busy gate
+    # can have many thousands of evidence files, and that one-time scan used to
+    # run on the first capture after every process restart.  Deterministic names
+    # and the in-process index still deduplicate the normal hot path; an exact
+    # same-name check below protects late/replayed callbacks.
     # Late native callbacks can repeat the same image_id/capture. Preserve the
     # first evidence file; a changed image with the same name is still accepted.
     if dest.is_file():
@@ -415,7 +403,12 @@ def _enhance_crop_jpeg(crop: bytes) -> bytes:
 
 def _plate_jpeg(jpeg: bytes, crop: bytes, box: dict | None, capture: dict | None) -> bytes:
     capture = capture or {}
-    plate_jpeg = crop if _looks_like_plate_crop(crop, jpeg) else b""
+    # The SDK vehicle-picture buffer is often smaller/softer than the
+    # panorama. When the native usLpBox exists, recrop the panorama first so
+    # night evidence and OCR use the highest-resolution pixels available.
+    plate_jpeg = _crop_from_bbox(jpeg, box) if jpeg[:2] == b"\xff\xd8" and box else b""
+    if plate_jpeg[:2] != b"\xff\xd8":
+        plate_jpeg = crop if _looks_like_plate_crop(crop, jpeg) else b""
     if plate_jpeg[:2] != b"\xff\xd8":
         plate_jpeg = _jpeg_from_ref(capture.get("plate_crop_path") or capture.get("crop_url"))
     if plate_jpeg[:2] != b"\xff\xd8" or not _looks_like_plate_crop(plate_jpeg, jpeg):
@@ -483,9 +476,63 @@ def capture_dict(row: VehicleCapture) -> dict:
     }
 
 
-def find_capture_for_session(db: Session, *, plate: str = "", camera_id: int | None = None) -> VehicleCapture | None:
-    """Best stored still for a visit: matching plate, else latest still on that camera."""
+def find_capture_for_session(
+    db: Session,
+    *,
+    plate: str = "",
+    camera_id: int | None = None,
+    event_id: str = "",
+    visit_id: str = "",
+    image_ref: str = "",
+) -> VehicleCapture | None:
+    """Return evidence belonging to this visit, never a later plate read.
+
+    Event/visit identity is authoritative.  A session's persisted entry image
+    reference is a second session-bound identity for older or partially
+    upgraded rows. Plate-only fallback is retained only for legacy sessions
+    that predate those identifiers; camera fallback is deliberately removed
+    because it can show an unrelated vehicle.
+    """
     plate = normalize_plate(plate)
+    event_id = str(event_id or "").strip()
+    visit_id = str(visit_id or "").strip()
+    image_ref = str(image_ref or "").strip().split("?", 1)[0].replace("\\", "/")
+    if image_ref.startswith("/media/"):
+        image_ref = image_ref[len("/media/"):]
+    image_parts = [part for part in image_ref.split("/") if part]
+    if len(image_parts) != 2:
+        image_ref = ""
+    if camera_id and event_id:
+        matched = db.scalar(
+            select(VehicleCapture).where(
+                VehicleCapture.camera_id == int(camera_id),
+                VehicleCapture.event_id == event_id,
+            ).order_by(VehicleCapture.id.desc())
+        )
+        if matched:
+            return matched
+    if camera_id and visit_id:
+        matched = db.scalar(
+            select(VehicleCapture).where(
+                VehicleCapture.camera_id == int(camera_id),
+                VehicleCapture.visit_id == visit_id,
+            ).order_by(VehicleCapture.id.desc())
+        )
+        if matched:
+            return matched
+    if image_ref:
+        image_filter = or_(
+            VehicleCapture.snapshot_path == image_ref,
+            VehicleCapture.crop_path == image_ref,
+        )
+        stmt = select(VehicleCapture).where(image_filter)
+        if camera_id:
+            stmt = stmt.where(VehicleCapture.camera_id == int(camera_id))
+        matched = db.scalar(stmt.order_by(VehicleCapture.id.desc()))
+        if matched:
+            return matched
+    if event_id or visit_id:
+        return None
     if plate:
         matched = db.scalar(
             select(VehicleCapture)
@@ -494,9 +541,45 @@ def find_capture_for_session(db: Session, *, plate: str = "", camera_id: int | N
         )
         if matched:
             return matched
-    if camera_id:
-        return latest_for_camera(db, int(camera_id))
     return None
+
+
+def prune_unreferenced_media(db: Session, *, retention_days: int | None = None) -> dict[str, int]:
+    """Remove expired, unreferenced evidence files without touching receipts.
+
+    Capture rows are the retention authority.  A file is never removed while
+    a capture still points to it, which keeps public receipts and operator
+    evidence valid even when the cleanup job runs concurrently with capture
+    ingestion.
+    """
+    import time
+
+    days = max(1, int(retention_days if retention_days is not None else getattr(settings, "media_retention_days", 14) or 14))
+    cutoff = time.time() - days * 86400
+    referenced: set[str] = set()
+    for snapshot, crop in db.execute(select(VehicleCapture.snapshot_path, VehicleCapture.crop_path)).all():
+        for value in (snapshot, crop):
+            text = str(value or "").replace("\\", "/").lstrip("/")
+            if text:
+                referenced.add(text)
+    removed = 0
+    scanned = 0
+    for kind in ("snapshots", "crops", "annotated", "alpr", "recognition"):
+        folder = settings.media_dir / kind
+        if not folder.is_dir():
+            continue
+        for path in folder.glob("*.jpg"):
+            scanned += 1
+            relative = Path(kind, path.name).as_posix()
+            if relative in referenced or path.name.startswith("live-"):
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    return {"scanned": scanned, "removed": removed, "retention_days": days}
 
 
 def _capture_by_identity(db: Session, camera_id: int, capture: dict | None) -> VehicleCapture | None:
@@ -509,6 +592,30 @@ def _capture_by_identity(db: Session, camera_id: int, capture: dict | None) -> V
             if existing is not None:
                 return existing
     return None
+
+
+def _discard_unreferenced_media(db: Session, *refs: str) -> None:
+    """Remove files created by a losing concurrent insert.
+
+    Capture evidence is written before the row commit so the row can reference
+    it. If a database uniqueness race rejects that insert, those files would
+    otherwise remain as duplicate/orphan media forever.
+    """
+    for raw in refs:
+        relative = str(raw or "").replace("\\", "/")
+        parts = Path(relative).parts
+        if len(parts) != 2 or parts[0] not in {"snapshots", "crops", "annotated", "alpr", "recognition"}:
+            continue
+        in_use = db.scalar(select(func.count(VehicleCapture.id)).where(
+            or_(VehicleCapture.snapshot_path == relative, VehicleCapture.crop_path == relative)
+        ))
+        if in_use:
+            continue
+        path = settings.media_dir / parts[0] / parts[1]
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.debug("Could not remove orphan capture media: %s", path, exc_info=True)
 
 
 def _box_iou(left: dict | None, right: dict | None) -> float:
@@ -585,6 +692,9 @@ def persist_event(
     coil_occupied: bool = False,
     force: bool = False,
 ) -> VehicleCapture | None:
+    from app.services.developer import capture_enabled
+    if not capture_enabled(db):
+        return None
     existing = _capture_by_identity(db, camera.id, capture)
     if existing is not None:
         return existing
@@ -614,6 +724,16 @@ def persist_event(
         box = dict(box)
     if native.get("source"):
         box["source"] = native.get("source")
+    # Preserve the camera's read-only OcxConfig geometry for diagnostics and
+    # evidence review. It is metadata only; it never schedules another query
+    # or capture.
+    if native.get("plate_region"):
+        box["native_plate_region"] = native["plate_region"]
+    if native.get("stop_line"):
+        box["native_stop_line"] = native["stop_line"]
+    for key in ("capture_mode", "native_min_plate_width", "native_max_plate_width"):
+        if native.get(key) is not None:
+            box[key] = native[key]
     try:
         from PIL import Image
         if jpeg[:2] == b"\xff\xd8":
@@ -735,6 +855,12 @@ def persist_event(
     except IntegrityError:
         db.rollback()
         existing = _capture_by_identity(db, camera.id, capture)
+        if existing is None and image_id > 0:
+            existing = db.scalar(select(VehicleCapture).where(
+                VehicleCapture.camera_id == camera.id,
+                VehicleCapture.image_id == image_id,
+            ))
+        _discard_unreferenced_media(db, snapshot_path, crop_path)
         if existing is None:
             raise
         return existing
@@ -793,7 +919,9 @@ def captures_for_sessions(db: Session, rows: list[object]) -> dict[int, VehicleC
             if row.plate
         }
     return {
-        int(row.id): by_plate.get(normalize_plate(row.plate)) or by_camera.get(int(row.camera_id))
+        int(row.id): by_plate.get(normalize_plate(row.plate)) or (
+            by_camera.get(int(row.camera_id)) if row.camera_id is not None else None
+        )
         for row in sessions
         if row.id is not None
     }

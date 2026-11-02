@@ -111,6 +111,15 @@ class RTSPCameraAdapter:
         urls = vendor_candidates(device.ip_address, device.username, device.password_secret, device.rtsp_url)
         return [{"kind": "rtsp", "url": url, "adapter_id": self.id} for url in urls]
 
+    async def disconnect(self, device: CameraLike) -> dict[str, Any]:
+        return {"ok": True, "adapter_id": self.id, "disconnected": True, "native_session": False}
+
+    async def detection_zones(self, device: CameraLike) -> dict[str, Any]:
+        return {"ok": False, "adapter_id": self.id, "zones": [], "error": "generic RTSP has no vendor zone API"}
+
+    async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]:
+        return []
+
     async def probe_candidates(self, device: CameraLike) -> list[dict[str, Any]]:
         rows = []
         for url in vendor_candidates(device.ip_address, device.username, device.password_secret, device.rtsp_url):

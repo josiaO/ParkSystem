@@ -545,7 +545,7 @@
       </div>
 
       <div id="page-cameras" class="hidden">
-        <div class="notice">The Site Server can manage every camera record, but this computer only opens and processes its assigned gate. Select a lane and assign this PC before starting live video. Viewing another camera does not change ownership.</div>
+        <div class="notice">The Site Server can manage every camera record, but this computer only opens and processes its assigned gate. Select a lane and assign this PC before starting live video. Viewing another camera does not change recognition ownership.</div>
         <div class="subnav" id="cameras-subnav">
           <button type="button" data-sub="live" class="active">Live</button>
           <button type="button" data-sub="ips">Devices</button>
@@ -785,6 +785,43 @@
       <div id="page-settings" class="hidden">
         <p class="muted">Site name, timezone, currency, and language. Technical stream and hardware options stay in Hardware Lab.</p>
         <div class="card card-b" id="settings-summary"><p class="muted">Loading site settings…</p></div>
+        <div class="card card-b" id="module-management" style="margin-top:12px;display:none">
+          <h3 style="margin-top:0">Modules &amp; access</h3>
+          <p class="muted">Change the active product capabilities after setup. Disabling a module hides its navigation and protects its API routes; it does not delete its data.</p>
+          <div class="inline-fields">
+            <label>Deployment profile
+              <select id="module-profile"></select>
+            </label>
+          </div>
+          <div id="module-profile-help" class="muted" style="margin:8px 0 12px"></div>
+          <div id="module-controls" class="mod-list"></div>
+          <div class="toolbar" style="margin-top:12px">
+            <button type="button" id="module-save">Save module configuration</button>
+            <button class="secondary" type="button" id="module-refresh">Reload</button>
+          </div>
+          <p class="error" id="module-error"></p>
+        </div>
+        <div class="card card-b" id="developer-playground" style="margin-top:12px;display:none">
+          <h3 style="margin-top:0">Developer Playground</h3>
+          <p class="muted">Test one subsystem at a time. These switches are persisted and physical actions fail closed when disabled.</p>
+          <div id="developer-controls" class="mod-list"></div>
+          <div class="toolbar" style="margin-top:12px">
+            <button class="secondary" type="button" id="developer-save">Save developer controls</button>
+            <button class="secondary" type="button" id="developer-refresh">Refresh counts</button>
+          </div>
+          <div id="developer-counts" class="statband" style="margin-top:12px"></div>
+          <div class="card" style="margin-top:12px;padding:12px">
+            <b>Delete test data</b>
+            <p class="muted">Enter comma-separated IDs. Deletion requires Developer mode, destructive tools, and confirmation.</p>
+            <div class="inline-fields">
+              <label>Capture IDs <input id="developer-capture-ids" placeholder="12, 13"></label>
+              <button class="secondary danger" type="button" id="developer-delete-captures">Delete captures</button>
+              <label>Session IDs <input id="developer-session-ids" placeholder="7, 8"></label>
+              <button class="secondary danger" type="button" id="developer-delete-sessions">Delete sessions</button>
+            </div>
+          </div>
+          <p class="error" id="developer-error"></p>
+        </div>
         <div class="card card-b" id="node-management" style="margin-top:12px;display:none">
           <h3 style="margin-top:0">Edge Node camera ownership</h3>
           <p class="muted">Assign each Edge Node to the gate whose cameras it should operate. The Site Server keeps the cameras visible for management but will not open cameras owned by an active node.</p>
@@ -1314,6 +1351,7 @@
       user: "", userId: null, permissions: [], roles: [], navigation: [], modules: {},
       recommendedAdapter: "hvx",
       platform: null,
+      siteTimezone: "UTC",
     };
     let selectedCameraId = null;
     let selectedGateId = null;
@@ -1598,7 +1636,17 @@
 
     function formatWhen(iso) {
       if (!iso) return "—";
-      return String(iso).slice(0, 19).replace("T", " ");
+      const parsed = new Date(String(iso));
+      if (Number.isNaN(parsed.getTime())) return String(iso).slice(0, 19).replace("T", " ");
+      try {
+        return new Intl.DateTimeFormat(undefined, {
+          timeZone: state.siteTimezone || "UTC",
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        }).format(parsed).replace(",", "");
+      } catch (_) {
+        return String(iso).slice(0, 19).replace("T", " ");
+      }
     }
 
     function cameraOptionLabel(camera) {
@@ -2609,7 +2657,8 @@
           }
           select.innerHTML = options.join("");
           const site = await api("/settings/site");
-          document.getElementById("site-timezone").value = site.timezone || "UTC";
+          state.siteTimezone = site.timezone || "UTC";
+          document.getElementById("site-timezone").value = state.siteTimezone;
           document.getElementById("site-currency").value = site.currency || "";
           document.getElementById("site-language").value = site.language || "en";
           document.getElementById("site-plate-validation").value = site.plate_validation || "NONE";
@@ -2857,7 +2906,10 @@
         const item = byId[navId];
         let visible = false;
         if (hasModuleNav) {
-          visible = Boolean(item);
+          // Settings is the recovery surface for module configuration. Keep
+          // it reachable for an authorized administrator even if a custom
+          // profile accidentally omitted the core.sites navigation item.
+          visible = navId === "settings" && can("settings.view") ? true : Boolean(item);
           if (item) setNavLabel(btn, item.label);
         } else {
           // Permission-only fallback when /auth/me has no navigation yet.
@@ -3275,6 +3327,11 @@
 
     async function refreshSessionContext() {
       const me = await api("/auth/me");
+      try {
+        const site = await api("/settings/site");
+        state.siteTimezone = site.timezone || "UTC";
+        if (site.currency) state.siteCurrency = site.currency;
+      } catch (_) {}
       state.permissions = me.permissions || [];
       state.navigation = me.navigation || [];
       state.modules = me.modules || {};
@@ -3312,7 +3369,7 @@
 
     function setSignedOut() {
       state.token = ""; state.user = ""; state.userId = null; state.permissions = [];
-      state.navigation = []; state.modules = {};
+      state.navigation = []; state.modules = {}; state.siteTimezone = "UTC";
       sessionStorage.removeItem("smartpark_token");
       document.body.classList.remove("role-tech");
       document.body.classList.remove("kiosk-mode");
@@ -3732,16 +3789,160 @@
       }
     }
 
+    const developerControlLabels = {
+      developer_mode: "Enable Developer mode",
+      logging_enabled: "Verbose diagnostic logging",
+      printing_enabled: "Printing / receipt device",
+      gate_opening_enabled: "Gate opening",
+      automatic_gate_opening_enabled: "Automatic gate opening",
+      recognition_enabled: "Recognition worker",
+      capture_enabled: "Capture and evidence persistence",
+      camera_connections_enabled: "Camera connections",
+      destructive_tools_enabled: "Destructive test-data tools",
+    };
+
+    function parseDeveloperIds(value) {
+      return String(value || "").split(",").map((item) => Number(item.trim())).filter((id) => Number.isInteger(id) && id > 0);
+    }
+
+    async function loadDeveloperPlayground() {
+      const card = document.getElementById("developer-playground");
+      const controls = document.getElementById("developer-controls");
+      const counts = document.getElementById("developer-counts");
+      const error = document.getElementById("developer-error");
+      if (!card || !controls || !counts || !can("settings.manage")) return;
+      card.style.display = "block";
+      error.textContent = "";
+      try {
+        const [cfg, summary] = await Promise.all([api("/developer/settings"), api("/developer/summary")]);
+        controls.innerHTML = Object.entries(developerControlLabels).map(([key, label]) => `
+          <label class="mod-row" style="cursor:pointer">
+            <input type="checkbox" class="bigck developer-control" data-dev-key="${key}" ${cfg[key] ? "checked" : ""}>
+            <div><b>${label}</b><div class="muted" style="font-size:11.5px">${key === "gate_opening_enabled" ? "When off, receipt-taking may continue but no barrier actuator is called." : key === "destructive_tools_enabled" ? "Required together with Developer mode before deleting captures or sessions." : ""}</div></div>
+          </label>`).join("");
+        const labels = { cameras: "Cameras", gates: "Gates", captures: "Captures", sessions: "Sessions", vehicles: "Vehicles", receipts: "Receipts", payments: "Payments", audit_logs: "Audit logs" };
+        counts.innerHTML = Object.entries(labels).map(([key, label]) => `<div class="stat"><div class="k">${label}</div><div class="v">${Number((summary.counts || {})[key] || 0)}</div></div>`).join("");
+        document.getElementById("developer-save").onclick = async () => {
+          error.textContent = "";
+          try {
+            const payload = {};
+            document.querySelectorAll(".developer-control").forEach((el) => { payload[el.dataset.devKey] = el.checked; });
+            await api("/developer/settings", { method: "PATCH", body: JSON.stringify(payload) });
+            toast("Developer controls saved", "info");
+            await loadDeveloperPlayground();
+          } catch (e) { error.textContent = e.message; }
+        };
+        document.getElementById("developer-refresh").onclick = loadDeveloperPlayground;
+        document.getElementById("developer-delete-captures").onclick = async () => {
+          const ids = parseDeveloperIds(document.getElementById("developer-capture-ids").value);
+          if (!ids.length || !confirm(`Delete ${ids.length} capture(s) and their image files?`)) return;
+          try { await api("/developer/captures/bulk-delete", { method: "POST", body: JSON.stringify({ ids, confirm: true }) }); document.getElementById("developer-capture-ids").value = ""; await loadDeveloperPlayground(); }
+          catch (e) { error.textContent = e.message; }
+        };
+        document.getElementById("developer-delete-sessions").onclick = async () => {
+          const ids = parseDeveloperIds(document.getElementById("developer-session-ids").value);
+          if (!ids.length || !confirm(`Delete ${ids.length} session(s) and their test ledger rows?`)) return;
+          try { await api("/developer/sessions/bulk-delete", { method: "POST", body: JSON.stringify({ ids, confirm: true }) }); document.getElementById("developer-session-ids").value = ""; await loadDeveloperPlayground(); }
+          catch (e) { error.textContent = e.message; }
+        };
+      } catch (e) {
+        card.style.display = "none";
+        if (can("settings.manage")) toast(`Developer tools unavailable: ${e.message}`, "warn");
+      }
+    }
+
+    async function loadModuleManagement() {
+      const card = document.getElementById("module-management");
+      const profileSelect = document.getElementById("module-profile");
+      const controls = document.getElementById("module-controls");
+      const help = document.getElementById("module-profile-help");
+      const error = document.getElementById("module-error");
+      if (!card || !profileSelect || !controls || !can("settings.manage")) return;
+      card.style.display = "block";
+      error.textContent = "";
+      const escapeHtml = (value) => String(value == null ? "" : value)
+        .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+      try {
+        const [moduleBody, profileBody] = await Promise.all([api("/modules"), api("/modules/profiles")]);
+        const config = moduleBody.config || {};
+        const modules = moduleBody.modules || [];
+        const profiles = profileBody.profiles || [];
+        profileSelect.innerHTML = profiles.map((profile) =>
+          `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name || profile.id)}</option>`
+        ).join("");
+        profileSelect.value = config.profile || "CUSTOM";
+        const profileDescription = new Map(profiles.map((profile) => [profile.id, profile.description || ""]));
+        const render = () => {
+          const selectedProfile = profileSelect.value || "CUSTOM";
+          const custom = selectedProfile === "CUSTOM";
+          help.textContent = profileDescription.get(selectedProfile) || (custom
+            ? "Select the modules this site should expose. Required dependencies are added by the server."
+            : "");
+          controls.innerHTML = modules.map((module) => {
+            const inProfile = selectedProfile !== "CUSTOM" && profiles.find((profile) => profile.id === selectedProfile)?.modules?.includes(module.id);
+            const required = module.id === "core.identity" || module.id === "core.sites";
+            const checked = custom ? (Boolean(module.enabled) || required) : Boolean(inProfile);
+            const dependencies = (module.required_dependencies || []).join(", ");
+            return `<label class="mod-row" style="cursor:${custom && !required ? "pointer" : "default"}">
+              <input type="checkbox" class="bigck module-control" data-module-id="${escapeHtml(module.id)}" ${checked ? "checked" : ""} ${!custom || required ? "disabled" : ""}>
+              <div style="flex:1"><b style="font-size:13px">${escapeHtml(module.name || module.id)}</b><div class="muted" style="font-size:11.5px"><span class="mono">${escapeHtml(module.id)}</span>${dependencies ? ` · needs ${escapeHtml(dependencies)}` : ""}</div></div>
+            </label>`;
+          }).join("");
+        };
+        profileSelect.onchange = render;
+        render();
+        document.getElementById("module-refresh").onclick = loadModuleManagement;
+        document.getElementById("module-save").onclick = async () => {
+          error.textContent = "";
+          try {
+            const selectedProfile = profileSelect.value || "CUSTOM";
+            let result;
+            if (selectedProfile === "CUSTOM") {
+              const moduleById = new Map(modules.map((module) => [module.id, module]));
+              const enabled = new Set([...document.querySelectorAll(".module-control:checked")].map((el) => el.dataset.moduleId));
+              let changed = true;
+              while (changed) {
+                changed = false;
+                [...enabled].forEach((moduleId) => {
+                  (moduleById.get(moduleId)?.required_dependencies || []).forEach((dependency) => {
+                    if (!enabled.has(dependency)) {
+                      enabled.add(dependency);
+                      changed = true;
+                    }
+                  });
+                });
+              }
+              result = await api("/modules/enabled", { method: "PUT", body: JSON.stringify({ enabled: [...enabled], profile: "CUSTOM" }) });
+            } else {
+              result = await api("/modules/profile", { method: "PUT", body: JSON.stringify({ profile: selectedProfile }) });
+            }
+            state.modules = result || state.modules;
+            await refreshSessionContext();
+            await loadModuleManagement();
+            toast("Module configuration saved", "info");
+          } catch (e) {
+            error.textContent = e.message || "Module configuration could not be saved.";
+          }
+        };
+      } catch (e) {
+        card.style.display = "block";
+        error.textContent = e.message || "Module configuration unavailable.";
+      }
+    }
+
     async function loadSettingsPage() {
       const box = document.getElementById("settings-summary");
       if (!box) return;
       try {
-        const site = await api("/settings/site");
+        const [site, clock] = await Promise.all([api("/settings/site"), api("/settings/clock")]);
+        state.siteTimezone = site.timezone || "UTC";
         if (site.currency) state.siteCurrency = site.currency;
         const lang = { en: "English", sw: "Kiswahili", ar: "Arabic", fr: "French", pt: "Portuguese" }[site.language] || site.language || "—";
         box.innerHTML = `<div class="biz-grid">
           <div><span>Site</span><b>${site.name || "—"}</b></div>
           <div><span>Timezone</span><b>${site.timezone || "UTC"}</b></div>
+          <div><span>Site clock</span><b>${clock.site_time || "—"}</b></div>
           <div><span>Currency</span><b>${site.currency || "—"}</b></div>
           <div><span>Language</span><b>${lang}</b></div>
         </div>
@@ -3749,6 +3950,9 @@
       } catch (e) {
         box.innerHTML = `<div class="empty-state"><b>Settings unavailable</b><p>${e.message}</p></div>`;
       }
+
+      await loadModuleManagement();
+      await loadDeveloperPlayground();
 
       const nodeCard = document.getElementById("node-management");
       const nodeBody = document.getElementById("node-management-body");
@@ -4021,7 +4225,7 @@
           const due = Number(s.amount_due || 0);
           const paid = Number(s.amount_paid || 0);
           const pay = due <= 0 && paid <= 0 ? (s.status || "OPEN") : (paid >= due && due > 0 ? "PAID" : (paid > 0 ? "PENDING" : "UNPAID"));
-          return `<tr data-id="${s.id}"><td><span class="plate">${s.plate || ""}</span></td><td>${s.parker_kind || "Casual"}</td><td>${paymentChip(pay)}</td><td>${s.receipt_status || "—"}</td><td><code>${s.public_token || "—"}</code></td><td>${(s.entry_time || "").slice(0,19).replace("T"," ")}</td><td>${moneyLabel(s.amount_due, s.currency)}</td><td>${moneyLabel(s.amount_paid, s.currency)}</td></tr>`;
+          return `<tr data-id="${s.id}"><td><span class="plate">${s.plate || ""}</span></td><td>${s.parker_kind || "Casual"}</td><td>${paymentChip(pay)}</td><td>${s.receipt_status || "—"}</td><td><code>${s.public_token || "—"}</code></td><td>${formatWhen(s.entry_time)}</td><td>${moneyLabel(s.amount_due, s.currency)}</td><td>${moneyLabel(s.amount_paid, s.currency)}</td></tr>`;
         }).join("") || `<tr><td colspan="8"><div class="empty-state"><b>No sessions yet.</b><p>Parking visits appear here after a vehicle is detected at an entry.</p></div></td></tr>`;
         document.querySelectorAll("#session-rows tr[data-id]").forEach((tr) => {
           tr.addEventListener("click", () => {
@@ -4041,7 +4245,7 @@
       try {
         const rows = await api("/payments");
         document.getElementById("payment-rows").innerHTML = rows.map((p) =>
-          `<tr><td>${(p.confirmed_at || p.created_at || "").slice(0,19).replace("T"," ")}</td><td>${p.session_id || "—"}</td><td>${methodLabel(p.method)}</td><td>${moneyLabel(p.amount, p.currency)}</td><td>${paymentChip(p.status)}</td><td class="tech-col">${p.provider_id || "—"}</td></tr>`
+          `<tr><td>${formatWhen(p.confirmed_at || p.created_at)}</td><td>${p.session_id || "—"}</td><td>${methodLabel(p.method)}</td><td>${moneyLabel(p.amount, p.currency)}</td><td>${paymentChip(p.status)}</td><td class="tech-col">${p.provider_id || "—"}</td></tr>`
         ).join("") || `<tr><td colspan="6"><div class="empty-state"><b>No payments yet.</b><p>Succeeded, pending, and failed payments will appear here.</p></div></td></tr>`;
       } catch (e) {
         err.textContent = e.message;
@@ -4242,6 +4446,7 @@
             public_base_url: document.getElementById("site-public-url").value.trim().replace(/\/+$/, ""),
           }),
         });
+        state.siteTimezone = saved.timezone || "UTC";
         error.textContent = `Site locale saved: ${saved.timezone} / ${saved.currency}`;
       } catch (err) {
         error.textContent = err.message;
@@ -4406,7 +4611,7 @@
       card.classList.remove("hidden");
       document.getElementById("kiosk-plate").textContent = data.plate || "—";
       const inside = data.still_inside ? "still inside" : "visit ended";
-      document.getElementById("kiosk-stay").textContent = `Time on site: ${data.duration_label || "—"} (${inside}). Entered ${(data.entry_time || "").replace("T", " ").slice(0, 16)}.`;
+      document.getElementById("kiosk-stay").textContent = `Time on site: ${data.duration_label || "—"} (${inside}). Entered ${formatWhen(data.entry_time)}.`;
       const remain = Math.round(Number(data.amount_remaining || 0));
       document.getElementById("kiosk-due").textContent = data.payable
         ? `${data.currency || "TZS"} ${remain.toLocaleString()} to pay`
@@ -5071,7 +5276,15 @@
 
     function localDateTimeValue(date) {
       const p = (n) => String(n).padStart(2, "0");
-      return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+      try {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: state.siteTimezone || "UTC", year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        }).formatToParts(date).reduce((out, part) => { out[part.type] = part.value; return out; }, {});
+        return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+      } catch (_) {
+        return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+      }
     }
 
     function fillTariffForm(editor) {
@@ -5094,9 +5307,11 @@
         if (!exit.value) exit.value = localDateTimeValue(now);
       }
       try {
+        const site = await api("/settings/site");
+        state.siteTimezone = site.timezone || "UTC";
         const tariff = await api("/fees/tariff");
         fillTariffForm(tariff.editor);
-        document.getElementById("fee-result").textContent = `${tariff.name} · ${tariff.currency}. Day rate ${tariff.editor.day_block_fee} per ${tariff.editor.day_block_minutes} min.`;
+        document.getElementById("fee-result").textContent = `${tariff.name} · ${tariff.currency}. Site time: ${state.siteTimezone}. Day rate ${tariff.editor.day_block_fee} per ${tariff.editor.day_block_minutes} min.`;
       } catch (err) {
         error.textContent = err.message;
       }

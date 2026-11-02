@@ -27,7 +27,7 @@ Coil: `Net_ReadGPIOState` on GPIO IN (learned 1–7). Rising edge → `Net_Image
 
 The site default is software reading: FastALPR reads the JPEG (`FASTALPR_ONLY`). The camera text stays available. Set a lane to `NATIVE_ONLY` to keep the camera string. See [PLATE-ENGINE.md](PLATE-ENGINE.md).
 
-Live JPEG is `Net_GetJpgBuffer` on the host. The Site Service MediaGateway polls it. FastALPR is a separate DETECT consumer.
+Live JPEG is produced by the host's decoded `Net_SetDrawDataOut` callback and held in a one-item latest-frame mailbox. `Net_GetJpgBuffer` is retained only for older DLL builds that cannot deliver decoded callbacks. The Site Service waits for a newer host frame sequence instead of replaying the cached JPEG. FastALPR is a separate DETECT consumer.
 
 Disable native fusion only with `native_alpr_enabled=false` (rollback/debug). Default is on.
 

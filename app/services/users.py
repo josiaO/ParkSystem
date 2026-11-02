@@ -101,6 +101,7 @@ def create_user(db: Session, *, username: str, full_name: str, password: str, st
 
 def update_user(db: Session, user: User, *, full_name: str | None, password: str | None, status: str | None, roles: list[str] | None) -> User:
     ensure_not_last_admin(db, user, next_roles=roles)
+    security_changed = bool(password) or status is not None or roles is not None
     if full_name is not None:
         user.full_name = full_name
     if password:
@@ -109,6 +110,11 @@ def update_user(db: Session, user: User, *, full_name: str | None, password: str
         user.status = validate_status(status)
     if roles is not None:
         set_user_roles(db, user, roles)
+    if security_changed:
+        # Existing bearer sessions must not survive a password, role, or
+        # account-status change.  The caller can log in again with the new
+        # credentials/permissions.
+        db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
     db.commit()
     db.expire_all()
     loaded = load_user(db, user.id)
