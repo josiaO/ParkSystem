@@ -149,6 +149,7 @@ class SQLiteOutbox:
     """
 
     PROCESSED_RETENTION_SECONDS = 7 * 24 * 3600.0
+    PUBLISHED_RETENTION_SECONDS = 90 * 24 * 3600.0
 
     def __init__(self, path: Path, *, legacy_path: Path | None = None):
         self.path = path
@@ -162,7 +163,11 @@ class SQLiteOutbox:
             # Business-event idempotency that survives a crash between "processed"
             # and "acknowledged": the ack and the processed mark commit together.
             db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY, ts REAL NOT NULL)")
-            db.execute("CREATE TABLE IF NOT EXISTS published (key TEXT PRIMARY KEY, event_id TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS published (key TEXT PRIMARY KEY, event_id TEXT NOT NULL, ts REAL NOT NULL DEFAULT 0)")
+            try:
+                db.execute("ALTER TABLE published ADD COLUMN ts REAL NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             db.execute("BEGIN IMMEDIATE")
             if not db.execute("SELECT 1 FROM metadata WHERE key = 'legacy_imported'").fetchone():
                 if legacy_path is not None and legacy_path.is_file():
@@ -188,16 +193,29 @@ class SQLiteOutbox:
         with self._connect() as db:
             identity = str(payload.get("dedupe_key") or payload.get("event_id") or "")
             if identity:
+                now = time.time()
                 identity = f"{kind}:{identity}"
                 db.execute("BEGIN IMMEDIATE")
                 existing = db.execute("SELECT event_id FROM published WHERE key = ?", (identity,)).fetchone()
                 if existing:
                     self.duplicates += 1
                     return existing[0]
-                db.execute("INSERT INTO published (key, event_id) VALUES (?, ?)", (identity, item_id))
+                db.execute("INSERT INTO published (key, event_id, ts) VALUES (?, ?, ?)", (identity, item_id, now))
+                db.execute(
+                    "DELETE FROM published WHERE ts > 0 AND ts < ? "
+                    "AND event_id NOT IN (SELECT id FROM events)",
+                    (now - self.PUBLISHED_RETENTION_SECONDS,),
+                )
             db.execute("INSERT INTO events (id, kind, payload, ts) VALUES (?, ?, ?, ?)",
                        (item_id, kind, json.dumps(payload, default=str), time.time()))
         return item_id
+
+    def change_token(self) -> int:
+        """Cheap cross-process wake-up token without opening SQLite."""
+        try:
+            return int(self.path.stat().st_mtime_ns)
+        except OSError:
+            return 0
 
     def pending(self, limit: int = 50) -> list[dict]:
         with self._connect() as db:

@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, patch
 from app.domain.devices import DEFAULT_CAMERA_ADAPTER, ConnectionMode
 from app.domain.gates import should_pulse_physical
 from app.infrastructure.db import is_postgres, is_sqlite
-from app.infrastructure.hardware.cameras import camera_adapter_for
+from app.infrastructure.hardware.cameras import adapter_catalog, camera_adapter_for
 from app.infrastructure.hardware.cameras.onvif import ONVIFCameraAdapter
+from app.infrastructure.hardware.cameras.qy import QYCameraAdapter
 from app.infrastructure.hardware.cameras.rtsp import RTSPCameraAdapter
 from app.infrastructure.hardware.edge import edge_agent_status, is_direct
 from app.infrastructure.hardware.gates import live_gate_adapter
@@ -60,6 +61,17 @@ class AdapterWrapTests(unittest.TestCase):
         host.return_value.connect.assert_awaited_once_with(
             ip="192.168.1.144", port=30000, username="admin", password="admin",
         )
+
+    def test_qy_is_a_first_class_vendor_alias_with_native_ownership(self):
+        camera = _cam(adapter_id="qy")
+        adapter = camera_adapter_for(camera)
+        self.assertIsInstance(adapter, QYCameraAdapter)
+        self.assertEqual(adapter.id, "qy")
+        caps = asyncio.run(adapter.capabilities(camera))
+        self.assertEqual(caps["vendor"], "QY")
+        self.assertEqual(caps["engine"], "ocxconfig_netsdk")
+        self.assertTrue(caps["native_plates"])
+        self.assertTrue(any(row["adapter_id"] == "qy" for row in adapter_catalog()))
 
     def test_onvif_cannot_replace_sdk_login(self):
         onvif = camera_adapter_for(_cam(adapter_id="onvif"))

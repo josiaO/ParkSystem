@@ -66,7 +66,7 @@ async def fetch_snapshot(uri: str, username: str, password: str, *, timeout: flo
         return b""
     import httpx
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         res = await client.get(uri, auth=(username, password) if username else None)
         if res.status_code == 401 and username:
             res = await client.get(uri, auth=httpx.DigestAuth(username, password))

@@ -23,6 +23,7 @@ class FastALPRProvider:
             from app.services.alpr import recognize_arrival_bytes
             call = recognize_arrival_bytes
             options["detected_boxes"] = event_or_frame["plate_boxes"]
+            options["decoded_bgr"] = event_or_frame.get("decoded_bgr")
         inference = asyncio.create_task(asyncio.to_thread(call, jpeg, **options))
         try:
             result = await asyncio.shield(inference)

@@ -77,6 +77,7 @@ def _spec_from_mapping(camera_id: int, source: dict[str, Any]) -> CameraLiveSpec
         need_detect=bool(source.get("need_detect", True)),
         live_role=str(source.get("live_role") or ROLE_LIVE),
         stream_profiles=dict(source.get("stream_profiles") or {}),
+        adapter_id=str(source.get("adapter_id") or "hvx").strip().lower() or "hvx",
     )
 
 

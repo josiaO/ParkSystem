@@ -41,7 +41,8 @@ Net_FuntionListRsp(handle, 800-byte buffer)
 Net_RegOffLineClient(handle)
 Net_StartVideo(handle, selected_stream, hidden message-pumped HWND)
 Net_RegImageRecvEx2 then Net_RegImageRecvEx
-Net_GetJpgBuffer(handle)               # bounded live JPEG sampler
+Net_SetDrawDataOut(handle, cb)        # primary decoded-frame callback
+Net_GetJpgBuffer(handle)               # compatibility fallback sampler
 Net_FindDeviceIp(cb)  # optional; needs WinPcap
 Net_ImageSnap(handle, T_DCImageSnap*)
 Net_DisConnCamera / Net_DelCamera

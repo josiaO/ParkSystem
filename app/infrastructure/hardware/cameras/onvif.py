@@ -70,3 +70,13 @@ class ONVIFCameraAdapter:
             if uri:
                 rows.append({"kind": "onvif", "url": uri, "adapter_id": self.id, **{k: v for k, v in profile.items() if k != "uri"}})
         return rows
+
+    async def disconnect(self, device: CameraLike) -> dict[str, Any]:
+        return {"ok": True, "adapter_id": self.id, "disconnected": True}
+
+    async def detection_zones(self, device: CameraLike) -> dict[str, Any]:
+        profile = dict(getattr(device, "onvif_profile", None) or {})
+        return {"ok": False, "adapter_id": self.id, "zones": profile.get("analytics_rules") or [], "error": "ONVIF analytics zones are device-specific"}
+
+    async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]:
+        return []

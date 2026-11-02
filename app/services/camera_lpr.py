@@ -1,10 +1,10 @@
-"""Camera ANPR contract used by SmartPark Edge.
+"""Camera ANPR and Windows OcxConfig streaming contract used by SmartPark Edge.
 
-Parking and FastALPR do not depend on OcxConfig. HVX/QY is the current site
-adapter (port 30000, Net_RegImageRecvEx). Another vendor or an in-house ALPR
-camera delivers plates into the same event path. FastALPR is the local JPEG
-OCR used when the camera has no native engine or the native plate is empty.
-Never invent plates when both are missing.
+Windows QY/HVX live video is owned by the OcxConfig/NetSDK host (port 30000,
+PlaySdk/RTSP decoder behind Net_StartVideo). Another vendor or an in-house
+camera adapter may deliver plates into the same event path. FastALPR remains
+the local application-side JPEG OCR used when the camera has no native plate
+or the native plate is empty. Never invent plates when both are missing.
 """
 
 from __future__ import annotations
@@ -234,6 +234,15 @@ def native_from_sdk_capture(capture: dict | None) -> dict:
         "crop_bytes": capture.get("crop_bytes") or 0,
         "have_vehicle": bool(capture.get("have_vehicle")) or rect is not None,
         "snap_type": capture.get("snap_type"),
+        # Read-only OcxConfig geometry carried by the x86 SDK host.  These
+        # values are camera coordinates, not a software ROI; preserving them
+        # lets the server audit that native capture happened inside the
+        # configured zone without adding a per-frame camera query.
+        "plate_region": capture.get("plate_region") or [],
+        "stop_line": capture.get("stop_line"),
+        "capture_mode": capture.get("capture_mode"),
+        "native_min_plate_width": capture.get("native_min_plate_width"),
+        "native_max_plate_width": capture.get("native_max_plate_width"),
     }
 
 
@@ -295,6 +304,8 @@ def camera_contract() -> dict:
         "picture_port": QY_PICTURE_PORT,
         "http_ui_port": QY_HTTP_PORT,
         "do_not_use_port": CAMAPI_DEFAULT_PORT,
+        "streaming_backend": "ocxconfig_netsdk",
+        "streaming_requires_ocxconfig_on_windows": True,
         "parking_requires_ocxconfig": False,
         "official_config": {
             "ui": "OcxConfig/OcxConfig.ocx",
@@ -304,7 +315,8 @@ def camera_contract() -> dict:
             "connect": "Net_AddCamera then Net_ConnCamera(handle, 30000, 5)",
             "autologin": "Net_ConnCameraEx(handle, port, 3, user, pass)",
             "native_plates": "Net_RegImageRecvEx2",
-            "note": "HVX vendor kit only. Not required for FastALPR, parking sessions, or a future camera brand.",
+            "streaming": "Net_StartVideo -> Net_SetDrawDataOut/Net_AddPlayWindow -> bounded latest JPEG host bridge",
+            "note": "HVX vendor kit is required for Windows QY/HVX streaming; FastALPR remains application-side and vendor-independent.",
         },
         "native_engine": {
             "api": "Net_RegImageRecvEx / Net_RegImageRecvEx2",
@@ -337,7 +349,8 @@ def camera_contract() -> dict:
         },
         "note": (
             "Parking is adapter + plate-event based. HVX uses NetSDK port 30000; "
-            "OcxConfig is only the current vendor DLL kit. FastALPR reads a JPEG when "
-            "the camera has no native plate or you ship your own ALPR later."
+            "OcxConfig/NetSDK is the authoritative Windows QY/HVX video backend. "
+            "FastALPR reads the newest JPEG delivered by that host when the camera "
+            "has no native plate or the native plate is empty."
         ),
     }

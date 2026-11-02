@@ -68,9 +68,12 @@ class Settings(BaseSettings):
     node_id: str = default_node_id()
     node_role: Literal["SERVER", "CLIENT"] = "SERVER"
     shared_media_dir: Path | None = None
-    db_pool_size: int = 5
-    db_max_overflow: int = 5
-    db_pool_timeout_seconds: float = 8.0
+    # The Site Server serves long-lived live streams plus short camera/plate
+    # polls. Keep enough checked-out connections for those request bursts, but
+    # still rely on bounded sessions and the route-level module cache.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout_seconds: float = 20.0
     # Where camera credentials live: auto (= dpapi on Windows, db elsewhere),
     # dpapi, file, memory, or db (legacy raw column).
     secrets_backend: str = "auto"
@@ -127,6 +130,9 @@ class Settings(BaseSettings):
     log_max_bytes: int = 5_000_000
     log_backup_count: int = 8
     gate_command_timeout_seconds: float = 3.0
+    # HVX snapshot requests are asynchronous; wait for the matching callback
+    # before falling back to a live frame that may belong to another moment.
+    capture_event_wait_seconds: float = 1.5
     hvx_vendor_dir: str | None = None
     request_timeout_seconds: float = 4.0
     hvx_connect_http_timeout_seconds: float = 20.0

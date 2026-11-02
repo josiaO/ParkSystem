@@ -19,17 +19,23 @@ if str(ROOT) not in sys.path:
 from app.api_main import app, ensure_roles
 from app.config import settings
 from app.db import Base, get_db
+from app.models import ParkingSession, VehicleCapture
 from app.services import public_ingress
 
 
 class PublicIngressPolicyTests(unittest.TestCase):
     def test_public_paths(self):
-        for path in ("/p/abc", "/p/abc/status", "/api/public/payment-intents", "/api/public/payment-status/abc",
+        for path in ("/p/abc", "/s/abc", "/p/abc/status", "/api/public/payment-intents", "/api/public/payment-status/abc",
                      "/api/webhooks/flutterwave", "/api/webhooks/clickpesa", "/health"):
             self.assertTrue(public_ingress.is_public_path(path), path)
         for path in ("/", "/cameras", "/cameras/1/live.mjpeg", "/gates/1/open", "/media/gateway", "/auth/login",
                      "/payments", "/payments/health", "/sessions", "/api/publicx", "/hvx", "/docs"):
             self.assertFalse(public_ingress.is_public_path(path), path)
+        self.assertTrue(public_ingress.is_public_path("/p/abc", "GET"))
+        self.assertTrue(public_ingress.is_public_path("/api/public/payment-intents", "POST"))
+        self.assertFalse(public_ingress.is_public_path("/p/abc/pay", "POST"))
+        self.assertFalse(public_ingress.is_public_path("/p/abc/kiosk-pay", "POST"))
+        self.assertFalse(public_ingress.is_public_path("/api/public/payment-status/abc", "POST"))
 
     def test_no_ingress_hosts_means_no_restriction(self):
         with patch.object(settings, "public_ingress_hosts", ""):
@@ -42,6 +48,14 @@ class PublicIngressPolicyTests(unittest.TestCase):
                                                                           "x-forwarded-host": "pay2.example.com"}))
             self.assertTrue(public_ingress.request_allowed("/cameras", {"host": "127.0.0.1:8760"}))
             self.assertTrue(public_ingress.request_allowed("/api/webhooks/flutterwave", {"host": "pay.example.com"}))
+
+    def test_rate_limiter_is_bounded_by_route_family_without_token_keys(self):
+        public_ingress.reset_rate_limiter()
+        key = ("198.51.100.10", "payment-intent")
+        for _ in range(10):
+            self.assertTrue(public_ingress._rate_limiter.allow(key, limit=10, window_seconds=60))
+        self.assertFalse(public_ingress._rate_limiter.allow(key, limit=10, window_seconds=60))
+        public_ingress.reset_rate_limiter()
 
 
 class PublicIngressMiddlewareTests(unittest.TestCase):
@@ -90,6 +104,47 @@ class PublicIngressMiddlewareTests(unittest.TestCase):
         self.assertEqual(hook.status_code, 401)  # reached the handler: unsigned webhook rejected
         health = self.client.get("/health", headers={"host": "pay.example.com"})
         self.assertEqual(health.status_code, 200)
+
+    def test_public_payment_photo_endpoint_serves_the_visit_bound_snapshot(self):
+        import shutil
+        import tempfile
+        from unittest.mock import PropertyMock
+        from app.config import Settings
+
+        media = Path(tempfile.mkdtemp(prefix="smartpark-public-media-"))
+        try:
+            (media / "snapshots").mkdir(parents=True)
+            photo = b"\xff\xd8\xff\xd9"
+            (media / "snapshots" / "entry.jpg").write_bytes(photo)
+            with patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=media):
+                with self.Session() as db:
+                    row = ParkingSession(
+                        site_id=1,
+                        plate="T123ABC",
+                        camera_id=7,
+                        status="CLOSED",
+                        public_token="photo-route-token",
+                        entry_event_id="photo-route-event",
+                    )
+                    db.add(row)
+                    db.flush()
+                    db.add(VehicleCapture(
+                        camera_id=7,
+                        plate="T123ABC",
+                        event_id="photo-route-event",
+                        snapshot_path="snapshots/entry.jpg",
+                    ))
+                    db.commit()
+
+                res = self.client.get(
+                    "/p/photo-route-token/snapshot.jpg",
+                    headers={"host": "pay.example.com"},
+                )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.content, photo)
+            self.assertEqual(res.headers.get("content-type"), "image/jpeg")
+        finally:
+            shutil.rmtree(media, ignore_errors=True)
 
     def test_lan_host_is_unrestricted(self):
         res = self.client.get("/cameras", headers={"host": "127.0.0.1:8760"})

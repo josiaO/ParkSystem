@@ -54,6 +54,54 @@ class AcquisitionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_silent_sdk_camera_does_not_open_a_competing_rtsp_reader(self):
+        async def scenario():
+            gw = LocalMediaGateway()
+            row = gw._session_for(CameraLiveSpec(
+                id=92, ip="10.0.0.92", username="operator", password="secret",
+                rtsp_url="rtsp://10.0.0.92/subvideo", sdk_handle=0,
+            ))
+            row.viewers = 1
+
+            async def sdk(session):
+                session.viewers = 0
+                return False
+
+            with patch.object(gw, "_sdk_frames", new=AsyncMock(side_effect=sdk)) as sdk_reader, \
+                    patch.object(gw, "_rtsp_frames", new=AsyncMock(return_value=True)) as video:
+                await gw._produce(row)
+                sdk_reader.assert_awaited_once()
+                video.assert_not_awaited()
+                self.assertEqual(row.native_fallback_until, 0.0)
+                self.assertIn("OcxConfig/NetSDK", row.last_error)
+
+        asyncio.run(scenario())
+
+    def test_unconnected_qy_camera_does_not_open_rtsp_as_a_hidden_fallback(self):
+        async def scenario():
+            gw = LocalMediaGateway()
+            row = gw._session_for(CameraLiveSpec(
+                id=93, ip="10.0.0.93", username="operator", password="secret",
+                rtsp_url="rtsp://10.0.0.93/subvideo", sdk_handle=None, adapter_id="qy",
+            ))
+            row.viewers = 1
+
+            async def sdk_read(session):
+                # The SDK adapter must be selected from adapter identity even
+                # before a handle exists; no generic camera reader is allowed.
+                session.viewers = 0
+                return False
+
+            with patch.object(gw, "_rtsp_frames", new=AsyncMock()) as video, \
+                    patch.object(gw, "_http_stills", new=AsyncMock()) as stills, \
+                    patch.object(gw, "_sdk_frames", new=AsyncMock(side_effect=sdk_read)) as sdk:
+                await gw._produce(row)
+                sdk.assert_awaited_once()
+                video.assert_not_awaited()
+                stills.assert_not_awaited()
+
+        asyncio.run(scenario())
+
     def test_latest_frame_replaces_stale_and_stays_bounded(self):
         gw = LocalMediaGateway()
         for i in range(50):

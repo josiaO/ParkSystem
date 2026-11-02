@@ -144,6 +144,22 @@ class NormalizedRecognitionEvent:
         )
         plate_raw = str(payload.get("plate_raw") or payload.get("raw_plate") or payload.get("plate_text_raw") or plate_norm)
         conf = float(payload.get("confidence") or payload.get("recognition_confidence") or 0)
+        explicit_class = str(payload.get("confidence_class") or "").upper().strip()
+        if explicit_class not in CONFIDENCE_CLASSES:
+            # Never let a missing class turn a zero-confidence event into a
+            # MEDIUM candidate.  This is especially important for internal
+            # callbacks and replayed outbox events.
+            from app.config import settings
+            if conf >= float(getattr(settings, "recognition_high_confidence", 0.92)):
+                explicit_class = CONF_HIGH
+            elif conf >= float(getattr(settings, "recognition_medium_confidence", 0.75)):
+                explicit_class = CONF_MEDIUM
+            else:
+                explicit_class = CONF_LOW
+        explicit_accepted = payload.get("accepted")
+        accepted = bool(explicit_accepted) if explicit_accepted is not None else (
+            bool(plate_norm) and not bool(payload.get("needs_review")) and explicit_class != CONF_LOW
+        )
         return cls(
             event_id=str(data.get("event_id") or payload.get("event_id") or ""),
             site_id=_as_int(data.get("site_id") if data.get("site_id") is not None else payload.get("site_id")),
@@ -158,9 +174,9 @@ class NormalizedRecognitionEvent:
             vehicle_detected=bool(payload.get("vehicle_detected", True)),
             image_ref=payload.get("image_ref"),
             plate_crop_ref=payload.get("plate_crop_ref"),
-            confidence_class=str(payload.get("confidence_class") or CONF_MEDIUM),
+            confidence_class=explicit_class,
             needs_review=bool(payload.get("needs_review")),
-            accepted=bool(payload.get("accepted", not payload.get("needs_review"))),
+            accepted=accepted,
             mode=str(payload.get("mode") or payload.get("recognition_mode") or "FASTALPR_ONLY"),
             presence=payload.get("presence"),
             consensus=payload.get("consensus") if isinstance(payload.get("consensus"), dict) else None,

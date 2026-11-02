@@ -129,6 +129,8 @@ class VendorPackageTests(unittest.TestCase):
         self.assertEqual(hvx_sdk.describe_rc(20), "DC_PASSWD_ERROR")
         self.assertTrue(any("Net_RegReportMessEx" in step for step in hvx_sdk.SDK_CONNECT_SEQUENCE))
         self.assertTrue(any("Net_StartVideo" in step for step in hvx_sdk.SDK_CONNECT_SEQUENCE))
+        self.assertTrue(any("Net_SetDrawDataOut" in step for step in hvx_sdk.SDK_CONNECT_SEQUENCE))
+        self.assertTrue(any("Net_AddPlayWindow" in step for step in hvx_sdk.SDK_CONNECT_SEQUENCE))
         host_src = (Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host" / "hvx_sdk.py").read_text(encoding="utf-8")
         self.assertIn("_camera_video_loop", host_src)
         self.assertIn("_ensure_camera_pump", host_src)
@@ -181,6 +183,66 @@ class VendorPackageTests(unittest.TestCase):
         self.assertEqual(result["stream_type"], 3)
         self.assertEqual(sdk.selected_stream_type(17), 3)
 
+    def test_ocx_plate_region_query_is_read_only_and_decoded(self):
+        import ctypes
+        import sys
+        import threading
+        from pathlib import Path
+        from types import SimpleNamespace
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_sdk
+
+        sdk = hvx_sdk.HVXSDK.__new__(hvx_sdk.HVXSDK)
+        sdk._lock = threading.Lock()
+        sdk._video_detect_configs = {}
+
+        def query_zone(handle, pointer):
+            setup = ctypes.cast(pointer, ctypes.POINTER(hvx_sdk.T_VideoDetectParamSetup)).contents
+            setup.ucLanes = 1
+            setup.ucCpMode = 2
+            setup.ucWidthFlag = 1
+            setup.ucMinScore = 72
+            setup.atPlateRegion[0].sX, setup.atPlateRegion[0].sY = 10, 20
+            setup.atPlateRegion[1].sX, setup.atPlateRegion[1].sY = 900, 20
+            setup.atPlateRegion[2].sX, setup.atPlateRegion[2].sY = 900, 600
+            setup.atPlateRegion[3].sX, setup.atPlateRegion[3].sY = 10, 600
+            setup.aStopLine.tStartPoint.sX, setup.aStopLine.tStartPoint.sY = 100, 300
+            setup.aStopLine.tEndPoint.sX, setup.aStopLine.tEndPoint.sY = 800, 300
+            setup.usCameraHeight = 420
+            setup.usRectLength = 1000
+            setup.usRectWidth = 500
+            setup.usTotalDis = 700
+            return 0
+
+        def query_vehicle(handle, pointer):
+            setup = ctypes.cast(pointer, ctypes.POINTER(hvx_sdk.T_VehicleVAFunSetup)).contents
+            setup.usMinPlateW = 80
+            setup.usMaxPlateW = 400
+            setup.ucRecRegShowEn = 1
+            setup.ucCpTimeInterval = 2
+            return 0
+
+        calls = []
+        def forbidden_write(*args):
+            calls.append(args)
+            return 0
+
+        sdk.dll = SimpleNamespace(
+            Net_QueryVideoDetectSetup=query_zone,
+            Net_QueryVehicleVAFunSetup=query_vehicle,
+            Net_VideoDetectSetup=forbidden_write,
+        )
+        result = sdk.query_video_detect(17)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["capture_mode"], 2)
+        self.assertEqual(result["plate_region"][2], {"x": 900, "y": 600})
+        self.assertEqual(result["stop_line"]["end"], {"x": 800, "y": 300})
+        self.assertEqual(result["native_min_plate_width"], 80)
+        self.assertTrue(result["region_overlay_enabled"])
+        self.assertEqual(calls, [])
+        self.assertEqual(sdk.video_detect_config(17)["road_width_cm"], 500)
+
     def test_jpg_drain_keeps_newest_and_reports_backlog(self):
         import hvx_sdk
         sdk = hvx_sdk.HVXSDK.__new__(hvx_sdk.HVXSDK)
@@ -222,6 +284,17 @@ class VendorPackageTests(unittest.TestCase):
         self.assertTrue(hvx_host._is_peer_disconnect(ConnectionResetError(10054, "forcibly closed")))
         self.assertTrue(hvx_host._is_peer_disconnect(OSError("[WinError 10054] An existing connection was forcibly closed by the remote host")))
         self.assertFalse(hvx_host._is_peer_disconnect(OSError("SDK connection failed")))
+
+    def test_hvx_http_json_null_numeric_defaults_do_not_raise(self):
+        import sys
+        from pathlib import Path
+        host = Path(__file__).resolve().parents[1] / "tools" / "hvx_sdk_host"
+        sys.path.insert(0, str(host))
+        import hvx_host
+
+        self.assertEqual(hvx_host._int_or(None, 30000), 30000)
+        self.assertEqual(hvx_host._int_or(0, 30000), 0)
+        self.assertEqual(hvx_host._int_or("8760", 30000), 8760)
 
     def test_hvx_http_server_has_bounded_request_admission(self):
         import sys

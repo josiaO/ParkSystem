@@ -14,6 +14,19 @@ REQUIRED_DLLS = (
     "Log.dll",
     "RtspRecvSdk.dll",
     "DecodeSdk.dll",
+    "ZlibHelper.dll",
+)
+
+# These are the QY/OcxConfig native runtime files used by the 32-bit host.
+# Discovery helpers are shipped too, but are not required to start a stream.
+QY_RUNTIME_DLLS = (
+    "NetSDK.dll",
+    "CommModule.dll",
+    "PlaySdk.dll",
+    "RtspRecvSdk.dll",
+    "DecodeSdk.dll",
+    "Log.dll",
+    "ZlibHelper.dll",
 )
 
 REQUIRED_PYTHON64_RUNTIME = (
@@ -36,6 +49,21 @@ REQUIRED_HOST = (
     "run_hvx_host.bat",
     "hvx_bindings.json",
 )
+
+REQUIRED_NATIVE_STREAM_MARKERS = (
+    '\"stream_backend\": \"ocxconfig_netsdk\"',
+    "Net_StartVideo -> Net_AddPlayWindow -> Net_SetDrawDataOut",
+    "_get_native_jpg_buffer",
+    "_native_jpeg_disabled_until",
+    "draw_data_primary=draw_data_rc",
+)
+REQUIRED_NATIVE_HOST_MARKERS = (
+    REQUIRED_NATIVE_STREAM_MARKERS[0],
+    REQUIRED_NATIVE_STREAM_MARKERS[1],
+    "Net_SetDrawDataOut (primary decoded-frame callback)",
+    "Net_GetJpgBuffer (compatibility fallback)",
+)
+REQUIRED_NATIVE_SDK_MARKERS = REQUIRED_NATIVE_STREAM_MARKERS[2:]
 
 FORBIDDEN_WHEEL_PREFIXES = ("pyside6-", "pyside6_addons-", "watchfiles-")
 
@@ -134,6 +162,23 @@ def verify_payload(payload: Path) -> list[str]:
     for name in REQUIRED_DLLS:
         if not (vendor / name).is_file():
             errors.append(f"vendor DLL missing: {name}")
+    manifest = vendor / "QY-SDK-MANIFEST.txt"
+    if not manifest.is_file():
+        errors.append("QY SDK manifest missing: vendor/QY-SDK-MANIFEST.txt")
+    else:
+        manifest_text = manifest.read_text(encoding="utf-8", errors="replace")
+        for name in QY_RUNTIME_DLLS:
+            if f"REQUIRED {name}" not in manifest_text:
+                errors.append(f"QY SDK manifest does not mark {name} as required")
+        for name in ("OcxConfig.ocx", "OcxConfigClient.exe"):
+            if f"OPTIONAL {name}" not in manifest_text:
+                errors.append(f"QY SDK field artifact missing from manifest: {name}")
+    if not (vendor / "qy-sdk" / "OcxConfig.ocx").is_file():
+        errors.append("QY SDK OCX missing: vendor/qy-sdk/OcxConfig.ocx")
+    if not (vendor / "qy-sdk" / "OcxConfigClient.exe").is_file():
+        errors.append("QY SDK client missing: vendor/qy-sdk/OcxConfigClient.exe")
+    if not (vendor / "vc_redist.x86.exe").is_file():
+        errors.append("QY 32-bit MSVC runtime missing: vendor/vc_redist.x86.exe")
     if not (vendor / "mediamtx" / "mediamtx.exe").is_file():
         errors.append("MediaMTX missing: vendor/mediamtx/mediamtx.exe")
 
@@ -149,6 +194,18 @@ def verify_payload(payload: Path) -> list[str]:
     for name in REQUIRED_HOST:
         if not (host / name).is_file():
             errors.append(f"HVX host file missing: {name}")
+    host_source = host / "hvx_host.py"
+    sdk_source = host / "hvx_sdk.py"
+    if host_source.is_file():
+        text = host_source.read_text(encoding="utf-8")
+        for marker in REQUIRED_NATIVE_HOST_MARKERS:
+            if marker not in text:
+                errors.append(f"HVX host does not advertise OcxConfig latest-frame delivery: {marker}")
+    if sdk_source.is_file():
+        text = sdk_source.read_text(encoding="utf-8")
+        for marker in REQUIRED_NATIVE_SDK_MARKERS:
+            if marker not in text:
+                errors.append(f"HVX SDK host missing native streaming guard: {marker}")
 
     if not (payload / "python64" / "python.exe").is_file():
         errors.append("64-bit embeddable Python missing: python64/python.exe")
@@ -193,6 +250,16 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("camera lab replay module missing: tools/camera_lab_replay.py")
     if not (payload / "requirements-windows.txt").is_file():
         errors.append("requirements-windows.txt missing")
+
+    wheels32_dir = payload / "wheels32"
+    pillow32 = sorted(wheels32_dir.glob("pillow-*-win32.whl")) if wheels32_dir.is_dir() else []
+    if len(pillow32) != 1:
+        errors.append(f"expected exactly one 32-bit Pillow wheel, found {[p.name for p in pillow32]}")
+    pth32 = sorted((payload / "python32").glob("python*._pth"))
+    if not pth32:
+        errors.append("32-bit Python path file missing: python32/python*._pth")
+    elif "..\\tools\\hvx_sdk_host" not in pth32[0].read_text(encoding="utf-8", errors="replace"):
+        errors.append("32-bit Python path file does not expose tools/hvx_sdk_host")
 
     wheels_dir = payload / "wheels"
     wheels = sorted(wheels_dir.glob("*.whl")) if wheels_dir.is_dir() else []

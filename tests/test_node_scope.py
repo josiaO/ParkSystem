@@ -348,14 +348,14 @@ class NodeScopeTests(unittest.TestCase):
              patch.object(settings, "recognition_gate_id", None), \
              patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):
             response = self.client.post("/cameras", headers=self.headers, json={
-                "name": "Node camera", "ip_address": "192.168.1.200",
+                "name": "Node camera", "ip_address": "192.168.1.200", "password": "real-camera-password",
             })
             self.assertEqual(response.status_code, 409, response.text)
 
             response = self.client.put("/runtime/recognition-owner", headers=self.headers, json={"gate_id": self.gate1["id"]})
             self.assertEqual(response.status_code, 200, response.text)
             created = self.client.post("/cameras", headers=self.headers, json={
-                "name": "Node camera", "ip_address": "192.168.1.200",
+                "name": "Node camera", "ip_address": "192.168.1.200", "password": "real-camera-password",
             })
             self.assertEqual(created.status_code, 200, created.text)
             self.assertEqual(created.json()["gate_id"], self.gate1["id"])

@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from app.core.plate import normalize_plate
 from app.domain.receipt_engine import extract_session_token, normalize_human_reference
 from app.models import ParkingSession, VehicleCapture
-from app.services.public_pay import session_by_public_token
 from app.services.simulation import OPEN_STATUSES
 
 
@@ -69,9 +68,22 @@ def _capture_for_session(db: Session, row: ParkingSession) -> tuple[VehicleCaptu
     from app.services.captures import find_capture_for_session
 
     plate = normalize_plate(row.plate)
-    capture = find_capture_for_session(db, plate=plate, camera_id=row.camera_id)
+    capture = find_capture_for_session(
+        db,
+        plate=plate,
+        camera_id=row.camera_id,
+        event_id=getattr(row, "entry_event_id", "") or "",
+        visit_id=getattr(row, "visit_id", "") or "",
+        image_ref=getattr(row, "entry_image_ref", "") or "",
+    )
     matches = bool(capture and plate and normalize_plate(capture.plate) == plate)
     return capture, matches
+
+
+def capture_for_session(db: Session, row: ParkingSession) -> VehicleCapture | None:
+    """Return only evidence identified by this session's event/visit identity."""
+    capture, _ = _capture_for_session(db, row)
+    return capture
 
 
 def image_fields(db: Session, row: ParkingSession) -> dict:
@@ -100,6 +112,8 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
         return None
     token = extract_receipt_token(raw)
     if token:
+        from app.services.public_pay import session_by_public_token
+
         row = session_by_public_token(db, token)
         if row is not None:
             return row

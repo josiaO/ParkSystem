@@ -50,7 +50,11 @@ async def grab_http_snapshot(ip: str, username: str, password: str) -> dict:
             targets.append((port, False))
     if await tcp_open(ip, 443, timeout=0.35):
         targets.append((443, True))
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+    # Camera credentials must never follow a redirect to an unexpected host.
+    # Many cameras use self-signed certificates, so verification remains
+    # opt-in per deployment; redirecting is never safe for this credentialed
+    # request.
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False, trust_env=False) as client:
         for port, tls in targets:
             for path in SNAPSHOT_PATHS:
                 url = f"{_http_base(ip, port, tls=tls)}{path}"
@@ -61,7 +65,7 @@ async def grab_http_snapshot(ip: str, username: str, password: str) -> dict:
                 except Exception as exc:
                     attempts.append({"url_redacted": redact_url(url), "error": str(exc)})
                     continue
-                if response.status_code == 200 and response.content[:2] == JPEG_SOI:
+                if response.status_code == 200 and len(response.content) <= 12 * 1024 * 1024 and response.content[:2] == JPEG_SOI:
                     return {
                         "ok": True,
                         "jpeg": response.content,

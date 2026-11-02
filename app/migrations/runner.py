@@ -97,9 +97,14 @@ def upgrade_to_head(engine: Engine) -> dict[str, Any]:
         else:
             mode = "adopt"
             fixups = apply_legacy_fixups(engine)
-            Base.metadata.create_all(engine)  # tables that never existed before
             _run(engine, command.stamp, BASELINE_REVISION)
             _run(engine, command.upgrade, "head")
+            # Historical migrations own tables that were introduced after the
+            # legacy schema. Creating the full current model before Alembic
+            # runs would make those migrations fail with "table already
+            # exists". Fill only any model tables still absent after the
+            # authoritative upgrade.
+            Base.metadata.create_all(engine)
         revision = current_revision(engine)
         head = head_revision()
         _last.update(

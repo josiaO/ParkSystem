@@ -24,7 +24,17 @@ def _indexes(table: str) -> set[str]:
 
 
 def _add_index(name: str, table: str, columns: list[str], *, unique: bool = False, where: str | None = None) -> None:
-    if name in _indexes(table):
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = set(inspector.get_table_names())
+    if table not in tables or name in _indexes(table):
+        return
+    existing_columns = {item["name"] for item in inspector.get_columns(table)}
+    if any(column not in existing_columns for column in columns):
+        # A partially migrated legacy database can legitimately be stamped at
+        # 0005 while missing a column from an earlier repair. The later model
+        # reconciliation creates the missing column; this index must not make
+        # the whole upgrade fail first.
         return
     kwargs = {"unique": unique}
     if where:

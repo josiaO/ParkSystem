@@ -5,14 +5,24 @@ The desktop is the primary operator interface on the dedicated Windows parking P
 ## Processes and ownership
 
 - **Site Service, 64-bit:** one local instance per lane PC, with API, camera events and parking decisions for that PC's assigned entry/exit pair. Multi-PC deployments share PostgreSQL and evidence storage; see `LANE-DEPLOYMENT.md`.
-- **HVX host, 32-bit Windows:** vendor SDK and callbacks. Video comes from Net_GetJpgBuffer; capture callbacks deliver independent vehicle/plate images. A working plate callback does not prove video works. Keep the supplied DLL family together.
+- **Camera engine boundary:** every camera carries an adapter ID. QY/HVX is one
+  vendor adapter backed by the 32-bit Windows OcxConfig/NetSDK host; RTSP and
+  ONVIF are separate generic adapters. Adapter identity selects ownership even
+  before a native SDK handle exists, so an unconnected QY camera cannot open a
+  competing RTSP reader.
+- **HVX host, 32-bit Windows:** vendor SDK and callbacks. Video comes from
+  Net_StartVideo plus the decoded draw-data/latest JPEG path; capture callbacks
+  deliver independent vehicle/plate images. A working plate callback does not
+  prove video works. Keep the supplied DLL family together.
 - **Recognition worker:** bounded latest-frame sampling, plate detection, crop, OCR and event delivery for generic MediaMTX cameras. SDK cameras stay with the Site Service. OCR waits for a stopped plate and does not run for every displayed frame.
-- **MediaMTX:** upstream RTSP connections and distribution for generic cameras; SDK cameras do not register guessed RTSP paths. Browser playback uses the existing WHEP transport; the server remains pinned to v1.11.3.
+- **MediaMTX:** upstream RTSP connections and distribution for generic cameras;
+  QY/HVX adapters do not register guessed RTSP paths. Browser playback uses the
+  existing WHEP transport; the server remains pinned to v1.11.3.
 - **Desktop:** independent latest-frame MJPEG readers feed the video canvas. Generic MediaMTX streams use one shared local JPEG consumer; SDK streams use the existing JPEG producer. Vehicle snapshots and plate crops have separate panels and bounded image requests.
 
 ## Video recovery
 
-SDK JPEG retrieval has a finite no-frame interval. The host expires JPEGs when its pump receives no frame for five seconds. Unchanged bytes from a freshly received frame are allowed; historical cache contents are not fresh video. If SDK video supplies no JPEG, an explicitly configured RTSP source can be used as fallback. It does not open guessed RTSP streams alongside the SDK. Capture callbacks remain active.
+SDK JPEG retrieval has a finite no-frame interval. The host expires JPEGs when its pump receives no frame for five seconds. Unchanged bytes from a freshly received frame are allowed; historical cache contents are not fresh video. Explicit `adapter_id=qy` never falls back to RTSP; it reports a native-host failure and preserves the camera SDK session for recovery. Legacy `adapter_id=hvx` rows may retain their historical generic fallback behavior until they are migrated to explicit `qy`. Capture callbacks remain active.
 
 RTSP tries the configured URI before guessed vendor URLs. JPEG decoding and encoding each use one FFmpeg thread, with one filter thread. A MediaMTX JPEG consumer is stopped before the direct fallback is started; another viewer reuses an active fallback producer.
 
@@ -26,7 +36,7 @@ Native event images use per-callback tokens rather than recycled vendor IDs. The
 
 ## Requirements and gaps
 
-The supplied Windows payload contains 32-bit Python, the vendor DLL set, 64-bit Python, Qt Essentials, FFmpeg, MediaMTX and both ONNX model files. The local Python environment passes `pip check`; the kit verifier passes file/wheel-presence checks. The installer now runs `pip check` after installing offline wheels. The installer also runs the supplied 32-bit vendor DLL loader check without calling camera APIs. The vendor video and SDK DLLs import MSVCR80.dll: Microsoft Visual C++ 2005 SP1 x86 is a deployment prerequisite. This runtime was not bundled in the existing kit and may already be installed with OcxConfig. Obtain it from [Microsoft](https://www.microsoft.com/en-gb/download/details.aspx?id=26347) if the loader check reports that dependency missing. Static file checks on Linux do not prove Windows codec/device compatibility.
+The supplied Windows payload contains 32-bit Python, the complete matched QY/OcxConfig DLL family, the OcxConfig OCX/client recovery artifacts, the bundled Microsoft Visual C++ 2005 SP1 x86 runtime, 64-bit Python, Qt Essentials, FFmpeg, MediaMTX and the FastALPR ONNX models. The local Python environment passes `pip check`; the kit verifier passes file/wheel-presence checks. The installer runs `pip check` after installing offline wheels and installs both the QY x86 and application x64 Microsoft runtimes before the loader check. The installer also runs the supplied 32-bit vendor DLL loader check without calling camera APIs. `vendor/QY-SDK-MANIFEST.txt` records the native files and SHA256 hashes, so a field technician can detect a mixed or partially copied SDK. Static file checks on Linux do not prove Windows codec/device compatibility.
 
 The Windows requirements are resolved from an offline wheel bundle and are less strictly pinned than the development requirements. Preserve that tested bundle; do not independently upgrade Qt, ONNX or SDK DLLs on site. Root requirements exclude uvloop on Windows. No evidence currently justifies adding more OCR libraries.
 

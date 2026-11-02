@@ -80,6 +80,36 @@ def test_crop_ocr_failure_is_not_reported_as_a_healthy_empty_read(monkeypatch):
     assert result["best"] is None
 
 
+def test_detector_frame_is_reused_for_crop_ocr(monkeypatch):
+    np = pytest.importorskip("numpy")
+    detector_box = SimpleNamespace(
+        bounding_box=SimpleNamespace(x1=30, y1=30, x2=130, y2=60),
+        confidence=0.95,
+    )
+    engine = SimpleNamespace(
+        detector=SimpleNamespace(predict=lambda _frame: [detector_box]),
+        ocr=SimpleNamespace(predict=lambda _crop: SimpleNamespace(text="T123ABC", confidence=0.95)),
+    )
+    decoded = np.zeros((100, 200, 3), dtype=np.uint8)
+    decode_calls = []
+
+    def decode(_jpeg):
+        decode_calls.append(1)
+        return decoded
+    monkeypatch.setattr(alpr, "fastalpr_installed", lambda: True)
+    monkeypatch.setattr(alpr, "decode_alpr_image", decode)
+    monkeypatch.setattr(alpr, "_load_engine", lambda: engine)
+
+    boxes, located = alpr.locate_plate_boxes(b"jpeg")
+    result = alpr.recognize_arrival_bytes(b"jpeg", detected_boxes=boxes, decoded_bgr=located["_decoded_bgr"])
+
+    assert result["best"]["plate"] == "T123ABC"
+    assert located["_decoded_bgr"] is decoded
+    # locate_plate_boxes decoded the JPEG once; crop OCR consumed that same
+    # buffer through the internal metadata fast path.
+    assert decode_calls == [1]
+
+
 @pytest.mark.parametrize("same_image", [False, True])
 def test_software_only_starts_with_its_own_detector_not_native_box_or_crop(same_image):
     async def run():

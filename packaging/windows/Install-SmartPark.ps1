@@ -156,6 +156,26 @@ foreach ($name in $copyDirs) {
     Copy-Item $src $dest -Recurse -Force
 }
 
+# Fail before installing services if the QY/OcxConfig runtime was truncated
+# or copied from a different SDK generation. The HVX host is 32-bit and the
+# native callback path depends on this complete companion DLL family.
+$qyVendor = Join-Path $InstallDir "vendor"
+$qyManifest = Join-Path $qyVendor "QY-SDK-MANIFEST.txt"
+$qyRequired = @("NetSDK.dll", "CommModule.dll", "PlaySdk.dll", "RtspRecvSdk.dll", "DecodeSdk.dll", "Log.dll", "ZlibHelper.dll")
+$qyMissing = @($qyRequired | Where-Object { -not (Test-Path (Join-Path $qyVendor $_)) })
+if ($qyMissing.Count -gt 0 -or -not (Test-Path $qyManifest)) {
+    throw "The QY/OcxConfig camera runtime is incomplete. Missing: $($qyMissing -join ', '); manifest: $qyManifest"
+}
+foreach ($artifact in @("OcxConfig.ocx", "OcxConfigClient.exe")) {
+    if (-not (Test-Path (Join-Path $qyVendor "qy-sdk\$artifact"))) {
+        throw "The QY field artifact is missing from the kit: vendor\qy-sdk\$artifact"
+    }
+}
+$pillow32 = @(Get-ChildItem (Join-Path $InstallDir "wheels32") -Filter "pillow-*-win32.whl" -ErrorAction SilentlyContinue)
+if ($pillow32.Count -ne 1) {
+    throw "The 32-bit Pillow wheel required by the QY capture host is missing or duplicated. Rebuild the kit."
+}
+
 Copy-Item (Join-Path $Payload "requirements-windows.txt") (Join-Path $InstallDir "requirements-windows.txt") -Force
 $docSrc = Join-Path $KitRoot "documentation"
 if (Test-Path $docSrc) {
@@ -186,6 +206,15 @@ if (-not (Test-Path $Py64)) {
     throw "64-bit Python is missing from the kit (payload\python64)."
 }
 $BundledRedist = Join-Path $InstallDir "vendor\vc_redist.x64.exe"
+$QyBundledRedist = Join-Path $InstallDir "vendor\vc_redist.x86.exe"
+if (-not (Test-Path $QyBundledRedist)) {
+    throw "The Microsoft Visual C++ 2005 SP1 x86 runtime required by QY/OcxConfig is missing from the kit."
+}
+Write-Host "Installing the bundled Microsoft Visual C++ 2005 SP1 x86 runtime for QY/OcxConfig..."
+$qyRedist = Start-Process -FilePath $QyBundledRedist -ArgumentList "/Q" -Wait -PassThru
+if ($qyRedist.ExitCode -notin @(0, 1638, 3010)) {
+    throw "Microsoft Visual C++ 2005 SP1 x86 runtime installation failed with exit code $($qyRedist.ExitCode)."
+}
 $localRuntimeMissing = @(@("msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll") | Where-Object {
     -not (Test-Path (Join-Path $InstallDir "python64\$_"))
 })
@@ -477,18 +506,6 @@ $logsShortcut.Save()
 # Background tasks own parking. Do not auto-launch the heavier desktop UI.
 $Startup = [Environment]::GetFolderPath("Startup")
 Remove-Item (Join-Path $Startup "SmartPark Edge.lnk") -Force -ErrorAction SilentlyContinue
-$WebBaseUrl = "http://127.0.0.1:8760"
-if ($configuredRole -eq "OPERATOR_CLIENT") {
-    if ($Role -eq "OPERATOR_CLIENT") {
-        $WebBaseUrl = "http://smartpark-server:8760"
-    } elseif ($deployment -and $deployment.server_base_url) {
-        $WebBaseUrl = ([string]$deployment.server_base_url).TrimEnd("/")
-    }
-}
-$WebUrl = "$($WebBaseUrl.TrimEnd('/'))/"
-$WebShortcut = "[InternetShortcut]`r`nURL=$WebUrl`r`n"
-Set-Content (Join-Path $Desktop "Zirp Web.url") $WebShortcut -Encoding ASCII
-Set-Content (Join-Path $Programs "Zirp Web.url") $WebShortcut -Encoding ASCII
 
 $Uninstall = Join-Path $InstallDir "Uninstall-SmartPark.ps1"
 $UninstallBody = @"
@@ -616,10 +633,26 @@ if ($Role) {
 } else {
     $setupRequired = $freshDeployment -or -not $deploymentConfigured
 }
+# Resolve the web shortcut only after the persisted role has been loaded. The
+# previous ordering evaluated $configuredRole before it was assigned, so an
+# Operator Workstation received a localhost shortcut even when its server URL
+# was valid.
+$WebBaseUrl = "http://127.0.0.1:8760"
+if ($configuredRole -eq "OPERATOR_CLIENT") {
+    if ($Role -eq "OPERATOR_CLIENT") {
+        $WebBaseUrl = "http://smartpark-server:8760"
+    } elseif ($deployment -and $deployment.server_base_url) {
+        $WebBaseUrl = ([string]$deployment.server_base_url).TrimEnd("/")
+    }
+}
+$WebUrl = "$($WebBaseUrl.TrimEnd('/'))/"
+$WebShortcut = "[InternetShortcut]`r`nURL=$WebUrl`r`n"
+Set-Content (Join-Path $Desktop "Zirp Web.url") $WebShortcut -Encoding ASCII
+Set-Content (Join-Path $Programs "Zirp Web.url") $WebShortcut -Encoding ASCII
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
-foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
+foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Repair-SmartParkNetwork.ps1", "Repair-SmartParkNetwork.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
     $src = Get-KitSupportFile $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force

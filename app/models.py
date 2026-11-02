@@ -177,7 +177,19 @@ class Gate(Base):
 class NodeGateAssignment(Base):
     """Authoritative central ownership of a physical gate by a node."""
     __tablename__ = "node_gate_assignments"
-    __table_args__ = (UniqueConstraint("node_id", "gate_id", name="uq_node_gate_assignment"),)
+    __table_args__ = (
+        UniqueConstraint("node_id", "gate_id", name="uq_node_gate_assignment"),
+        # A physical gate may have exactly one live owner.  The central
+        # server uses this as the final race-proof boundary; the API also
+        # performs a friendly conflict check before this constraint fires.
+        Index(
+            "uq_node_gate_assignment_active_gate",
+            "gate_id",
+            unique=True,
+            sqlite_where=text("enabled = 1"),
+            postgresql_where=text("enabled = true"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id"), index=True)
     gate_id: Mapped[int] = mapped_column(ForeignKey("gates.id"), index=True)
@@ -443,6 +455,9 @@ class VehicleCapture(Base):
         Index("uq_vehicle_captures_camera_visit", "camera_id", "visit_id", unique=True,
               sqlite_where=text("visit_id != '' AND camera_id IS NOT NULL"),
               postgresql_where=text("visit_id != '' AND camera_id IS NOT NULL")),
+        Index("uq_vehicle_captures_camera_image_identity", "camera_id", "image_id", unique=True,
+              sqlite_where=text("image_id > 0 AND camera_id IS NOT NULL"),
+              postgresql_where=text("image_id > 0 AND camera_id IS NOT NULL")),
         Index("ix_vehicle_captures_camera_image", "camera_id", "image_id"),
         Index("ix_vehicle_captures_camera_latest", "camera_id", "id"),
     )

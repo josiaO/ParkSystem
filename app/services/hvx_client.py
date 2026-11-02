@@ -251,10 +251,17 @@ class HVXHostClient:
             return []
 
     async def live_jpeg(self, handle: int) -> bytes:
-        """Net_GetJpgBuffer live frame. Never the last car-event still."""
+        """Read the next latest-only OcxConfig frame, never a car-event still.
+
+        The host waits for a source sequence newer than the previous response.
+        This prevents the Windows HTTP bridge from returning the same cached
+        frame so quickly that an MJPEG consumer displays a stale FIFO.
+        """
         try:
             client = _shared_live_client(self.base_url, handle)
-            r = await client.get(f"/live-jpeg/{int(handle)}")
+            previous = int(self.last_live_seq.get(int(handle), 0) or 0)
+            params = {"after": previous, "wait_ms": 1000} if previous else {}
+            r = await client.get(f"/live-jpeg/{int(handle)}", params=params, timeout=1.4)
             try:
                 self.last_live_seq[int(handle)] = int(r.headers.get("x-frame-seq") or 0)
             except (TypeError, ValueError):

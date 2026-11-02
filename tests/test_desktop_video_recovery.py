@@ -24,7 +24,7 @@ async def test_sdk_without_first_jpeg_returns_for_fallback():
          patch('app.services.media_gateway.time.monotonic', side_effect=lambda: next(times)), \
          patch('app.services.media_gateway.settings.stream_read_timeout_seconds', 3.):
         assert await gateway._sdk_frames(row) is False
-    assert 'RTSP fallback' in row.last_error
+    assert 'OcxConfig/NetSDK' in row.last_error
 
 
 @pytest.mark.asyncio
@@ -111,6 +111,23 @@ def test_sdk_does_not_serve_frozen_cache_as_live_video():
     with patch('tools.hvx_sdk_host.hvx_sdk.time.monotonic', return_value=16.0):
         assert sdk.live_jpeg_for(7) == b''
     assert sdk._last_live_jpeg[7] == b'\xff\xd8live'
+
+
+def test_sdk_live_frame_contract_rejects_replaying_the_same_sequence():
+    import threading
+    from tools.hvx_sdk_host.hvx_sdk import HVXSDK
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._live_condition = threading.Condition(sdk._lock)
+    sdk._last_live_jpeg = {7: b'\xff\xd8live'}
+    sdk._live_received_at = {7: 10.0}
+    sdk._live_requested_at = {}
+    sdk._live_frame_seq = {7: 4}
+    sdk._window_frame_seq = {}
+    with patch('tools.hvx_sdk_host.hvx_sdk.time.monotonic', return_value=11.0):
+        jpeg, seq = sdk.live_frame_for(7, after_seq=4, wait_ms=0)
+    assert jpeg == b''
+    assert seq == 4
 
 
 @pytest.mark.asyncio

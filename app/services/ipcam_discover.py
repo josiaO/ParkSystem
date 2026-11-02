@@ -70,7 +70,7 @@ def _vendor_from_text(blob: str) -> str | None:
 async def fingerprint_http(ip: str, port: int = HTTP_PORT) -> str | None:
     timeout = httpx.Timeout(FINGERPRINT_TIMEOUT, connect=SCAN_TIMEOUT)
     base = f"http://{ip}" if port == 80 else f"http://{ip}:{port}"
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         for path in _CAMERA_PATHS:
             url = f"{base}{path}"
             try:

@@ -73,6 +73,14 @@ class TanzaniaPlatePolicy(NeutralPlatePolicy):
             return base
         normalised = normalize_plate(raw)
         variants = confusion_variants(normalised)
+        # Tanzania plates begin with T. At night the camera's native OCR can
+        # render that first character as 7 or 1; only the explicit TZ profile
+        # may apply this correction, and only when the remaining characters
+        # already fit a Tanzanian registration shape.
+        if len(normalised) >= 6 and normalised[:1] in {"7", "1"}:
+            tz_leading_t = "T" + normalised[1:]
+            if plate_shape_score(tz_leading_t) >= plate_shape_score(normalised):
+                variants.append(tz_leading_t)
         best = normalised
         best_score = plate_shape_score(normalised)
         for plate in variants:

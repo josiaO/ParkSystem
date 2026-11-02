@@ -21,24 +21,25 @@ from app.models import (
 )
 from app.services.kiosk_lookup import format_stay
 from app.services.simulation import OPEN_STATUSES
+from app.services.site_policy import as_site_local, as_site_utc, site_policy
 
 
-def _aware(dt: datetime) -> datetime:
+def _aware(dt: datetime, policy: dict | None = None) -> datetime:
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+        return as_site_utc(dt, policy)
+    return dt.astimezone(timezone.utc)
 
 
-def default_range(now: datetime | None = None) -> tuple[datetime, datetime]:
-    end = _aware(now or datetime.now(timezone.utc))
-    start = end.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, end
+def default_range(now: datetime | None = None, policy: dict | None = None) -> tuple[datetime, datetime]:
+    end_local = as_site_local(now or datetime.now(timezone.utc), policy)
+    start_local = end_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return as_site_utc(start_local, policy), as_site_utc(end_local, policy)
 
 
-def parse_range(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
-    default_start, default_end = default_range()
-    start_at = _aware(start) if start else default_start
-    end_at = _aware(end) if end else default_end
+def parse_range(start: datetime | None, end: datetime | None, policy: dict | None = None) -> tuple[datetime, datetime]:
+    default_start, default_end = default_range(policy=policy)
+    start_at = _aware(start, policy) if start else default_start
+    end_at = _aware(end, policy) if end else default_end
     if end_at < start_at:
         start_at, end_at = end_at, start_at
     # A date-only end lands at midnight; include that whole day.
@@ -52,7 +53,8 @@ def _money(amount: float, currency: str) -> str:
 
 
 def report_summary(db: Session, start: datetime | None = None, end: datetime | None = None) -> dict:
-    start_at, end_at = parse_range(start, end)
+    policy = site_policy(db)
+    start_at, end_at = parse_range(start, end, policy)
     currency = "TZS"
     sample = db.scalar(select(ParkingSession.currency).where(ParkingSession.currency != "").limit(1))
     if sample:
@@ -104,7 +106,7 @@ def report_summary(db: Session, start: datetime | None = None, end: datetime | N
 
     payments = [
         {
-            "when": row.confirmed_at.isoformat() if row.confirmed_at else "",
+            "when": as_site_local(row.confirmed_at, policy).isoformat() if row.confirmed_at else "",
             "session_id": row.session_id,
             "method": row.method,
             "amount": float(row.amount or 0),
@@ -163,7 +165,7 @@ def report_summary(db: Session, start: datetime | None = None, end: datetime | N
         operator_totals[name]["count"] += 1
         operator_totals[name]["amount"] += float(row.amount or 0)
         if row.confirmed_at:
-            stamp = row.confirmed_at.astimezone(timezone.utc).date().isoformat()
+            stamp = as_site_local(row.confirmed_at, policy).date().isoformat()
             day_totals[stamp]["count"] += 1
             day_totals[stamp]["amount"] += float(row.amount or 0)
 
@@ -185,7 +187,7 @@ def report_summary(db: Session, start: datetime | None = None, end: datetime | N
         outstanding_rows.append({
             "plate": row.plate,
             "kind": row.parker_kind or "CASUAL",
-            "since": row.entry_time.isoformat() if row.entry_time else "",
+            "since": as_site_local(row.entry_time, policy).isoformat() if row.entry_time else "",
             "stay": format_stay(seconds),
             "due": due,
             "paid": paid,

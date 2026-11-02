@@ -24,3 +24,12 @@ class SimulatedCameraAdapter:
 
     async def live_sources(self, device: CameraLike) -> list[dict[str, Any]]:
         return [{"kind": "simulated", "adapter_id": self.id}]
+
+    async def disconnect(self, device: CameraLike) -> dict[str, Any]:
+        return {"ok": True, "adapter_id": self.id, "disconnected": True}
+
+    async def detection_zones(self, device: CameraLike) -> dict[str, Any]:
+        return {"ok": True, "adapter_id": self.id, "zones": []}
+
+    async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]:
+        return []

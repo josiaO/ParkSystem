@@ -24,11 +24,13 @@ from app.domain.parking_engine import (
     EXIT_VEHICLE_PASSED,
     LanePolicy,
 )
+from app.domain.site import DEFAULT_SITE_ID
+from app.db import release_connection
 from app.infrastructure.payments.ledger import SUCCEEDED, paid_total
 from app.models import Camera, Gate, ParkingSession, utcnow
 from app.services.access import lookup_entitlement
 from app.services.decisions import record_access_decision, record_gate_command
-from app.services.fee_engine import load_active_rules
+from app.services.fee_engine import load_active_rules, normalize_tariff_rules
 from app.services.parking_sessions import (
     complete_authorized_exit,
     mark_vehicle_passed,
@@ -110,7 +112,10 @@ class ExitLaneController:
                 "reason": "payment_grace",
             }
 
-        rules = load_active_rules(db, row.car_type or "Car1", site_id=row.site_id)
+        site_id = int(row.site_id or DEFAULT_SITE_ID)
+        rules = normalize_tariff_rules(row.tariff_rules, car_type=row.car_type or "Car1") if row.tariff_rules else load_active_rules(
+            db, row.car_type or "Car1", site_id=site_id
+        )
         quote = quote_stay(row.entry_time, at, rules)
         row.amount_due = quote.due_minor
         row.amount_paid = paid
@@ -207,7 +212,8 @@ class ExitLaneController:
 
         token = extract_session_token(raw_scan)
         row = session_by_public_token(db, token) if token else None
-        if row is None or int(row.site_id) != int(site_id) or row.status == "CLOSED":
+        row_site_id = int(row.site_id or DEFAULT_SITE_ID) if row is not None else None
+        if row is None or row_site_id != int(site_id) or row.status == "CLOSED":
             return {
                 "ok": False, "action": "EXIT", "reason": "invalid_qr",
                 "barrier_opened": False, "pay_required": False, "session": None,
@@ -233,7 +239,8 @@ class ExitLaneController:
     ) -> dict[str, Any]:
         policy = policy or LanePolicy()
         at = _aware(at) or datetime.now(timezone.utc)
-        entitlement = lookup_entitlement(db, row.plate, at=at, site_id=row.site_id, strict=True)
+        site_id = int(row.site_id or DEFAULT_SITE_ID)
+        entitlement = lookup_entitlement(db, row.plate, at=at, site_id=site_id, strict=True)
         financial = self._fresh_financial_state(db, row, at=at, entitlement=entitlement)
         db.commit()
         db.refresh(row)
@@ -242,7 +249,7 @@ class ExitLaneController:
             db,
             plate=row.plate,
             event_id=event_id,
-            site_id=row.site_id,
+            site_id=site_id,
             lane_id=lane_id,
             camera_id=camera.id if camera else None,
             gate_id=gate.id if gate else None,
@@ -287,6 +294,8 @@ class ExitLaneController:
                 "barrier_opened": False,
                 "session": snapshot(row),
                 "financial": financial,
+                "payment_url": f"/p/{row.public_token}" if row.public_token else None,
+                "qr_url": f"/p/{row.public_token}/qr.png" if row.public_token else None,
                 "message": f"Payment required: {row.currency} {financial['due']:.0f}.",
             }
 
@@ -351,12 +360,14 @@ class ExitLaneController:
         mark("gate_requested", command_uuid=command_uuid)
         if self.opener is None:
             from app.services.simulation import _pulse_gate
+            release_connection(db)
             opened = await _pulse_gate(
                 db, gate, cameras, reason=f"exit {row.plate}", side="EXIT",
                 led_text="THANKYOU", session=row, automatic=True,
                 command_uuid=command_uuid,
             )
         else:
+            release_connection(db)
             opened = await self.opener(
                 db, gate, cameras, reason=f"exit {row.plate}", session=row,
                 side="EXIT", command_uuid=command_uuid,
@@ -384,16 +395,23 @@ class ExitLaneController:
             }
 
         row = complete_authorized_exit(db, row, policy=policy, command_uuid=command_uuid)
+        passage_complete = row.lifecycle == CLOSED
         record_access_decision(
             db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
             outcome="EXIT_AUTHORIZED", reason=financial["reason"],
-            parker_kind=row.parker_kind or "CASUAL", barrier_opened=True,
+            parker_kind=row.parker_kind or "CASUAL", barrier_opened=passage_complete,
             extra={"source": source, **financial},
         )
         return {
             "ok": True, "action": "EXIT",
             "reason": "closed" if row.lifecycle == CLOSED else "waiting_passage",
-            "pay_required": False, "barrier_opened": True,
+            "pay_required": False,
+            # Backwards-compatible UI meaning: the open command was accepted.
+            # `passage_required` and the session lifecycle distinguish this
+            # from physical passage confirmation.
+            "barrier_opened": True,
+            "barrier_command_accepted": True,
+            "passage_required": not passage_complete,
             "assistance_required": False, "session": snapshot(row),
             "financial": financial,
             "message": "Exit authorized. Barrier opening.",

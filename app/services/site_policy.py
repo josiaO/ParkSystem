@@ -10,7 +10,21 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.domain.site import DEFAULT_SITE_POLICY, PLATE_NORMALIZATION_POLICIES, PLATE_VALIDATION_POLICIES, SUPPORTED_LANGUAGES
-from app.models import SiteSetting
+from app.models import Site, SiteSetting
+
+
+def validate_timezone(value: str | None) -> str:
+    """Return a canonical IANA timezone or raise a useful configuration error."""
+    name = str(value or "").strip()
+    if not name:
+        return "UTC"
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            f"Invalid timezone '{name}'. Use an IANA name such as Africa/Dar_es_Salaam or UTC."
+        )
+    return name
 
 
 def _bundled_defaults() -> dict[str, Any]:
@@ -74,6 +88,7 @@ def save_site_policy(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     if current.get("plate_validation"):
         value = str(current["plate_validation"]).upper()
         current["plate_validation"] = value if value in PLATE_VALIDATION_POLICIES else "NONE"
+    current["timezone"] = validate_timezone(current.get("timezone"))
     if "public_base_url" in current:
         current["public_base_url"] = str(current.get("public_base_url") or "").strip().rstrip("/")
     if not str(current.get("public_base_url") or "").strip():
@@ -86,10 +101,35 @@ def save_site_policy(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
         db.add(SiteSetting(key="site", value=current))
     else:
         row.value = current
+    # Keep the normalized site row in sync with the settings document. Older
+    # installs read locale from both places; writing both makes the CRUD path
+    # deterministic without requiring a destructive migration.
+    site = db.get(Site, int(current.get("site_id") or 1))
+    if site is not None:
+        site.timezone = current["timezone"]
+        site.locale = str(current.get("locale") or site.locale or "en")
+        site.currency = str(current.get("currency") or site.currency or "USD")
     db.commit()
     if hasattr(db, "info"):
         db.info.pop("smartpark.site_policy", None)
     return site_policy(db)
+
+
+def site_clock(db: Session | None = None) -> dict[str, str]:
+    """Expose the authoritative clock without persisting a moving value.
+
+    Database timestamps remain UTC. The application clock is the Site Server's
+    OS clock (Windows on production nodes), and the configured site timezone is
+    used only for operator/customer presentation.
+    """
+    policy = site_policy(db)
+    now = datetime.now(timezone.utc)
+    return {
+        "source": "site_server_os_utc",
+        "server_time_utc": now.isoformat(),
+        "site_time": as_site_local(now, policy).isoformat(),
+        "timezone": str(policy.get("timezone") or "UTC"),
+    }
 
 
 def site_zoneinfo(policy: dict[str, Any] | None = None) -> ZoneInfo:
@@ -104,6 +144,13 @@ def as_site_local(when: datetime, policy: dict[str, Any] | None = None) -> datet
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     return when.astimezone(site_zoneinfo(policy))
+
+
+def as_site_utc(when: datetime, policy: dict[str, Any] | None = None) -> datetime:
+    """Interpret a naive user-entered value as site-local and return UTC."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=site_zoneinfo(policy))
+    return when.astimezone(timezone.utc)
 
 
 def format_money(amount, policy: dict[str, Any] | None = None) -> str:

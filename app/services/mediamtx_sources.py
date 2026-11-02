@@ -109,6 +109,8 @@ def source_config_for_camera(camera) -> dict[str, Any]:
             "ip": camera.ip_address,
             "rtsp_url": "",
             "transport": "TCP",
+            "native": True,
+            "provider": "OcxConfig/NetSDK",
         }
     live_uri, detect_uri, evidence_uri = upstream_role_uris(
         ip=camera.ip_address,
@@ -157,5 +159,13 @@ def sync_camera(camera, *, db=None) -> dict[str, Any]:
             unregister_camera_source(int(camera.id))
         except Exception:
             pass
+        if cfg.get("native"):
+            return {
+                "registered": False,
+                "native": True,
+                "provider": cfg.get("provider") or "OcxConfig/NetSDK",
+                "camera_id": int(camera.id),
+                "reason": "Native camera is owned by OcxConfig/NetSDK; MediaMTX is not used",
+            }
         return {"registered": False, "reason": "No playable RTSP source was resolved"}
     return register_camera_source(int(camera.id), cfg, db=db)

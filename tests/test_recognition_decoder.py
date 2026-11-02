@@ -280,6 +280,60 @@ class LaneBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(task, 2)
                 runtime.reset()
 
+    async def test_shutdown_drains_timed_out_provider_before_releasing_lane(self):
+        from app.config import settings
+        from app.recognition_worker import _infer_camera
+        from app.services.recognition_runtime import runtime
+
+        runtime.reset()
+        stop = asyncio.Event()
+        provider_started = asyncio.Event()
+        provider_finished = asyncio.Event()
+
+        async def stream(*_args, **_kwargs):
+            while not stop.is_set():
+                yield b"\xff\xd8frame"
+                await asyncio.sleep(0.005)
+
+        async def infer(_frame):
+            provider_started.set()
+            await asyncio.sleep(0.12)
+            provider_finished.set()
+            return {
+                "event_id": "slow-event",
+                "ok": True,
+                "normalized_plate": "ABC123",
+                "confidence": 0.95,
+                "detector_confidence": 0.95,
+                "bbox": {"crop": {"x1": 0, "y1": 0, "x2": 160, "y2": 40}},
+            }
+
+        provider = type("Provider", (), {"process": staticmethod(infer)})()
+        stats = {}
+        _ready_gate(11)
+        scheduler_after_shutdown = None
+        with patch("app.infrastructure.media.registry.get_detect_endpoint", AsyncMock(return_value={"provider": "MEDIAMTX", "rtsp": "rtsp://127.0.0.1:8554/cam11_detect"})), \
+             patch("app.services.recognition_decoder.iter_jpegs", stream), \
+             patch("app.services.alpr.locate_plate_boxes", _still_plate), \
+             patch("app.infrastructure.recognition.recognition_provider_for", return_value=provider), \
+             patch.object(settings, "recognition_sample_fps", 30), \
+             patch.object(settings, "recognition_worker_stall_seconds", 0.02):
+            task = asyncio.create_task(_infer_camera({"id": 11}, stop, stats))
+            try:
+                await asyncio.wait_for(provider_started.wait(), 1)
+                await asyncio.sleep(0.04)
+                stop.set()
+                await asyncio.wait_for(task, 1)
+                scheduler_after_shutdown = runtime.scheduler.snapshot()
+            finally:
+                stop.set()
+                if not task.done():
+                    await asyncio.wait_for(task, 1)
+                runtime.reset()
+
+        assert provider_finished.is_set()
+        assert scheduler_after_shutdown["inflight"] == 0
+
     async def test_one_decoder_failure_does_not_stop_the_other_lane(self):
         from app.recognition_worker import _infer_camera
         from app.services.recognition_runtime import runtime

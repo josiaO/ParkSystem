@@ -33,6 +33,17 @@ CAMERA_CAPABILITIES = (
     "JPEG",
 )
 
+# Adapter identity is deliberately separate from recognition identity.  A QY
+# camera can use FastALPR in Zirp while its video/control plane is owned by the
+# native OcxConfig/NetSDK adapter.  ``hvx`` remains a persisted legacy alias
+# for installations created before the adapter registry was introduced.
+SDK_CAMERA_ADAPTER_IDS = frozenset({"qy", "hvx", "native"})
+# ``hvx`` was the historical default for older rows and may describe an
+# unclassified camera until it connects. ``qy`` and ``native`` are explicit
+# native-stream selections and must never fall back to RTSP.
+NATIVE_STREAM_ADAPTER_IDS = frozenset({"qy", "native"})
+GENERIC_CAMERA_ADAPTER_IDS = frozenset({"rtsp", "ipcam", "dahua", "hikvision", "onvif"})
+
 
 @runtime_checkable
 class CameraLike(Protocol):
@@ -62,10 +73,16 @@ class CameraAdapter(Protocol):
 
     async def live_sources(self, device: CameraLike) -> list[dict[str, Any]]: ...
 
+    async def disconnect(self, device: CameraLike) -> dict[str, Any]: ...
+
+    async def detection_zones(self, device: CameraLike) -> dict[str, Any]: ...
+
+    async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]: ...
+
 
 def camera_type_for(adapter_id: str, *, native_plates: bool = False) -> str:
     key = (adapter_id or "hvx").strip().lower()
-    if key == "hvx" or native_plates:
+    if key in SDK_CAMERA_ADAPTER_IDS or native_plates:
         return "VENDOR_SDK_CAMERA"
     if key == "onvif":
         return "GENERIC_ONVIF"

@@ -262,6 +262,8 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("T123ABC", page.text)
         self.assertIn("Pay on phone", page.text)
+        self.assertIn('/assets/zirp-logo.png', page.text)
+        self.assertIn('@media (max-width:430px)', page.text)
         status = self.client.get(f"/p/{token}/status")
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["plate"], "T123ABC")

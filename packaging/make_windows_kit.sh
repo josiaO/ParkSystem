@@ -11,6 +11,7 @@ PY_VER="3.11.9"
 PY64_URL="https://www.python.org/ftp/python/${PY_VER}/python-${PY_VER}-embed-amd64.zip"
 PY32_URL="https://www.python.org/ftp/python/${PY_VER}/python-${PY_VER}-embed-win32.zip"
 GETPIP_URL="https://bootstrap.pypa.io/get-pip.py"
+QY_X86_REDIST_SOURCE="${SMARTPARK_QY_X86_REDIST_EXE:-$CACHE/msvc/vcredist_x86.exe}"
 
 if [[ -z "$OUT" || "$OUT" == "/" || "$OUT" == "$ROOT" || "$OUT" == "$ROOT/" ]]; then
   echo "Refusing to delete unsafe output path: '$OUT'" >&2
@@ -54,8 +55,11 @@ cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
 HVX_VENDOR_SOURCE="${SMARTPARK_HVX_VENDOR_DIR:-}"
 if [[ -z "$HVX_VENDOR_SOURCE" ]]; then
-  for candidate in "$ROOT/OcxConfig" "$ROOT/vendor" "$ROOT/tools/hvx_sdk_host/vendor" \
-                  "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig"; do
+  # Prefer the current field package over stale copied vendor folders. The
+  # QY DLL family must remain matched; mixing NetSDK and PlaySdk generations
+  # is a common source of stacking and loader failures.
+  for candidate in "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig" \
+                  "$ROOT/OcxConfig" "$ROOT/tools/hvx_sdk_host/vendor" "$ROOT/vendor"; do
     if [[ -f "$candidate/NetSDK.dll" ]]; then
       HVX_VENDOR_SOURCE="$candidate"
       break
@@ -76,6 +80,41 @@ if [[ ${#vendor_dlls[@]} -eq 0 ]]; then
   exit 1
 fi
 cp "${vendor_dlls[@]}" "$OUT/payload/vendor/"
+mkdir -p "$OUT/payload/vendor/qy-sdk"
+for artifact in OcxConfig.ocx OcxConfigClient.exe; do
+  if [[ ! -f "$HVX_VENDOR_SOURCE/$artifact" ]]; then
+    echo "ERROR: QY field artifact is missing: $HVX_VENDOR_SOURCE/$artifact" >&2
+    exit 1
+  fi
+  cp "$HVX_VENDOR_SOURCE/$artifact" "$OUT/payload/vendor/qy-sdk/"
+done
+
+# Keep a human-readable, hash-backed inventory beside the binaries. This is
+# copied by the installer and lets field technicians prove that the 32-bit
+# OcxConfig family was not partially replaced by another SDK release.
+{
+  echo "QY/OcxConfig runtime manifest"
+  echo "Source package: $(basename "$HVX_VENDOR_SOURCE")"
+  echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "Primary stream path: Net_StartVideo -> Net_AddPlayWindow -> Net_SetDrawDataOut"
+  echo "Compatibility path: Net_GetJpgBuffer (bounded latest-frame fallback)"
+  printf 'REQUIRED vc_redist.x86.exe SHA256 %s\n' "$(sha256sum "$QY_X86_REDIST_SOURCE" | awk '{print $1}')"
+  for required in NetSDK.dll CommModule.dll PlaySdk.dll RtspRecvSdk.dll DecodeSdk.dll Log.dll ZlibHelper.dll; do
+    if [[ ! -f "$HVX_VENDOR_SOURCE/$required" ]]; then
+      echo "ERROR: required QY runtime DLL is missing: $HVX_VENDOR_SOURCE/$required" >&2
+      exit 1
+    fi
+    printf 'REQUIRED %s SHA256 %s\n' "$required" "$(sha256sum "$HVX_VENDOR_SOURCE/$required" | awk '{print $1}')"
+  done
+  for optional in DevSearchHelper.dll DevSearchHelperBatch.dll; do
+    if [[ -f "$HVX_VENDOR_SOURCE/$optional" ]]; then
+      printf 'OPTIONAL %s SHA256 %s\n' "$optional" "$(sha256sum "$HVX_VENDOR_SOURCE/$optional" | awk '{print $1}')"
+    fi
+  done
+  for optional in OcxConfig.ocx OcxConfigClient.exe; do
+    printf 'OPTIONAL %s SHA256 %s\n' "$optional" "$(sha256sum "$HVX_VENDOR_SOURCE/$optional" | awk '{print $1}')"
+  done
+} > "$OUT/payload/vendor/QY-SDK-MANIFEST.txt"
 
 download() {
   local url="$1" dest="$2"
@@ -199,6 +238,20 @@ else
   echo "or SMARTPARK_MSVC_REDIST_EXE pointing to the official vc_redist.x64.exe." >&2
   exit 1
 fi
+if [[ ! -f "$QY_X86_REDIST_SOURCE" ]]; then
+  echo "ERROR: Microsoft Visual C++ 2005 SP1 x86 runtime is required by the QY/OcxConfig DLLs." >&2
+  echo "Provide SMARTPARK_QY_X86_REDIST_EXE or cache it at $CACHE/msvc/vcredist_x86.exe." >&2
+  exit 1
+fi
+QY_X86_REDIST_SHA256="8648c5fc29c44b9112fe52f9a33f80e7fc42d10f3b5b42b2121542a13e44adfd"
+actual_qy_x86_sha256="$(sha256sum "$QY_X86_REDIST_SOURCE" | awk '{print $1}')"
+if [[ "$actual_qy_x86_sha256" != "$QY_X86_REDIST_SHA256" ]]; then
+  echo "ERROR: Microsoft Visual C++ 2005 SP1 x86 runtime hash mismatch." >&2
+  echo "Expected $QY_X86_REDIST_SHA256, got $actual_qy_x86_sha256" >&2
+  exit 1
+fi
+cp "$QY_X86_REDIST_SOURCE" "$OUT/payload/vendor/vc_redist.x86.exe"
+echo "Bundled verified Microsoft Visual C++ 2005 SP1 x86 redistributable for QY/OcxConfig."
 printf 'python311.zip\r\n.\r\n..\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python64/python311._pth"
 printf 'python311.zip\r\n.\r\n..\\tools\\hvx_sdk_host\r\nLib\\site-packages\r\nimport site\r\n' > "$OUT/payload/python32/python311._pth"
 
@@ -358,6 +411,7 @@ for helper in \
   Run-RecordedMediaTests.ps1 Run-RecordedMediaTests.bat \
   Open-SmartParkLogs.bat \
   Run-CameraLab.ps1 Run-CameraLab.bat \
+  Repair-SmartParkNetwork.ps1 Repair-SmartParkNetwork.bat \
   Wipe-SmartPark.ps1 Wipe-SmartPark.bat; do
   cp "$ROOT/packaging/windows/$helper" "$SUPPORT/"
 done
@@ -395,7 +449,10 @@ cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
 cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
 cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
 cp "$ROOT/docs/MIGRATION-AND-ROLLBACK.md" "$OUT/documentation/"
-cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/documentation/"
+cp "$ROOT/docs/SYSTEM-GUIDE.md" "$OUT/documentation/"
+if [[ -f "$ROOT/FIRST_TEST_WINDOWS.md" ]]; then
+  cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/documentation/"
+fi
 if [[ -f "$ROOT/docs/CAMERA-LAB.md" ]]; then
   cp "$ROOT/docs/CAMERA-LAB.md" "$OUT/documentation/"
 fi

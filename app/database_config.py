@@ -14,7 +14,7 @@ import socket
 import time
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import URL, make_url
 
 from app.config import settings
@@ -128,7 +128,13 @@ def _tcp_preflight(config: DatabaseConfig) -> dict[str, Any]:
         return {"ok": False, "error": "PostgreSQL could not be reached on this computer.", "technical": str(exc)[:240]}
 
 
-def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str | None = None) -> dict[str, Any]:
+def preflight(
+    config: DatabaseConfig,
+    *,
+    initialize: bool = False,
+    password: str | None = None,
+    required_tables: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Validate a candidate database and optionally bring its schema to head."""
     result: dict[str, Any] = {
         "engine": config.engine,
@@ -138,6 +144,7 @@ def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str
     }
     if config.is_sqlite:
         path = config.sqlite_file()
+        engine = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             usage = __import__("shutil").disk_usage(path.parent)
@@ -166,13 +173,20 @@ def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str
 
                 result["migration"] = status(engine)
             result["migration"]["up_to_date"] = bool(result["migration"].get("revision")) and result["migration"].get("revision") == result["migration"].get("head")
-            engine.dispose()
+            if required_tables:
+                missing = sorted(set(required_tables) - set(inspect(engine).get_table_names()))
+                result["checks"].append({"name": "required schema tables", "ok": not missing, "missing": missing})
+                if missing:
+                    result["error"] = "Required schema tables are missing: " + ", ".join(missing) + ". Upgrade the Site Server database first."
             # A fresh database is valid but not yet migrated; Apply performs
             # the authoritative Alembic initialization.
             result["ok"] = all(bool(row.get("ok")) for row in result["checks"])
         except Exception as exc:
             result["checks"].append({"name": "database", "ok": False, "error": str(exc)[:300]})
             result["error"] = "SQLite could not be opened or configured."
+        finally:
+            if engine is not None:
+                engine.dispose()
         return result
 
     result["host"] = config.postgres_host
@@ -184,6 +198,8 @@ def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str
     if not tcp.get("ok"):
         result["error"] = "PostgreSQL could not be reached on this computer. Install PostgreSQL or select SQLite for testing."
         return result
+    engine = None
+    phase = "authentication/database"
     try:
         engine = create_engine(database_url(config, password=password), future=True, pool_pre_ping=True)
         with engine.begin() as conn:
@@ -197,6 +213,7 @@ def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str
             {"name": "permissions", "ok": True},
             {"name": "read/write transaction", "ok": True},
         ])
+        phase = "schema migration" if initialize else "schema status"
         if initialize:
             from app.migrations.runner import upgrade_to_head
 
@@ -206,15 +223,27 @@ def preflight(config: DatabaseConfig, *, initialize: bool = False, password: str
 
             result["migration"] = status(engine)
         result["migration"]["up_to_date"] = bool(result["migration"].get("revision")) and result["migration"].get("revision") == result["migration"].get("head")
+        if required_tables:
+            missing = sorted(set(required_tables) - set(inspect(engine).get_table_names()))
+            result["checks"].append({"name": "required schema tables", "ok": not missing, "missing": missing})
+            if missing:
+                result["error"] = "Required schema tables are missing: " + ", ".join(missing) + ". Upgrade the Site Server database first."
         # A reachable database with a pending migration is still a valid
         # candidate; Apply will migrate it before the service is started.
-        result["ok"] = True
-        engine.dispose()
+        result["ok"] = not required_tables or not missing
     except Exception as exc:
         message = str(exc)
-        result["checks"].append({"name": "authentication/database", "ok": False, "error": message[:300]})
-        result["error"] = "PostgreSQL was found but authentication, database access, or permissions failed."
+        result["checks"].append({"name": phase, "ok": False, "error": message[:300]})
+        if phase == "schema migration":
+            result["error"] = "PostgreSQL schema migration failed."
+        elif phase == "schema status":
+            result["error"] = "PostgreSQL schema status could not be read."
+        else:
+            result["error"] = "PostgreSQL was found but authentication, database access, or permissions failed."
         result["technical"] = message[:300]
+    finally:
+        if engine is not None:
+            engine.dispose()
     return result
 
 

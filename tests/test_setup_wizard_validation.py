@@ -54,6 +54,15 @@ def test_node_installer_locks_role_and_skips_role_selection(qapp):
     assert wizard._database_config().engine == "POSTGRESQL"
 
 
+def test_node_server_address_syncs_postgres_host(qapp):
+    wizard = SetupWizard(DeploymentConfig(), role_locked=EDGE_NODE)
+
+    wizard.server_url.setText("http://192.168.1.240:8760")
+    wizard.server_url.editingFinished.emit()
+
+    assert wizard.pg_host.text() == "192.168.1.240"
+
+
 def test_node_does_not_require_hidden_local_administrator_password(qapp):
     wizard = SetupWizard(DeploymentConfig(), role_locked=EDGE_NODE)
 

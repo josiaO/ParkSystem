@@ -139,6 +139,7 @@ class ArrivalGate:
 
     def reset(self) -> None:
         self._last: tuple[float, ...] | None = None
+        self._seen_since: float | None = None
         self._stable_since: float | None = None
         self._absent_since: float | None = None
         self._announced = False
@@ -160,8 +161,21 @@ class ArrivalGate:
             self._absent_since = None
             return "held"
         if not box:
+            # Detector output is not guaranteed on every decoded frame.  A
+            # single night-time glare/compression miss must not erase the
+            # arrival state, otherwise the next box starts a fresh settle
+            # window and a stopped car can remain permanently unread.  Keep
+            # the last valid box only for the same short absence window used
+            # for departure detection; a genuinely empty lane still resets.
+            if self._last is not None:
+                if self._absent_since is None or now < self._absent_since:
+                    self._absent_since = now
+                if now - self._absent_since < self.absence_seconds:
+                    return "missing"
             self._last = None
+            self._seen_since = None
             self._stable_since = None
+            self._absent_since = None
             self._announced = False
             return "absent"
         if self._retry_at is not None:
@@ -174,7 +188,20 @@ class ArrivalGate:
         self._observed_at = now
         center = _box_center(box)
         if center is None:
+            if self._last is not None:
+                if self._absent_since is None or now < self._absent_since:
+                    self._absent_since = now
+                if now - self._absent_since < self.absence_seconds:
+                    return "missing"
+            self._last = None
+            self._seen_since = None
+            self._stable_since = None
+            self._absent_since = None
+            self._announced = False
             return "absent"
+        self._absent_since = None
+        if self._seen_since is None:
+            self._seen_since = now
         moved = self._last is None or _moved(self._last, center, self.move_ratio)
         if moved:
             had_previous = self._last is not None
@@ -186,6 +213,20 @@ class ArrivalGate:
             # bounded OCR opportunity for fast traffic; consensus and plate
             # validation still reject accidental/non-car text.
             if had_previous and self._near_enough(box) and self._ocr_count < self.max_ocr:
+                self._announced = True
+                return "ready"
+            # A moving vehicle may never produce a stable box. Once it has
+            # been visible for the bounded fallback interval, give OCR one
+            # opportunity even while it is still moving. The detector and OCR
+            # quality checks remain authoritative, and the normal near-size
+            # path still gets priority whenever the plate is readable.
+            if (
+                had_previous
+                and self.far_fallback_seconds > 0.0
+                and self._seen_since is not None
+                and now - self._seen_since >= self.far_fallback_seconds
+                and self._ocr_count < self.max_ocr
+            ):
                 self._announced = True
                 return "ready"
             return "moving"
@@ -206,7 +247,7 @@ class ArrivalGate:
                 plate_width = 0.0
             if plate_width < self.min_plate_width_px and (
                 self.far_fallback_seconds <= 0.0
-                or now - self._stable_since < self.far_fallback_seconds
+                or now - (self._seen_since if self._seen_since is not None else self._stable_since) < self.far_fallback_seconds
             ):
                 return "far"
         if self._announced:

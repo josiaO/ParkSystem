@@ -441,21 +441,40 @@ def decode_alpr_image(data: bytes):
 def _boost_contrast(bgr):
     try:
         import cv2
+        import numpy as np
     except ImportError:
         return None
+    # Headlights create a dark plate next to clipped white pixels. A mild
+    # gamma lift before local contrast recovers shadow detail without making a
+    # second OCR call or changing the detector frame.
+    try:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if float(np.mean(gray)) < 82.0:
+            gamma = 0.76
+            lut = np.array([((index / 255.0) ** gamma) * 255.0 for index in range(256)], dtype=np.uint8)
+            bgr = cv2.LUT(bgr, lut)
+    except Exception:
+        pass
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     light, a, b = cv2.split(lab)
     # Compress specular glare (headlights) before CLAHE so the plate crop is not washed out.
     try:
-        import numpy as np
         hi = float(np.percentile(light, 98))
         if hi > 220:
-            light = cv2.convertScaleAbs(light, alpha=0.85, beta=0)
+            light = cv2.convertScaleAbs(light, alpha=0.82, beta=0)
     except Exception:
         pass
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
     light = clahe.apply(light)
-    return cv2.cvtColor(cv2.merge((light, a, b)), cv2.COLOR_LAB2BGR)
+    enhanced = cv2.cvtColor(cv2.merge((light, a, b)), cv2.COLOR_LAB2BGR)
+    # A restrained unsharp mask restores character edges lost to motion blur;
+    # keeping the weights low avoids amplifying JPEG/headlight halos.
+    try:
+        softened = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
+        enhanced = cv2.addWeighted(enhanced, 1.18, softened, -0.18, 0)
+    except Exception:
+        pass
+    return enhanced
 
 
 def _low_light(crop_bgr) -> bool:
@@ -505,6 +524,94 @@ def _prepare_ocr_crop(crop_bgr, *, enhance: bool = True):
         )
     boosted = _boost_contrast(crop_bgr) if enhance else None
     return boosted if boosted is not None else crop_bgr
+
+
+def _rectify_plate_crop(crop_bgr):
+    """Perspective-correct a visibly skewed plate, when its border is clear.
+
+    The detector returns an axis-aligned box, while a Tanzanian plate can be
+    viewed at an angle and become a trapezoid.  We only warp a strong,
+    plate-shaped quadrilateral found *inside that already validated crop*.
+    If no reliable quadrilateral is present, the original crop is returned;
+    this keeps ordinary plates and low-light frames on the existing path.
+    """
+    if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
+        return crop_bgr, False
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return crop_bgr, False
+    try:
+        height, width = crop_bgr.shape[:2]
+        if width < 48 or height < 16:
+            return crop_bgr, False
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(gray, 45, 140)
+        edges = cv2.morphologyEx(
+            edges,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+            iterations=1,
+        )
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        crop_area = float(width * height)
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < crop_area * 0.16 or area > crop_area * 0.96:
+                continue
+            perimeter = float(cv2.arcLength(contour, True))
+            if perimeter <= 0:
+                continue
+            approx = cv2.approxPolyDP(contour, perimeter * 0.035, True)
+            if len(approx) != 4 or not cv2.isContourConvex(approx):
+                continue
+            points = approx.reshape(4, 2).astype("float32")
+            top_width = float(np.linalg.norm(points[1] - points[0]))
+            bottom_width = float(np.linalg.norm(points[2] - points[3]))
+            left_height = float(np.linalg.norm(points[3] - points[0]))
+            right_height = float(np.linalg.norm(points[2] - points[1]))
+            long_side = max(top_width, bottom_width)
+            short_side = max(1.0, min(left_height, right_height))
+            aspect = long_side / short_side
+            if not (1.35 <= aspect <= 8.0):
+                continue
+            # Favor a large, central plate border over a random car-panel edge.
+            center = points.mean(axis=0)
+            distance = float(np.linalg.norm(center - np.array([width / 2, height / 2])))
+            score = area * (1.0 - min(0.7, distance / max(width, height)))
+            candidates.append((score, points, aspect))
+        if not candidates:
+            return crop_bgr, False
+        _, points, aspect = max(candidates, key=lambda item: item[0])
+        sums = points.sum(axis=1)
+        diffs = points[:, 0] - points[:, 1]
+        ordered = np.array([
+            points[np.argmin(sums)],
+            points[np.argmin(diffs)],
+            points[np.argmax(sums)],
+            points[np.argmax(diffs)],
+        ], dtype="float32")
+        out_width = max(160, min(640, int(round(max(width * 0.8, 320)))))
+        out_height = max(32, min(160, int(round(out_width / max(aspect, 1.35)))))
+        target = np.array([
+            [0, 0], [out_width - 1, 0],
+            [out_width - 1, out_height - 1], [0, out_height - 1],
+        ], dtype="float32")
+        matrix = cv2.getPerspectiveTransform(ordered, target)
+        rectified = cv2.warpPerspective(
+            crop_bgr, matrix, (out_width, out_height),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        if rectified is None or getattr(rectified, "size", 0) == 0:
+            return crop_bgr, False
+        return rectified, True
+    except Exception:
+        # Rectification is an enhancement, never a reason to lose a frame.
+        return crop_bgr, False
 
 
 def _save_crop_bgr(crop_bgr) -> str | None:
@@ -779,8 +886,9 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
         if crop is None or getattr(crop, "size", 0) == 0:
             continue
         crop_ready = time.monotonic()
-        low_light = _low_light(crop)
-        ocr_input = _prepare_ocr_crop(crop, enhance=low_light)
+        rectified_crop, rectified = _rectify_plate_crop(crop)
+        low_light = _low_light(rectified_crop)
+        ocr_input = _prepare_ocr_crop(rectified_crop, enhance=low_light)
         ocr_started = time.monotonic()
         try:
             ocr = engine.ocr.predict(ocr_input)
@@ -794,7 +902,7 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
         # only already-accepted text, losing plates that needed enhancement.
         if not low_light and (not accepted or conf < float(settings.recognition_high_confidence)):
             try:
-                enhanced = engine.ocr.predict(_prepare_ocr_crop(crop, enhance=True))
+                enhanced = engine.ocr.predict(_prepare_ocr_crop(rectified_crop, enhance=True))
                 enhanced_text, enhanced_conf = _ocr_result_text(enhanced)
                 enhanced_plate, _rank = _apply_country_profile(enhanced_text, enhanced_conf)
                 enhanced_ok = accept_ocr_plate(
@@ -820,10 +928,11 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
                 plate_confidence=raw_conf,
                 # Save the readable view used by OCR, not the raw tiny plate
                 # rectangle. The full vehicle snapshot remains unchanged.
-                plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(crop, enhance=True)) if save_crops else None,
+                plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(rectified_crop, enhance=True)) if save_crops else None,
                 bbox=box,
                 detector_confidence=_detection_score(detection),
                 timings={"crop_ms": round((crop_ready - crop_started) * 1000, 1),
+                         "perspective_rectified": rectified,
                          "ocr_ms": round((ocr_finished - ocr_started) * 1000, 1),
                          "crop_ready_at": crop_ready, "ocr_started_at": ocr_started,
                          "ocr_finished_at": ocr_finished},
@@ -879,7 +988,8 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
     try:
         bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
-        ocr_input = _prepare_ocr_crop(bgr)
+        rectified, rectified_used = _rectify_plate_crop(bgr)
+        ocr_input = _prepare_ocr_crop(rectified)
         ocr = engine.ocr.predict(ocr_input)
         text, conf = _ocr_result_text(ocr)
         plate, _rank = _apply_country_profile(text, conf)
@@ -895,7 +1005,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
             plate_raw=text,
             plate_normalized=plate,
             plate_confidence=raw_conf,
-            plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(bgr, enhance=True)),
+            plate_crop_path=_save_crop_bgr(_prepare_ocr_crop(rectified, enhance=True)),
             bbox=None,
         )
         return {
@@ -905,6 +1015,7 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
             "plates": [hit.as_dict()],
             "count": 1,
             "best": hit.as_dict(),
+            "perspective_rectified": rectified_used,
             "latency_ms": round((time.monotonic() - started) * 1000, 2),
             "detail": "plate crop OCR",
         }
@@ -966,9 +1077,14 @@ def locate_plate_boxes(
         reverse=True,
     )
     finished = time.monotonic()
+    # The worker immediately performs crop OCR on this same frame. Keep the
+    # decoded BGR image in the internal metadata so that path does not decode
+    # the JPEG a second time. Callers that serialize this metadata should drop
+    # the private buffer first; it is intentionally not part of any event.
     return boxes, {"available": True, "image_width": width, "image_height": height,
                    "detector_ms": round((finished - started) * 1000, 1),
-                   "detector_started_at": started, "detector_finished_at": finished}
+                   "detector_started_at": started, "detector_finished_at": finished,
+                   "_decoded_bgr": bgr}
 
 
 def recognize_arrival_bytes(
@@ -979,6 +1095,7 @@ def recognize_arrival_bytes(
     detect_zoom: float | None = None,
     save_evidence: bool | None = None,
     detected_boxes: list | None = None,
+    decoded_bgr=None,
 ) -> dict:
     """When a plate is in the zone, crop it and OCR that crop. Never OCR the car.
 
@@ -1011,7 +1128,12 @@ def recognize_arrival_bytes(
             "detail": "no plate in the detection zone",
         }
     try:
-        bgr = decode_alpr_image(jpeg)
+        # ``decoded_bgr`` is an internal fast path used after detector-first
+        # recognition. Fall back to the public JPEG decode path if a caller
+        # supplies an invalid buffer; this keeps the API failure-safe.
+        bgr = decoded_bgr if decoded_bgr is not None else meta.get("_decoded_bgr")
+        if getattr(bgr, "ndim", 0) != 3 or getattr(bgr, "size", 0) == 0:
+            bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
     except Exception:
         return {"ok": False, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [], "best": None, "detail": "could not decode frame"}
@@ -1080,9 +1202,13 @@ def plate_still_present(jpeg: bytes, *, detect_roi: str | None = None, detect_zo
     except Exception:
         return None
     width, height = int(bgr.shape[1]), int(bgr.shape[0])
+    min_det = float(getattr(settings, "alpr_detector_confidence", 0.26) or 0.26)
     for item in detections or []:
         bbox = getattr(item, "bounding_box", None)
-        if bbox is not None and plate_box_ok(bbox, width, height):
+        # Keep departure detection consistent with the arrival detector.  A
+        # low-confidence glare/sign box must not hold a published visit in
+        # ``EVENT_PUBLISHED`` forever and block the next vehicle.
+        if bbox is not None and _detection_score(item) >= min_det and plate_box_ok(bbox, width, height):
             return True
     return False
 

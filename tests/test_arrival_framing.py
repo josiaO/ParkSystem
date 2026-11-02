@@ -68,6 +68,35 @@ class ArrivalGateTests(unittest.TestCase):
         self.assertEqual(gate.observe(_box(10, 80), 0.0), "moving")
         self.assertEqual(gate.observe(_box(60, 140), 0.1), "ready")
 
+    def test_far_moving_plate_gets_bounded_fallback_ocr_opportunity(self):
+        gate = ArrivalGate(stable_seconds=0.8, min_plate_width_px=64, far_fallback_seconds=0.5)
+        self.assertEqual(gate.observe(_box(10, 50), 0.0), "moving")
+        self.assertEqual(gate.observe(_box(24, 64), 0.2), "moving")
+        # The box is still moving and remains below the preferred readable
+        # width, but the vehicle has been visible long enough to avoid a miss.
+        self.assertEqual(gate.observe(_box(38, 78), 0.6), "ready")
+
+    def test_one_detector_miss_does_not_restart_stationary_capture(self):
+        gate = ArrivalGate(stable_seconds=0.3, absence_seconds=0.6)
+        box = _box(20, 90)
+        self.assertEqual(gate.observe(box, 0.0), "moving")
+        self.assertEqual(gate.observe(box, 0.3), "ready")
+        gate.note_ocr(published=False)
+        self.assertEqual(gate.observe(None, 0.35), "missing")
+        # The original stable box is still valid after the brief detector
+        # miss, so the next frame is eligible immediately.
+        self.assertEqual(gate.observe(box, 0.4), "ready")
+
+    def test_sustained_detector_miss_starts_a_new_arrival(self):
+        gate = ArrivalGate(stable_seconds=0.3, absence_seconds=0.6)
+        box = _box(20, 90)
+        gate.observe(box, 0.0)
+        gate.observe(box, 0.3)
+        gate.note_ocr(published=False)
+        self.assertEqual(gate.observe(None, 0.7), "missing")
+        self.assertEqual(gate.observe(None, 1.4), "absent")
+        self.assertEqual(gate.observe(box, 1.5), "moving")
+
 
 class FramingTests(unittest.TestCase):
     def test_a_tight_lane_box_is_accepted(self):

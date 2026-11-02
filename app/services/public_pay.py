@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.infrastructure.payments import payment_provider_for, record_succeeded_payment, transaction_dict
 from app.models import ParkingSession
-from app.services.simulation import quote_session, session_dict as sim_session_dict
+from app.services.simulation import quote_session
+from app.services.session_presentation import session_presentation
 
 
 def session_by_public_token(db: Session, token: str) -> ParkingSession | None:
@@ -19,19 +20,10 @@ def session_by_public_token(db: Session, token: str) -> ParkingSession | None:
     return db.scalar(select(ParkingSession).where(ParkingSession.public_token == token))
 
 
-def public_session_payload(db: Session, row: ParkingSession) -> dict:
-    if row.status not in ("CLOSED", "PAID"):
-        quote_session(db, row)
-        db.commit()
-        db.refresh(row)
-    due = float(row.amount_due or 0)
-    paid = float(row.amount_paid or 0)
-    remaining = max(0.0, due - paid)
-    paid_up = remaining <= 0.0001
-    from app.services.kiosk_lookup import image_fields, stay_for
-
-    stay = stay_for(row)
-    images = image_fields(db, row)
+def public_session_payload(db: Session, row: ParkingSession, *, audience: str = "driver") -> dict:
+    """Return the shared presentation projection for Driver or kiosk use."""
+    body = session_presentation(db, row, audience=audience)
+    remaining = float(body["amount_remaining"])
     payable = remaining > 0.0001
     from app.services.mobile_payments import active_mobile_provider_id, external_provider_ids
 
@@ -46,31 +38,17 @@ def public_session_payload(db: Session, row: ParkingSession) -> dict:
         if settings.allow_public_simulated_payments:
             pay_methods.insert(0, "MOBILE_SIMULATED")
             pay_endpoint = f"/p/{row.public_token}/pay"
-    return {
+    body.update({
         "mobile_provider": mobile_provider,
         "pay_endpoint": pay_endpoint,
-        "ok": True,
-        "token": row.public_token,
-        "session_id": row.id,
-        "plate": row.plate,
-        "status": row.status,
-        "parker_kind": getattr(row, "parker_kind", None) or "CASUAL",
-        "entry_time": row.entry_time.isoformat() if row.entry_time else None,
-        "exit_time": row.exit_time.isoformat() if row.exit_time else None,
-        "currency": row.currency or "TZS",
-        "amount_due": due,
-        "amount_paid": paid,
-        "amount_remaining": remaining,
-        "paid": paid_up or row.status == "PAID",
-        "payable": payable,
-        "pay_blocked_reason": "" if payable else "This vehicle does not have a fee to pay.",
-        "receipt_url": f"/p/{row.public_token}",
-        "qr_url": f"/p/{row.public_token}/qr.png",
+        "online_payment_available": bool(pay_endpoint),
         "pay_methods": pay_methods if payable else [],
-        "session": sim_session_dict(row),
-        **stay,
-        **images,
-    }
+    })
+    if audience != "operator":
+        body.pop("image_plate", None)
+        body.pop("image_matches_plate", None)
+        body.pop("parker_kind", None)
+    return body
 
 
 async def pay_public_session(
@@ -80,6 +58,7 @@ async def pay_public_session(
     method: str = "MOBILE_SIMULATED",
     amount: float | None = None,
     operator_id: int | None = None,
+    audience: str = "driver",
 ) -> dict:
     """Settle via simulated mobile or kiosk ledger path.
 
@@ -91,7 +70,7 @@ async def pay_public_session(
     paid = float(row.amount_paid or 0)
     remaining = max(0.0, due - paid)
     if remaining <= 0.0001:
-        return {"ok": True, "already_paid": True, **public_session_payload(db, row)}
+        return {"ok": True, "already_paid": True, **public_session_payload(db, row, audience=audience)}
 
     method = (method or "MOBILE_SIMULATED").strip().upper()
     pay_amount = float(amount) if amount is not None else remaining
@@ -130,7 +109,7 @@ async def pay_public_session(
             "method": "MOBILE_SIMULATED",
             "transaction": transaction_dict(recorded["transaction"]),
             "duplicate": recorded["duplicate"],
-            **public_session_payload(db, recorded["session"]),
+            **public_session_payload(db, recorded["session"], audience=audience),
         }
 
     if method in {"KIOSK_CASH", "CASH", "KIOSK"}:
@@ -150,7 +129,7 @@ async def pay_public_session(
             "method": "KIOSK_CASH",
             "transaction": transaction_dict(recorded["transaction"]),
             "duplicate": recorded["duplicate"],
-            **public_session_payload(db, recorded["session"]),
+            **public_session_payload(db, recorded["session"], audience=audience),
         }
 
     raise ValueError(f"Unsupported pay method: {method}")
