@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from app.domain.cameras import CameraAdapter, CameraLike
+from app.domain.cameras import CameraAdapter, CameraLike, NATIVE_STREAM_ADAPTER_IDS, SDK_CAMERA_ADAPTER_IDS
 from app.domain.devices import DEFAULT_CAMERA_ADAPTER
 from app.infrastructure.hardware.cameras.hvx import HVXCameraAdapter
 from app.infrastructure.hardware.cameras.onvif import ONVIFCameraAdapter
+from app.infrastructure.hardware.cameras.qy import QYCameraAdapter
 from app.infrastructure.hardware.cameras.rtsp import RTSPCameraAdapter
 from app.infrastructure.hardware.cameras.simulated import SimulatedCameraAdapter
 
 ADAPTERS: dict[str, CameraAdapter] = {
     "hvx": HVXCameraAdapter(),
+    # QY is the vendor-facing name for the OcxConfig/NetSDK family.  Keep a
+    # separate registry key even though both keys share the same reliable
+    # host implementation, so future vendor adapters cannot accidentally
+    # inherit QY semantics from the default alias.
+    "qy": QYCameraAdapter(),
     "rtsp": RTSPCameraAdapter(),
     "onvif": ONVIFCameraAdapter(),
     "simulated": SimulatedCameraAdapter(),
@@ -27,6 +33,24 @@ def resolve_adapter_key(adapter_id: str | None = None) -> str:
     return key if key in ADAPTERS else DEFAULT_CAMERA_ADAPTER
 
 
+def adapter_requires_native_stream(adapter_id: str | None = None) -> bool:
+    """Whether this adapter must own the camera's continuous video session."""
+    return (adapter_id or DEFAULT_CAMERA_ADAPTER).strip().lower() in NATIVE_STREAM_ADAPTER_IDS
+
+
+def adapter_catalog() -> list[dict[str, Any]]:
+    """Stable capability catalog for onboarding and future plugin UIs."""
+    rows: list[dict[str, Any]] = []
+    for key, adapter in ADAPTERS.items():
+        rows.append({
+            "adapter_id": key,
+            "implementation": adapter.__class__.__name__,
+            "native_stream": adapter_requires_native_stream(key),
+            "legacy_alias": key == "hvx",
+        })
+    return rows
+
+
 def camera_adapter_for(device: CameraLike | None = None, adapter_id: str | None = None) -> CameraAdapter:
     key = resolve_adapter_key(adapter_id or getattr(device, "adapter_id", None))
     return ADAPTERS[key]
@@ -41,7 +65,7 @@ def adapter_has_native_plates(device: CameraLike | None = None, adapter_id: str 
     HVX.
     """
     adapter = camera_adapter_for(device, adapter_id)
-    if adapter.id == DEFAULT_CAMERA_ADAPTER:
+    if str(getattr(adapter, "id", None) or "").strip().lower() in SDK_CAMERA_ADAPTER_IDS:
         return True
     if device is None:
         return False

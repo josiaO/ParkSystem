@@ -13,15 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings as app_settings
-from app.core.plate import normalize_plate
+from app.core.plate import normalize_plate, plate_similarity
 from app.domain.gates import should_pulse_physical
 from app.infrastructure.payments.ledger import record_succeeded_payment
 from app.domain.site import DEFAULT_SITE_ID
-from app.models import Camera, Gate, ParkingSession, SiteSetting, utcnow
+from app.models import Camera, Gate, ParkingSession, SiteSetting, as_utc, utcnow
 from app.services.access import Entitlement, lookup_entitlement
 from app.services.decisions import record_access_decision, record_gate_command
-from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules
-from app.services.gates import controller
+from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules, normalize_tariff_rules
+from app.services.gates import GateCommandResult, controller
 from app.services.led_udp import send_led_text
 from app.domain.receipt_engine import session_qr_payload
 from app.services.parking_sessions import _allocate_identity
@@ -31,10 +31,14 @@ from app.services.receipts import (
     policy_should_print,
     resolve_receipt_policy,
 )
+from app.services.site_policy import as_site_local, site_policy
 
 DEFAULT_PARKING_SETTINGS = {
+    # Development keeps the fast simulator behavior.  A configured or
+    # production deployment is made fail-closed by parking_settings() below.
     "receipt_required_before_open": False,
     "receipt_policy": "PRINT_AND_OPEN",
+    "passage_sensing": "OPEN_COMMAND_COUNTS_AS_PASSED",
     "exit_requires_payment": True,
     "pay_prompt": "Pay {amount} {currency}",
     "printer_adapter": "simulated",
@@ -53,6 +57,13 @@ def parking_settings(db: Session) -> dict:
     merged = dict(DEFAULT_PARKING_SETTINGS)
     if row and isinstance(row.value, dict):
         merged.update(row.value)
+    # Physical lanes must wait for the passage sensor and require a usable
+    # receipt before opening.  The development profile intentionally retains
+    # the simulator defaults so fixture tests and commissioning remain usable.
+    if str(getattr(app_settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT").upper() != "DEVELOPMENT":
+        merged["receipt_required_before_open"] = True
+        merged["receipt_policy"] = "REQUIRE_TAKEN_BEFORE_OPEN"
+        merged["passage_sensing"] = "WAIT_FOR_PASSAGE"
     policy = resolve_receipt_policy(merged)
     merged["receipt_policy"] = policy
     merged["receipt_required_before_open"] = policy_requires_taken(policy)
@@ -93,6 +104,9 @@ def save_parking_settings(db: Session, payload: dict) -> dict:
 
 
 def session_dict(row: ParkingSession, capture=None, *, lookup_capture: bool = True) -> dict:
+    from sqlalchemy.orm import object_session
+    db = object_session(row)
+    policy = site_policy(db) if db is not None else None
     token = row.public_token or ""
     body = {
         "id": row.id,
@@ -112,8 +126,8 @@ def session_dict(row: ParkingSession, capture=None, *, lookup_capture: bool = Tr
         "receipt_url": f"/p/{token}" if token else None,
         "qr_url": f"/p/{token}/qr.png" if token else None,
         "qr_payload": session_qr_payload(token),
-        "entry_time": row.entry_time.isoformat() if row.entry_time else None,
-        "exit_time": row.exit_time.isoformat() if row.exit_time else None,
+        "entry_time": as_site_local(row.entry_time, policy).isoformat() if row.entry_time else None,
+        "exit_time": as_site_local(row.exit_time, policy).isoformat() if row.exit_time else None,
         "currency": row.currency,
         "amount_due": float(row.amount_due or 0),
         "amount_paid": float(row.amount_paid or 0),
@@ -129,7 +143,35 @@ def session_dict(row: ParkingSession, capture=None, *, lookup_capture: bool = Tr
         if db is not None:
             cap = capture
             if cap is None and lookup_capture:
-                cap = find_capture_for_session(db, plate=row.plate, camera_id=row.camera_id)
+                cap = find_capture_for_session(
+                    db,
+                    plate=row.plate,
+                    camera_id=row.camera_id,
+                    event_id=getattr(row, "entry_event_id", "") or "",
+                    visit_id=getattr(row, "visit_id", "") or "",
+                    image_ref=getattr(row, "entry_image_ref", "") or "",
+                )
+            # Very old sessions created before event/visit/image identity was
+            # persisted can still be shown in the operator UI. Keep their
+            # photo only when the latest same-camera capture is temporally
+            # adjacent to entry and the plate differs by at most one OCR
+            # character. This fallback is intentionally not used by the
+            # public payment projection.
+            if cap is None and lookup_capture and db is not None and row.camera_id:
+                from app.services.captures import latest_for_camera
+
+                candidate = latest_for_camera(db, int(row.camera_id))
+                entry_at = as_utc(row.entry_time or row.created_at)
+                capture_at = as_utc(candidate.created_at) if candidate is not None else None
+                if (
+                    candidate is not None
+                    and candidate.snapshot_path
+                    and entry_at is not None
+                    and capture_at is not None
+                    and abs((capture_at - entry_at).total_seconds()) <= 5.0
+                    and plate_similarity(row.plate, candidate.plate) >= 0.85
+                ):
+                    cap = candidate
             if cap:
                 info = capture_dict(cap)
                 body["snapshot_url"] = info.get("snapshot_url")
@@ -160,7 +202,10 @@ def _active_for_plate(db: Session, plate: str) -> ParkingSession | None:
 
 
 def receipt_text(row: ParkingSession, cfg: dict) -> str:
-    when = (row.entry_time or utcnow()).strftime("%Y-%m-%d %H:%M:%S UTC")
+    from sqlalchemy.orm import object_session
+    db = object_session(row)
+    local_when = as_site_local(row.entry_time or utcnow(), site_policy(db) if db is not None else None)
+    when = local_when.strftime("%Y-%m-%d %H:%M:%S %Z")
     policy = resolve_receipt_policy(cfg)
     wait = "Gate opens only after this receipt is taken.\n" if policy_requires_taken(policy) else "Keep this receipt for payment.\n"
     return (
@@ -239,6 +284,20 @@ async def _pulse_gate(
 ):
     if not gate or not cameras:
         return None
+    from app.services.developer import gate_opening_enabled
+    if not gate_opening_enabled(db):
+        blocked = GateCommandResult(
+            ok=False,
+            simulated=True,
+            message="Developer mode has gate opening disabled",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        record_gate_command(
+            db, gate=gate, session=session, reason=reason, automatic=automatic,
+            dry_run=True, ok=False, message=blocked.message,
+            command_uuid=command_uuid or None,
+        )
+        return blocked
     dry_run = bool(session is not None and session.simulated) or not should_pulse_physical(gate=gate, automatic=automatic)
     started = time.perf_counter()
     opened = await controller().open(
@@ -299,7 +358,11 @@ async def handle_plate_event(
     plate = normalize_plate(plate)
     if not plate:
         raise ValueError("No number plate")
-    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
+    entitlement = lookup_entitlement(
+        db, plate,
+        site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID),
+        strict=True,
+    )
     if entitlement.registered and entitlement.plate:
         plate = normalize_plate(entitlement.plate)
     if side == "EXIT":
@@ -486,20 +549,33 @@ async def take_receipt(db: Session, row: ParkingSession, *, reason: str = "simul
     }
 
 
-def quote_session(db: Session, row: ParkingSession, *, at: datetime | None = None) -> dict:
+def quote_session(
+    db: Session,
+    row: ParkingSession,
+    *,
+    at: datetime | None = None,
+    persist: bool = True,
+) -> dict:
     at = at or datetime.now(timezone.utc)
-    rules = load_active_rules(db, row.car_type or "Car1")
+    rules = normalize_tariff_rules(row.tariff_rules, car_type=row.car_type or "Car1") if row.tariff_rules else load_active_rules(
+        db, row.car_type or "Car1", site_id=(row.site_id or DEFAULT_SITE_ID)
+    )
     fee = calculate_car1_fee(row.entry_time, at, rules)
     row.amount_due = fee.due
     row.breakdown = list(fee.breakdown or [])
     row.currency = fee.currency
-    db.commit()
+    if persist:
+        db.commit()
     return fee.__dict__
 
 
 async def handle_exit(db: Session, *, plate: str, gate: Gate | None, side: str, camera: Camera | None = None) -> dict:
     plate = normalize_plate(plate)
-    entitlement = lookup_entitlement(db, plate, site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID))
+    entitlement = lookup_entitlement(
+        db, plate,
+        site_id=(getattr(gate, "site_id", None) or getattr(camera, "site_id", None) or DEFAULT_SITE_ID),
+        strict=True,
+    )
     row = _active_for_plate(db, plate)
     pulse_camera = camera or (_side_camera(gate, side) if gate else None)
     cameras = [pulse_camera] if pulse_camera else list((gate.cameras if gate else None) or [])

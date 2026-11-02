@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 import sys
 import tempfile
 import time
@@ -64,19 +65,48 @@ def strong_read(event: dict, plate_policy: dict) -> bool:
 _owns_cache: dict[int, tuple[float, bool]] = {}
 
 
+def _health_paths():
+    """Return shared and Windows per-user heartbeat locations.
+
+    Some Windows upgrades preserve an ACL that blocks the scheduled-task
+    account from replacing a ProgramData file. The per-user fallback keeps
+    ownership observable while the installer repairs the shared directory.
+    """
+    from app.config import settings
+
+    primary = settings.data_dir / "recognition-worker.json"
+    if os.name != "nt":
+        return (primary,)
+    local_appdata = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    fallback = local_appdata / "SmartParkEdge" / "recognition-worker.json"
+    return (primary, fallback) if fallback != primary else (primary,)
+
+
 def worker_health() -> dict:
     """Read a process-safe heartbeat; stale/missing files never confer ownership."""
     from app.config import settings
 
-    try:
-        body = json.loads((settings.data_dir / "recognition-worker.json").read_text(encoding="utf-8"))
-        if not isinstance(body, dict) or not isinstance(body.get("cameras"), list):
-            raise ValueError("Invalid worker heartbeat")
-        age = time.time() - float(body.get("updated_at", 0))
-        healthy = bool(body.get("enabled")) and 0 <= age <= 6.0
-        return {**body, "ok": healthy, "heartbeat_age_seconds": round(age, 2)}
-    except (OSError, ValueError, TypeError, AttributeError):
+    candidates = []
+    for path in _health_paths():
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(body, dict) and isinstance(body.get("cameras"), list):
+                candidates.append(body)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if not candidates:
         return {"ok": False, "enabled": False, "cameras": [], "state": "OFFLINE"}
+    def _timestamp(item: dict) -> float:
+        try:
+            value = float(item.get("updated_at", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if value >= 0 else 0.0
+
+    body = max(candidates, key=_timestamp)
+    age = time.time() - _timestamp(body)
+    healthy = bool(body.get("enabled")) and 0 <= age <= 6.0
+    return {**body, "ok": healthy, "heartbeat_age_seconds": round(age, 2)}
 
 
 def _worker_ready(camera_id: int) -> bool:
@@ -143,7 +173,9 @@ def worker_owns_software_reads(camera_id: int) -> bool:
     with SessionLocal() as db:
         from app.models import Camera
         camera = db.get(Camera, camera_id)
+        from app.services.developer import recognition_enabled
         enabled = (bool(flags(db).get("fastalpr_new_pipeline_enabled"))
+                   and recognition_enabled(db)
                    and camera is not None and _software_camera(camera, db)
                    and mediamtx_detect_active(camera_id, db)
                    and (_worker_ready(camera_id) or _worker_claim_has_live_frames(camera_id, health)))
@@ -246,30 +278,35 @@ def _write_health(body: dict) -> None:
 
     from app.services.process_metrics import snapshot
     body["resources"] = {**snapshot(), "decoder_count": sum(bool(row.get("decoder_pid")) for row in body.get("cameras", []))}
-    path = settings.data_dir / "recognition-worker.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    paths = _health_paths()
     # Windows can have the previous fixed ``recognition-worker.tmp`` held by
     # a second scheduled worker or by a health reader.  A unique temp file
     # prevents one stale process from crashing the recognition worker; if the
     # final replace is temporarily denied, keep the last good heartbeat and
     # let the next loop retry.
-    temporary: str | None = None
-    try:
-        fd, temporary = tempfile.mkstemp(prefix="recognition-worker-", suffix=".tmp", dir=str(path.parent))
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({**body, "updated_at": time.time()}, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    except (OSError, PermissionError) as exc:
-        log.warning("recognition health write skipped: %s", exc)
-    finally:
-        if temporary:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
+    last_error = None
+    for path in paths:
+        temporary: str | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix="recognition-worker-", suffix=".tmp", dir=str(path.parent))
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({**body, "updated_at": time.time()}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            temporary = None
+            return
+        except (OSError, PermissionError) as exc:
+            last_error = exc
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+    if last_error is not None:
+        log.warning("recognition health write skipped: %s", last_error)
 
 
 def _configure_worker_runtime() -> bool:
@@ -638,6 +675,7 @@ async def _infer_camera(
                 "detect_roi": detect_roi,
                 "detect_zoom": detect_zoom,
                 "plate_boxes": boxes if located.get("available") else None,
+                "decoded_bgr": located.get("_decoded_bgr"),
             }), ticket.captured_at))
             try:
                 # Shield is intentional: timeout must not cancel the provider,
@@ -756,6 +794,11 @@ async def _infer_camera(
         infer_task.cancel()
         stop_task.cancel()
         await asyncio.gather(decode_task, infer_task, stop_task, return_exceptions=True)
+        # A timed-out ONNX call cannot be cancelled safely. Drain it before
+        # releasing the lane so a restart never overlaps the old native model
+        # thread or leaves the scheduler believing ownership is available.
+        if pending_inference is not None and not pending_inference.done():
+            await asyncio.gather(pending_inference, return_exceptions=True)
         runtime.scheduler.release(camera_id)
 
 
@@ -784,6 +827,8 @@ async def _loop() -> None:
             try:
                 with SessionLocal() as db:
                     enabled = bool(flags(db).get("fastalpr_new_pipeline_enabled"))
+                    from app.services.developer import recognition_enabled
+                    enabled = enabled and recognition_enabled(db)
                     from app.services.node_scope import describe_recognition_scope
                     scope = describe_recognition_scope(db)
                 wanted = _camera_rows() if enabled else []
@@ -876,7 +921,10 @@ async def _loop() -> None:
                                      else "READY" if warmup_status.get("ready") else "WARMING"),
                            "retiring_cameras": sorted(retiring),
                            "cameras": [{key: value for key, value in tasks[cid][2].items() if key != "latency_samples"} for cid in sorted(tasks)]})
-            await asyncio.sleep(2.0)
+            # A worker with no assigned cameras is an idle control plane. Keep
+            # configuration recovery responsive, but avoid opening the remote
+            # PostgreSQL session every two seconds forever.
+            await asyncio.sleep(2.0 if candidate_camera_ids else 10.0)
     finally:
         for stop, task, _stats in tasks.values():
             stop.set()

@@ -158,7 +158,8 @@ class Login(QDialog):
     def _prefill(self):
         try:
             import httpx
-            setup=httpx.get(f"{api.base_url}/auth/setup", timeout=3).json()
+            from .api import desktop_base_url
+            setup=httpx.get(f"{desktop_base_url()}/auth/setup", timeout=3, trust_env=False).json()
             if setup.get("username"): self.user.setText(setup["username"])
             if setup.get("password"):
                 self.pwd.setText(setup["password"])
@@ -177,9 +178,9 @@ class Login(QDialog):
         try:
             # The wizard may have just replaced deployment.json. Refresh the
             # endpoint immediately before the first authentication request.
-            from .api import configure_base_url
+            from .api import configure_desktop_base_url
 
-            configure_base_url()
+            configure_desktop_base_url()
             api.login(self.user.text().strip(), self.pwd.text())
             self.accept()
             return
@@ -196,7 +197,7 @@ class Login(QDialog):
                         ensure_background_services(config=config)
                     else:
                         wait_for_api(timeout=20.0, base_url=api.base_url)
-                    configure_base_url()
+                    configure_desktop_base_url()
                     api.login(self.user.text().strip(), self.pwd.text())
                     self.accept()
                     return
@@ -998,11 +999,11 @@ class Fees(QWidget):
         actions.addWidget(save); actions.addWidget(reload_btn); actions.addStretch(); l.addLayout(actions)
         quote_form=QFormLayout()
         self.entry=QLineEdit(); self.exit=QLineEdit()
-        from datetime import datetime, timezone, timedelta
-        now=datetime.now(timezone.utc)
+        from datetime import datetime, timedelta
+        now=datetime.now()
         self.entry.setText((now-timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S"))
         self.exit.setText(now.strftime("%Y-%m-%dT%H:%M:%S"))
-        quote_form.addRow("Entry (UTC)", self.entry); quote_form.addRow("Exit (UTC)", self.exit)
+        quote_form.addRow("Entry (site time)", self.entry); quote_form.addRow("Exit (site time)", self.exit)
         l.addLayout(quote_form)
         quote=QPushButton("Quote Car1 fee"); quote.clicked.connect(self.quote); l.addWidget(quote)
         self.out=QLabel(""); self.out.setWordWrap(True); l.addWidget(self.out)
@@ -1678,6 +1679,12 @@ class SettingsPage(QWidget):
         site_save=QPushButton("Save site locale")
         site_save.clicked.connect(self.save_site)
         form.addRow("", site_save)
+        if not (api.can("settings.manage") or api.can("simulation.run")):
+            # settings.view users can correct the site clock/display locale,
+            # but cannot change fee currency, plate policy, or public QR host.
+            for field in (self.currency, self.plate_validation, self.public_base_url):
+                field.setEnabled(False)
+            self.timezone.setPlaceholderText("Africa/Dar_es_Salaam or UTC")
         self.site_status=QLabel("")
         form.addRow("", self.site_status)
         l.addLayout(form)
@@ -1705,13 +1712,15 @@ class SettingsPage(QWidget):
         combo.blockSignals(previous)
     def showEvent(self, event):
         super().showEvent(event)
-        if api.can("simulation.run") and not getattr(self, "_loaded", False):
+        if api.can("settings.view") and not getattr(self, "_loaded", False):
             self._loaded=True
-            self.load_parking()
             self.load_site()
+            if api.can("simulation.run"):
+                self.load_parking()
     def load_site(self):
         try:
             data=api.get("/settings/site")
+            clock=api.get("/settings/clock")
         except Exception as e:
             self.site_status.setText(str(e)); return
         self.timezone.setText(str(data.get("timezone") or "UTC"))
@@ -1721,6 +1730,10 @@ class SettingsPage(QWidget):
         if idx>=0: self.language.setCurrentIndex(idx)
         idx=self.plate_validation.findText(str(data.get("plate_validation") or "NONE"))
         if idx>=0: self.plate_validation.setCurrentIndex(idx)
+        self.site_status.setText(
+            f"Server clock (UTC): {clock.get('server_time_utc', '—')} · "
+            f"Site clock ({clock.get('timezone', data.get('timezone') or 'UTC')}): {clock.get('site_time', '—')}"
+        )
     def save_site(self):
         try:
             saved=api.patch("/settings/site",{
@@ -1891,9 +1904,47 @@ class MainWindow(DesktopShell):
         refresh_action=add_act("Refresh", ["F5", "Ctrl+R"], self._shortcut_refresh, "Reload this page")
         menu.addAction(refresh_action)
         menu.addSeparator()
+        menu.addAction(add_act(
+            "Repair / reconfigure deployment",
+            "Ctrl+Shift+D",
+            self._reconfigure_deployment,
+            "Correct the saved Site Server, node, or database settings",
+        ))
+        menu.addSeparator()
         help_action=add_act("Keyboard shortcuts", ["F1", "Ctrl+/"], self._shortcut_help)
         menu.addAction(help_action)
         self.finish_shell(refresh_action, help_action)
+
+    def _reconfigure_deployment(self):
+        from app.deployment import load_deployment_config
+        from .api import configure_base_url
+        from .setup import SetupWizard
+
+        current = load_deployment_config()
+        wizard = SetupWizard(current, parent=self, role_locked=current.role)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = load_deployment_config()
+        configure_base_url()
+        try:
+            if updated.runs_local_gate_runtime:
+                from app.desktop.launch import restart_background_services
+
+                restart_background_services(config=updated)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Deployment saved but runtime could not restart",
+                f"The new configuration was saved, but local services did not restart.\n\n{exc}\n\n"
+                "Close and reopen SmartPark Edge after correcting the configuration.",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Deployment updated",
+            "The deployment configuration was saved and local services restarted. SmartPark Edge will close; reopen it to sign in with the repaired configuration.",
+        )
+        QApplication.instance().quit()
     def _call_page(self, names):
         page=self._current_page()
         if page is None:
@@ -1960,6 +2011,7 @@ class MainWindow(DesktopShell):
             "F5        Refresh this page\n"
             "F11       Focus workspace / restore navigation\n"
             "Ctrl+M    Hide / restore menu bar\n"
+            "Ctrl+Shift+D    Repair / reconfigure deployment\n"
             "F8        Open only the highlighted camera or armed gate side\n"
             "F9        Close only the highlighted camera or armed gate side\n"
             "1 / 2     Select live camera 1 or 2, or gate entry / exit\n"
@@ -1980,7 +2032,7 @@ def main():
     app.setFont(font)
     apply_appearance(app, "Light")
     from app.deployment import OPERATOR_CLIENT, ensure_legacy_config_saved, load_deployment_config
-    from .api import configure_base_url
+    from .api import configure_base_url, configure_desktop_base_url
     config = ensure_legacy_config_saved()
     if not config.configured:
         from .setup import SetupWizard
@@ -1991,12 +2043,43 @@ def main():
         config = load_deployment_config()
     configure_base_url()
     if config.role != OPERATOR_CLIENT:
-        try:
-            from app.desktop.launch import ensure_background_services
-            ensure_background_services(config=config)
-        except Exception as exc:
-            QMessageBox.critical(None, PRODUCT_NAME, f"The {PRODUCT_NAME} Site Server could not start.\n\n{exc}")
-            return 1
+        while True:
+            try:
+                from app.desktop.launch import ensure_background_services
+
+                ensure_background_services(config=config)
+                break
+            except Exception as exc:
+                prompt = QMessageBox(None)
+                prompt.setIcon(QMessageBox.Icon.Critical)
+                prompt.setWindowTitle(f"{PRODUCT_NAME} startup failed")
+                prompt.setText(f"The {PRODUCT_NAME} local service could not start.")
+                prompt.setInformativeText(str(exc))
+                repair = prompt.addButton("Repair deployment", QMessageBox.ButtonRole.AcceptRole)
+                prompt.addButton("Exit", QMessageBox.ButtonRole.RejectRole)
+                prompt.exec()
+                if prompt.clickedButton() is not repair:
+                    return 1
+                from .setup import SetupWizard
+
+                wizard = SetupWizard(config, role_locked=config.role)
+                if wizard.exec() != QDialog.DialogCode.Accepted:
+                    return 1
+                from app.deployment import load_deployment_config
+
+                config = load_deployment_config()
+                configure_base_url()
+                try:
+                    from app.desktop.launch import restart_background_services
+
+                    restart_background_services(config=config)
+                    break
+                except Exception as repair_exc:
+                    # Return to the same repair prompt with the actionable
+                    # restart/migration error instead of silently starting an
+                    # old service with the previous configuration.
+                    exc = repair_exc
+                    continue
     else:
         from app.desktop.launch import disable_background_services
 
@@ -2004,9 +2087,9 @@ def main():
         while True:
             try:
                 import httpx
-                response = httpx.get(f"{api.base_url}/health/live", timeout=3)
+                response = httpx.get(f"{api.base_url}/health/live", timeout=3, trust_env=False)
                 response.raise_for_status()
-                identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3)
+                identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3, trust_env=False)
                 identity.raise_for_status()
                 identity_body = identity.json()
                 if config.paired_server_id:
@@ -2044,6 +2127,11 @@ def main():
                         configure_base_url()
                         continue
                 return 1
+    # The node desktop signs in to its local Site Service. The service uses
+    # the shared PostgreSQL database and applies the same node/gate scope, so
+    # the central Site Server process is not a single point of failure for a
+    # lane operator.
+    configure_desktop_base_url()
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()

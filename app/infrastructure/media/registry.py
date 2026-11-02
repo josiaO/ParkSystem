@@ -68,8 +68,9 @@ def _sdk_camera(camera_id: int, db=None) -> bool:
     camera = db.get(Camera, int(camera_id))
     if camera is None:
         return False
+    from app.infrastructure.hardware.cameras import adapter_requires_native_stream
     profiles = camera.stream_profiles or {}
-    return camera.sdk_handle is not None or any(
+    return adapter_requires_native_stream(getattr(camera, "adapter_id", None)) or camera.sdk_handle is not None or any(
         str(profile.get("protocol") or "").lower() == "sdk"
         for profile in profiles.values() if isinstance(profile, dict)
     )

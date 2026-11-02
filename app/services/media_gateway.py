@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.config import settings
+from app.infrastructure.hardware.cameras import adapter_requires_native_stream
 from app.domain.media import STREAM_STATES
 from app.services.circuit import reconnect_for
 from app.services.ffmpeg_profiles import (
@@ -75,6 +76,7 @@ class CameraLiveSpec:
     need_detect: bool = False
     live_role: str = ROLE_LIVE
     stream_profiles: dict = field(default_factory=dict)
+    adapter_id: str = "hvx"
 
 
 @dataclass
@@ -132,6 +134,10 @@ class StreamSession:
     source_frame_seq: int = 0
     frame_intervals: deque = field(default_factory=lambda: deque(maxlen=256))
     _restart_not_before: float = 0.0
+    # Compatibility field retained for older runtime payloads. SDK cameras do
+    # not switch to RTSP after OcxConfig goes silent: that would create a
+    # competing reader and defeat the vendor's bounded drop-on-full queue.
+    native_fallback_until: float = 0.0
     _src_at: float = 0.0
     _src_n: int = 0
     _chg_n: int = 0
@@ -155,7 +161,12 @@ def _percentile(values: list[float], fraction: float) -> float | None:
 
 
 class LocalMediaGateway:
-    """SmartPark media owner. Backends are HVX JPEG and FFmpeg RTSP, not go2rtc internals."""
+    """Own one bounded media producer per camera.
+
+    Windows QY/HVX cameras are delivered exclusively by the OcxConfig/NetSDK
+    host. Generic cameras may use FFmpeg RTSP. Keeping those ownership rules
+    separate prevents two readers from competing for one physical camera.
+    """
 
     def __init__(self) -> None:
         self._sessions: dict[int, StreamSession] = {}
@@ -208,6 +219,7 @@ class LocalMediaGateway:
                 need_detect=bool(source.get("need_detect")),
                 live_role=str(source.get("live_role") or ROLE_LIVE),
                 stream_profiles=dict(source.get("stream_profiles") or {}),
+                adapter_id=str(source.get("adapter_id") or "hvx").strip().lower() or "hvx",
             )
         row = self._session_for(spec)
         if source.get("need_detect"):
@@ -455,6 +467,7 @@ class LocalMediaGateway:
         fresh_ok = fresh_s is not None and fresh_s < stale_s and not frozen
         return {
             "camera_id": row.spec.id,
+            "adapter_id": row.spec.adapter_id,
             "connection_state": state,
             "ok": bool(live) and fresh_ok,
             "viewers": row.viewers,
@@ -486,7 +499,21 @@ class LocalMediaGateway:
             "queue_depth": row.live.depth(),
             "detect_queue_depth": row.detect.depth(),
             "rtsp": (row.url or "").startswith("rtsp://"),
-            "sdk": row.source == "sdk" or row.spec.sdk_handle is not None,
+            "sdk": row.source == "sdk" or row.spec.sdk_handle is not None or adapter_requires_native_stream(row.spec.adapter_id),
+            "stream_backend": (
+                "ocxconfig_netsdk"
+                if row.source == "sdk" or row.spec.sdk_handle is not None or adapter_requires_native_stream(row.spec.adapter_id)
+                else "rtsp_gateway"
+            ),
+            "native_stream_required": bool(
+                adapter_requires_native_stream(row.spec.adapter_id)
+                or row.spec.sdk_handle is not None
+                or any(
+                    str(profile.get("protocol") or "").lower() == "sdk"
+                    for profile in (row.spec.stream_profiles or {}).values()
+                    if isinstance(profile, dict)
+                )
+            ),
             "codec": row.codec or ((profiles.get(ROLE_LIVE) or profiles.get(ROLE_SUB) or {}).get("codec") if isinstance(profiles, dict) else ""),
             "width": row.width,
             "height": row.height,
@@ -598,7 +625,7 @@ class LocalMediaGateway:
         now = time.monotonic()
         if now < row._restart_not_before:
             return False
-        wait = min(float(reconnect_for(row.spec.id).record_failure("stale or frozen video")), 8.0)
+        wait = float(reconnect_for(row.spec.id).record_failure("stale or frozen video"))
         row._restart_not_before = now + wait
         row.decoder_restarts += 1
         row.reconnects += 1
@@ -676,19 +703,26 @@ class LocalMediaGateway:
                 row.state = "CONNECTING"
                 ok = False
                 try:
-                    if spec.sdk_handle is not None:
-                        ok = await self._sdk_frames(row)
-                    # OcxConfig owns QY video through Net_StartVideo and its
-                    # PlaySdk HWND. Never open a second RTSP/HTTP decoder for
-                    # the same native session: QY firmware closes that second
-                    # connection and the native decoder can then wedge. Generic
-                    # IP cameras still use MediaMTX/RTSP below.
-                    native_sdk = spec.sdk_handle is not None or any(
+                    native_sdk = adapter_requires_native_stream(spec.adapter_id) or spec.sdk_handle is not None or any(
                         str(profile.get("protocol") or "").lower() == "sdk"
                         for profile in (spec.stream_profiles or {}).values()
                         if isinstance(profile, dict)
                     )
-                    if not ok and not native_sdk:
+                    if native_sdk:
+                        # OcxConfig is the authoritative streaming backend for
+                        # SDK cameras. The Windows host owns stop/restart
+                        # recovery; this task only consumes its newest JPEG.
+                        # Never open a second RTSP/HTTP reader for the same
+                        # physical camera.
+                        ok = await self._sdk_frames(row)
+                        if not ok:
+                            row.native_fallback_until = 0.0
+                            row.last_error = row.last_error or "OcxConfig/NetSDK video supplied no fresh JPEG"
+                            row.state = "DEGRADED"
+                            row.decode_errors += 1
+                            await self._backoff(row, row.last_error)
+                            continue
+                    else:
                         try:
                             ok = await self._rtsp_frames(row)
                         except asyncio.CancelledError:
@@ -723,7 +757,7 @@ class LocalMediaGateway:
         row.state = "RECONNECTING"
         row.reconnects += 1
         row.decoder_restarts += 1
-        wait = min(float(reconnect_for(row.spec.id).record_failure(error)), 8.0)
+        wait = float(reconnect_for(row.spec.id).record_failure(error))
         row._restart_not_before = time.monotonic() + wait
         log.warning("camera=%s media reconnect=%s decoder_restart=%s wait_s=%.1f error=%s", row.spec.id, row.reconnects, row.decoder_restarts, wait, str(error)[:300])
         await self._reap_children(row)
@@ -743,6 +777,8 @@ class LocalMediaGateway:
     async def _sdk_frames(self, row: StreamSession) -> bool:
         spec = row.spec
         if spec.sdk_handle is None:
+            row.last_error = f"{spec.adapter_id or 'sdk'} adapter requires a connected native SDK handle"
+            row.state = "DEGRADED"
             return False
         host = HVXHostClient()
         interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
@@ -778,8 +814,7 @@ class LocalMediaGateway:
                     row.state = "STREAMING"
             elif (got and self._stale_fresh(row, factor=1.0)) or time.monotonic() - last_jpeg_at >= silence_limit:
                 row.state = "DEGRADED"
-                row.last_error = ("SDK video supplied no JPEG; trying configured RTSP fallback"
-                                      if str(row.spec.rtsp_url).startswith("rtsp://") else "SDK video supplied no JPEG")
+                row.last_error = "OcxConfig/NetSDK video supplied no fresh JPEG"
                 return False
             delay = interval - (time.monotonic() - started)
             await asyncio.sleep(delay if delay > 0.002 else 0.002)
@@ -853,15 +888,23 @@ class LocalMediaGateway:
                         row.source = "rtsp"
                         row.url = url
                         row.state = "STREAMING"
-                        self.publish(spec.id, first, source="rtsp", url=url)
+                        # A decoder can emit identical JPEG bytes for an empty
+                        # lane or a low-motion night scene. The decoder frame
+                        # sequence, not byte equality, is the RTSP freshness
+                        # signal.
+                        rtsp_sequence = int(row.source_frame_seq or 0) + 1
+                        self.publish(
+                            spec.id, first, source="rtsp", url=url,
+                            source_seq=rtsp_sequence,
+                        )
                         async for jpeg in stream:
                             if not (row.wanted() or row.viewers > 0):
                                 break
-                            self.publish(spec.id, jpeg, source="rtsp", url=url)
-                            if self._stale_fresh(row):
-                                row.frozen = True
-                                row.state = "DEGRADED"
-                                return False
+                            rtsp_sequence += 1
+                            self.publish(
+                                spec.id, jpeg, source="rtsp", url=url,
+                                source_seq=rtsp_sequence,
+                            )
                         return True
                     except asyncio.CancelledError:
                         await stream.aclose()
@@ -879,6 +922,9 @@ class LocalMediaGateway:
         spec = row.spec
         interval = 0.2
         got = False
+        last_jpeg_at = time.monotonic()
+        silence_limit = max(1.0, float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0))
+        source_sequence = int(row.source_frame_seq or 0)
         row.state = "CONNECTING"
         while row.wanted() or row.viewers > 0:
             started = time.monotonic()
@@ -887,17 +933,16 @@ class LocalMediaGateway:
                 row.source = "http"
                 row.url = str(http.get("url") or "")
                 row.state = "STREAMING"
+                source_sequence += 1
                 self.publish(
                     spec.id, http["jpeg"],
                     source="http",
                     url=str(http.get("url") or ""),
+                    source_seq=source_sequence,
                 )
+                last_jpeg_at = time.monotonic()
                 got = True
-                if self._stale_fresh(row):
-                    row.frozen = True
-                    row.state = "DEGRADED"
-                    return False
-            elif got and self._stale_fresh(row, factor=1.0):
+            elif got and time.monotonic() - last_jpeg_at >= silence_limit:
                 row.state = "DEGRADED"
                 return False
             delay = interval - (time.monotonic() - started)

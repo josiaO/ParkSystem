@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -78,7 +79,10 @@ def _base_from_public_url(public_url: str) -> str:
 
 
 def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -> ReceiptDocument:
-    when = (row.entry_time or utcnow()).strftime("%d %b %Y %H:%M")
+    from sqlalchemy.orm import object_session
+    from app.services.site_policy import as_site_local, site_policy
+    db = object_session(row)
+    when = as_site_local(row.entry_time or utcnow(), site_policy(db) if db is not None else None).strftime("%d %b %Y %H:%M %Z")
     lane = gate.name if gate else (row.lane_direction or "")
     token = row.public_token or ""
     qr_payload = session_qr_payload(token, base_url=_base_from_public_url(public_url) or resolve_public_base_url())
@@ -152,26 +156,31 @@ async def issue_receipt(
         dest = folder / f"{token or row.plate}.png"
         dest.write_bytes(document.qr_png)
         qr_path = str(dest)
-    record = Receipt(
-        session_id=row.id,
-        plate=row.plate,
-        public_token=token,
-        body_text=document.body_text,
-        qr_payload=document.qr_payload,
-        qr_path=qr_path,
-        printer_adapter=printed.adapter_id,
-        status=printed.status,
-        payload={
-            "site_name": document.site_name,
-            "entry_time": document.entry_time,
-            "entry_gate": document.entry_gate,
-            "public_url": document.public_url,
-            "message": printed.message,
-            "simulated": printed.simulated,
-            "path": printed.path,
-        },
+    # The legacy reprint endpoint can be retried by a browser. Reuse one
+    # receipt row per session instead of appending another row on every retry.
+    record = db.scalar(
+        select(Receipt).where(Receipt.session_id == row.id).order_by(Receipt.id.desc())
     )
-    db.add(record)
+    if record is None:
+        record = Receipt(session_id=row.id)
+        db.add(record)
+    record.plate = row.plate
+    record.public_token = token
+    record.body_text = document.body_text
+    record.qr_payload = document.qr_payload
+    record.qr_path = qr_path
+    record.printer_adapter = printed.adapter_id
+    record.status = printed.status
+    record.print_job_id = record.print_job_id or f"legacy-session-{int(row.id)}"
+    record.payload = {
+        "site_name": document.site_name,
+        "entry_time": document.entry_time,
+        "entry_gate": document.entry_gate,
+        "public_url": document.public_url,
+        "message": printed.message,
+        "simulated": printed.simulated,
+        "path": printed.path,
+    }
     if printed.ok and row.receipt_status in {"", "NONE"}:
         row.receipt_status = "PRINTED"
     db.commit()

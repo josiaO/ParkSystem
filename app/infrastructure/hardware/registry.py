@@ -28,12 +28,13 @@ def camera_connection_mode(camera: Camera) -> str:
 
 def camera_device(camera: Camera) -> DeviceRecord:
     lane = camera.gate.name if camera.gate else ""
+    adapter = camera_adapter_id(camera)
     return DeviceRecord(
         id=f"camera:{camera.id}",
         device_type=DeviceType.CAMERA.value,
         name=camera.name,
         adapter_id=camera_adapter_id(camera),
-        vendor="HVX" if camera_adapter_id(camera) == DEFAULT_CAMERA_ADAPTER else camera_adapter_id(camera),
+        vendor="QY" if adapter in {"hvx", "qy", "native"} else adapter,
         ip=camera.ip_address,
         port=camera.sdk_port,
         gate_id=camera.gate_id,

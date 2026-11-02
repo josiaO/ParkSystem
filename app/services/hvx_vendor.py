@@ -92,7 +92,7 @@ def vendor_inventory() -> dict:
             "Net_QueryConnState(handle)  # supplied NetSDK returns 0 when connected; 2 is accepted for compatibility",
             "Net_FuntionListRsp(handle, 800-byte buffer)  # select stream 4/3/2/1/0 from capability bits",
             "Net_RegOffLineClient(handle)",
-            "Net_StartVideo(handle, stream, HWND) then Net_GetJpgBuffer for live frames",
+            "Net_StartVideo(handle, stream, HWND) then Net_SetDrawDataOut for decoded live frames; Net_GetJpgBuffer is compatibility fallback",
             "Net_RegImageRecvEx2(handle)  # OcxConfig.ocx official native plate+JPEG",
             "Net_RegImageRecvEx(handle) fallback — QY IPC native plate+JPEG",
         ],

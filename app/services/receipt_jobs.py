@@ -63,7 +63,8 @@ def _lane_name(db: Session, row: ParkingSession) -> str:
 
 
 def _document_for(db: Session, row: ParkingSession) -> ReceiptDocument:
-    when = (row.entry_time or utcnow()).strftime("%d %b %Y %H:%M")
+    from app.services.site_policy import as_site_local, site_policy
+    when = as_site_local(row.entry_time or utcnow(), site_policy(db)).strftime("%d %b %Y %H:%M %Z")
     token = row.public_token or ""
     qr_payload = session_qr_payload(token, base_url=resolve_public_base_url(db))
     content = render_entry_receipt(

@@ -24,7 +24,7 @@ from app.api_main import app, ensure_roles
 from app.db import Base, get_db, set_session_factory
 from app.infrastructure import secrets as secret_mod
 from app.migrations.runner import current_revision, head_revision, upgrade_to_head
-from app.models import AccessPlan, Camera, Gate, RegisteredVehicle, Role, Site, Tariff, User, UserRole
+from app.models import AccessPlan, Camera, Gate, Node, NodeAuthSession, NodeGateAssignment, RegisteredVehicle, Role, Site, Tariff, User, UserRole
 from app.security import hash_password
 from app.services import redaction
 from app.services.secrets_migration import migrate_plaintext_secrets
@@ -96,6 +96,38 @@ class AlembicRunnerTests(unittest.TestCase):
         summary = upgrade_to_head(file_engine)
         self.assertEqual(summary["mode"], "fresh")
         self.assertEqual(current_revision(file_engine), head_revision())
+
+    def test_stamped_current_database_repairs_missing_node_registry(self):
+        engine = self._engine("stamped-without-nodes.db")
+        excluded = {"nodes", "node_auth_sessions", "node_gate_assignments"}
+        Base.metadata.create_all(
+            engine,
+            tables=[table for table in Base.metadata.sorted_tables if table.name not in excluded],
+        )
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+            conn.exec_driver_sql(f"INSERT INTO alembic_version VALUES ('0012_exclusive_gate_ownership')")
+
+        summary = upgrade_to_head(engine)
+
+        self.assertEqual(summary["mode"], "upgrade")
+        self.assertEqual(current_revision(engine), head_revision())
+        self.assertTrue({"nodes", "node_auth_sessions", "node_gate_assignments"}.issubset(inspect(engine).get_table_names()))
+
+    def test_gate_ownership_migration_uses_boolean_safe_predicate(self):
+        engine = self._engine("gate-ownership.db")
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP INDEX uq_node_gate_assignment_active_gate")
+            conn.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+            conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('0011_node_registry_repair')")
+
+        summary = upgrade_to_head(engine)
+
+        self.assertEqual(summary["mode"], "upgrade")
+        self.assertIn("uq_node_gate_assignment_active_gate", {
+            item["name"] for item in inspect(engine).get_indexes("node_gate_assignments")
+        })
 
     def test_pre_alembic_sqlite_is_adopted_and_site_scoped(self):
         engine = self._engine("legacy.db")

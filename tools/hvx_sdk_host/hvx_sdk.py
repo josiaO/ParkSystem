@@ -118,9 +118,11 @@ SDK_CONNECT_SEQUENCE = [
     "Net_FuntionListRsp(handle, 800-byte buffer)  # choose stream type from +0x04 flags",
     "Net_RegOffLineClient(handle)",
     "Net_StartVideo(handle, selected stream type, HWND)  # OcxConfig PlaySdk path",
-    "Net_SetDrawDataOut(handle, decoded bitmap callback)  # latest frame, no HWND capture",
+    "Net_ShowPlateRegion(handle, show)  # native plate/stop/prefix overlay",
+    "Net_AddPlayWindow(handle, HWND)  # OcxConfig display ordering",
+    "Net_SetDrawDataOut(handle, decoded bitmap callback)  # primary decoded-frame delivery",
     "Net_RegImageRecvEx2(handle, cb)  # native plate + JPEG",
-    "Net_GetJpgBuffer(handle, ptr, size)  # compatibility fallback only",
+    "Net_GetJpgBuffer(handle, ptr, size)  # compatibility delivery if draw callback is unavailable",
 ]
 
 
@@ -155,6 +157,76 @@ class T_ImageUserInfo(ctypes.Structure):
         ("ucDirection", ctypes.c_ubyte),
         ("ucTotalNum", ctypes.c_ubyte),
         ("ucSnapshotIndex", ctypes.c_ubyte),
+    ]
+
+
+class T_Point(ctypes.Structure):
+    _fields_ = [("sX", ctypes.c_short), ("sY", ctypes.c_short)]
+
+
+class T_Line(ctypes.Structure):
+    _fields_ = [("tStartPoint", T_Point), ("tEndPoint", T_Point)]
+
+
+class T_DivisionLine(ctypes.Structure):
+    _fields_ = [
+        ("ucDashedLine", ctypes.c_ubyte),
+        ("ucReserved", ctypes.c_ubyte),
+        ("tLine", T_Line),
+    ]
+
+
+class T_VideoDetectParamSetup(ctypes.Structure):
+    """QY Net_Setup.h T_VideoDetectParamSetup (ONE_DIRECTION_LANES == 5).
+
+    This is intentionally a query-only binding.  The camera remains the
+    authority for its trigger polygon and lines; SmartPark never writes this
+    structure during normal startup.
+    """
+
+    _fields_ = [
+        ("ucLanes", ctypes.c_ubyte),
+        ("ucSnapAutoBike", ctypes.c_ubyte),
+        ("ucMinScore", ctypes.c_ubyte),
+        ("ucReserved", ctypes.c_ubyte),
+        ("ucCpMode", ctypes.c_ubyte),
+        ("ucWidthFlag", ctypes.c_ubyte),
+        ("ucLprHead", ctypes.c_ubyte),
+        ("ucZoomSlop", ctypes.c_ubyte),
+        ("atPlateRegion", T_Point * 4),
+        ("aStopLine", T_Line),
+        ("atSpeedRegion", T_Point * 4),
+        ("atOccupCheckLine", T_Line * 2),
+        ("atDivisionLine", T_DivisionLine * 6),
+        ("tPrefixLine", T_Line),
+        ("tLeftBorderLine", T_Line),
+        ("tRightBorderLine", T_Line),
+        ("atVirLoop", (T_Point * 4) * 5),
+        ("atBanRegion", T_Point * 4),
+        ("usCameraHeight", ctypes.c_ushort),
+        ("usRectLength", ctypes.c_ushort),
+        ("usRectWidth", ctypes.c_ushort),
+        ("usTotalDis", ctypes.c_ushort),
+    ]
+
+
+class T_VehicleVAFunSetup(ctypes.Structure):
+    _fields_ = [
+        ("ucPlateRealTimeShowEn", ctypes.c_ubyte),
+        ("ucRecRegShowEn", ctypes.c_ubyte),
+        ("ucArmyLprPrior", ctypes.c_ubyte),
+        ("ucNoPlateVehicleSnapEn", ctypes.c_ubyte),
+        ("ucCpHightTI", ctypes.c_ubyte),
+        ("ucLocalCity", ctypes.c_ubyte),
+        ("ucPlateDirection", ctypes.c_ubyte),
+        ("ucCpTimeInterval", ctypes.c_ubyte),
+        ("uiPlateDefaultWord", ctypes.c_uint),
+        ("usMinPlateW", ctypes.c_ushort),
+        ("usMaxPlateW", ctypes.c_ushort),
+        ("ucInvalidLprLevel", ctypes.c_ubyte),
+        ("ucVehicleInterval", ctypes.c_ubyte),
+        ("ucPolicePlate", ctypes.c_ubyte),
+        ("ucPlateFeature", ctypes.c_ubyte),
     ]
 
 
@@ -332,6 +404,7 @@ class HVXSDK:
         self._live_requested_at = {}
         self._video_streams = {}
         self._function_lists = {}
+        self._video_detect_configs = {}
         self._video_locks = {}
         self._video_diagnostics = {}
         self._video_recovery_at = {}
@@ -342,16 +415,18 @@ class HVXSDK:
         self._gpio_state = {}
         self._event_media = {}
         self._hwnds = {}
-        # QY exposes the same decoded bitmap that PlaySdk paints through
-        # Net_SetDrawDataOut. Keep the callback alive and copy only the latest
-        # bitmap. This avoids PrintWindow/BitBlt (which is unreliable for
-        # off-screen HWNDs) and avoids polling the vendor JPEG function that
-        # crashes on some gate-camera firmware.
+        # Keep the decoded-bitmap callback alive for the lifetime of the
+        # camera. ParkWatch's PlaySdk path owns a continuous decoder and
+        # exports decoded frames through a callback; polling a cached JPEG is
+        # only a compatibility path for DLL builds that cannot register this
+        # callback.
         self._draw_callbacks = {}
         self._draw_frames = {}
         self._draw_frame_seq = {}
         self._draw_encoded_seq = {}
         self._window_frame_seq = {}
+        self._window_last_jpeg = {}
+        self._native_jpeg_disabled_until = {}
         self._video_handles = set()
         # A failed PlaySdk start must not be reported as a live decoder, but
         # the connection watcher still needs a bounded retry path.  Keep the
@@ -365,10 +440,20 @@ class HVXSDK:
         self._ui_thread = None
         self._hwnd_queue = queue.Queue()
         self._ui_commands = queue.Queue(maxsize=8)
+        # A timed-out HWND command remains in the queue until the owner thread
+        # reaches it. Reject new controls briefly so a wedged PlaySdk decoder
+        # cannot accumulate recovery commands and starve both camera lanes.
+        self._ui_control_not_before = 0.0
+        self._ui_submit_lock = threading.Lock()
         self._hwnd_ready = {}
         self._wndproc = None
         self._wndclass = None
         self._lock = threading.Lock()
+        # The HTTP bridge is a latest-frame transport, not a request-per-frame
+        # FIFO. A reader can wait for a source sequence newer than the one it
+        # already displayed; this prevents Windows keep-alive timing from
+        # turning repeated reads of the cached JPEG into visible stacking.
+        self._live_condition = threading.Condition(self._lock)
         self._bind()
         rc = self.dll.Net_Init()
         if rc != DC_NO_ERROR:
@@ -404,6 +489,12 @@ class HVXSDK:
         if hasattr(self.dll, "Net_FuntionListRsp"):
             self.dll.Net_FuntionListRsp.argtypes = [c_int, c_void_p]
             self.dll.Net_FuntionListRsp.restype = c_int
+        if hasattr(self.dll, "Net_QueryVideoDetectSetup"):
+            self.dll.Net_QueryVideoDetectSetup.argtypes = [c_int, ctypes.POINTER(T_VideoDetectParamSetup)]
+            self.dll.Net_QueryVideoDetectSetup.restype = c_int
+        if hasattr(self.dll, "Net_QueryVehicleVAFunSetup"):
+            self.dll.Net_QueryVehicleVAFunSetup.argtypes = [c_int, ctypes.POINTER(T_VehicleVAFunSetup)]
+            self.dll.Net_QueryVehicleVAFunSetup.restype = c_int
         self.dll.Net_ImageSnap.argtypes = [c_int, ctypes.POINTER(T_DCImageSnap)]
         self.dll.Net_ImageSnap.restype = c_int
         self.dll.Net_RegOffLineClient.argtypes = [c_int]
@@ -586,6 +677,16 @@ class HVXSDK:
         }
         key = int(handle)
         with self._lock:
+            video_detect = dict(self._video_detect_configs.get(key) or {})
+            if video_detect:
+                # Keep the camera's native geometry with the transient event.
+                # The server can use it for diagnostics and evidence audit,
+                # while the native callback remains the only capture trigger.
+                row["plate_region"] = video_detect.get("plate_region") or []
+                row["stop_line"] = video_detect.get("stop_line")
+                row["capture_mode"] = video_detect.get("capture_mode")
+                row["native_min_plate_width"] = video_detect.get("native_min_plate_width")
+                row["native_max_plate_width"] = video_detect.get("native_max_plate_width")
             # Every callback owns its geometry; a matching plate string
             # does not mean the car stayed in the same pixel position.
             self._last_capture[key] = row
@@ -676,6 +777,83 @@ class HVXSDK:
         with self._lock:
             row = dict(getattr(self, "_function_lists", {}).get(int(handle)) or {})
         return int(row.get("stream_type") or 0)
+
+    @staticmethod
+    def _point_dict(point: T_Point) -> dict[str, int]:
+        return {"x": int(point.sX), "y": int(point.sY)}
+
+    @classmethod
+    def _line_dict(cls, line: T_Line) -> dict[str, dict[str, int]]:
+        return {
+            "start": cls._point_dict(line.tStartPoint),
+            "end": cls._point_dict(line.tEndPoint),
+        }
+
+    def query_video_detect(self, handle: int) -> dict:
+        """Read OcxConfig's plate zone and trigger lines without changing them."""
+        result = {
+            "ok": False,
+            "available": hasattr(self.dll, "Net_QueryVideoDetectSetup"),
+            "rc": None,
+            "plate_region": [],
+            "stop_line": None,
+            "capture_mode": None,
+            "plate_width_flag": None,
+            "min_score": None,
+            "camera_height_cm": None,
+            "road_length_cm": None,
+            "road_width_cm": None,
+            "total_distance_cm": None,
+        }
+        if not result["available"]:
+            result["error"] = "Net_QueryVideoDetectSetup not exported"
+        else:
+            setup = T_VideoDetectParamSetup()
+            try:
+                rc = int(self.dll.Net_QueryVideoDetectSetup(int(handle), ctypes.byref(setup)))
+                result.update({
+                    "ok": rc == DC_NO_ERROR,
+                    "rc": rc,
+                    "plate_region": [self._point_dict(point) for point in setup.atPlateRegion],
+                    "stop_line": self._line_dict(setup.aStopLine),
+                    "capture_mode": int(setup.ucCpMode),
+                    "plate_width_flag": int(setup.ucWidthFlag),
+                    "min_score": int(setup.ucMinScore),
+                    "lanes": int(setup.ucLanes),
+                    "camera_height_cm": int(setup.usCameraHeight),
+                    "road_length_cm": int(setup.usRectLength),
+                    "road_width_cm": int(setup.usRectWidth),
+                    "total_distance_cm": int(setup.usTotalDis),
+                })
+                if rc != DC_NO_ERROR:
+                    result["error"] = describe_rc(rc)
+            except Exception as exc:
+                result["error"] = str(exc)
+
+        # The vehicle-function query supplies the native plate-width window
+        # that the camera is actually using.  It is optional across firmware
+        # revisions, so failure here does not invalidate the zone query.
+        if hasattr(self.dll, "Net_QueryVehicleVAFunSetup"):
+            va = T_VehicleVAFunSetup()
+            try:
+                va_rc = int(self.dll.Net_QueryVehicleVAFunSetup(int(handle), ctypes.byref(va)))
+                result["vehicle_config_rc"] = va_rc
+                if va_rc == DC_NO_ERROR:
+                    result["native_min_plate_width"] = int(va.usMinPlateW)
+                    result["native_max_plate_width"] = int(va.usMaxPlateW)
+                    result["capture_interval"] = int(va.ucCpTimeInterval)
+                    result["vehicle_interval"] = int(va.ucVehicleInterval)
+                    result["region_overlay_enabled"] = bool(va.ucRecRegShowEn)
+            except Exception as exc:
+                result["vehicle_config_error"] = str(exc)
+
+        with self._lock:
+            self._video_detect_configs[int(handle)] = dict(result)
+        return result
+
+    def video_detect_config(self, handle: int) -> dict:
+        with self._lock:
+            return dict(self._video_detect_configs.get(int(handle)) or {})
 
     def add_and_connect(self, ip: str, port: int, timeout: int, username: str, password: str):
         with self._lock:
@@ -776,6 +954,21 @@ class HVXSDK:
         if connected:
             offline_rc = int(self.dll.Net_RegOffLineClient(handle))
             steps.append({"api": "Net_RegOffLineClient", "rc": offline_rc, "name": describe_rc(offline_rc)})
+            # Read the same recognition polygon/trigger-line configuration
+            # exposed by OcxConfig.  This is deliberately before video start
+            # and query-only, so it cannot reconfigure a working camera or add
+            # a per-frame control request to the hot path.
+            video_detect = self.query_video_detect(handle)
+            steps.append({
+                "api": "Net_QueryVideoDetectSetup",
+                "rc": video_detect.get("rc"),
+                "name": describe_rc(video_detect.get("rc") if video_detect.get("rc") is not None else -1),
+                "plate_region": video_detect.get("plate_region", []),
+                "stop_line": video_detect.get("stop_line"),
+                "capture_mode": video_detect.get("capture_mode"),
+                "native_min_plate_width": video_detect.get("native_min_plate_width"),
+                "native_max_plate_width": video_detect.get("native_max_plate_width"),
+            })
             # OcxConfig starts PlaySdk after selecting the function-list stream
             # and only then registers Ex2 for native plate callbacks.  Keeping
             # this order matters on firmware that shares the decoder/control
@@ -861,10 +1054,48 @@ class HVXSDK:
             live = self._last_live_jpeg.get(int(handle), b"")
             return live if live[:2] == b"\xff\xd8" else b""
 
-    def live_jpeg_for(self, handle: int) -> bytes:
+    def live_frame_for(self, handle: int, *, after_seq: int = 0, wait_ms: int = 0) -> tuple[bytes, int]:
+        """Return the newest live JPEG, optionally waiting for a newer source frame.
+
+        ``Net_StartVideo``/PlaySdk owns the decoder and this method only
+        exposes its one-item latest cache. Waiting on the source sequence is
+        important: returning the same cached response at 15--20 requests per
+        second lets a downstream Windows reader accumulate old HTTP responses
+        even though the native decoder itself is latest-only.
+        """
+        handle = int(handle)
+        after = max(0, int(after_seq or 0))
+        timeout = max(0.0, min(int(wait_ms or 0), 1500)) / 1000.0
+        deadline = time.monotonic() + timeout
+        condition = getattr(self, "_live_condition", None)
         with self._lock:
-            self._live_requested_at[int(handle)] = time.monotonic()
-        return self.jpeg_for(handle)
+            self._live_requested_at[handle] = time.monotonic()
+            while condition is not None:
+                current = max(
+                    int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0),
+                    int(getattr(self, "_window_frame_seq", {}).get(handle, 0) or 0),
+                )
+                if current > after or timeout <= 0:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                condition.wait(timeout=remaining)
+            seq = max(
+                int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0),
+                int(getattr(self, "_window_frame_seq", {}).get(handle, 0) or 0),
+            )
+            received_at = self._live_received_at.get(handle, 0.0)
+            jpeg = self._last_live_jpeg.get(handle, b"")
+            if time.monotonic() - received_at > 5.0 or jpeg[:2] != b"\xff\xd8":
+                return b"", seq
+            if after and seq <= after:
+                return b"", seq
+            return jpeg, seq
+
+    def live_jpeg_for(self, handle: int) -> bytes:
+        # Compatibility API for callers that need an immediate snapshot.
+        return self.live_frame_for(handle)[0]
 
     def drain_events(self, handle: int) -> list[dict]:
         self._refresh_recognition(handle)
@@ -964,9 +1195,11 @@ class HVXSDK:
         state = int(self.dll.Net_QueryConnState(handle))
         with self._lock:
             capture = dict(self._last_capture.get(int(handle)) or {})
+            video_detect = dict(self._video_detect_configs.get(int(handle)) or {})
         recognition = self._refresh_recognition(handle, observed_state=state)
         return {"state": state, "name": describe_state(state), "last_capture": capture or None,
-                "recognition": recognition, "video": self.video_status(handle)}
+                "recognition": recognition, "video": self.video_status(handle),
+                "video_detect": video_detect or None}
 
     def disconnect(self, handle: int, *, force: bool = False):
         stop_rc = self.stop_video(handle)
@@ -1002,11 +1235,14 @@ class HVXSDK:
             getattr(self, "_draw_frame_seq", {}).pop(handle, None)
             getattr(self, "_draw_encoded_seq", {}).pop(handle, None)
             getattr(self, "_window_frame_seq", {}).pop(handle, None)
+            getattr(self, "_window_last_jpeg", {}).pop(handle, None)
+            getattr(self, "_native_jpeg_disabled_until", {}).pop(handle, None)
             self._live_received_at.pop(handle, None)
             getattr(self, "_live_frame_seq", {}).pop(handle, None)
             self._live_requested_at.pop(handle, None)
             self._video_streams.pop(handle, None)
             getattr(self, "_function_lists", {}).pop(int(handle), None)
+            getattr(self, "_video_detect_configs", {}).pop(int(handle), None)
             getattr(self, "_video_diagnostics", {}).pop(int(handle), None)
             self._last_event_jpeg.pop(handle, None)
             self._last_event_crop.pop(handle, None)
@@ -1172,16 +1408,25 @@ class HVXSDK:
         self._ensure_ui_thread()
         ready = threading.Event()
         result = {}
-        try:
-            self._ui_commands.put_nowait((operation, ready, result))
-        except queue.Full:
-            raise HVXSDKError("Video control is busy")
-        if not ready.wait(5.0):
-            result["cancelled"] = True
-            raise HVXSDKError("Video control timed out; see hvx-host.log")
-        if "error" in result:
-            raise result["error"]
-        return result.get("value")
+        with self._ui_submit_lock:
+            now = time.monotonic()
+            if now < self._ui_control_not_before:
+                raise HVXSDKError("Video control is busy; previous decoder recovery is still unwinding")
+            try:
+                self._ui_commands.put_nowait((operation, ready, result))
+            except queue.Full:
+                self._ui_control_not_before = now + 2.0
+                raise HVXSDKError("Video control is busy")
+            if not ready.wait(5.0):
+                # The UI thread may still be inside a vendor call. Mark this
+                # command cancelled and hold off new submissions long enough
+                # for it to be discarded; never stack another Net_StartVideo.
+                result["cancelled"] = True
+                self._ui_control_not_before = time.monotonic() + 6.0
+                raise HVXSDKError("Video control timed out; see hvx-host.log")
+            if "error" in result:
+                raise result["error"]
+            return result.get("value")
 
     def _video_lock(self, handle: int):
         with self._lock:
@@ -1287,9 +1532,11 @@ class HVXSDK:
             frame = self._draw_frames.get(handle)
             seq = int(self._draw_frame_seq.get(handle, 0))
             encoded_seq = int(self._draw_encoded_seq.get(handle, 0))
-            cached = self._last_live_jpeg.get(handle, b"")
+        # A callback is an edge, not a cache. Returning the previously encoded
+        # JPEG here makes a stalled decoder look healthy to the HTTP bridge.
+        # The caller must receive an empty result until a newer DIB arrives.
         if not frame or seq <= encoded_seq:
-            return cached if cached[:2] == b"\xff\xd8" else b""
+            return b""
         raw, width, height, bit_count, stride, orientation = frame
         try:
             from PIL import Image
@@ -1302,13 +1549,28 @@ class HVXSDK:
         except Exception as exc:
             self._note_video(handle, draw_data_error=type(exc).__name__)
             return b""
+        now = time.monotonic()
         with self._lock:
             if handle in self._video_handles:
                 self._draw_encoded_seq[handle] = seq
                 self._last_live_jpeg[handle] = jpeg
-                self._live_received_at[handle] = time.monotonic()
+                self._live_received_at[handle] = now
                 getattr(self, "_live_frame_seq", {})[handle] = seq
-        self._note_video(handle, capture_mode="sdk_draw_data", window_capture_rc=None)
+                diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
+                frames_received = int(diagnostics.get("frames_received") or 0) + 1
+            else:
+                frames_received = 0
+            condition = getattr(self, "_live_condition", None)
+            if condition is not None:
+                condition.notify_all()
+        self._note_video(
+            handle,
+            capture_mode="sdk_draw_data",
+            frame_delivery="sdk_draw_data",
+            last_jpeg_at=now,
+            frames_received=frames_received,
+            window_capture_rc=None,
+        )
         return jpeg
 
     def video_status(self, handle: int) -> dict:
@@ -1329,6 +1591,9 @@ class HVXSDK:
         row.setdefault("frames_received", 0)
         row["state"] = ("LIVE" if age is not None and age <= 5.0 else "START_FAILED"
                         if row.get("start_rc") not in (None, DC_NO_ERROR) else "NO_FRAMES")
+        row["stream_backend"] = "ocxconfig_netsdk"
+        row["frame_delivery"] = row.get("frame_delivery") or row.get("capture_mode") or "pending"
+        row["bounded_latest_frame"] = True
         return row
 
     def live_frame_seq(self, handle: int) -> int:
@@ -1380,21 +1645,30 @@ class HVXSDK:
         region_rc = None
         if rc == DC_NO_ERROR and hasattr(self.dll, "Net_ShowPlateRegion"):
             region_rc = int(self.dll.Net_ShowPlateRegion(int(handle), 0))
-        draw_data_rc = None
-        if rc == DC_NO_ERROR and hasattr(self.dll, "Net_SetDrawDataOut"):
-            # Register the decoded-frame callback immediately after the
-            # decoder starts. It is independent of the display HWND and keeps
-            # gate-camera video moving even when PrintWindow returns black.
-            draw_data_rc = self._register_draw_data(int(handle))
         play_window_rc = None
         if rc == DC_NO_ERROR and hwnd and hasattr(self.dll, "Net_AddPlayWindow"):
             # OcxConfig adds its display window after Net_StartVideo.  Keep
             # that ordering: some gate-camera firmware only begins painting
             # after the PlaySdk window is registered explicitly.
             play_window_rc = int(self.dll.Net_AddPlayWindow(int(handle), hwnd))
+        draw_data_rc = None
+        if rc == DC_NO_ERROR and hasattr(self.dll, "Net_SetDrawDataOut"):
+            # ParkWatch registers its decoded-frame callback after the window
+            # is attached. Make this the primary delivery lane. The callback
+            # copies one DIB and the camera pump encodes only that new DIB;
+            # it never asks the SDK for the same cached JPEG on every tick.
+            draw_data_rc = self._register_draw_data(int(handle))
         if rc != DC_NO_ERROR:
             logging.getLogger("smartpark.hvx").warning("Video start failed: handle=%s stream=%s rc=%s", handle, used, rc)
-        self._note_video(handle, control_operation="IDLE", control_error="", start_rc=rc, start_rc_name=describe_rc(rc))
+        self._note_video(
+            handle,
+            control_operation="IDLE",
+            control_error="",
+            start_rc=rc,
+            start_rc_name=describe_rc(rc),
+            frame_delivery=("sdk_draw_data" if draw_data_rc == DC_NO_ERROR else "netsdk_jpg_buffer"),
+            draw_data_primary=draw_data_rc == DC_NO_ERROR,
+        )
         with self._lock:
             self._video_streams[int(handle)] = used
             if rc == DC_NO_ERROR:
@@ -1439,6 +1713,8 @@ class HVXSDK:
                     getattr(self, "_draw_frame_seq", {}).pop(int(handle), None)
                     getattr(self, "_draw_encoded_seq", {}).pop(int(handle), None)
                     getattr(self, "_window_frame_seq", {}).pop(int(handle), None)
+                    getattr(self, "_window_last_jpeg", {}).pop(int(handle), None)
+                    getattr(self, "_native_jpeg_disabled_until", {}).pop(int(handle), None)
                     self._live_received_at.pop(int(handle), None)
                     self._live_requested_at.pop(int(handle), None)
                 if hasattr(self.dll, "Net_StopVideo"):
@@ -1516,13 +1792,11 @@ class HVXSDK:
     def _capture_window_jpeg(self, handle: int) -> bytes:
         """Capture the PlaySdk-rendered HWND used by OcxConfig for live video.
 
-        The supplied OcxConfig does not poll ``Net_GetJpgBuffer`` for its
-        display.  It opens PlaySdk into a real window and lets the decoder's
-        paint path update that window.  Some gate-camera firmware builds
-        throw a C++ exception from ``Net_GetJpgBuffer`` even though
-        ``Net_StartVideo`` succeeded.  Capturing the rendered window keeps us
-        on the same stable path as OcxConfig and leaves the recognition
-        callback untouched.
+        This is the compatibility path for a PlaySdk build where the direct
+        latest-JPEG API is unavailable or temporarily faults. OcxConfig still
+        opens PlaySdk into a real window, so this keeps a valid fallback while
+        the primary recognition lane remains the bounded Net_GetJpgBuffer
+        source.
         """
         hwnd = self._hwnds.get(int(handle))
         if not hwnd or os.name != "nt":
@@ -1594,15 +1868,24 @@ class HVXSDK:
             image.save(output, format="JPEG", quality=82, optimize=False)
             jpeg = output.getvalue()
             with self._lock:
-                window_seq = int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0) + 1
-                getattr(self, "_window_frame_seq", {})[int(handle)] = window_seq
-                self._live_received_at[int(handle)] = time.monotonic()
+                previous = getattr(self, "_window_last_jpeg", {}).get(int(handle), b"")
+                changed = jpeg != previous
+                getattr(self, "_window_last_jpeg", {})[int(handle)] = jpeg
+                if changed:
+                    window_seq = int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0) + 1
+                    getattr(self, "_window_frame_seq", {})[int(handle)] = window_seq
+                    self._live_received_at[int(handle)] = time.monotonic()
                 first_window_frame = not bool(self._video_diagnostics.get(int(handle), {}).get("window_capture_logged"))
+                if changed:
+                    condition = getattr(self, "_live_condition", None)
+                    if condition is not None:
+                        condition.notify_all()
             self._note_video(handle, capture_mode="play_sdk_hwnd", window_capture_rc=1,
                              window_capture_ms=round((time.monotonic() - started) * 1000, 1),
                              jpeg_error="", window_capture_logged=True,
+                             window_duplicate=not changed,
                              window_capture_width=width, window_capture_height=height)
-            self._note_video_read(handle, 0, len(jpeg), "", True)
+            self._note_video_read(handle, 0, len(jpeg), "", changed)
             if first_window_frame:
                 logging.getLogger("smartpark.hvx").info(
                     "PlaySdk HWND live capture started: handle=%s size=%sx%s jpeg_bytes=%s",
@@ -1631,32 +1914,24 @@ class HVXSDK:
             except Exception:
                 logging.getLogger("smartpark.hvx").debug("PlaySdk window capture cleanup failed", exc_info=True)
 
-    def _get_jpg_buffer(self, handle: int) -> bytes:
-        # Prefer the decoded-frame callback. It is the same PlaySdk decoder
-        # used by OcxConfig but does not depend on a hidden/off-screen HWND.
-        # Keep the window path as a bounded compatibility fallback for older
-        # vendor DLLs that export no draw-data callback or do not invoke it.
-        if int(handle) in getattr(self, "_draw_callbacks", {}):
-            jpeg = self._draw_data_jpeg(handle)
-            if jpeg:
-                return jpeg
-            with self._lock:
-                registered_at = float(self._video_diagnostics.get(int(handle), {}).get("draw_data_registered_at") or 0.0)
-                received = int(self._video_diagnostics.get(int(handle), {}).get("draw_data_frames") or 0)
-            if received or not registered_at or time.monotonic() - registered_at < 2.0:
-                return b""
-        # Native QY video is rendered by PlaySdk into the HWND passed to
-        # Net_StartVideo, just as in OcxConfig. Do not call Net_GetJpgBuffer on
-        # this path: gate-camera firmware can raise 0xe06d7363 there after a
-        # successful video start and wedge every other camera's control call.
-        if os.name == "nt" and self._hwnds.get(int(handle)):
-            return self._capture_window_jpeg(handle)
+    def _get_native_jpg_buffer(self, handle: int) -> bytes:
+        """Read the latest decoded PlaySdk JPEG through the OcxConfig API.
+
+        OcxConfig starts PlaySdk, attaches its window, and reads the bounded
+        latest JPEG buffer. Keep the call serialized per camera and temporarily
+        fall back after a firmware-specific native exception so one QY camera
+        cannot wedge the shared 32-bit host.
+        """
+        handle = int(handle)
         if not hasattr(self.dll, "Net_GetJpgBuffer"):
             self._note_video(handle, jpeg_error="API_UNAVAILABLE")
             return b""
+        disabled_until = float(getattr(self, "_native_jpeg_disabled_until", {}).get(handle, 0.0) or 0.0)
+        if disabled_until > time.monotonic():
+            return b""
         with self._video_lock(handle):
             with self._lock:
-                if hasattr(self, "_video_handles") and int(handle) not in self._video_handles:
+                if hasattr(self, "_video_handles") and handle not in self._video_handles:
                     return b""
             buf = ctypes.POINTER(ctypes.c_ubyte)()
             size = ctypes.c_ulong(0)
@@ -1665,7 +1940,7 @@ class HVXSDK:
             data = b""
             self._note_video(handle, jpeg_read_pending=True, jpeg_read_started_at=time.monotonic())
             try:
-                rc = int(self.dll.Net_GetJpgBuffer(int(handle), ctypes.byref(buf), ctypes.byref(size)))
+                rc = int(self.dll.Net_GetJpgBuffer(handle, ctypes.byref(buf), ctypes.byref(size)))
                 if rc != DC_NO_ERROR:
                     error = "SDK_ERROR"
                 elif not size.value or not buf:
@@ -1680,9 +1955,13 @@ class HVXSDK:
             except Exception as exc:
                 error = type(exc).__name__
                 if isinstance(exc, OSError):
-                    self._note_video(handle, native_decoder_fault=True, native_decoder_error=str(exc))
+                    until = time.monotonic() + 30.0
+                    getattr(self, "_native_jpeg_disabled_until", {})[handle] = until
+                    self._note_video(handle, native_decoder_fault=True,
+                                     native_decoder_error=str(exc),
+                                     native_jpeg_disabled_until=until)
                     logging.getLogger("smartpark.hvx").error(
-                        "Native JPEG decoder fault: handle=%s error=%s; automatic decoder restart disabled",
+                        "Native JPEG decoder fault: handle=%s error=%s; using bounded fallback for 30s",
                         handle, exc,
                     )
             finally:
@@ -1691,8 +1970,50 @@ class HVXSDK:
                         self.dll.Net_FreeBuffer(ctypes.cast(buf, ctypes.c_void_p))
                     except Exception:
                         logging.getLogger("smartpark.hvx").exception("Video buffer release failed: handle=%s", handle)
-                self._note_video_read(handle, rc, int(size.value), error, bool(data))
+            self._note_video_read(handle, rc, int(size.value), error, bool(data))
+            if data:
+                self._note_video(handle, capture_mode="netsdk_jpg_buffer", window_capture_rc=None)
             return data
+
+    def _get_jpg_buffer(self, handle: int) -> bytes:
+        # Prefer the continuous decoded-frame callback used by ParkWatch.
+        # This avoids treating Net_GetJpgBuffer's current cache as a stream
+        # and keeps display delivery independent from capture/OCR callbacks.
+        handle = int(handle)
+        draw_registered = False
+        if handle in getattr(self, "_draw_callbacks", {}):
+            with self._lock:
+                diagnostics = getattr(self, "_video_diagnostics", {}).get(handle, {})
+                draw_rc = diagnostics.get("draw_data_rc")
+                registered_at = float(diagnostics.get("draw_data_registered_at") or 0.0)
+                received = int(diagnostics.get("draw_data_frames") or 0)
+            draw_registered = draw_rc == DC_NO_ERROR
+            jpeg = self._draw_data_jpeg(handle)
+            if jpeg:
+                return jpeg
+            # During warm-up, wait for the callback instead of opening a
+            # second read path. Once at least one callback has arrived, keep
+            # this lane authoritative; a later silence must trigger recovery.
+            if draw_registered and (received or not registered_at or time.monotonic() - registered_at < 2.0):
+                return b""
+            # A few older DLL builds accept the registration but never invoke
+            # it. After a bounded warm-up, permit the legacy latest-JPEG API
+            # rather than leaving that camera permanently blank.
+            if draw_registered and not received:
+                draw_registered = False
+        # Compatibility fallback for old QY DLL builds that reject or do not
+        # export Net_SetDrawDataOut. It is deliberately unreachable after a
+        # healthy draw callback has delivered its first frame.
+        if not draw_registered:
+            jpeg = self._get_native_jpg_buffer(handle)
+            if jpeg:
+                return jpeg
+        # Native QY video is also rendered by PlaySdk into the HWND passed to
+        # Net_StartVideo, just as in OcxConfig. Use it only after the direct
+        # callback and compatibility JPEG API have not supplied a frame.
+        if os.name == "nt" and self._hwnds.get(int(handle)):
+            return self._capture_window_jpeg(handle)
+        return b""
 
     def _note_video_read(self, handle: int, rc, size: int, error: str, received: bool) -> None:
         now = time.monotonic()
@@ -1816,7 +2137,12 @@ class HVXSDK:
             user32.DispatchMessageW(ctypes.byref(m))
 
     def _camera_video_loop(self, handle: int):
-        """Sample the SDK's current frame at a bounded rate, not as a frame queue."""
+        """Consume one continuous decoded callback lane per camera.
+
+        The loop only converts a newly-arrived DIB (or reads the legacy
+        current-JPEG API when the callback is unavailable). It never drains a
+        frame queue and never republishes the previous JPEG as progress.
+        """
         handle = int(handle)
         idle = 0
         retry_at = time.monotonic() + 5.0
@@ -1829,14 +2155,16 @@ class HVXSDK:
                 if handle in self._video_handles:
                     previous = self._last_live_jpeg.get(handle, b"")
                     self._last_live_jpeg[handle] = jpeg
-                    # Draw-data frames update freshness when they are encoded.
-                    # For the legacy buffer path, only a changed JPEG is proof
-                    # that the SDK delivered a new frame; repeated cache reads
-                    # must not keep stale video alive.
-                    if handle not in getattr(self, "_draw_callbacks", {}) and jpeg != previous:
+                    # A changed JPEG is proof that the SDK delivered a new
+                    # frame. Draw-data frames normally update this before the
+                    # pump publishes; direct OcxConfig reads update it here.
+                    if jpeg != previous:
                         self._live_received_at[handle] = time.monotonic()
                         seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0) + 1
                         getattr(self, "_live_frame_seq", {})[handle] = seq
+                        condition = getattr(self, "_live_condition", None)
+                        if condition is not None:
+                            condition.notify_all()
         while self._video_running:
             started = time.monotonic()
             with self._lock:
@@ -1845,7 +2173,6 @@ class HVXSDK:
                 retry_at = float(getattr(self, "_video_retry_at", {}).get(handle, 0.0) or 0.0)
                 if not active and not retrying:
                     break
-                requested = self._live_requested_at.get(handle, started)
                 current_stream = self._video_streams.get(handle)
             if not active and retrying:
                 if started < retry_at:
@@ -1864,18 +2191,25 @@ class HVXSDK:
                 idle = min(idle + 1, 4)
                 continue
             with self._lock:
-                requested = self._live_requested_at.get(handle, started)
+                requested = float(getattr(self, "_live_requested_at", {}).get(handle, started) or started)
                 not_before = float(getattr(self, "_video_diagnostics", {}).get(handle, {}).get("jpeg_not_before") or 0.0)
+            # Do not keep reading/encoding a camera that no longer has a live
+            # consumer. This is the native equivalent of ParkWatch owning one
+            # display worker per active camera instead of leaving old readers
+            # behind after a viewer disconnects.
             if started - requested > 5.0:
                 retry_at = started + 5.0
-                time.sleep(.25)
+                time.sleep(0.25)
                 continue
             if started < not_before:
                 time.sleep(min(0.1, not_before - started))
                 continue
             jpeg = self._get_jpg_buffer(handle)
             with self._lock:
-                current_seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0)
+                current_seq = max(
+                    int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0),
+                    int(getattr(self, "_window_frame_seq", {}).get(handle, 0) or 0),
+                )
                 draw_seq = int(getattr(self, "_draw_frame_seq", {}).get(handle, 0) or 0)
                 encoded_seq = int(getattr(self, "_draw_encoded_seq", {}).get(handle, 0) or 0)
             new_frame = bool(jpeg) and (jpeg != previous_jpeg or current_seq > previous_seq or draw_seq > encoded_seq)
@@ -2011,7 +2345,10 @@ class HVXSDK:
 
     def close(self):
         with self._lock:
-            handles = list(self._video_handles)
+            # A failed start is still a live SDK session that may have a
+            # retry task and a partially-created PlaySdk state. Close both
+            # active and retrying handles before unloading NetSDK.
+            handles = sorted(set(self._video_handles) | set(getattr(self, "_video_retry_handles", set())))
         stopped = True
         for handle in handles:
             try:

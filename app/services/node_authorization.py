@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.domain.site import DEFAULT_SITE_ID
 from app.models import Camera, Gate, Node, NodeAuthSession, NodeGateAssignment
 
 
@@ -46,7 +47,7 @@ def principal_for_node(db: Session, node_id: str | None = None) -> NodePrincipal
     return NodePrincipal(
         node_pk=int(row.id),
         node_id=row.node_id,
-        site_id=int(row.site_id),
+        site_id=int(row.site_id or DEFAULT_SITE_ID),
         capabilities=frozenset(str(value) for value in values),
     )
 
@@ -63,14 +64,14 @@ def assigned_gate_ids(db: Session, principal: NodePrincipal) -> set[int]:
 
 def node_owns_gate(db: Session, principal: NodePrincipal, gate_id: int) -> bool:
     gate = db.get(Gate, int(gate_id))
-    return bool(gate and int(gate.site_id) == principal.site_id and int(gate.id) in assigned_gate_ids(db, principal))
+    return bool(gate and int(gate.site_id or DEFAULT_SITE_ID) == principal.site_id and int(gate.id) in assigned_gate_ids(db, principal))
 
 
 def node_owns_camera(db: Session, principal: NodePrincipal, camera_id: int) -> bool:
     camera = db.get(Camera, int(camera_id))
     return bool(
         camera
-        and int(camera.site_id) == principal.site_id
+        and int(camera.site_id or DEFAULT_SITE_ID) == principal.site_id
         and camera.gate_id is not None
         and node_owns_gate(db, principal, int(camera.gate_id))
     )

@@ -161,7 +161,7 @@ async def _post(
     }
     auth = (username, password) if username else None
     envelope = _envelope(body, action=action, username=username, password=password, header_extra=header_extra)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         response = await client.post(url, content=envelope, headers=headers, auth=auth)
         response.raise_for_status()
         return response.text

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -23,6 +25,21 @@ from app.models import SiteSetting, User
 from app.security import current_user, user_permissions
 
 SETTINGS_KEY = "modules"
+_CONFIG_CACHE_TTL = 1.0
+_config_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+_config_cache_lock = threading.Lock()
+
+
+def _cache_key(db: Session) -> int:
+    try:
+        return id(db.get_bind())
+    except Exception:
+        return id(db)
+
+
+def _invalidate_config_cache(db: Session) -> None:
+    with _config_cache_lock:
+        _config_cache.pop(_cache_key(db), None)
 
 # Optional modules offered in onboarding step 5 (prompt §9).
 OPTIONAL_MODULE_CHOICES: tuple[tuple[str, str, str], ...] = (
@@ -65,6 +82,12 @@ def load_config(db: Session | None) -> dict[str, Any]:
     cfg = _default_config()
     if db is None:
         return cfg
+    key = _cache_key(db)
+    now = time.monotonic()
+    with _config_cache_lock:
+        cached = _config_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return dict(cached[1])
     row = db.get(SiteSetting, SETTINGS_KEY)
     if row and isinstance(row.value, dict):
         stored = row.value
@@ -88,10 +111,13 @@ def load_config(db: Session | None) -> dict[str, Any]:
     elif not enabled:
         cfg["enabled"] = sorted(_profile_modules(DEFAULT_PROFILE))
         cfg["profile"] = DEFAULT_PROFILE
+    with _config_cache_lock:
+        _config_cache[key] = (time.monotonic() + _CONFIG_CACHE_TTL, dict(cfg))
     return cfg
 
 
 def save_config(db: Session, config: dict[str, Any]) -> dict[str, Any]:
+    _invalidate_config_cache(db)
     current = load_config(db)
     for key in ("profile", "onboarding_completed", "onboarding_step", "use_case",
                 "recognition_default", "onboarding_hardware", "onboarding_health_ok"):
@@ -105,6 +131,7 @@ def save_config(db: Session, config: dict[str, Any]) -> dict[str, Any]:
     else:
         row.value = current
     db.commit()
+    _invalidate_config_cache(db)
     return current
 
 
@@ -120,6 +147,7 @@ def ensure_modules_initialized(db: Session) -> dict[str, Any]:
         }
         db.add(SiteSetting(key=SETTINGS_KEY, value=cfg))
         db.commit()
+        _invalidate_config_cache(db)
         return cfg
     # Persist repaired preset enablement so UI and workers stay consistent.
     stored = row.value if isinstance(row.value, dict) else {}
@@ -132,6 +160,7 @@ def ensure_modules_initialized(db: Session) -> dict[str, Any]:
             elif key in cfg:
                 row.value[key] = cfg[key]
         db.commit()
+        _invalidate_config_cache(db)
         return load_config(db)
     return cfg
 

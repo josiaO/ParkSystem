@@ -52,9 +52,10 @@ from app.models import ParkingEntryClaim, ParkingSession, as_utc, utcnow
 def _policy(**over) -> LanePolicy:
     if isinstance(over.get("policy"), LanePolicy):
         return over["policy"]
+    production = str(getattr(settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT").upper() != "DEVELOPMENT"
     return LanePolicy(
         receipt_required_before_open=bool(over.get("receipt_required_before_open", False)),
-        passage_sensing=str(over.get("passage_sensing") or "OPEN_COMMAND_COUNTS_AS_PASSED"),
+        passage_sensing=str(over.get("passage_sensing") or ("WAIT_FOR_PASSAGE" if production else "OPEN_COMMAND_COUNTS_AS_PASSED")),
         subscriber_skip_receipt=over.get("subscriber_skip_receipt", True),
     )
 
@@ -106,6 +107,7 @@ def _allocate_identity(db: Session) -> tuple[str, str]:
 def session_by_entry_event(db: Session, site_id: int, event_id: str) -> ParkingSession | None:
     if not event_id:
         return None
+    site_id = int(site_id or DEFAULT_SITE_ID)
     return db.scalar(
         select(ParkingSession).where(
             ParkingSession.site_id == site_id, ParkingSession.entry_event_id == event_id
@@ -122,6 +124,7 @@ def session_by_visit(
 ) -> ParkingSession | None:
     if not visit_id or camera_id is None:
         return None
+    site_id = int(site_id or DEFAULT_SITE_ID)
     return db.scalar(
         select(ParkingSession).where(
             ParkingSession.site_id == int(site_id),
@@ -140,6 +143,7 @@ def _claim_for_visit(
 ) -> ParkingEntryClaim | None:
     if not visit_id or camera_id is None:
         return None
+    site_id = int(site_id or DEFAULT_SITE_ID)
     return db.scalar(
         select(ParkingEntryClaim).where(
             ParkingEntryClaim.site_id == int(site_id),
@@ -197,6 +201,7 @@ def active_for_plate(
     plate = (plate or "").strip().upper()
     if not plate:
         return None
+    site_id = int(site_id or DEFAULT_SITE_ID)
     stmt = (
         select(ParkingSession)
         .where(
@@ -233,6 +238,7 @@ def recent_similar_entry(
     """
     if camera_id is None and lane_id is None:
         return None
+    site_id = int(site_id or DEFAULT_SITE_ID)
     now = utcnow()
     window = float(getattr(settings, "entry_dedupe_seconds", 3.0) or 3.0)
     threshold = float(getattr(settings, "entry_dedupe_similarity", 0.85) or 0.85)
@@ -297,10 +303,20 @@ def start_entry(
     ``parking_entry_claims`` unique constraint is the concurrent authority.
     """
     policy = policy or LanePolicy()
+    site_id = int(site_id or DEFAULT_SITE_ID)
     plate = (plate or "").strip().upper()
     visit_id = str(visit_id or "")
     if not plate:
         raise ValueError("No number plate")
+    # Freeze the commercial terms at entry.  Exit must not re-price an
+    # existing visit because an operator edited the tariff or timezone later.
+    from app.services.fee_engine import load_active_rules
+    from app.services.site_policy import site_policy
+    tariff_rules = dict(load_active_rules(db, getattr(settings, "fee_car_type", "Car1") or "Car1", site_id=site_id))
+    tariff_rules.setdefault(
+        "timezone",
+        str(site_policy(db).get("timezone") or getattr(settings, "site_timezone", "UTC") or "UTC"),
+    )
     existing = _existing_entry(
         db,
         site_id=site_id,
@@ -323,6 +339,9 @@ def start_entry(
         camera_id=camera_id,
         entry_lane_id=lane_id,
         lane_direction="ENTRY",
+        car_type=str(tariff_rules.get("car_type") or getattr(settings, "fee_car_type", "Car1") or "Car1"),
+        currency=str(tariff_rules.get("currency") or getattr(settings, "fee_currency", "TZS") or "TZS"),
+        tariff_rules=tariff_rules,
         status="WAITING_RECEIPT" if policy.receipt_required_before_open and parker_kind.upper() == "CASUAL" else "ACTIVE",
         lifecycle=VEHICLE_DETECTED,
         public_token=token,
@@ -533,6 +552,7 @@ def start_exit(
     or empty if no session. Duplicate ``event_id`` does not close twice.
     """
     policy = policy or LanePolicy()
+    site_id = int(site_id or DEFAULT_SITE_ID)
     plate = (plate or "").strip().upper()
     if event_id:
         by_exit = db.scalar(

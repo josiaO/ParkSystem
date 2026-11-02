@@ -60,6 +60,24 @@ def short_session():
     return factory()
 
 
+def release_connection(session) -> None:
+    """Return a checked-out connection before slow external work.
+
+    Camera SDK calls, OCR, printers, payment providers, and gate controllers
+    can await for seconds. A transaction checkpoint lets SQLAlchemy return the
+    connection to the pool while that external work is in flight.
+    """
+    if session is None:
+        return
+    try:
+        session.commit()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+
+
 @event.listens_for(engine, "before_cursor_execute")
 def _before_cursor(conn, cursor, statement, parameters, context, executemany):
     conn.info["smartpark_query_started"] = time.perf_counter()

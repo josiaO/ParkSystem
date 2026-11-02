@@ -33,6 +33,8 @@ def make_sdk():
     sdk._video_running = True
     sdk._ui_thread = None
     sdk._ui_commands = queue.Queue(maxsize=8)
+    sdk._ui_control_not_before = 0.0
+    sdk._ui_submit_lock = threading.Lock()
     sdk._hwnd_queue = queue.Queue()
     sdk._hwnd_ready = {}
     sdk._hwnds = {}
