@@ -297,6 +297,12 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 return reply_jpeg(self, jpeg, headers={"X-Frame-Seq": seq})
             except Exception as exc: return reply(self,500,{"error":str(exc)})
+        if path.startswith("/video-status/"):
+            if not sdk: return reply(self,503,{"error":startup_error})
+            try:
+                handle=int(path.rsplit("/",1)[-1])
+                return reply(self,200,sdk.video_status(handle))
+            except Exception as exc: return reply(self,500,{"error":str(exc)})
         if path.startswith("/state/"):
             if not sdk: return reply(self,503,{"error":startup_error})
             try:

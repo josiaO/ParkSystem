@@ -1,10 +1,11 @@
-"""Save each car event: full snapshot, plate crop, extracted characters.
+"""Save each car event: zone snapshot, plate crop, extracted characters.
 
 Works for native camera callbacks and FastALPR (or a future in-house engine).
 Does not change barrier, fee, or SDK login.
 
-Snapshots are vehicle events only — empty scenes and non-car OCR (signs, walls)
-must not create VehicleCapture rows.
+Snapshots are the configured recognition-zone view of vehicle events. The
+source frame remains available in memory for coordinate mapping and OCR, while
+empty scenes and non-car OCR (signs, walls) must not create VehicleCapture rows.
 """
 
 from __future__ import annotations
@@ -47,7 +48,10 @@ MIN_FASTALPR_CONF = 0.35
 MIN_FASTALPR_CONF_TZ = 0.22
 MIN_PLATE_ASPECT = 1.4  # plate boxes are wider than tall
 MAX_PLATE_ASPECT = 8.0
-PLATE_CROP_PAD = 0.18  # keep characters inside the crop without the whole car
+# Native QY rectangles can arrive before the final plate geometry settles.
+# Extra context prevents an early rectangle from clipping characters; software
+# recognition still uses the full-panorama detector as its authoritative box.
+PLATE_CROP_PAD = 0.24
 
 
 def _bbox_aspect(box: dict | None) -> float | None:
@@ -380,6 +384,36 @@ def _crop_from_bbox(jpeg: bytes, box: dict | None, *, pad_ratio: float = PLATE_C
         return b""
 
 
+def detection_zone_jpeg(
+    jpeg: bytes,
+    *,
+    detect_roi: str | None = None,
+    detect_zoom: float | None = None,
+) -> bytes:
+    """Return the camera frame cropped to the recognition admission zone.
+
+    This is the event snapshot, not the plate OCR crop. Keeping it separate
+    means the saved snapshot shows the useful stopping area while the plate
+    crop still uses the detector's full-frame coordinates and padding.
+    """
+    if not jpeg or jpeg[:2] != b"\xff\xd8":
+        return b""
+    try:
+        from PIL import Image
+        import numpy as np
+        from app.services.alpr import _roi_crop, decode_alpr_image
+
+        bgr = decode_alpr_image(jpeg)
+        view, _dx, _dy = _roi_crop(bgr, detect_roi, detect_zoom)
+        if view is None or getattr(view, "size", 0) == 0:
+            return b""
+        output = BytesIO()
+        Image.fromarray(np.asarray(view)[:, :, ::-1]).save(output, format="JPEG", quality=92)
+        return output.getvalue()
+    except Exception:
+        return b""
+
+
 def _enhance_crop_jpeg(crop: bytes) -> bytes:
     """Create the readable evidence crop while keeping the car snapshot raw."""
     if not crop or crop[:2] != b"\xff\xd8":
@@ -706,6 +740,16 @@ def persist_event(
     image_id = int((capture or {}).get("image_id") or 0)
     if jpeg[:2] != b"\xff\xd8" and crop[:2] != b"\xff\xd8" and not native.get("plate"):
         return None
+    snapshot_jpeg = jpeg
+    if not (capture or {}).get("snapshot_zone") and jpeg[:2] == b"\xff\xd8":
+        from app.services.camera_framing import framing_from_profiles
+
+        framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
+        snapshot_jpeg = detection_zone_jpeg(
+            jpeg,
+            detect_roi=(capture or {}).get("detect_roi") or framing["detect_roi"],
+            detect_zoom=(capture or {}).get("detect_zoom") or framing["detect_zoom"],
+        ) or jpeg
     if not force:
         from app.services.site_policy import site_policy
         allowed, _reason = should_persist_vehicle_capture(
@@ -731,7 +775,10 @@ def persist_event(
         box["native_plate_region"] = native["plate_region"]
     if native.get("stop_line"):
         box["native_stop_line"] = native["stop_line"]
-    for key in ("capture_mode", "native_min_plate_width", "native_max_plate_width"):
+    for key in (
+        "capture_mode", "native_min_plate_width", "native_max_plate_width",
+        "camera_timestamp", "vehicle_id", "snapshot_index",
+    ):
         if native.get(key) is not None:
             box[key] = native[key]
     try:
@@ -783,9 +830,9 @@ def persist_event(
                     "crops", _plate_crop_name(camera.id, image_id, capture, incoming_plate or existing.plate), plate_jpeg,
                 )
                 updated = True
-            if jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
-                existing.snapshot_path = _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", jpeg) or _write_jpeg(
-                    "snapshots", f"cam{camera.id}-img{image_id}-car.jpg", jpeg,
+            if snapshot_jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
+                existing.snapshot_path = _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", snapshot_jpeg) or _write_jpeg(
+                    "snapshots", f"cam{camera.id}-img{image_id}-car.jpg", snapshot_jpeg,
                 )
                 updated = True
             if updated:
@@ -824,9 +871,9 @@ def persist_event(
         return recent_duplicate
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
     snapshot_path = (
-        _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", jpeg)
-        or _write_jpeg("snapshots", f"{stamp}-car.jpg", jpeg)
-    ) if jpeg[:2] == b"\xff\xd8" else ""
+        _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", snapshot_jpeg)
+        or _write_jpeg("snapshots", f"{stamp}-car.jpg", snapshot_jpeg)
+    ) if snapshot_jpeg[:2] == b"\xff\xd8" else ""
     crop_path = (
         _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg)
         or _write_jpeg("crops", _plate_crop_name(camera.id, image_id, capture, native.get("plate")), plate_jpeg)

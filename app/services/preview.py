@@ -33,6 +33,7 @@ __all__ = [
     "fresh_alpr",
     "fresh_last_car",
     "get_state",
+    "invalidate_camera",
     "live_metrics",
     "live_is_current",
     "media_path",
@@ -80,6 +81,7 @@ class PreviewState:
     _fps_at: float = 0.0
     _fps_n: int = 0
     fingerprint: int = 0
+    generation: int = 1
     waiters: set[asyncio.Event] = field(default_factory=set, repr=False)
 
 
@@ -97,6 +99,25 @@ def get_state(camera_id: int) -> PreviewState:
     return row
 
 
+def invalidate_camera(camera_id: int, *, generation: int | None = None) -> None:
+    """Drop cached display/evidence overlays when media ownership restarts."""
+    row = get_state(int(camera_id))
+    row.jpeg = b""
+    row.url = ""
+    row.url_redacted = ""
+    row.captured_at = 0.0
+    row.fingerprint = 0
+    row.alpr = {}
+    row.alpr_at = 0.0
+    row.last_car = {}
+    row.last_car_at = 0.0
+    row.plate_box = {}
+    row.plate_box_at = 0.0
+    row.generation = max(row.generation + 1, int(generation or 0), 1)
+    row.seq += 1
+    _notify(row)
+
+
 def live_is_current(camera_id: int) -> bool:
     row = get_state(camera_id)
     session = gateway.session(camera_id)
@@ -104,7 +125,19 @@ def live_is_current(camera_id: int) -> bool:
     # Prefer the gateway's unique-frame timestamp so SDK polling cannot keep a
     # frozen picture looking healthy forever.
     if session is not None and hasattr(session, "last_fresh_frame_at"):
-        fresh_at = float(getattr(session, "last_fresh_frame_at") or 0.0)
+        # A session may exist before its first producer frame is admitted (or
+        # when a test/operator has seeded the shared cache).  Do not turn that
+        # zero value into permission for snapshot_for_camera to open another
+        # reader; the cache timestamp is the only freshness source available
+        # until the producer publishes its first unique frame.
+        # ``remember_frame`` is also the shared cache admission point for
+        # SDK snapshots and test/operator seed frames.  Take the newest of
+        # the producer clock and cache clock so a stale session object cannot
+        # hide a freshly admitted shared frame.
+        fresh_at = max(
+            float(getattr(session, "last_fresh_frame_at") or 0.0),
+            float(row.captured_at or 0.0),
+        )
     else:
         # Compatibility for lightweight callers/tests that provide the old
         # session shape. Real StreamSession objects always have the fresh
@@ -126,10 +159,18 @@ def remember_frame(
     url_redacted: str = "",
     source: str = "",
     persist: bool = False,
+    generation: int | None = None,
 ) -> None:
     if jpeg[:2] != JPEG_SOI:
         return
     row = get_state(camera_id)
+    if generation is not None and int(generation) < row.generation:
+        return
+    if generation is not None and int(generation) > row.generation:
+        invalidate_camera(camera_id, generation=int(generation))
+        row = get_state(camera_id)
+    if generation is not None:
+        row.generation = int(generation)
     fingerprint = hash(jpeg)
     changed = fingerprint != row.fingerprint
     row.jpeg = jpeg
@@ -139,8 +180,8 @@ def remember_frame(
         now = time.monotonic()
         # ``captured_at`` is the freshness timestamp, not merely the last
         # time a caller observed bytes.  Keeping it unchanged for duplicate
-        # JPEGs prevents a frozen camera from looking healthy when the
-        # gateway session is temporarily unavailable.
+        # gateway JPEGs prevents a frozen camera from looking healthy when
+        # the producer is temporarily unavailable.
         row.captured_at = now
         if row._fps_at <= 0:
             row._fps_at = now
@@ -150,6 +191,12 @@ def remember_frame(
             row.fps = round(row._fps_n / elapsed, 1)
             row._fps_at = now
             row._fps_n = 0
+    elif not source:
+        # A direct/operator snapshot is an explicit new cache admission even
+        # when its JPEG bytes match an older frame (camera ids can be reused
+        # by a fresh database/test fixture).  Continuous producers always pass
+        # a source and therefore keep the duplicate-frame freshness guard.
+        row.captured_at = time.monotonic()
     if source:
         row.source = source
     if url:
@@ -298,12 +345,34 @@ async def sdk_jpeg(sdk_handle: int | None, *, trigger: bool = False) -> dict:
     }
 
 
-async def resolve_playable(ip: str, username: str, password: str, explicit: str = "", cached: str = "", sdk_handle: int | None = None) -> dict:
+async def resolve_playable(
+    ip: str,
+    username: str,
+    password: str,
+    explicit: str = "",
+    cached: str = "",
+    sdk_handle: int | None = None,
+    adapter_id: str = "",
+) -> dict:
+    from app.infrastructure.hardware.cameras import adapter_requires_native_stream
+
+    # A native handle or an explicit QY/native adapter is an ownership claim,
+    # not merely a preferred source.  If the SDK frame is unavailable, report
+    # the native failure instead of silently opening HTTP or RTSP beside it.
+    native_only = sdk_handle is not None or adapter_requires_native_stream(adapter_id)
     sdk = {"ok": False, "error": ""}
     if sdk_handle is not None:
         sdk = await sdk_jpeg(sdk_handle)
         if sdk.get("ok"):
             return sdk
+        if native_only:
+            return sdk
+    if native_only:
+        return {
+            "ok": False,
+            "error": "QY/NetSDK owns this camera stream; no generic HTTP or RTSP fallback is permitted",
+            "source": "sdk",
+        }
     http = await grab_http_snapshot(ip, username, password)
     if http.get("ok"):
         return http
@@ -334,11 +403,18 @@ async def snapshot_for_camera(
     password: str,
     explicit: str = "",
     sdk_handle: int | None = None,
+    adapter_id: str = "",
 ) -> dict:
     lock = _snapshot_locks.setdefault(int(camera_id), asyncio.Lock())
     async with lock:
         return await _snapshot_for_camera_unlocked(
-            camera_id, ip, username, password, explicit, sdk_handle=sdk_handle,
+            camera_id,
+            ip,
+            username,
+            password,
+            explicit,
+            sdk_handle=sdk_handle,
+            adapter_id=adapter_id,
         )
 
 
@@ -374,6 +450,7 @@ async def _snapshot_for_camera_unlocked(
     password: str,
     explicit: str = "",
     sdk_handle: int | None = None,
+    adapter_id: str = "",
 ) -> dict:
     from app.infrastructure.media.registry import mediamtx_live_active
     from app.services import mediamtx
@@ -436,7 +513,15 @@ async def _snapshot_for_camera_unlocked(
         # keeps SDK snapshots usable while the shared producer warms up.
         active_sdk_handle = sdk_handle if sdk_handle is not None else getattr(getattr(session, "spec", None), "sdk_handle", None)
         if active_sdk_handle is not None:
-            grabbed = await resolve_playable(ip, username, password, explicit, row.url, sdk_handle=active_sdk_handle)
+            grabbed = await resolve_playable(
+                ip,
+                username,
+                password,
+                explicit,
+                row.url,
+                sdk_handle=active_sdk_handle,
+                adapter_id=adapter_id or getattr(getattr(session, "spec", None), "adapter_id", ""),
+            )
             if grabbed.get("ok"):
                 gateway.publish(
                     camera_id,
@@ -462,7 +547,15 @@ async def _snapshot_for_camera_unlocked(
             "cached": True,
             "source": row.source or "cache",
         }
-    grabbed = await resolve_playable(ip, username, password, explicit, row.url, sdk_handle=sdk_handle)
+    grabbed = await resolve_playable(
+        ip,
+        username,
+        password,
+        explicit,
+        row.url,
+        sdk_handle=sdk_handle,
+        adapter_id=adapter_id,
+    )
     if grabbed.get("ok"):
         gateway.publish(
             camera_id,

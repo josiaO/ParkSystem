@@ -23,6 +23,7 @@ from app.security import hash_password
 from app.services.ffmpeg_profiles import fallback_profile, list_profiles, normalize_profile, profile_args
 from app.services.latest_frame import LatestFrameBuffer
 from app.services.media_gateway import LocalMediaGateway, live_scale_filter, take_latest_jpeg
+from app.services.circuit import reconnect_for
 from app.services.onvif_discover import parse_media_xaddr, parse_profiles, parse_stream_uri
 from app.services.preview import CameraLiveSpec, acquire_live, live_metrics, release_live, remember_frame, stop_live_pumps, viewers_for
 from app.services.queues import AI_FRAMES, BoundedQueue
@@ -345,6 +346,80 @@ class LiveDecodeTests(unittest.IsolatedAsyncioTestCase):
         command = " ".join(seen["cmd"])
         self.assertIn("fps=10,scale=960:-2:force_original_aspect_ratio=decrease", command)
         self.assertIn("-q:v 12", command)
+
+
+class SdkRetryProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_sdk_source_progress_resets_policy(self):
+        class Host:
+            def __init__(self):
+                self.last_live_seq = {7: 0}
+                self.last_live_meta = {}
+                self.calls = 0
+                self.row = None
+
+            async def live_jpeg(self, handle):
+                self.calls += 1
+                self.last_live_seq[handle] += 1
+                self.last_live_meta[handle] = {"duration_ms": 4.0, "status_code": 200, "fresh": True}
+                jpeg = b"\xff\xd8frame" + bytes([self.calls]) + b"\xff\xd9"
+                if self.calls >= 3 and self.row is not None:
+                    self.row.viewers = 0
+                return jpeg
+
+            async def video_status(self, handle):
+                return {"callback_frames": self.calls, "pump_liveness": True}
+
+        gw = LocalMediaGateway()
+        spec = CameraLiveSpec(id=7001, ip="", username="", password="", rtsp_url="", sdk_handle=7)
+        row = gw._session_for(spec)
+        row.viewers = 1
+        policy = reconnect_for(spec.id)
+        policy.attempts = 4
+        policy.next_at = 0.0
+        host = Host()
+        host.row = row
+
+        with patch("app.services.media_gateway.HVXHostClient", return_value=host), \
+             patch("app.services.media_gateway.asyncio.sleep", new=AsyncMock()):
+            result = await gw._sdk_frames(row)
+
+        self.assertTrue(result)
+        self.assertEqual(policy.attempts, 0)
+        self.assertGreaterEqual(row.source_frame_seq, 3)
+
+    async def test_cached_sdk_jpeg_does_not_reset_policy(self):
+        class Host:
+            def __init__(self):
+                self.last_live_seq = {8: 9}
+                self.last_live_meta = {}
+                self.calls = 0
+                self.row = None
+
+            async def live_jpeg(self, handle):
+                self.calls += 1
+                self.last_live_meta[handle] = {"duration_ms": 4.0, "status_code": 200, "fresh": False}
+                if self.calls >= 2 and self.row is not None:
+                    self.row.viewers = 0
+                return b"\xff\xd8cached\xff\xd9"
+
+            async def video_status(self, handle):
+                return {"callback_frames": 12, "pump_liveness": True}
+
+        gw = LocalMediaGateway()
+        spec = CameraLiveSpec(id=7002, ip="", username="", password="", rtsp_url="", sdk_handle=8)
+        row = gw._session_for(spec)
+        row.viewers = 1
+        policy = reconnect_for(spec.id)
+        policy.attempts = 4
+        policy.next_at = 0.0
+        host = Host()
+        host.row = row
+        with patch("app.services.media_gateway.HVXHostClient", return_value=host), \
+             patch("app.services.media_gateway.asyncio.sleep", new=AsyncMock()):
+            result = await gw._sdk_frames(row)
+
+        self.assertFalse(result)
+        self.assertEqual(policy.attempts, 4)
 
 
 if __name__ == "__main__":

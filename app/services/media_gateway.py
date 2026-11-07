@@ -77,6 +77,7 @@ class CameraLiveSpec:
     live_role: str = ROLE_LIVE
     stream_profiles: dict = field(default_factory=dict)
     adapter_id: str = "hvx"
+    recognition_mode: str = ""
 
 
 @dataclass
@@ -141,6 +142,17 @@ class StreamSession:
     _src_at: float = 0.0
     _src_n: int = 0
     _chg_n: int = 0
+    # SDK bridge diagnostics. These are deliberately per camera so a stalled
+    # QY lane cannot hide behind a healthy sibling lane.
+    sdk_diagnostics: dict[str, Any] = field(default_factory=dict)
+    request_duration_ms: float | None = None
+    request_status: int | None = None
+    request_error: str = ""
+    last_source_progress_at: float = 0.0
+    recovery_reason: str = ""
+    # A reconnect starts a new media generation. Consumers can use this to
+    # reject frames that were produced by a cancelled/old decoder task.
+    generation: int = 1
 
     def wanted(self) -> bool:
         return self.viewers > 0 or self.detect_consumers > 0 or self.spec.need_detect
@@ -158,6 +170,42 @@ def _percentile(values: list[float], fraction: float) -> float | None:
         return round(ordered[0], 1)
     index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * fraction))))
     return round(ordered[index], 1)
+
+
+def _effective_ocr_owner(mode: str) -> str:
+    """Describe the configured plate owner without starting a second reader."""
+    canonical = str(mode or "").strip().upper()
+    if canonical in {"NATIVE_ONLY"}:
+        return "native_camera"
+    if canonical in {"HYBRID", "NATIVE_WITH_LOCAL_VERIFY"}:
+        return "native_camera+fastalpr_worker"
+    return "fastalpr_worker"
+
+
+def _classify_sdk_stall(row: StreamSession, now: float) -> str | None:
+    """Separate demand, bridge, and native decoder symptoms for diagnostics."""
+    if row.spec.sdk_handle is None and row.source != "sdk":
+        return None
+    diag = row.sdk_diagnostics
+    if not diag:
+        return "not_observed"
+    demand_age = diag.get("consumer_demand_age_ms")
+    pump = diag.get("pump_liveness")
+    callback_age = diag.get("callback_age_ms")
+    jpeg_age = diag.get("jpeg_age_ms")
+    if isinstance(demand_age, (int, float)) and demand_age > 5000:
+        return "consumer_inactive"
+    if pump is False:
+        return "pump_dead"
+    if isinstance(callback_age, (int, float)) and callback_age > 5000:
+        return "native_decoder_stall"
+    if isinstance(jpeg_age, (int, float)) and jpeg_age > 5000:
+        return "bridge_or_encode_stall"
+    if row.request_duration_ms is not None and row.request_duration_ms > 1000:
+        return "bridge_request_stall"
+    if row.last_error:
+        return "bridge_error"
+    return None
 
 
 class LocalMediaGateway:
@@ -220,6 +268,7 @@ class LocalMediaGateway:
                 live_role=str(source.get("live_role") or ROLE_LIVE),
                 stream_profiles=dict(source.get("stream_profiles") or {}),
                 adapter_id=str(source.get("adapter_id") or "hvx").strip().lower() or "hvx",
+                recognition_mode=str(source.get("recognition_mode") or ""),
             )
         row = self._session_for(spec)
         if source.get("need_detect"):
@@ -401,6 +450,31 @@ class LocalMediaGateway:
         for pid in pids:
             _kill_pid(pid)
 
+    def _invalidate_generation(self, row: StreamSession, reason: str) -> None:
+        """Invalidate buffered media before a decoder is allowed to recover."""
+        row.generation += 1
+        row.live = LatestFrameBuffer("live", maxsize=1)
+        row.detect = LatestFrameBuffer("detect", maxsize=1)
+        row.source_frame_seq = 0
+        row.last_fresh_frame_at = 0.0
+        row.last_frame_received_at = 0.0
+        row.last_received_at = 0.0
+        row.frozen = False
+        row.recovery_reason = str(reason or "reconnect")[:200]
+        try:
+            from app.services.recognition_runtime import runtime
+
+            runtime.recover_if_known(row.spec.id)
+        except Exception:
+            log.debug("camera=%s recognition invalidation unavailable", row.spec.id, exc_info=True)
+        try:
+            from app.services.preview import invalidate_camera
+
+            invalidate_camera(row.spec.id, generation=row.generation)
+        except Exception:
+            # Recovery must not depend on the optional desktop preview cache.
+            log.debug("camera=%s preview invalidation unavailable", row.spec.id, exc_info=True)
+
     def stop_all(self) -> None:
         self.stop_watchers()
         for camera_id in list(self._sessions):
@@ -467,6 +541,7 @@ class LocalMediaGateway:
         fresh_ok = fresh_s is not None and fresh_s < stale_s and not frozen
         return {
             "camera_id": row.spec.id,
+            "media_generation": row.generation,
             "adapter_id": row.spec.adapter_id,
             "connection_state": state,
             "ok": bool(live) and fresh_ok,
@@ -539,7 +614,28 @@ class LocalMediaGateway:
             "stream_profiles": public_profiles(profiles),
             "warnings": warnings,
             "last_error": row.last_error,
+            "sdk_diagnostics": dict(row.sdk_diagnostics),
+            "callback_progress": {
+                "frames": row.sdk_diagnostics.get("callback_frames"),
+                "fps": row.sdk_diagnostics.get("callback_fps"),
+                "age_ms": row.sdk_diagnostics.get("callback_age_ms"),
+            } if row.sdk_diagnostics else None,
+            "jpeg_production": {
+                "fps": row.sdk_diagnostics.get("jpeg_production_fps"),
+                "age_ms": row.sdk_diagnostics.get("jpeg_age_ms"),
+                "frames": row.sdk_diagnostics.get("frames_received"),
+                "encode_ms": row.sdk_diagnostics.get("jpeg_encode_ms"),
+            } if row.sdk_diagnostics else None,
+            "consumer_demand_age_ms": row.sdk_diagnostics.get("consumer_demand_age_ms") if row.sdk_diagnostics else None,
+            "pump_liveness": row.sdk_diagnostics.get("pump_liveness") if row.sdk_diagnostics else None,
+            "request_duration_ms": row.request_duration_ms,
+            "request_status": row.request_status,
+            "request_error": row.request_error,
+            "recovery_reason": row.recovery_reason or row.sdk_diagnostics.get("recovery_reason", ""),
+            "effective_ocr_owner": _effective_ocr_owner(row.spec.recognition_mode),
+            "stall_classification": _classify_sdk_stall(row, now),
         }
+
 
     def publish_detect(
         self,
@@ -577,7 +673,10 @@ class LocalMediaGateway:
             return latest_detect
         if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
             row.frames_dropped_ai += 1
-        sample = row.detect.put(jpeg, source=source or "mediamtx", url=url, camera_id=camera_id)
+        sample = row.detect.put(
+            jpeg, source=source or "mediamtx", url=url, camera_id=camera_id,
+            generation=row.generation,
+        )
         row.frames_sampled_ai += 1
         row.ai_last_at = now
         row.ai_last_seq = sample.seq
@@ -631,6 +730,7 @@ class LocalMediaGateway:
         row.reconnects += 1
         row.state = "RECONNECTING"
         row.last_error = "stale or frozen video"
+        self._invalidate_generation(row, row.last_error)
         log.warning("camera=%s media decoder stale; restarting decoder=%s reconnect=%s", row.spec.id, row.decoder_restarts, row.reconnects)
         pids = list(row.child_pids)
         row.child_pids.clear()
@@ -652,6 +752,7 @@ class LocalMediaGateway:
         url: str = "",
         detect: bool = True,
         source_seq: int | None = None,
+        generation: int | None = None,
     ) -> FrameSample | None:
         if jpeg[:2] != JPEG_SOI:
             return None
@@ -661,6 +762,12 @@ class LocalMediaGateway:
                 id=camera_id, ip="", username="", password="", rtsp_url="", sdk_handle=None,
             ))
             self._sessions[camera_id] = row
+        if generation is not None and int(generation) != row.generation:
+            # A cancelled decoder may finish one read after reconnect. Its
+            # bytes belong to the old source generation and must not repopulate
+            # LIVE, DETECT, or the preview cache.
+            row.frames_dropped_ai += 1
+            return None
         previous = row.live.latest()
         source_advanced = False
         if source_seq is not None:
@@ -678,7 +785,10 @@ class LocalMediaGateway:
                 row.last_fresh_frame_at = now
                 row.frozen = False
             return previous
-        sample = row.live.put(jpeg, source=source, url=url, camera_id=camera_id)
+        sample = row.live.put(
+            jpeg, source=source, url=url, camera_id=camera_id,
+            generation=row.generation,
+        )
         self._note_arrival(row, jpeg, sample.received_at, changed=True)
         row.source = source or row.source
         row.url = url or row.url
@@ -691,9 +801,19 @@ class LocalMediaGateway:
             if latest_detect is None or (now - latest_detect.received_at) >= interval:
                 if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
                     row.frames_dropped_ai += 1
-                row.detect.put(jpeg, source=source, url=url, camera_id=camera_id)
+                row.detect.put(
+                    jpeg, source=source, url=url, camera_id=camera_id,
+                    generation=row.generation,
+                )
         from app.services.preview import remember_frame
-        remember_frame(camera_id, jpeg, url=url, url_redacted=redact_url(url) if url else "", source=source)
+        remember_frame(
+            camera_id,
+            jpeg,
+            url=url,
+            url_redacted=redact_url(url) if url else "",
+            source=source,
+            generation=row.generation,
+        )
         return sample
 
     async def _produce(self, row: StreamSession) -> None:
@@ -733,8 +853,13 @@ class LocalMediaGateway:
                             ok = False
                         if not ok:
                             ok = await self._http_stills(row)
+                    # SDK progress resets the policy at the source-frame edge
+                    # inside _sdk_frames. Do not reset here when a consumer
+                    # disconnect merely causes that loop to return; doing so
+                    # was the confirmed replay-policy defect.
                     if ok:
-                        reconnect_for(spec.id).record_success()
+                        if not native_sdk:
+                            reconnect_for(spec.id).record_success()
                     else:
                         row.state = "DEGRADED"
                         row.decode_errors += 1
@@ -754,9 +879,16 @@ class LocalMediaGateway:
                 row.state = "DISCONNECTED"
 
     async def _backoff(self, row: StreamSession, error: str) -> None:
+        # A consumer may have disconnected while the in-flight read was
+        # failing. This is a normal shutdown, not a reconnect: preserve the
+        # last diagnostic sample and avoid manufacturing a new generation.
+        if not row.wanted():
+            row.state = "DISCONNECTED"
+            return
         row.state = "RECONNECTING"
         row.reconnects += 1
         row.decoder_restarts += 1
+        self._invalidate_generation(row, error)
         wait = float(reconnect_for(row.spec.id).record_failure(error))
         row._restart_not_before = time.monotonic() + wait
         log.warning("camera=%s media reconnect=%s decoder_restart=%s wait_s=%.1f error=%s", row.spec.id, row.reconnects, row.decoder_restarts, wait, str(error)[:300])
@@ -776,6 +908,7 @@ class LocalMediaGateway:
 
     async def _sdk_frames(self, row: StreamSession) -> bool:
         spec = row.spec
+        generation = row.generation
         if spec.sdk_handle is None:
             row.last_error = f"{spec.adapter_id or 'sdk'} adapter requires a connected native SDK handle"
             row.state = "DEGRADED"
@@ -784,6 +917,13 @@ class LocalMediaGateway:
         interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
         got = False
         last_jpeg_at = time.monotonic()
+        previous_response_jpeg = b""
+        initial_sequence_map = getattr(host, "last_live_seq", {})
+        previous_response_seq = (
+            int(initial_sequence_map.get(int(spec.sdk_handle), 0) or 0)
+            if isinstance(initial_sequence_map, dict) else 0
+        )
+        next_diag_at = 0.0
         silence_limit = max(1.0, float(settings.stream_read_timeout_seconds))
         row.state = "STREAMING"
         row.source = "sdk"
@@ -796,15 +936,58 @@ class LocalMediaGateway:
             except Exception as exc:
                 row.last_error = str(exc)[:300]
                 jpeg = b""
+            handle = int(spec.sdk_handle)
+            metadata_map = getattr(host, "last_live_meta", {})
+            raw_meta = metadata_map.get(handle) if isinstance(metadata_map, dict) else {}
+            meta = dict(raw_meta or {})
+            row.request_duration_ms = meta.get("duration_ms")
+            row.request_status = meta.get("status_code")
+            row.request_error = str(meta.get("error") or "")[:200]
+            sequence_map = getattr(host, "last_live_seq", {})
+            sequence_reliable = isinstance(sequence_map, dict)
+            current_seq = int(sequence_map.get(handle, 0) or 0) if sequence_reliable else 0
+            # New hosts stamp every latest-frame response. For older hosts,
+            # use a byte edge only as a compatibility signal; an identical
+            # cached JPEG is never source progress.
+            source_advanced = (
+                current_seq > previous_response_seq
+                if current_seq > 0 or previous_response_seq > 0
+                else bool(jpeg[:2] == JPEG_SOI and jpeg != previous_response_jpeg)
+            )
+            # A legacy/mocked host may expose a non-zero sequence without
+            # advancing it per handle. The first complete JPEG still proves
+            # that this decoder attempt received source data.
+            if (
+                jpeg[:2] == JPEG_SOI
+                and not got
+                and not previous_response_jpeg
+                and (not sequence_reliable or current_seq <= 0)
+            ):
+                source_advanced = True
+            metadata_fresh = meta.get("fresh") if isinstance(meta, dict) else None
+            source_progress_capable = sequence_reliable or isinstance(metadata_fresh, bool)
+            # Older hosts do not expose a sequence or freshness bit. A
+            # complete response proves that the bridge is alive, but it does
+            # not prove that the pixels changed. Keep the no-response watchdog
+            # alive without treating the frame as new source progress.
+            pump_activity = bool(jpeg[:2] == JPEG_SOI and (source_advanced or not source_progress_capable))
+            previous_response_seq = max(previous_response_seq, current_seq)
             if jpeg[:2] == JPEG_SOI:
-                last_jpeg_at = time.monotonic()
                 self.publish(
                     spec.id, jpeg,
                     source="sdk",
                     url=f"sdk://handle/{int(spec.sdk_handle)}",
-                    source_seq=host.last_live_seq.get(int(spec.sdk_handle)),
+                    source_seq=current_seq or None,
+                    generation=generation,
                 )
-                got = True
+                previous_response_jpeg = jpeg
+                if pump_activity:
+                    last_jpeg_at = time.monotonic()
+                    got = True
+                if source_advanced:
+                    row.last_source_progress_at = last_jpeg_at
+                    row.recovery_reason = "fresh_source_frame"
+                    reconnect_for(spec.id).record_success()
                 # The host keeps returning the last JPEG until the camera
                 # encodes a new one. Repeating those bytes is not a dead pump.
                 if self._stale_fresh(row):
@@ -812,16 +995,50 @@ class LocalMediaGateway:
                     row.state = "DEGRADED"
                 else:
                     row.state = "STREAMING"
-            elif (got and self._stale_fresh(row, factor=1.0)) or time.monotonic() - last_jpeg_at >= silence_limit:
+            now = time.monotonic()
+            # A native camera that has not produced even its first JPEG must
+            # reach the no-frame recovery boundary before the optional
+            # diagnostics call.  This keeps recovery deterministic and avoids
+            # adding another clock/network operation to the first-frame path.
+            no_jpeg_stale = (
+                not jpeg
+                and now - last_jpeg_at >= max(float(getattr(settings, "stale_stream_seconds", 2.5)), 0.01)
+            )
+            if no_jpeg_stale:
                 row.state = "DEGRADED"
                 row.last_error = "OcxConfig/NetSDK video supplied no fresh JPEG"
                 return False
-            delay = interval - (time.monotonic() - started)
+            if now >= next_diag_at:
+                try:
+                    diagnostics = await host.video_status(handle)
+                    if isinstance(diagnostics, dict):
+                        row.sdk_diagnostics = diagnostics
+                        if diagnostics.get("recovery_state") not in {None, "STABLE"}:
+                            row.recovery_reason = str(
+                                diagnostics.get("recovery_reason")
+                                or diagnostics.get("recovery_state")
+                                or row.recovery_reason
+                            )[:200]
+                except Exception as exc:
+                    row.sdk_diagnostics = {
+                        **row.sdk_diagnostics,
+                        "diagnostics_error": type(exc).__name__,
+                    }
+                next_diag_at = now + 2.0
+            elif (
+                (source_progress_capable and got and self._stale_fresh(row, factor=1.0))
+                or now - last_jpeg_at >= silence_limit
+            ):
+                row.state = "DEGRADED"
+                row.last_error = "OcxConfig/NetSDK video supplied no fresh JPEG"
+                return False
+            delay = interval - (now - started)
             await asyncio.sleep(delay if delay > 0.002 else 0.002)
         return got
 
     async def _rtsp_frames(self, row: StreamSession) -> bool:
         spec = row.spec
+        generation = row.generation
         role = spec.live_role or ROLE_LIVE
         profiles = spec.stream_profiles or {}
         if role in {ROLE_MAIN, ROLE_EVIDENCE}:
@@ -896,6 +1113,7 @@ class LocalMediaGateway:
                         self.publish(
                             spec.id, first, source="rtsp", url=url,
                             source_seq=rtsp_sequence,
+                            generation=generation,
                         )
                         async for jpeg in stream:
                             if not (row.wanted() or row.viewers > 0):
@@ -904,6 +1122,7 @@ class LocalMediaGateway:
                             self.publish(
                                 spec.id, jpeg, source="rtsp", url=url,
                                 source_seq=rtsp_sequence,
+                                generation=generation,
                             )
                         return True
                     except asyncio.CancelledError:
@@ -920,6 +1139,7 @@ class LocalMediaGateway:
     async def _http_stills(self, row: StreamSession) -> bool:
         """Poll HTTP snapshot endpoints slowly — not a live transport."""
         spec = row.spec
+        generation = row.generation
         interval = 0.2
         got = False
         last_jpeg_at = time.monotonic()
@@ -939,6 +1159,7 @@ class LocalMediaGateway:
                     source="http",
                     url=str(http.get("url") or ""),
                     source_seq=source_sequence,
+                    generation=generation,
                 )
                 last_jpeg_at = time.monotonic()
                 got = True

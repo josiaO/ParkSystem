@@ -182,6 +182,23 @@ class AcquisitionContractTests(unittest.TestCase):
         self.assertEqual(gw.session(2).reconnects, 0)
         self.assertTrue(gw.peek_live(2).jpeg.endswith(b"b"))
 
+    def test_reconnect_invalidates_old_buffers_and_preview(self):
+        gw = LocalMediaGateway()
+        gw.publish(1, JPEG + b"old", source="rtsp", source_seq=1)
+        old_generation = gw.session(1).generation
+        with patch("app.services.media_gateway._kill_pid"):
+            self.assertTrue(gw.restart_decoder(1))
+        row = gw.session(1)
+        self.assertGreater(row.generation, old_generation)
+        self.assertIsNone(gw.peek_live(1))
+        self.assertIsNone(gw.peek_detect(1))
+        from app.services.preview import get_state
+        self.assertEqual(get_state(1).jpeg, b"")
+        self.assertIsNone(gw.publish(1, JPEG + b"late", source="rtsp", generation=old_generation))
+        fresh = gw.publish(1, JPEG + b"new", source="rtsp", generation=row.generation)
+        self.assertIsNotNone(fresh)
+        self.assertEqual(fresh.generation, row.generation)
+
     def test_releasing_a_viewer_keeps_detect(self):
         gw = LocalMediaGateway()
         spec = _spec(3, handle=3, need_detect=True)

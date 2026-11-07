@@ -69,6 +69,7 @@ class HVXHostClient:
     def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or settings.hvx_host_url).rstrip("/")
         self.last_live_seq: dict[int, int] = {}
+        self.last_live_meta: dict[int, dict] = {}
 
     async def info(self) -> dict:
         try:
@@ -107,6 +108,18 @@ class HVXHostClient:
         r = await client.get(f"/state/{handle}", timeout=settings.request_timeout_seconds)
         r.raise_for_status()
         return r.json()
+
+    async def video_status(self, handle: int) -> dict:
+        """Read video-only host diagnostics without refreshing recognition state."""
+        try:
+            client = _shared_poll_client(self.base_url)
+            r = await client.get(f"/video-status/{int(handle)}", timeout=2.0)
+            if r.status_code != 200:
+                return {"ok": False, "status_code": r.status_code}
+            payload = r.json()
+            return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid diagnostics"}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
 
     async def discover(self, wait_seconds: float = 2.0) -> dict:
         try:
@@ -257,16 +270,23 @@ class HVXHostClient:
         This prevents the Windows HTTP bridge from returning the same cached
         frame so quickly that an MJPEG consumer displays a stale FIFO.
         """
+        started = asyncio.get_running_loop().time()
+        handle = int(handle)
+        meta = {"status_code": None, "duration_ms": None, "fresh": False, "error": ""}
         try:
             client = _shared_live_client(self.base_url, handle)
-            previous = int(self.last_live_seq.get(int(handle), 0) or 0)
+            previous = int(self.last_live_seq.get(handle, 0) or 0)
             params = {"after": previous, "wait_ms": 1000} if previous else {}
-            r = await client.get(f"/live-jpeg/{int(handle)}", params=params, timeout=1.4)
+            r = await client.get(f"/live-jpeg/{handle}", params=params, timeout=1.4)
+            meta["status_code"] = r.status_code
             try:
-                self.last_live_seq[int(handle)] = int(r.headers.get("x-frame-seq") or 0)
+                self.last_live_seq[handle] = int(r.headers.get("x-frame-seq") or 0)
             except (TypeError, ValueError):
-                self.last_live_seq[int(handle)] = 0
+                self.last_live_seq[handle] = 0
+            meta["frame_seq"] = self.last_live_seq.get(handle, 0)
+            meta["wait"] = r.headers.get("x-frame-wait") or ""
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+                meta["fresh"] = self.last_live_seq.get(handle, 0) > previous
                 return r.content
         except (httpx.TransportError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             _drop_live_client(self.base_url, handle)
@@ -274,10 +294,16 @@ class HVXHostClient:
         except OSError as exc:
             if int(getattr(exc, "winerror", 0) or 0) == 10054:
                 _drop_live_client(self.base_url, handle)
+                meta["error"] = "connection_reset"
                 return b""
+            meta["error"] = type(exc).__name__
             return b""
-        except Exception:
+        except Exception as exc:
+            meta["error"] = type(exc).__name__
             return b""
+        finally:
+            meta["duration_ms"] = round((asyncio.get_running_loop().time() - started) * 1000.0, 1)
+            self.last_live_meta[handle] = meta
         return b""
 
     async def capture_jpeg(self, handle: int, *, trigger: bool = False) -> bytes:

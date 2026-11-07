@@ -71,7 +71,11 @@ from .services.access import ensure_access_plans, lookup_entitlement, plan_dict,
 from .services.receipts import RECEIPT_POLICIES, issue_receipt, receipt_dict
 from .core.plate import normalize_plate
 from .infrastructure.hardware.printers import list_system_printers, printer_adapter
-from .infrastructure.hardware.cameras import adapter_has_native_plates, camera_adapter_for
+from .infrastructure.hardware.cameras import (
+    adapter_has_native_plates,
+    adapter_requires_native_stream,
+    camera_adapter_for,
+)
 from .infrastructure.hardware.edge import edge_agent_status
 from .infrastructure.hardware.registry import camera_adapter_id, camera_connection_mode, devices_as_dicts
 from .infrastructure.payments.ledger import list_transactions, transaction_dict
@@ -194,6 +198,27 @@ def _consume_background_task(task: asyncio.Task) -> None:
         pass
 
 
+async def _supervise_background_loop(name: str, factory, *, restart_delay: float = 2.0) -> None:
+    """Keep a diagnostic/control loop observable and restartable.
+
+    A failed asyncio task otherwise disappears while the parent process and
+    its health endpoint continue to look alive.  This wrapper is intentionally
+    limited to non-authoritative diagnostics; it never retries gate commands
+    or camera control calls.
+    """
+    while True:
+        try:
+            await factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("background loop failed name=%s; restarting", name)
+            await asyncio.sleep(restart_delay)
+        else:
+            log.warning("background loop exited name=%s; restarting", name)
+            await asyncio.sleep(restart_delay)
+
+
 DEFAULT_ROLES = {
     "Admin": "*",
     "Operator": ",".join([
@@ -231,7 +256,7 @@ async def _diagnostic_heartbeat_loop() -> None:
     turning the service log into a per-frame trace.
     """
     from .services.media_gateway import gateway
-    from .services.recognition_worker import worker_health
+    from .recognition_worker import worker_health
 
     previous_signature = None
     last_media_prune = 0.0
@@ -421,7 +446,10 @@ async def lifespan(app: FastAPI):
     from .services import onvif_runtime
     onvif_runtime.set_persist(_onvif_capture)
     onvif_events = asyncio.create_task(_onvif_events_loop(), name="onvif-events")
-    diagnostics = asyncio.create_task(_diagnostic_heartbeat_loop(), name="diagnostic-heartbeat")
+    diagnostics = asyncio.create_task(
+        _supervise_background_loop("diagnostic-heartbeat", _diagnostic_heartbeat_loop),
+        name="diagnostic-heartbeat",
+    )
     try:
         yield
     finally:
@@ -1373,7 +1401,13 @@ def get_camera_or_404(db: Session, camera_id: int) -> Camera:
 
 async def live_snapshot(c: Camera) -> dict:
     return await snapshot_for_camera(
-        c.id, c.ip_address, c.username, c.password_secret, c.rtsp_url, sdk_handle=c.sdk_handle,
+        c.id,
+        c.ip_address,
+        c.username,
+        c.password_secret,
+        c.rtsp_url,
+        sdk_handle=c.sdk_handle,
+        adapter_id=c.adapter_id,
     )
 
 
@@ -1694,6 +1728,11 @@ async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise
                 "scope": scope.get("detail") or "Camera is outside this node's assigned gate",
             },
         }
+    # Explicit QY/native rows have a single physical-stream owner: the vendor
+    # SDK host.  A web port on the same device is not permission to silently
+    # mutate the row to RTSP.  The historical ``hvx`` alias remains eligible
+    # for its legacy fallback until those rows are explicitly migrated.
+    native_stream = adapter_requires_native_stream(camera.adapter_id)
     adapter = camera_adapter_for(camera)
     caps = await adapter.capabilities(camera)
     if not caps.get("sdk_login"):
@@ -1706,7 +1745,7 @@ async def apply_camera_connect(camera: Camera, db: Session, user: User, *, raise
         if await tcp_open(camera.ip_address, web_port, timeout=0.4):
             web = True
             break
-    if web:
+    if web and not native_stream:
         previous = camera.adapter_id
         camera.adapter_id = "rtsp"
         _commit_camera(db, camera)
@@ -2165,36 +2204,63 @@ async def _run_local_alpr_locked(
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))
     started = time.perf_counter()
-    if plate_crop[:2] == b"\xff\xd8":
-        from .services.alpr import recognize_plate_crop_bytes
+    from .services.alpr import recognize_arrival_bytes, recognize_plate_crop_bytes
+    from .services.camera_framing import framing_from_profiles, native_plate_region_to_roi
+    framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
+    # ParkWatch/OcxConfig's polygon is the camera-side zone.  Use it only when
+    # the operator has not explicitly saved an application ROI; this keeps the
+    # native camera configuration useful without silently overriding settings.
+    native_roi = native_plate_region_to_roi(
+        native.get("plate_region"),
+        image_width=int(native.get("image_width") or 0),
+        image_height=int(native.get("image_height") or 0),
+    )
+    effective_roi = framing["detect_roi"] or native_roi or None
+    from .services.camera_framing import gate_for
+    prepared = gate_for(int(camera.id)).prepared
+    boxes = prepared[1] if prepared and prepared[0] == hash(jpeg) else None
+    native_box = None
+    if isinstance(native.get("bbox"), dict):
+        native_box = fit_plate_box(
+            {**native["bbox"], "image_width": native.get("image_width") or 0, "image_height": native.get("image_height") or 0},
+            jpeg,
+            src_w=int(native.get("image_width") or 0),
+            src_h=int(native.get("image_height") or 0),
+        )
+    # A native usLpBox is a useful fallback, but it is not trusted as the
+    # primary FastALPR crop.  The panorama detector runs inside this one
+    # recognition call and only uses the native box if it finds no current box.
+    if boxes:
         alpr = await run_inference(
+            recognize_arrival_bytes, jpeg,
+            camera_label=f"cam-{camera.id}-{camera.ip_address}",
+            detect_roi=effective_roi,
+            detect_zoom=framing["detect_zoom"],
+            detected_boxes=boxes,
+            fallback_box=native_box,
+        )
+    else:
+        alpr = await run_inference(
+            recognize_arrival_bytes, jpeg,
+            camera_label=f"cam-{camera.id}-{camera.ip_address}",
+            detect_roi=effective_roi,
+            detect_zoom=framing["detect_zoom"],
+            fallback_box=native_box,
+        )
+    if not (alpr or {}).get("best") and plate_crop[:2] == b"\xff\xd8":
+        # The SDK vehicle-picture buffer is a last-resort source only when the
+        # full panorama detector is unavailable; never prefer it over the
+        # current full panorama.
+        crop_result = await run_inference(
             recognize_plate_crop_bytes,
             plate_crop,
             camera_label=f"cam-{camera.id}-{camera.ip_address}-native-crop",
         )
-    else:
-        from .services.alpr import recognize_arrival_bytes
-        from .services.camera_framing import framing_from_profiles
-        framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-        from .services.camera_framing import gate_for
-        prepared = gate_for(int(camera.id)).prepared
-        boxes = prepared[1] if prepared and prepared[0] == hash(jpeg) else None
-        if boxes is None and isinstance(native.get("bbox"), dict):
-            fitted = fit_plate_box(
-                {**native["bbox"], "image_width": native.get("image_width") or 0, "image_height": native.get("image_height") or 0},
-                jpeg,
-                src_w=int(native.get("image_width") or 0),
-                src_h=int(native.get("image_height") or 0),
-            )
-            if fitted:
-                boxes = [fitted]
-        alpr = await run_inference(
-            recognize_arrival_bytes, jpeg,
-            camera_label=f"cam-{camera.id}-{camera.ip_address}",
-            detect_roi=framing["detect_roi"] or None,
-            detect_zoom=framing["detect_zoom"],
-            detected_boxes=boxes,
-        )
+        if crop_result.get("best") or not (alpr or {}).get("ok", True):
+            alpr = crop_result
+    if not alpr:
+        alpr = {"ok": True, "backend": "fastalpr", "plates": [], "best": None,
+                "detail": "no plate box in the current panorama"}
     # A timed-out API request may outlive its dependency-scoped SQLAlchemy
     # session while this native call drains. Do not touch the closed session,
     # persist a late result, or update lane state from an abandoned task.
@@ -2996,6 +3062,7 @@ def _live_spec(camera: Camera, *, need_detect: bool = False, live_role: str = "L
         live_role=live_role,
         stream_profiles=_resolve_stream_profiles(camera),
         adapter_id=str(getattr(camera, "adapter_id", None) or "hvx").strip().lower() or "hvx",
+        recognition_mode=str(getattr(camera, "recognition_mode", None) or ""),
     )
 
 
@@ -3098,7 +3165,13 @@ async def _camera_snapshot_with_live_lease(camera_id: int, spec: CameraLiveSpec)
                     },
                 )
     grabbed = await snapshot_for_camera(
-        spec.id, spec.ip, spec.username, spec.password, spec.rtsp_url, sdk_handle=spec.sdk_handle,
+        spec.id,
+        spec.ip,
+        spec.username,
+        spec.password,
+        spec.rtsp_url,
+        sdk_handle=spec.sdk_handle,
+        adapter_id=spec.adapter_id,
     )
     if not grabbed.get("ok"):
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")
@@ -3785,6 +3858,8 @@ def _show_camera_read(
     jpeg: bytes,
     crop: bytes,
     overlay: dict | None,
+    detect_roi: str | None = None,
+    detect_zoom: float | None = None,
 ) -> None:
     """Put the camera's plate, crop, and box on the live lane immediately.
 
@@ -3795,7 +3870,17 @@ def _show_camera_read(
         return
     if overlay:
         remember_plate_box(camera_id, overlay)
-    snapshot_url = _publish_live_still(camera_id, "snapshots", jpeg)
+    from .services.captures import _crop_from_bbox, detection_zone_jpeg
+
+    # Keep the immediate live evidence consistent with persisted captures.
+    # The raw callback frame is still used for processing, but the operator
+    # sees the configured arrival zone and a crop made from its plate box.
+    snapshot = detection_zone_jpeg(
+        jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom,
+    ) or jpeg
+    zone_crop = _crop_from_bbox(jpeg, overlay) if overlay else b""
+    crop = zone_crop or crop
+    snapshot_url = _publish_live_still(camera_id, "snapshots", snapshot)
     crop_url = _publish_live_still(camera_id, "crops", crop)
     if not plate and not snapshot_url and not crop_url:
         return
@@ -3887,7 +3972,12 @@ async def _drain_camera_events(
         image_id = int(capture.get("image_id") or 0)
         plate = str(capture.get("plate") or "")
         from .services.dedup import native_callbacks
-        if native_callbacks.seen(camera_id=camera_id, plate=plate, image_id=image_id):
+        if native_callbacks.seen(
+            camera_id=camera_id,
+            plate=plate,
+            image_id=image_id,
+            fingerprint=str(capture.get("capture_token") or ""),
+        ):
             # A second callback can carry the box the first one missed. Remember
             # it for the live view, but do not open another session.
             from .core.plate import is_camera_no_plate
@@ -3988,6 +4078,8 @@ async def _drain_camera_events(
                 return processed
             from .services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
             local_only = camera_recognition_mode(row) == LOCAL_ONLY
+            from .services.camera_framing import framing_from_profiles
+            framing = framing_from_profiles(getattr(row, "stream_profiles", None))
             _show_camera_read(
                 camera_id,
                 plate=native_plate if real_native and not local_only else "",
@@ -3995,6 +4087,8 @@ async def _drain_camera_events(
                 jpeg=jpeg,
                 crop=crop,
                 overlay={**plate_overlay, "label": ""} if local_only and plate_overlay else plate_overlay,
+                detect_roi=framing["detect_roi"],
+                detect_zoom=framing["detect_zoom"],
             )
             from .services import hybrid_fusion
             if presence and real_native and hybrid_fusion.routes_camera(row, db):
@@ -4151,7 +4245,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         return False
     runtime.lane(int(camera.id)).last_error = ""
     gate.prepared = (hash(jpeg), boxes)
-    phase = gate.observe(best_arrival_box(boxes), time.monotonic())
+    phase = gate.observe(best_arrival_box(boxes, detect_roi=framing["detect_roi"]), time.monotonic())
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
         return True
@@ -4183,13 +4277,12 @@ def _current_recognition_jpeg(camera_id: int) -> bytes:
 
     now = time.monotonic()
     maximum_age = float(settings.stale_stream_seconds)
-    for read in (gateway.peek_detect, gateway.peek_live):
-        sample = read(camera_id)
-        if sample is not None and 0 <= now - sample.received_at <= maximum_age:
-            return sample.jpeg
-    cached = get_state(camera_id)
-    if cached.jpeg[:2] == b"\xff\xd8" and 0 <= now - cached.captured_at <= maximum_age:
-        return cached.jpeg
+    # Recognition is admitted only from DETECT. LIVE and the preview cache
+    # belong to display/evidence consumers; falling back to either lets an
+    # open display pane accidentally become an ALPR input path.
+    sample = gateway.peek_detect(camera_id)
+    if sample is not None and 0 <= now - sample.received_at <= maximum_age:
+        return sample.jpeg
     return b""
 
 
@@ -4600,6 +4693,13 @@ async def _hvx_watch_loop():
 
 async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     """Periodic FastALPR for cameras that have no onboard plate engine."""
+    # QY/native cameras are serviced by the SDK callback lane.  Keep this
+    # guard here as well as in the scheduler so an endpoint, stale task, or
+    # future caller cannot start a second generic recognition path.
+    with short_session() as db:
+        camera = db.get(Camera, camera_id)
+        if camera is None or adapter_requires_native_stream(camera.adapter_id):
+            return
     from .recognition_worker import worker_owns_software_reads
     if worker_owns_software_reads(camera_id):
         from .services.mediamtx_detect import stop_detect_consumer
@@ -4689,7 +4789,9 @@ async def _camera_event_loop():
                     ]
                     ipcam_ids = [
                         int(c.id) for c in active
-                        if c.sdk_handle is None and c.status in {
+                        if c.sdk_handle is None
+                        and not adapter_requires_native_stream(c.adapter_id)
+                        and c.status in {
                             CameraStatus.VIDEO_CONNECTED.value, CameraStatus.SDK_CONNECTED.value,
                         }
                     ]

@@ -144,9 +144,11 @@ class Settings(BaseSettings):
     alpr_detector_confidence: float = 0.26
     alpr_crop_padding_ratio: float = 0.18
     alpr_ocr_target_width: int = 320
-    # Wait for a useful plate size, with a bounded fallback for fast vehicles.
+    # Wait for a useful plate size. The legacy fallback setting is retained
+    # for configuration compatibility, but arrival admission never OCRs a far
+    # plate merely because a timer elapsed.
     alpr_min_capture_plate_width_px: int = 64
-    alpr_capture_far_fallback_seconds: float = 1.5
+    alpr_capture_far_fallback_seconds: float = 0.0
     # SmartPark recognition zone (车牌识别区): skip sky / far field.
     # Normalized x1,y1,x2,y2. "off" uses the full frame.
     alpr_detect_roi: str = "0.06,0.18,0.94,0.92"

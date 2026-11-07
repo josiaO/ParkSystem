@@ -132,6 +132,23 @@ class IsolationAndWatchdogTests(unittest.TestCase):
         self.assertTrue(rt.finish(fresh, plate="T111NEW"))
         self.assertEqual(lane.last_plate, "T111NEW")
 
+    def test_recovery_drops_queued_frames_and_current_live_plate(self):
+        rt = RecognitionRuntime(max_concurrency=1)
+        lane = rt.lane(19)
+        lane.visit.observe(presence=True, plate="T123OLD")
+        lane.last_plate = "T123OLD"
+        lane.offer_frame(JPEG + b"old")
+        ticket = rt.begin_if_idle(19)
+        self.assertIsNotNone(ticket)
+        lane.reject_inflight(ticket)
+        lane.offer_frame(JPEG + b"queued")
+        old_generation = lane.generation
+        rt.recover(19)
+        self.assertGreater(lane.generation, old_generation)
+        self.assertEqual(lane.mailbox.depth(), 0)
+        self.assertEqual(lane.last_plate, "")
+        self.assertFalse(lane.accept(ticket, plate="T123OLD"))
+
 
 class StaleAndPhantomPlateTests(unittest.TestCase):
     def tearDown(self):

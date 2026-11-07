@@ -42,6 +42,13 @@ def framing_from_profiles(profiles: dict | None) -> dict:
     if not isinstance(roi, str) or not roi.strip():
         legacy = profiles.get("detect_roi") or profiles.get("alpr_detect_roi") or ""
         roi = legacy if isinstance(legacy, str) else ""
+    # An empty FRAMING value means "use the site default", not "search the
+    # whole picture". Keep the effective zone consistent in the API/UI,
+    # worker, and legacy recognition paths.
+    if not str(roi or "").strip():
+        from app.config import settings
+
+        roi = str(getattr(settings, "alpr_detect_roi", "off") or "off").strip()
     zoom_raw = row.get("detect_zoom")
     if zoom_raw in (None, ""):
         zoom_raw = profiles.get("detect_zoom")
@@ -72,14 +79,83 @@ def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float)
     return out
 
 
-def best_arrival_box(boxes: list[dict] | None) -> dict | None:
+def native_plate_region_to_roi(
+    region: list | tuple | None,
+    *,
+    image_width: int = 0,
+    image_height: int = 0,
+    padding: float = 0.08,
+) -> str:
+    """Convert OcxConfig's camera polygon into FastALPR's normalized ROI.
+
+    OcxConfig/ParkWatch stores the plate detection zone as four pixel points.
+    FastALPR accepts a normalized rectangle.  The conversion is deliberately
+    read-only and conservative: an invalid or missing native zone returns an
+    empty string, allowing the configured/site-wide ROI to remain in control.
+    """
+    try:
+        width = int(image_width or 0)
+        height = int(image_height or 0)
+    except (TypeError, ValueError):
+        return ""
+    if width < 32 or height < 32 or not isinstance(region, (list, tuple)):
+        return ""
+    points: list[tuple[float, float]] = []
+    for point in region:
+        if not isinstance(point, dict):
+            continue
+        try:
+            x = float(point.get("x"))
+            y = float(point.get("y"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            points.append((x, y))
+    if len(points) < 3:
+        return ""
+    x1 = max(0.0, min(x for x, _ in points) / width - float(padding))
+    y1 = max(0.0, min(y for _, y in points) / height - float(padding))
+    x2 = min(1.0, max(x for x, _ in points) / width + float(padding))
+    y2 = min(1.0, max(y for _, y in points) / height + float(padding))
+    if x2 - x1 < 0.08 or y2 - y1 < 0.08:
+        return ""
+    return ",".join(f"{value:.4f}" for value in (x1, y1, x2, y2))
+
+
+def box_in_detection_zone(box: dict | None, detect_roi: str | None = None) -> bool:
+    """Return whether a detector box's center is inside the admission zone."""
+    if not isinstance(box, dict):
+        return False
+    from app.services.alpr import parse_detect_roi
+
+    roi = parse_detect_roi(detect_roi) if detect_roi is not None else parse_detect_roi()
+    if roi is None:  # explicit "off" / full-frame mode
+        return True
+    try:
+        width = float(box.get("image_width") or 0)
+        height = float(box.get("image_height") or 0)
+        x1, y1 = float(box["x1"]), float(box["y1"])
+        x2, y2 = float(box["x2"]), float(box["y2"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if width <= 0 or height <= 0 or x2 <= x1 or y2 <= y1:
+        return False
+    cx = ((x1 + x2) / 2.0) / width
+    cy = ((y1 + y2) / 2.0) / height
+    return roi[0] <= cx <= roi[2] and roi[1] <= cy <= roi[3]
+
+
+def best_arrival_box(boxes: list[dict] | None, detect_roi: str | None = None) -> dict | None:
     """Choose the closest credible plate for the lane gate.
 
     Detector confidence order can change between frames when a second car or
     a reflection is present. Area-first selection keeps the gate attached to
     the nearest plate, which is also the plate with the most readable pixels.
     """
-    candidates = [item for item in (boxes or []) if isinstance(item, dict)]
+    candidates = [
+        item for item in (boxes or [])
+        if isinstance(item, dict) and box_in_detection_zone(item, detect_roi)
+    ]
     if not candidates:
         return None
 
@@ -208,27 +284,9 @@ class ArrivalGate:
             self._last = center
             self._stable_since = now
             self._announced = False
-            # Do not require a stopped car when the plate already has enough
-            # pixels to read. The second near-size frame is an immediate,
-            # bounded OCR opportunity for fast traffic; consensus and plate
-            # validation still reject accidental/non-car text.
-            if had_previous and self._near_enough(box) and self._ocr_count < self.max_ocr:
-                self._announced = True
-                return "ready"
-            # A moving vehicle may never produce a stable box. Once it has
-            # been visible for the bounded fallback interval, give OCR one
-            # opportunity even while it is still moving. The detector and OCR
-            # quality checks remain authoritative, and the normal near-size
-            # path still gets priority whenever the plate is readable.
-            if (
-                had_previous
-                and self.far_fallback_seconds > 0.0
-                and self._seen_since is not None
-                and now - self._seen_since >= self.far_fallback_seconds
-                and self._ocr_count < self.max_ocr
-            ):
-                self._announced = True
-                return "ready"
+            # A moving box is detector-only. OCR admission requires the plate
+            # to hold still inside the zone, preventing a distant or passing
+            # car from being read before it reaches the stop point.
             return "moving"
         if self._stable_since is None:
             self._stable_since = now
@@ -237,18 +295,14 @@ class ArrivalGate:
         if now - self._stable_since < self.stable_seconds:
             return "moving"
         # Plate pixel width is a useful distance proxy. Upscaling cannot
-        # recover characters that were not sampled by the camera. Delay the
-        # OCR until the vehicle is close enough, but only for a bounded time so
-        # a fast vehicle is never lost solely because it stayed far away.
+        # recover characters that were not sampled by the camera. A far plate
+        # remains detector-only until it reaches the readable part of the zone.
         if self.min_plate_width_px > 0:
             try:
                 plate_width = float(box["x2"]) - float(box["x1"])
             except (KeyError, TypeError, ValueError):
                 plate_width = 0.0
-            if plate_width < self.min_plate_width_px and (
-                self.far_fallback_seconds <= 0.0
-                or now - (self._seen_since if self._seen_since is not None else self._stable_since) < self.far_fallback_seconds
-            ):
+            if plate_width < self.min_plate_width_px:
                 return "far"
         if self._announced:
             return "moving"

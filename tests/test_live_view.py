@@ -19,7 +19,7 @@ from app.db import Base, get_db, set_session_factory
 from app.models import Role, User, UserRole
 from app.security import hash_password
 from app.services.alpr import bbox_dict
-from app.services.preview import media_path, remember_frame, stop_live_pumps, take_latest_jpeg
+from app.services.preview import media_path, remember_frame, resolve_playable, stop_live_pumps, take_latest_jpeg
 
 
 JPEG = b"\xff\xd8\xff\xd9"
@@ -262,6 +262,45 @@ class LiveViewTests(unittest.TestCase):
         self.assertEqual(body["adapter_id"], "rtsp")
         self.assertIsNone(body["sdk_handle"])
         self.assertEqual(body["plate_engine"], "fastalpr")
+
+    def test_qy_connect_never_falls_back_to_video_when_sdk_port_closed(self):
+        cam = self.client.post("/cameras", headers=self.headers, json={
+            "name": "QY Entry", "ip_address": "10.0.0.91", "adapter_id": "qy",
+        }).json()
+
+        async def probe(ip, port, timeout=1.0):
+            return int(port) != 30000
+
+        with patch("app.api_main.tcp_open", new=probe):
+            with patch(
+                "app.infrastructure.hardware.cameras.rtsp.grab_http_snapshot",
+                new=AsyncMock(side_effect=AssertionError("QY must not open a generic video path")),
+            ):
+                res = self.client.post(f"/cameras/{cam['id']}/sdk/connect", headers=self.headers, json={})
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(body["adapter_id"], "qy")
+        self.assertEqual(body["status"], "SDK_FAILED")
+        self.assertIsNone(body["sdk_handle"])
+        self.assertFalse(body["sdk_result"]["connected"])
+
+    def test_qy_snapshot_resolution_never_opens_http_or_rtsp_fallback(self):
+        async def scenario():
+            with patch(
+                "app.services.preview.grab_http_snapshot",
+                new=AsyncMock(side_effect=AssertionError("QY snapshot opened HTTP fallback")),
+            ), patch(
+                "app.services.preview.grab_camera_frame",
+                new=AsyncMock(side_effect=AssertionError("QY snapshot opened RTSP fallback")),
+            ):
+                result = await resolve_playable(
+                    "10.0.0.91", "admin", "secret", adapter_id="qy",
+                )
+            return result
+
+        result = __import__("asyncio").run(scenario())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["source"], "sdk")
 
     def test_snapshot_uses_sdk_jpeg_without_ffmpeg(self):
         cam = self._camera()

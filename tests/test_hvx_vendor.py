@@ -91,12 +91,18 @@ class VendorPackageTests(unittest.TestCase):
         struct.pack_into("<HHHH", blob, 0x18, 807, 303, 866, 354)
         blob[0x25] = 2
         blob[0x40] = 91
+        blob[0x26:0x38] = b"202611030102030040"
+        struct.pack_into("<I", blob, 0x3C, 42)
+        blob[0x43] = 2
         parsed = hvx_sdk.parse_image_user_info(bytes(blob))
         self.assertEqual(parsed["plate_box"], [807, 303, 866, 354])
         self.assertEqual(parsed["image_width"], 1920)
         self.assertEqual(parsed["image_height"], 1080)
         self.assertEqual(parsed["score"], 91)
         self.assertTrue(parsed["have_vehicle"])
+        self.assertEqual(parsed["camera_timestamp"], "202611030102030040")
+        self.assertEqual(parsed["vehicle_id"], 42)
+        self.assertEqual(parsed["snapshot_index"], 2)
         self.assertTrue(hvx_sdk.plate_box_usable(parsed["plate_box"]))
         empty = {
             "image_id": 9, "plate": "T285DQP", "plate_box": [0, 0, 0, 0],
@@ -136,6 +142,7 @@ class VendorPackageTests(unittest.TestCase):
         self.assertIn("_ensure_camera_pump", host_src)
         self.assertIn("hvx-live-", host_src)
         self.assertIn("hvx-play-ui", host_src)
+        self.assertIn("control_duration_ms", host_src)
         self.assertEqual(hvx_sdk.T_DCImageSnap._fields_[0][0], "uiImageId")
         self.assertEqual(hvx_sdk.T_ControlGate._fields_[0][0], "ucState")
         self.assertEqual(hvx_sdk.GATE_STATE_OPEN, 1)

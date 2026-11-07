@@ -193,3 +193,15 @@ def test_automatic_recognition_never_reads_minutes_old_evidence_as_a_live_car():
         assert api_main._current_recognition_jpeg(7) == b""
         sample.received_at = 499.9
         assert api_main._current_recognition_jpeg(7) == JPEG
+
+
+def test_automatic_recognition_does_not_fall_back_to_display_only_frames():
+    from app.services.preview import PreviewState
+
+    display = SimpleNamespace(jpeg=JPEG, received_at=499.9)
+    cached = PreviewState(jpeg=JPEG, captured_at=499.9)
+    with patch("app.services.media_gateway.gateway.peek_detect", return_value=None), \
+         patch("app.services.media_gateway.gateway.peek_live", return_value=display), \
+         patch.object(api_main, "get_state", return_value=cached), \
+         patch.object(api_main.time, "monotonic", return_value=500.0):
+        assert api_main._current_recognition_jpeg(7) == b""
