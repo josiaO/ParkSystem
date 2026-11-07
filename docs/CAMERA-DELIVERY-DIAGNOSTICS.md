@@ -24,6 +24,30 @@ video. A vehicle callback can supply an image while continuous video is broken.
 These tests reproduce software failures without cameras. They do not establish
 which native SDK failure occurs on a particular Windows PC.
 
+## QY/OcxConfig capture and FastALPR contract
+
+The Windows QY path follows the boundary confirmed by the fresh Ghidra and
+ParkWatch evidence: `Net_StartVideo`/PlaySdk owns continuous decoded video;
+the native image callback owns vehicle-event capture; and FastALPR remains the
+application-side plate recognizer. There is one OcxConfig SDK reader per
+camera, one latest-frame live buffer, and no browser reader or second QY
+decoder.
+
+For a native event, the full panorama is now the primary FastALPR input. The
+camera `usLpBox` is scaled from its callback dimensions to the JPEG dimensions
+and used only as a fallback when the current detector cannot return a box. The
+SDK vehicle-picture buffer is a last-resort OCR source, not the preferred crop.
+This prevents an early/partial native rectangle from clipping a plate while
+the vehicle panorama is complete. The native OcxConfig four-point plate region
+is converted to the FastALPR normalized detection zone only when no explicit
+operator zone is configured.
+
+Night/IR crops use one bounded enhanced OCR retry when the first crop is dark
+or weak. The raw vehicle panorama remains the evidence image; enhancement is
+applied to the OCR crop only. Native camera timestamp, vehicle ID, and snapshot
+index are retained with the event so replay and repeated realtime ID `0`
+callbacks can be diagnosed.
+
 ## Gate-camera evidence on Windows
 
 Use the updated SDK host together with the updated application. In PowerShell,
@@ -40,6 +64,31 @@ Each connection's `video` includes:
 - `jpeg_rc`, `jpeg_error`, `jpeg_bytes`, `jpeg_attempts`, and `jpeg_read_ms`.
 - `jpeg_read_pending` and `pending_read_ms` for a blocked native JPEG read.
 - `frames_received`, `frame_age_ms`, `state`, and `control_error`.
+
+The running Site Service exposes the same measurements per camera through
+`/health/details` and `/health/ready` under the media rows:
+
+- `callback_progress`: native decoded-callback count, rate, and age;
+- `jpeg_production`: latest JPEG count/rate, age, and encode time;
+- `consumer_demand_age_ms`, `pump_liveness`, `request_duration_ms`, and
+  `request_status`;
+- `recovery_reason`, `stall_classification`, and `effective_ocr_owner`.
+
+`stall_classification` separates `consumer_inactive`, `pump_dead`,
+`native_decoder_stall`, `bridge_or_encode_stall`, and bridge request/error
+symptoms. This is diagnostic telemetry only: it does not open a gate, trigger
+a capture, or change camera configuration. Core readiness remains separate
+from `camera_freshness.operational_ready`; a stale required lane is listed in
+`required_stale_camera_ids` even when the database and HTTP service are ready.
+
+For a low-impact Windows host-only snapshot, use:
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:30000/video-status/0' | ConvertTo-Json -Depth 8
+```
+
+Replace `0` with the SDK handle. The endpoint reads cached state and does not
+start another decoder or camera reader.
 
 `frames_received` counts valid JPEG samples, not proof that objects are moving.
 Compare camera timestamps or visible movement as well. Repeated identical

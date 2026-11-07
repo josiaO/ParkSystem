@@ -84,7 +84,7 @@ def test_video_presence_uses_current_detection_even_with_old_display_box():
          patch('app.services.alpr.locate_plate_boxes', return_value=([], {'available':True})) as locate, \
          patch('app.services.recognition_runtime.runtime.lane', return_value=SimpleNamespace(visit=visit)):
         assert not asyncio.run(_video_arrival_ready(camera, b'current-frame'))
-    locate.assert_called_once_with(b'current-frame', detect_roi=None, detect_zoom=1.0)
+    locate.assert_called_once_with(b'current-frame', detect_roi='0.06,0.18,0.94,0.92', detect_zoom=1.0)
     assert visit.observe.call_args.kwargs['presence'] is False
     assert preview.held_plate_box(camera.id) is None
     gate_for(camera.id).reset()

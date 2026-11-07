@@ -49,6 +49,32 @@ async def probe_connection(
         recommended = "hvx"
         capabilities.extend(["NATIVE_ALPR", "SNAPSHOT", "MAIN_STREAM", "SUB_STREAM"])
 
+        # Once the vendor control plane is reachable, commissioning must not
+        # probe ONVIF/RTSP/HTTP as additional media owners.  Those probes can
+        # open their own sessions and make a QY camera look healthy through a
+        # path that the runtime is not allowed to use.  The explicit SDK path
+        # is authoritative; profile discovery happens after SDK login.
+        attempts.extend([
+            {"step": "onvif", "skipped": True, "reason": "vendor SDK owns the camera stream"},
+            {"step": "rtsp", "skipped": True, "reason": "vendor SDK owns the camera stream"},
+            {"step": "http_mjpeg", "skipped": True, "reason": "vendor SDK owns the camera stream"},
+            {"step": "manual_stream", "ok": bool((rtsp_url or "").strip()), "provided": bool((rtsp_url or "").strip())},
+        ])
+        return {
+            "ok": True,
+            "ip": ip,
+            "recommended_adapter": recommended,
+            "camera_type": "VENDOR_SDK_CAMERA",
+            "recognition_mode": "FASTALPR_ONLY",
+            "capabilities": sorted(set(capabilities)),
+            "profiles": profiles,
+            "attempts": attempts,
+            "note": (
+                "The vendor SDK is the sole QY/HVX stream owner. "
+                "Connect through the SDK first; do not add a parallel RTSP, ONVIF, or HTTP reader."
+            ),
+        }
+
     onvif = await discover_camera_streams(ip, username, password, rtsp_url)
     attempts.append({
         "step": "onvif",

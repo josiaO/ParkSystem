@@ -62,8 +62,13 @@ REQUIRED_NATIVE_HOST_MARKERS = (
     REQUIRED_NATIVE_STREAM_MARKERS[1],
     "Net_SetDrawDataOut (primary decoded-frame callback)",
     "Net_GetJpgBuffer (compatibility fallback)",
+    "/video-status/",
 )
-REQUIRED_NATIVE_SDK_MARKERS = REQUIRED_NATIVE_STREAM_MARKERS[2:]
+REQUIRED_NATIVE_SDK_MARKERS = REQUIRED_NATIVE_STREAM_MARKERS[2:] + (
+    "consumer_demand_age_ms",
+    "pump_last_iteration_age_ms",
+    "callback_fps",
+)
 
 FORBIDDEN_WHEEL_PREFIXES = ("pyside6-", "pyside6_addons-", "watchfiles-")
 

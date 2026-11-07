@@ -95,6 +95,12 @@ def test_site_service_start_keeps_child_diagnostics(tmp_path):
     assert spawn.call_args.kwargs["stderr"].name.endswith("site-service-launch.log")
 
 
+def test_diagnostic_heartbeat_uses_the_real_worker_module_and_is_supervised():
+    source = Path("app/api_main.py").read_text(encoding="utf-8")
+    assert "from .recognition_worker import worker_health" in source
+    assert "_supervise_background_loop(\"diagnostic-heartbeat\"" in source
+
+
 def test_site_service_spawn_failure_does_not_start_an_in_process_api(tmp_path):
     config = DeploymentConfig(configured=True, role=SITE_SERVER, installation_id="i", server_id="s")
     with patch.object(launch, "_port_open", return_value=False), \

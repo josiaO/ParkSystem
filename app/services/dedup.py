@@ -15,7 +15,11 @@ class EventDeduper:
 
     def key(self, *, camera_id: int, plate: str = "", image_id: int = 0, fingerprint: str = "") -> str:
         plate = normalize_plate(plate)
-        if fingerprint:
+        # QY realtime callbacks legitimately reuse image_id=0.  A host
+        # capture token is the immutable identity for that case; do not fold
+        # two different callbacks into one just because the plate text is
+        # equal for a moment.
+        if fingerprint and not image_id:
             return f"{camera_id}:fp:{fingerprint}"
         if image_id:
             return f"{camera_id}:{image_id}"

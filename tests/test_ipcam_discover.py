@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
+from app.services.camera_onboard import probe_connection
 from app.services.ipcam_discover import adapter_for, fingerprint_http, generic_discovery_row
 from app.services.site_cameras import camera_spec_for_ip, discovery_row, scan_prefix
 
@@ -64,6 +65,23 @@ class IpcamDiscoverTests(unittest.TestCase):
 
         with patch("app.services.ipcam_discover.httpx.AsyncClient", return_value=_Client()):
             self.assertEqual(asyncio.run(fingerprint_http("10.0.0.9")), "hikvision")
+
+    def test_vendor_onboarding_does_not_probe_competing_media_paths(self):
+        async def vendor_tcp(ip, port, timeout=1.0):
+            return int(port) == 30000
+
+        with patch("app.services.camera_onboard.tcp_open", new=vendor_tcp), \
+             patch("app.services.camera_onboard.discover_camera_streams", new=unittest.mock.AsyncMock(side_effect=AssertionError("ONVIF probe opened beside QY"))), \
+             patch("app.services.camera_onboard.probe", new=unittest.mock.AsyncMock(side_effect=AssertionError("RTSP probe opened beside QY"))), \
+             patch("app.services.camera_onboard.grab_http_snapshot", new=unittest.mock.AsyncMock(side_effect=AssertionError("HTTP probe opened beside QY"))):
+            result = asyncio.run(probe_connection(ip="10.0.0.92"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["recommended_adapter"], "hvx")
+        self.assertEqual([attempt["step"] for attempt in result["attempts"]], [
+            "vendor_adapter", "onvif", "rtsp", "http_mjpeg", "manual_stream",
+        ])
+        self.assertTrue(all(attempt.get("skipped") for attempt in result["attempts"][1:4]))
 
 
 if __name__ == "__main__":
