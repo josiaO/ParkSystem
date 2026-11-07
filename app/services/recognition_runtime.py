@@ -286,6 +286,15 @@ class CameraRecognitionLane:
         with self._lock:
             self.generation += 1
             self.inflight = None
+            # Frames accepted before a media reconnect belong to the old
+            # source generation. Do not let them be admitted after recovery.
+            self.mailbox = LatestFrameBuffer("ai-mailbox", maxsize=1)
+            self.last_accepted_seq = 0
+            self.last_accepted_generation = 0
+            self.last_frame_at = 0.0
+            self.last_frame_seq = 0
+            self.last_plate = ""
+            self.last_plate_at = 0.0
             self.recognition_stalls += 1
             self.recognition_restarts += 1
             return self.generation
@@ -546,6 +555,14 @@ class RecognitionRuntime:
         generation = lane.recover()
         self.scheduler.force_release(camera_id)
         return generation
+
+    def recover_if_known(self, camera_id: int) -> int | None:
+        """Invalidate a lane only when this process already owns it."""
+        camera_id = int(camera_id)
+        with self._lock:
+            if camera_id not in self._lanes:
+                return None
+        return self.recover(camera_id)
 
     def watchdog_once(self, stall_seconds: float | None = None) -> list[int]:
         from app.config import settings

@@ -305,6 +305,9 @@ def parse_image_user_info(blob: bytes) -> dict:
         "score": int(blob[0x40]) if len(blob) > 0x40 else None,
         "have_vehicle": bool(blob[0x25]) if len(blob) > 0x25 else False,
         "snap_type": int(blob[0x24]) if len(blob) > 0x24 else None,
+        "camera_timestamp": bytes(blob[0x26:0x38]).split(b"\x00", 1)[0].decode("ascii", "ignore"),
+        "vehicle_id": int.from_bytes(blob[0x3C:0x40], "little") if len(blob) >= 0x40 else 0,
+        "snapshot_index": int(blob[0x43]) if len(blob) > 0x43 else 0,
     }
 
 
@@ -597,6 +600,9 @@ class HVXSDK:
                 "crop_bytes": previous.get("crop_bytes") or 0,
                 "have_vehicle": True if plate_box_usable(box) else bool(previous.get("have_vehicle")),
                 "snap_type": previous.get("snap_type"),
+                "camera_timestamp": parsed.get("camera_timestamp") or previous.get("camera_timestamp", ""),
+                "vehicle_id": int(parsed.get("vehicle_id") or previous.get("vehicle_id") or 0),
+                "snapshot_index": int(parsed.get("snapshot_index") or previous.get("snapshot_index") or 0),
             }
             event = retain_plate_box(previous, event)
             self._last_capture[handle] = event
@@ -645,6 +651,9 @@ class HVXSDK:
                     "score": int(info.ucScore),
                     "have_vehicle": bool(int(info.ucHaveVehicle)),
                     "snap_type": int(info.ucSnapType),
+                    "camera_timestamp": bytes(info.acSnapTime).split(b"\x00", 1)[0].decode("ascii", "ignore"),
+                    "vehicle_id": int(info.uiVehicleId),
+                    "snapshot_index": int(info.ucSnapshotIndex),
                 }
             plate = _decode_plate(parsed.get("plate_raw") or b"")
             score = parsed.get("score")
@@ -674,10 +683,13 @@ class HVXSDK:
             "crop_bytes": len(crop),
             "have_vehicle": have_vehicle,
             "snap_type": snap_type,
+            "camera_timestamp": parsed.get("camera_timestamp", "") if pt_info else "",
+            "vehicle_id": int(parsed.get("vehicle_id") or 0) if pt_info else 0,
+            "snapshot_index": int(parsed.get("snapshot_index") or 0) if pt_info else 0,
         }
         key = int(handle)
         with self._lock:
-            video_detect = dict(self._video_detect_configs.get(key) or {})
+            video_detect = dict(getattr(self, "_video_detect_configs", {}).get(key) or {})
             if video_detect:
                 # Keep the camera's native geometry with the transient event.
                 # The server can use it for diagnostics and evidence audit,
@@ -1070,6 +1082,8 @@ class HVXSDK:
         condition = getattr(self, "_live_condition", None)
         with self._lock:
             self._live_requested_at[handle] = time.monotonic()
+            diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
+            diagnostics["consumer_demand_at"] = self._live_requested_at[handle]
             while condition is not None:
                 current = max(
                     int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0),
@@ -1126,8 +1140,10 @@ class HVXSDK:
                 records = [value for (camera, _), value in self._event_media.items()
                            if camera == int(handle) and value[0] == int(image_id)]
                 return records[0][index] if len(records) == 1 else b""
-            latest = self._last_event_jpeg if index == 1 else self._last_event_crop
-            return latest.get(int(handle), b"")
+            # A missing identity must fail closed.  Returning the latest car
+            # image here can bind one callback's plate to another callback's
+            # media, especially because QY uses image_id=0 for realtime reads.
+            return b""
 
     def event_jpeg_for(self, handle: int, image_id: int | None = None, *, capture_token=None) -> bytes:
         return self._event_image(handle, image_id, capture_token, 1)
@@ -1397,25 +1413,53 @@ class HVXSDK:
             with self._video_control(handle):
                 return self._start_video(handle, stream_type)
         try:
-            return self._call_video_ui(start)
+            try:
+                return self._call_video_ui(start, handle=handle, action="start_video")
+            except TypeError as exc:
+                # Keep lightweight test/maintenance shims that implement the
+                # old one-argument hook compatible with the timed diagnostics
+                # hook added above.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                return self._call_video_ui(start)
         except Exception as exc:
             self._note_video(handle, control_error=str(exc))
             raise
 
-    def _call_video_ui(self, operation):
+    def _call_video_ui(self, operation, *, handle: int | None = None, action: str = "video-control"):
+        started = time.monotonic()
+
+        def note(**fields):
+            if handle is None:
+                return
+            self._note_video(
+                int(handle),
+                control_action=action,
+                control_duration_ms=round(max(0.0, time.monotonic() - started) * 1000, 1),
+                **fields,
+            )
+
         if threading.current_thread() is self._ui_thread:
-            return operation()
+            try:
+                value = operation()
+            except Exception as exc:
+                note(control_result="error", control_error=str(exc)[:240])
+                raise
+            note(control_result="ok")
+            return value
         self._ensure_ui_thread()
         ready = threading.Event()
         result = {}
         with self._ui_submit_lock:
             now = time.monotonic()
             if now < self._ui_control_not_before:
+                note(control_result="busy", control_error="recovery holdoff")
                 raise HVXSDKError("Video control is busy; previous decoder recovery is still unwinding")
             try:
                 self._ui_commands.put_nowait((operation, ready, result))
             except queue.Full:
                 self._ui_control_not_before = now + 2.0
+                note(control_result="busy", control_error="control queue full")
                 raise HVXSDKError("Video control is busy")
             if not ready.wait(5.0):
                 # The UI thread may still be inside a vendor call. Mark this
@@ -1423,9 +1467,12 @@ class HVXSDK:
                 # for it to be discarded; never stack another Net_StartVideo.
                 result["cancelled"] = True
                 self._ui_control_not_before = time.monotonic() + 6.0
+                note(control_result="timeout", control_error="UI thread did not finish within 5 seconds")
                 raise HVXSDKError("Video control timed out; see hvx-host.log")
             if "error" in result:
+                note(control_result="error", control_error=str(result["error"])[:240])
                 raise result["error"]
+            note(control_result="ok")
             return result.get("value")
 
     def _video_lock(self, handle: int):
@@ -1504,6 +1551,17 @@ class HVXSDK:
             seq = int(self._draw_frame_seq.get(handle, 0)) + 1
             self._draw_frame_seq[handle] = seq
             self._draw_frames[handle] = (raw, width, height, bit_count, stride, -1 if int(bmi_height) > 0 else 1)
+            diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
+            callback_now = time.monotonic()
+            callback_first = float(diagnostics.get("callback_window_at") or callback_now)
+            callback_count = int(diagnostics.get("callback_window_frames") or 0) + 1
+            diagnostics.update(
+                callback_last_at=callback_now,
+                callback_frames=seq,
+                callback_window_at=callback_first,
+                callback_window_frames=callback_count,
+                callback_fps=round(callback_count / max(callback_now - callback_first, 0.001), 1),
+            )
         self._note_video(
             handle,
             capture_mode="sdk_draw_data",
@@ -1538,6 +1596,7 @@ class HVXSDK:
         if not frame or seq <= encoded_seq:
             return b""
         raw, width, height, bit_count, stride, orientation = frame
+        encode_started = time.monotonic()
         try:
             from PIL import Image
 
@@ -1549,6 +1608,7 @@ class HVXSDK:
         except Exception as exc:
             self._note_video(handle, draw_data_error=type(exc).__name__)
             return b""
+        encode_ms = round((time.monotonic() - encode_started) * 1000.0, 1)
         now = time.monotonic()
         with self._lock:
             if handle in self._video_handles:
@@ -1558,6 +1618,14 @@ class HVXSDK:
                 getattr(self, "_live_frame_seq", {})[handle] = seq
                 diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
                 frames_received = int(diagnostics.get("frames_received") or 0) + 1
+                first = float(diagnostics.get("jpeg_window_at") or now)
+                count = int(diagnostics.get("jpeg_window_frames") or 0) + 1
+                diagnostics.update(
+                    jpeg_encode_ms=encode_ms,
+                    jpeg_production_fps=round(count / max(now - first, 0.001), 1),
+                    jpeg_window_at=first,
+                    jpeg_window_frames=count,
+                )
             else:
                 frames_received = 0
             condition = getattr(self, "_live_condition", None)
@@ -1583,11 +1651,30 @@ class HVXSDK:
         row["function_list_flags"] = int(function_list.get("flags") or 0)
         row["capability_stream_type"] = int(function_list.get("stream_type") or 0)
         row["function_list_rc"] = function_list.get("rc")
-        received_at = row.pop("last_jpeg_at", None)
-        read_started = row.pop("jpeg_read_started_at", None)
+        received_at = row.get("last_jpeg_at")
+        read_started = row.get("jpeg_read_started_at")
         row["pending_read_ms"] = round(max(0.0, now - read_started) * 1000, 1) if row.get("jpeg_read_pending") and read_started is not None else None
         age = max(0.0, now - received_at) if received_at is not None else None
         row["frame_age_ms"] = round(age * 1000, 1) if age is not None else None
+        callback_at = row.get("callback_last_at")
+        jpeg_at = row.get("last_jpeg_at")
+        demand_at = row.get("consumer_demand_at")
+        pump_at = row.get("pump_last_iteration_at")
+        row["callback_age_ms"] = round(max(0.0, now - callback_at) * 1000, 1) if callback_at else None
+        row["jpeg_age_ms"] = round(max(0.0, now - jpeg_at) * 1000, 1) if jpeg_at else None
+        row["consumer_demand_age_ms"] = round(max(0.0, now - demand_at) * 1000, 1) if demand_at else None
+        row["pump_last_iteration_age_ms"] = round(max(0.0, now - pump_at) * 1000, 1) if pump_at else None
+        row["pump_liveness"] = bool(pump_at and now - pump_at <= 2.0)
+        row["callback_frames"] = int(row.get("callback_frames") or row.get("draw_data_frames") or 0)
+        row["callback_fps"] = float(row.get("callback_fps") or 0.0)
+        row["jpeg_production_fps"] = float(row.get("jpeg_production_fps") or 0.0)
+        row["recovery_reason"] = str(row.get("recovery_reason") or row.get("recovery_error") or "")[:200]
+        for private_key in (
+            "last_jpeg_at", "jpeg_read_started_at", "callback_last_at",
+            "consumer_demand_at", "pump_last_iteration_at", "callback_window_at",
+            "jpeg_window_at",
+        ):
+            row.pop(private_key, None)
         row.setdefault("frames_received", 0)
         row["state"] = ("LIVE" if age is not None and age <= 5.0 else "START_FAILED"
                         if row.get("start_rc") not in (None, DC_NO_ERROR) else "NO_FRAMES")
@@ -1721,7 +1808,12 @@ class HVXSDK:
                     return int(self.dll.Net_StopVideo(int(handle)))
                 return 0
         try:
-            return self._call_video_ui(stop)
+            try:
+                return self._call_video_ui(stop, handle=handle, action="stop_video")
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                return self._call_video_ui(stop)
         except Exception as exc:
             self._note_video(handle, control_error=str(exc))
             return -1
@@ -2167,6 +2259,10 @@ class HVXSDK:
                             condition.notify_all()
         while self._video_running:
             started = time.monotonic()
+            with self._lock:
+                diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
+                diagnostics["pump_last_iteration_at"] = started
+                diagnostics["pump_iterations"] = int(diagnostics.get("pump_iterations") or 0) + 1
             with self._lock:
                 active = handle in self._video_handles
                 retrying = handle in getattr(self, "_video_retry_handles", set())

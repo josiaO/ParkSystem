@@ -61,6 +61,79 @@ def _ai_review_stats() -> dict:
         return {"enabled": False, "error": str(exc)[:120]}
 
 
+def _camera_freshness() -> dict:
+    """Expose live-camera freshness separately from process readiness.
+
+    `/health/ready` remains a core startup probe so an unconfigured site can
+    finish setup, while this section prevents a healthy HTTP process from
+    being mistaken for healthy camera lanes.
+    """
+    try:
+        from app.services.preview import live_metrics
+
+        rows = live_metrics()
+        required_ids: set[int] = set()
+        try:
+            from app.db import SessionLocal
+            from app.models import Camera
+            from app.services.node_scope import camera_active_on_this_installation
+
+            with SessionLocal() as db:
+                for camera in db.query(Camera).filter(Camera.enabled == True).all():  # noqa: E712
+                    if camera_active_on_this_installation(camera, db=db):
+                        required_ids.add(int(camera.id))
+        except Exception:
+            # Health must remain available during first-run/migration. An
+            # unavailable registry means operational requirements are unknown,
+            # not that every lane is healthy.
+            required_ids = set()
+        observed = [row for row in rows if row.get("pumping") or row.get("viewers")]
+        stale = [
+            row for row in observed
+            if row.get("frozen") or row.get("connection_state") not in {"STREAMING", "READY"}
+            or row.get("live_frame_age_ms") is None
+            or float(row.get("live_frame_age_ms") or 0) > 5000
+        ]
+        by_id = {int(row.get("camera_id")): row for row in rows if row.get("camera_id") is not None}
+        required_stale = [
+            camera_id for camera_id in sorted(required_ids)
+            if camera_id not in by_id
+            or camera_id not in {int(row.get("camera_id")) for row in observed}
+            or int(camera_id) in {int(row.get("camera_id")) for row in stale}
+        ]
+        operational_status = (
+            "degraded" if required_stale or stale
+            else "healthy" if required_ids or observed
+            else "not_observed"
+        )
+        return {
+            "status": operational_status,
+            "observed_count": len(observed),
+            "stale_camera_ids": [row.get("camera_id") for row in stale],
+            "required_camera_ids": sorted(required_ids),
+            "required_stale_camera_ids": required_stale,
+            "operational_ready": not required_stale and bool(required_ids or observed),
+            "rows": [
+                {
+                    "camera_id": row.get("camera_id"),
+                    "required": int(row.get("camera_id") or 0) in required_ids,
+                    "state": row.get("connection_state"),
+                    "frame_age_ms": row.get("live_frame_age_ms"),
+                    "fps": row.get("fps"),
+                    "frozen": bool(row.get("frozen")),
+                    "stall_classification": row.get("stall_classification"),
+                }
+                for row in observed
+            ],
+        }
+    except Exception as exc:
+        return {
+            "status": "unknown", "observed_count": 0, "stale_camera_ids": [],
+            "required_camera_ids": [], "required_stale_camera_ids": [],
+            "operational_ready": False, "error": str(exc)[:160],
+        }
+
+
 def _payments_stats() -> dict:
     try:
         from app.services.mobile_payments import payments_health
@@ -163,6 +236,18 @@ def ready() -> dict:
         hvx_ok = r.status_code == 200
     except Exception:
         hvx_ok = False
+    camera_freshness = _camera_freshness()
+    try:
+        from app.recognition_worker import worker_health
+
+        recognition = worker_health()
+        recognition_summary = {
+            "ok": bool(recognition.get("ok")),
+            "state": recognition.get("state"),
+            "heartbeat_age_seconds": recognition.get("heartbeat_age_seconds"),
+        }
+    except Exception as exc:
+        recognition_summary = {"ok": False, "state": "UNKNOWN", "error": str(exc)[:160]}
     state = startup_state()
     core = db_ok
     hvx_required = hvx_host_supported()
@@ -192,6 +277,8 @@ def ready() -> dict:
             ),
         },
         "platform": platform_snapshot(),
+        "camera_freshness": camera_freshness,
+        "recognition": recognition_summary,
         "time": datetime.now(timezone.utc).isoformat(),
     }
     return payload

@@ -125,6 +125,30 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(fitted["y1"], 67)
         self.assertGreater(fitted["x2"], fitted["x1"])
 
+    def test_ocxconfig_detection_polygon_becomes_fastalpr_zone(self):
+        from app.services.camera_framing import native_plate_region_to_roi
+
+        roi = native_plate_region_to_roi(
+            [{"x": 192, "y": 324}, {"x": 1728, "y": 324},
+             {"x": 1728, "y": 864}, {"x": 192, "y": 864}],
+            image_width=1920,
+            image_height=1080,
+        )
+        self.assertEqual(roi, "0.0200,0.2200,0.9800,0.8800")
+
+    def test_zero_identity_event_media_never_falls_back_to_latest(self):
+        import threading
+        from collections import OrderedDict
+        from tools.hvx_sdk_host.hvx_sdk import HVXSDK
+
+        sdk = HVXSDK.__new__(HVXSDK)
+        sdk._lock = threading.Lock()
+        sdk._event_media = OrderedDict()
+        sdk._last_event_jpeg = {3: b"\xff\xd8old"}
+        sdk._last_event_crop = {3: b"\xff\xd8old-crop"}
+        self.assertEqual(sdk.event_jpeg_for(3), b"")
+        self.assertEqual(sdk.event_crop_for(3), b"")
+
     def test_empty_scene_zc_is_not_a_plate(self):
         from types import SimpleNamespace
         from app.services.alpr import accept_ocr_plate, plate_box_ok

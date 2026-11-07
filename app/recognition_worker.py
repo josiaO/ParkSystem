@@ -192,7 +192,7 @@ def publish_recognition(event: dict) -> dict:
 
 def _publish_frame(event: dict, jpeg: bytes) -> dict:
     """Archive evidence once per consensus event, not on each decoder frame."""
-    from app.services.captures import _crop_from_bbox, _enhance_crop_jpeg, _write_jpeg
+    from app.services.captures import detection_zone_jpeg, _crop_from_bbox, _enhance_crop_jpeg, _write_jpeg
 
     if not event.get("vehicle_detected", True) or not event.get("normalized_plate"):
         raise ValueError("recognition event has no vehicle plate")
@@ -204,8 +204,14 @@ def _publish_frame(event: dict, jpeg: bytes) -> dict:
     if not identifier.isalnum() or len(identifier) > 64:
         raise ValueError("Invalid recognition event ID")
     relative = f"recognition-{identifier}.jpg"
-    saved = _write_jpeg("snapshots", relative, jpeg)
+    snapshot = detection_zone_jpeg(
+        jpeg,
+        detect_roi=event.get("detect_roi"),
+        detect_zoom=event.get("detect_zoom"),
+    ) or jpeg
+    saved = _write_jpeg("snapshots", relative, snapshot)
     event["image_ref"] = f"/media/{saved}"
+    event["snapshot_zone"] = True
     crop = _crop_from_bbox(jpeg, event.get("bbox"))
     crop = _enhance_crop_jpeg(crop) or crop
     if crop:
@@ -639,7 +645,7 @@ async def _infer_camera(
                     stats["timeline"] = {"visit_id": lane.visit.visit_id, "camera_id": camera_id,
                                          "direction": camera.get("lane_direction", "ENTRY")}
                     mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
-            phase = arrival.observe(best_arrival_box(boxes), time.monotonic())
+            phase = arrival.observe(best_arrival_box(boxes, detect_roi=detect_roi), time.monotonic())
             stats["arrival"] = phase
             if phase == "absent":
                 runtime.finish(ticket, plate="")
@@ -769,6 +775,8 @@ async def _infer_camera(
                 event["visit_id"] = lane.visit.visit_id
                 event["frame_seq"] = ticket.frame_seq
                 event["generation"] = ticket.generation
+                event["detect_roi"] = detect_roi
+                event["detect_zoom"] = detect_zoom
                 await run_inference(_publish_frame, event, ticket.jpeg)
                 mark("event_persisted", timeline)
                 stats["published"] = int(stats.get("published") or 0) + 1
@@ -921,10 +929,11 @@ async def _loop() -> None:
                                      else "READY" if warmup_status.get("ready") else "WARMING"),
                            "retiring_cameras": sorted(retiring),
                            "cameras": [{key: value for key, value in tasks[cid][2].items() if key != "latency_samples"} for cid in sorted(tasks)]})
-            # A worker with no assigned cameras is an idle control plane. Keep
-            # configuration recovery responsive, but avoid opening the remote
-            # PostgreSQL session every two seconds forever.
-            await asyncio.sleep(2.0 if candidate_camera_ids else 10.0)
+            # The heartbeat is considered stale after six seconds. Keep the
+            # idle worker cadence below that threshold as well; a worker with
+            # no assigned cameras must still prove that its control loop is
+            # alive and able to notice configuration changes.
+            await asyncio.sleep(2.0)
     finally:
         for stop, task, _stats in tasks.values():
             stop.set()

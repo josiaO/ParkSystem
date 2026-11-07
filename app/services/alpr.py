@@ -989,11 +989,23 @@ def recognize_plate_crop_bytes(jpeg: bytes, *, camera_label: str = "plate-crop")
         bgr = decode_alpr_image(jpeg)
         engine = _load_engine()
         rectified, rectified_used = _rectify_plate_crop(bgr)
-        ocr_input = _prepare_ocr_crop(rectified)
-        ocr = engine.ocr.predict(ocr_input)
-        text, conf = _ocr_result_text(ocr)
-        plate, _rank = _apply_country_profile(text, conf)
-        raw_conf = max(0.0, min(float(conf or 0), 1.0))
+        # Night/IR crops need a deliberately bounded second pass.  The old
+        # direct-crop path enhanced once but never retried a weak result, so a
+        # dark native crop could be displayed as evidence yet fail OCR.
+        attempts = [_prepare_ocr_crop(rectified, enhance=False)]
+        if _low_light(rectified):
+            attempts.append(_prepare_ocr_crop(rectified, enhance=True))
+        text, conf, plate, raw_conf = "", 0.0, "", 0.0
+        for index, ocr_input in enumerate(attempts):
+            ocr = engine.ocr.predict(ocr_input)
+            candidate_text, candidate_conf = _ocr_result_text(ocr)
+            candidate_plate, _rank = _apply_country_profile(candidate_text, candidate_conf)
+            candidate_raw_conf = max(0.0, min(float(candidate_conf or 0), 1.0))
+            candidate_ok = accept_ocr_plate(candidate_plate, candidate_raw_conf)
+            if candidate_ok and (not plate or candidate_raw_conf > raw_conf):
+                text, conf, plate, raw_conf = candidate_text, candidate_conf, candidate_plate, candidate_raw_conf
+            elif index == 0 and not plate:
+                text, conf, plate, raw_conf = candidate_text, candidate_conf, candidate_plate, candidate_raw_conf
         if not accept_ocr_plate(plate, raw_conf):
             return {
                 "ok": True, "backend": "fastalpr", "pipeline": "crop_ocr",
@@ -1071,6 +1083,9 @@ def locate_plate_boxes(
         box["image_width"] = width
         box["image_height"] = height
         box["confidence"] = _detection_score(item)
+        from app.services.camera_framing import box_in_detection_zone
+        if not box_in_detection_zone(box, detect_roi):
+            continue
         boxes.append(box)
     boxes.sort(
         key=lambda item: (float(item.get("confidence") or 0), int(item["x2"]) - int(item["x1"])),
@@ -1096,6 +1111,7 @@ def recognize_arrival_bytes(
     save_evidence: bool | None = None,
     detected_boxes: list | None = None,
     decoded_bgr=None,
+    fallback_box: dict | None = None,
 ) -> dict:
     """When a plate is in the zone, crop it and OCR that crop. Never OCR the car.
 
@@ -1105,6 +1121,13 @@ def recognize_arrival_bytes(
     started = time.monotonic()
     if detected_boxes is None:
         boxes, meta = locate_plate_boxes(jpeg, detect_roi=detect_roi, detect_zoom=detect_zoom)
+        # OcxConfig's native rectangle is a capture hint, not the primary
+        # software crop.  It is retained only when the current detector could
+        # not produce a box for this event (for example a Windows model warm-up
+        # or a dark/IR frame).
+        if not boxes and isinstance(fallback_box, dict):
+            boxes = [fallback_box]
+            meta = {**meta, "available": True, "fallback": "ocxconfig-native-box"}
     else:
         boxes, meta = detected_boxes, {"available": True}
     if not meta.get("available"):
@@ -1139,11 +1162,18 @@ def recognize_arrival_bytes(
         return {"ok": False, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [], "best": None, "detail": "could not decode frame"}
     from types import SimpleNamespace
 
+    from app.services.camera_framing import box_in_detection_zone
     valid_boxes = []
     for box in boxes:
         try:
             candidate = SimpleNamespace(**{key: int(box[key]) for key in ("x1", "y1", "x2", "y2")})
-            if plate_box_ok(candidate, int(bgr.shape[1]), int(bgr.shape[0])):
+            if (
+                plate_box_ok(candidate, int(bgr.shape[1]), int(bgr.shape[0]))
+                and box_in_detection_zone(
+                    {**box, "image_width": int(bgr.shape[1]), "image_height": int(bgr.shape[0])},
+                    detect_roi,
+                )
+            ):
                 valid_boxes.append(box)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue

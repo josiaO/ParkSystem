@@ -234,6 +234,9 @@ def native_from_sdk_capture(capture: dict | None) -> dict:
         "crop_bytes": capture.get("crop_bytes") or 0,
         "have_vehicle": bool(capture.get("have_vehicle")) or rect is not None,
         "snap_type": capture.get("snap_type"),
+        "camera_timestamp": str(capture.get("camera_timestamp") or ""),
+        "vehicle_id": int(capture.get("vehicle_id") or 0),
+        "snapshot_index": int(capture.get("snapshot_index") or 0),
         # Read-only OcxConfig geometry carried by the x86 SDK host.  These
         # values are camera coordinates, not a software ROI; preserving them
         # lets the server audit that native capture happened inside the

@@ -19,6 +19,7 @@ class FrameSample:
     decode_at: float = 0.0
     source_ts: float | None = None
     camera_id: int = 0
+    generation: int = 1
 
     def age_ms(self, now: float | None = None) -> float:
         stamp = self.received_at or 0.0
@@ -50,6 +51,7 @@ class LatestFrameBuffer:
         url: str = "",
         source_ts: float | None = None,
         camera_id: int = 0,
+        generation: int = 1,
     ) -> FrameSample:
         now = time.monotonic()
         with self._lock:
@@ -64,6 +66,7 @@ class LatestFrameBuffer:
                 decode_at=now,
                 source_ts=source_ts,
                 camera_id=int(camera_id or 0),
+                generation=max(1, int(generation or 1)),
             )
             self._items.append(sample)
             while len(self._items) > self.maxsize:
@@ -104,4 +107,5 @@ class LatestFrameBuffer:
             "seq": latest.seq if latest else 0,
             "age_ms": latest.age_ms(now) if latest else None,
             "source": latest.source if latest else "",
+            "generation": latest.generation if latest else 0,
         }

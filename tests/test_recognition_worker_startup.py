@@ -49,6 +49,14 @@ def test_malformed_worker_timestamp_is_treated_as_stale(tmp_path):
     assert body["heartbeat_age_seconds"] > 6
 
 
+def test_idle_worker_heartbeat_cadence_stays_below_stale_threshold():
+    from pathlib import Path
+
+    source = Path("app/recognition_worker.py").read_text(encoding="utf-8")
+    assert "await asyncio.sleep(2.0)" in source
+    assert "asyncio.sleep(2.0 if candidate_camera_ids else 10.0)" not in source
+
+
 def test_onnx_dll_failure_is_restart_required_not_a_retry_loop():
     from app.recognition_worker import _fatal_native_load_error
 
