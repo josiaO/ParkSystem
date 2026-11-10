@@ -251,6 +251,12 @@ class ArrivalGate:
                 self._stable_since = now
                 self._observed_at = now
                 return "new_vehicle"
+            # Advance the held reference after evaluating the handoff. Without
+            # this, a single vehicle moving gradually through the frame is
+            # compared with its original position forever and eventually
+            # looks like a following vehicle on every lane crossing.
+            if center is not None:
+                self._last = center
             return "held"
         if not box:
             # Detector output is not guaranteed on every decoded frame.  A
