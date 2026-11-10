@@ -1,6 +1,6 @@
 # SmartPark streaming baseline
 
-Date: 2026-11-03 (Africa/Dar_es_Salaam)
+Date: 2026-11-09 (Africa/Dar_es_Salaam)
 
 This baseline is intentionally split between software-only evidence and
 measurements that require the installed Windows cameras. No camera-to-screen
@@ -20,6 +20,8 @@ The current software path has these bounded defaults:
 | Stale admission limit | `settings.recognition_stale_frame_ms` |
 | Media reconnect | per-camera circuit with exponential backoff and jitter |
 | Media generation | increments on decoder recovery; old buffers, preview state, and late publishes are invalidated |
+| MJPEG static-scene heartbeat | one transport heartbeat per second without changing the display sequence |
+| Camera/display isolation | gateway frame and generation observers; no gateway import of preview or recognition |
 | Event idempotency | event ID, visit ID, capture identity, parking entry claim, and database uniqueness |
 
 The following fields are exposed by `/media/gateway`, `/health/details`, and
@@ -48,9 +50,12 @@ precision, recall, missed-vehicle rate, and duplicate-session rate.
 
 | Measurement | Result | Status |
 |---|---|---|
-| Focused streaming/recognition regression suite | 67 passed, 1 warning in 6.06 s (`tests/test_realtime_field_failures.py`, `tests/test_media_acquisition.py`, `tests/test_media_gateway.py`, `tests/test_production_stabilization.py`) | Software-only |
-| Full repository regression suite | Began successfully; local run was interrupted after 109 tests while the first parametrized camera-diagnostics test stalled during setup; cause not established | Must be rerun in CI/Windows-like environment before release |
+| Focused camera/media/recognition regression suite | 147 passed, 1 warning in 13.17 s across the camera contract, media gateway/acquisition/registry, delivery diagnostics, live-pipeline, multi-camera, reconnect, live-view, adapter, and configuration suites | Software-only; VERIFIED with mocks |
+| Desktop/media presentation regression suite | 70 passed, 1 warning in 20.31 s | Software-only; VERIFIED with mocks |
+| Full repository regression suite | 210 tests passed before the local run was manually stopped after 7:11; remaining long-running tests were not completed | Incomplete; not a full-suite sign-off |
 | Synthetic bounded-buffer and stale-result checks | Covered by automated tests | Software-only |
+| Final camera/display regression checks | 44 passed, including static-scene heartbeat, MediaMTX owner handoff, viewer-lease synchronization, bounded acquisition, and generation isolation | Software-only; VERIFIED with mocks |
+| Final Windows payload/packaging checks | 27 passed; payload verifier passed; ZIP integrity passed | Software-only/package integrity |
 | Source codec/FPS per installed camera | Not available in this environment | Windows field measurement required |
 | Camera-to-screen p95 | Not measured; local frame age is insufficient | Physical LED/timestamp procedure required |
 | Recognition admission/completion latency | Instrumented, no field sample attached | Windows replay/field sample required |

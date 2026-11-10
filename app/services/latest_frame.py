@@ -64,7 +64,10 @@ class LatestFrameBuffer:
                 source=source,
                 url=url,
                 decode_at=now,
-                source_ts=source_ts,
+                # ``received_at`` is monotonic for age calculations. The
+                # normalized source timestamp is wall-clock acquisition time
+                # when an upstream source timestamp is unavailable.
+                source_ts=source_ts if source_ts is not None else time.time(),
                 camera_id=int(camera_id or 0),
                 generation=max(1, int(generation or 1)),
             )

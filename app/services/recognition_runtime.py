@@ -611,3 +611,19 @@ def _percentile(samples: list[float], pct: float) -> float | None:
 
 
 runtime = RecognitionRuntime()
+
+
+def _observe_generation(camera_id: int, *, generation: int) -> None:
+    # The media gateway publishes ownership changes without importing this
+    # optional consumer.  A lane is invalidated only if this process owns it.
+    runtime.recover_if_known(camera_id)
+
+
+try:
+    from app.services.media_gateway import register_generation_observer
+
+    register_generation_observer(_observe_generation)
+except Exception:
+    # Recognition can run in an isolated worker/test process without the
+    # display gateway being initialized.
+    pass

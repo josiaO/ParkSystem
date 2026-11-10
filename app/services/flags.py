@@ -102,5 +102,27 @@ def media_mtx_for_camera(camera_id: int, db=None) -> bool:
     return not allow or int(camera_id) in allow
 
 
+def direct_generic_media_allowed() -> bool:
+    """Allow the direct generic reader only outside production."""
+    from app.config import settings
+
+    return str(getattr(settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT").upper() != "PRODUCTION"
+
+
+def validate_media_configuration(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate the production media owner before starting the sidecar."""
+    from app.config import settings
+
+    effective = dict(cfg or _from_settings())
+    production = str(getattr(settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT").upper() == "PRODUCTION"
+    errors: list[str] = []
+    if production:
+        if not effective.get("media_gateway_enabled"):
+            errors.append("production requires media_gateway_enabled=true")
+        if str(effective.get("live_view_provider") or "").upper() != LIVE_VIEW_MEDIAMTX:
+            errors.append("production requires live_view_provider=MEDIAMTX")
+    return {"valid": not errors, "errors": errors, "production": production, "config": effective}
+
+
 def native_alpr_enabled(db=None) -> bool:
     return bool(flags(db).get("native_alpr_enabled", True))

@@ -49,6 +49,17 @@ REQUIRED_HOST = (
     "run_hvx_host.bat",
     "hvx_bindings.json",
 )
+REQUIRED_HOST_PARTS = (
+    "00_context.py",
+    "10_types.py",
+    "15_protocol.py",
+    "20_connection.py",
+    "30_captures.py",
+    "40_video.py",
+    "50_gpio.py",
+    "60_facade.py",
+    "__init__.py",
+)
 
 REQUIRED_NATIVE_STREAM_MARKERS = (
     '\"stream_backend\": \"ocxconfig_netsdk\"',
@@ -199,6 +210,10 @@ def verify_payload(payload: Path) -> list[str]:
     for name in REQUIRED_HOST:
         if not (host / name).is_file():
             errors.append(f"HVX host file missing: {name}")
+    host_parts = host / "hvx_sdk_parts"
+    for name in REQUIRED_HOST_PARTS:
+        if not (host_parts / name).is_file():
+            errors.append(f"HVX host split implementation missing: hvx_sdk_parts/{name}")
     host_source = host / "hvx_host.py"
     sdk_source = host / "hvx_sdk.py"
     if host_source.is_file():
@@ -207,7 +222,12 @@ def verify_payload(payload: Path) -> list[str]:
             if marker not in text:
                 errors.append(f"HVX host does not advertise OcxConfig latest-frame delivery: {marker}")
     if sdk_source.is_file():
-        text = sdk_source.read_text(encoding="utf-8")
+        # The public shim intentionally stays small after the refactor. Scan
+        # its split implementation too; otherwise a valid kit is rejected
+        # merely because the verifier knows only the legacy filename.
+        sources = [sdk_source]
+        sources.extend(sorted((host / "hvx_sdk_parts").glob("*.py")))
+        text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sources)
         for marker in REQUIRED_NATIVE_SDK_MARKERS:
             if marker not in text:
                 errors.append(f"HVX SDK host missing native streaming guard: {marker}")
@@ -243,8 +263,12 @@ def verify_payload(payload: Path) -> list[str]:
     if not decoder.is_file():
         errors.append("recognition decoder missing: app/services/recognition_decoder.py")
     worker = payload / "app" / "recognition_worker.py"
-    if worker.is_file() and "recognition_decoder" not in worker.read_text(encoding="utf-8"):
-        errors.append("recognition worker in the kit does not use the local MediaMTX decoder")
+    if worker.is_file():
+        worker_sources = [worker]
+        worker_sources.extend(sorted((payload / "app" / "recognition_worker").glob("*.py")))
+        worker_text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in worker_sources)
+        if "recognition_decoder" not in worker_text:
+            errors.append("recognition worker in the kit does not use the local MediaMTX decoder")
     lab = payload / "tools" / "camera_lab.py"
     if not lab.is_file():
         errors.append("camera lab missing: tools/camera_lab.py")

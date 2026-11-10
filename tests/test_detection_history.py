@@ -52,3 +52,26 @@ def test_stale_mjpeg_closes_cleanly_and_requests_camera_only_restart():
             restart.assert_called_once_with(4)
 
     asyncio.run(exercise())
+
+
+def test_static_mjpeg_sends_transport_heartbeat_without_new_display_sequence():
+    async def timeout(awaitable, *_args, **_kwargs):
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    async def exercise():
+        jpeg = b"\xff\xd8static\xff\xd9"
+        row = preview.PreviewState(jpeg=jpeg, seq=1)
+        with patch.object(preview, "get_state", return_value=row), \
+             patch.object(preview, "live_is_current", return_value=True), \
+             patch.object(preview, "MJPEG_HEARTBEAT_SECONDS", 0), \
+             patch.object(preview.asyncio, "wait_for", new=timeout):
+            stream = preview.mjpeg_from_cache(4)
+            first = await stream.__anext__()
+            second = await stream.__anext__()
+            assert jpeg in first
+            assert second == first
+            assert row.seq == 1
+            await stream.aclose()
+
+    asyncio.run(exercise())

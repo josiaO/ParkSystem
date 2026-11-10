@@ -64,6 +64,16 @@ Each connection's `video` includes:
 - `jpeg_rc`, `jpeg_error`, `jpeg_bytes`, `jpeg_attempts`, and `jpeg_read_ms`.
 - `jpeg_read_pending` and `pending_read_ms` for a blocked native JPEG read.
 - `frames_received`, `frame_age_ms`, `state`, and `control_error`.
+- `capture_mode`, `draw_data_primary`, `callback_fps`, `jpeg_production_fps`,
+  `jpeg_encode_ms`, `window_capture_ms`, and the source/output JPEG dimensions.
+
+The QY preview profile defaults to a 1280px maximum width, quality 78, and 15
+FPS. It is display-only: native recognition callbacks are not downscaled. The
+profile can be tuned for a field PC with `SMARTPARK_HVX_JPEG_MAX_WIDTH`,
+`SMARTPARK_HVX_JPEG_QUALITY`, and `SMARTPARK_HVX_JPEG_FPS`. A healthy camera
+should report `capture_mode=sdk_draw_data` and `draw_data_primary=true`.
+`capture_mode=play_sdk_hwnd` identifies the slower PrintWindow/BitBlt
+compatibility path.
 
 The running Site Service exposes the same measurements per camera through
 `/health/details` and `/health/ready` under the media rows:
@@ -84,7 +94,7 @@ from `camera_freshness.operational_ready`; a stale required lane is listed in
 For a low-impact Windows host-only snapshot, use:
 
 ```powershell
-Invoke-RestMethod 'http://127.0.0.1:30000/video-status/0' | ConvertTo-Json -Depth 8
+Invoke-RestMethod 'http://127.0.0.1:8765/video-status/0' | ConvertTo-Json -Depth 8
 ```
 
 Replace `0` with the SDK handle. The endpoint reads cached state and does not
