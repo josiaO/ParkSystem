@@ -246,6 +246,7 @@ class HybridFusionServiceTests(unittest.TestCase):
             out = asyncio.run(hybrid_fusion.offer_native(None, self.camera, {"plate": "ABC123", "confidence": 0.9}, jpeg=b"\xff\xd8x\xff\xd9"))
         self.assertEqual(len(out), 1)
         self.assertEqual(self.persisted[0]["capture"]["fusion"]["method"], "NATIVE_ONLY")
+        self.assertNotIn(self.camera.id, hybrid_fusion._evidence)
 
     def test_flush_decides_waiting_native_after_timeout(self):
         coordinator = hybrid_fusion.coordinator()

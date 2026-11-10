@@ -219,17 +219,16 @@ def _recent_native_duplicate(
     window = float(getattr(settings, "native_repeat_window_seconds", 8.0) or 8.0)
     if age < 0 or age > window:
         return None
-    current_box = native.get("bbox") if isinstance(native.get("bbox"), dict) else None
-    previous_box = latest.bbox if isinstance(latest.bbox, dict) else None
-    if current_box is None or previous_box is None or _box_iou(current_box, previous_box) >= 0.45:
-        log.info(
-            "native capture duplicate suppressed camera_id=%s plate=%s age_seconds=%.2f",
-            camera.id,
-            plate,
-            age,
-        )
-        return latest
-    return None
+    # QY realtime image IDs and plate boxes can change on every callback while
+    # one car is moving. The repeat window is the reliable physical boundary;
+    # requiring box overlap allowed one car to create several captures.
+    log.info(
+        "native capture duplicate suppressed camera_id=%s plate=%s age_seconds=%.2f",
+        camera.id,
+        plate,
+        age,
+    )
+    return latest
 
 def persist_event(
     db: Session,

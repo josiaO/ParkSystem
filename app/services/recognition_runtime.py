@@ -86,6 +86,20 @@ class LaneVisit:
         if now is not None:
             self.last_empty_at = now
 
+    def adopt_visit(self, visit_id: str, now: float | None = None) -> bool:
+        """Adopt a visit identity created by another recognition process."""
+        visit_id = str(visit_id or "").strip()
+        if not visit_id or visit_id == self.visit_id:
+            return False
+        moment = time.monotonic() if now is None else float(now)
+        self.reset(moment)
+        self.visit_id = visit_id
+        self.state = VEHICLE_PRESENT
+        self.vehicle_present = True
+        self.last_presence_at = moment
+        self.last_empty_at = 0.0
+        return True
+
     def observe(
         self,
         *,
