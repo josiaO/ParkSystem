@@ -202,6 +202,20 @@ def test_sdk_read_cannot_overlap_decoder_restart():
     native.assert_called_once()
 
 
+def test_live_http_sequence_survives_video_stop_start():
+    sdk = sdk_reader(Mock(return_value=0))
+    sdk._video_handles = {0}
+    sdk._live_frame_seq = {0: 42}
+    sdk._video_diagnostics = {}
+    sdk._call_video_ui = lambda operation: operation()
+    sdk.dll.Net_StopVideo = Mock(return_value=0)
+
+    assert sdk.stop_video(0) == 0
+    # Draw/window counters are decoder-local, but the HTTP sequence must not
+    # go backwards while a reconnect reuses the same SDK handle.
+    assert sdk._live_frame_seq[0] == 42
+
+
 def test_sdk_diagnostic_records_native_exceptions_without_crashing():
     sdk = sdk_reader(Mock(side_effect=OSError("decoder failed")))
     assert sdk._get_jpg_buffer(0) == b""

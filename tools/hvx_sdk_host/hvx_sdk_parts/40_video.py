@@ -88,7 +88,13 @@ class _HVXVideoMixin:
                 self._draw_encoded_seq[handle] = seq
                 self._last_live_jpeg[handle] = jpeg
                 self._live_received_at[handle] = now
-                getattr(self, "_live_frame_seq", {})[handle] = seq
+                # ``_draw_frame_seq`` is local to one PlaySdk decoder
+                # generation. The HTTP client sequence must remain monotonic
+                # across a stop/start of the same handle or it can keep asking
+                # for ``after=<old high value>`` forever after the new decoder
+                # starts again at sequence 1.
+                live_seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0)
+                getattr(self, "_live_frame_seq", {})[handle] = max(live_seq + 1, seq)
                 diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
                 frames_received = int(diagnostics.get("frames_received") or 0) + 1
                 first = float(diagnostics.get("jpeg_window_at") or now)
@@ -119,7 +125,68 @@ class _HVXVideoMixin:
         )
         return jpeg
 
-    def _recover_video_decoder(self, handle: int) -> bool:
+    def _begin_video_recovery(self, handle: int, reason: str) -> bool:
+        """Claim one recovery operation for one camera.
+
+        The PlaySdk controls share a Windows owner thread, but recovery
+        ownership must still be per camera.  A timed-out native call can keep
+        running after its HTTP caller has returned; this claim prevents that
+        camera's pump from queueing another stop/start pair behind it.
+        """
+        handle = int(handle)
+        now = time.monotonic()
+        with self._lock:
+            if handle not in self._video_handles:
+                return False
+            inflight = getattr(self, "_video_recovery_inflight", None)
+            if inflight is None:
+                inflight = set()
+                self._video_recovery_inflight = inflight
+            next_at = float(getattr(self, "_video_recovery_at", {}).get(handle, 0.0) or 0.0)
+            if handle in inflight or now < next_at:
+                self._video_diagnostics.setdefault(handle, {}).update(
+                    recovery_state="BUSY",
+                    recovery_reason=str(reason or "video recovery")[:200],
+                )
+                return False
+            inflight.add(handle)
+            diagnostics = self._video_diagnostics.setdefault(handle, {})
+            diagnostics.update(
+                recovery_state="IN_FLIGHT",
+                recovery_reason=str(reason or "video recovery")[:200],
+                recovery_owner=threading.current_thread().name,
+                recovery_started_at=now,
+            )
+            return True
+
+    def _finish_video_recovery(self, handle: int, *, ok: bool, error: str = "") -> None:
+        handle = int(handle)
+        now = time.monotonic()
+        with self._lock:
+            inflight = getattr(self, "_video_recovery_inflight", set())
+            if handle not in inflight:
+                # The UI completion callback owns the transition. Callers also
+                # finish defensively after synchronous compatibility hooks, so
+                # make the state transition idempotent and preserve its timing.
+                return
+            inflight.discard(handle)
+            diagnostics = self._video_diagnostics.setdefault(handle, {})
+            started = float(diagnostics.pop("recovery_started_at", now) or now)
+            diagnostics.update(
+                recovery_state="RECOVERED" if ok else "FAILED",
+                recovery_owner="",
+                recovery_duration_ms=round(max(0.0, now - started) * 1000.0, 1),
+                recovery_error=str(error or "")[:240],
+            )
+            # Keep a bounded per-camera backoff even when the caller timed out.
+            # The next attempt must wait for the native owner to settle.
+            recovery_at = getattr(self, "_video_recovery_at", None)
+            if recovery_at is None:
+                recovery_at = {}
+                self._video_recovery_at = recovery_at
+            recovery_at[handle] = now + (1.0 if ok else 6.0)
+
+    def _recover_video_decoder(self, handle: int, *, reason: str = "native decoder fault") -> bool:
         """Reopen one PlaySdk decoder after a native JPEG exception.
 
         The QY SDK exposes no decoder-reset function.  OcxConfig's own
@@ -129,17 +196,27 @@ class _HVXVideoMixin:
         not block the other lane.
         """
         handle = int(handle)
+        if not self._begin_video_recovery(handle, reason):
+            return False
+        exhausted = False
         with self._lock:
-            if handle not in self._video_handles:
-                return False
             attempts = int(self._video_diagnostics.get(handle, {}).get("decoder_recovery_attempts") or 0)
             if attempts >= 3:
-                return False
-            self._video_diagnostics.setdefault(handle, {})["decoder_recovery_attempts"] = attempts + 1
-            current = self._video_streams.get(handle)
-            if current is None:
-                current = self.selected_stream_type(handle)
-            current = int(current or 0)
+                exhausted = True
+            else:
+                self._video_diagnostics.setdefault(handle, {})["decoder_recovery_attempts"] = attempts + 1
+                current = self._video_streams.get(handle)
+                if current is None:
+                    current = self.selected_stream_type(handle)
+                # A stale decoder is reopened on the stream it was already using.
+                # Alternating stream types after a timeout created two competing
+                # PlaySdk states on affected QY firmware and caused the recovery
+                # storm observed on Windows.
+                current = int(current or 0)
+        if exhausted:
+            self._finish_video_recovery(handle, ok=False, error="recovery attempt limit reached")
+            return False
+        outcome: dict = {}
 
         def reopen():
             with self._video_control(handle):
@@ -148,19 +225,50 @@ class _HVXVideoMixin:
                         return {"ok": False, "reason": "video handle was released"}
                 stop_rc = int(self.dll.Net_StopVideo(handle)) if hasattr(self.dll, "Net_StopVideo") else 0
                 if stop_rc != DC_NO_ERROR:
+                    outcome["error"] = describe_rc(stop_rc)
                     return {"ok": False, "stop_rc": stop_rc, "reason": describe_rc(stop_rc)}
                 result = self._start_video(handle, current)
+                outcome["result"] = result
                 return {"ok": bool(result.get("ok")), "stop_rc": stop_rc, **result}
 
+        def complete() -> None:
+            result = outcome.get("result") or {}
+            self._finish_video_recovery(
+                handle,
+                ok=bool(result.get("ok")),
+                error=str(result.get("reason") or result.get("error") or outcome.get("error") or ""),
+            )
+
         try:
-            result = self._call_video_ui(reopen)
+            try:
+                result = self._call_video_ui(
+                    reopen, handle=handle, action="recover_video", completion=complete,
+                )
+            except TypeError as exc:
+                # Lightweight compatibility shims used by maintenance/tests
+                # may still expose the old one-argument hook.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                try:
+                    result = self._call_video_ui(reopen)
+                finally:
+                    complete()
         except Exception as exc:
+            # A real timed-out command is completed by the UI owner when its
+            # queued operation is discarded or finally returns.  Do not clear
+            # the in-flight claim early and queue a second native recovery.
+            if "timed out" not in str(exc).lower():
+                self._finish_video_recovery(handle, ok=False, error=str(exc))
             self._note_video(handle, recovery_error=str(exc), recovery_state="FAILED")
             logging.getLogger("smartpark.hvx").warning(
                 "Native JPEG decoder recovery failed: handle=%s error=%s", handle, exc,
             )
             return False
         if not result or not result.get("ok"):
+            self._finish_video_recovery(
+                handle, ok=False,
+                error=str(result.get("reason") or result.get("error") or "start failed") if result else "start failed",
+            )
             self._note_video(handle, recovery_error=str(result.get("reason") or result.get("error") or "start failed"),
                              recovery_state="FAILED")
             logging.getLogger("smartpark.hvx").warning(
@@ -168,6 +276,9 @@ class _HVXVideoMixin:
                 handle, result.get("stop_rc"), result.get("rc"),
             )
             return False
+        # The completion callback normally ran before the UI call returned.
+        # This is idempotent and also covers synchronous compatibility hooks.
+        self._finish_video_recovery(handle, ok=True)
         self._note_video(
             handle,
             native_decoder_fault=False,
@@ -184,7 +295,14 @@ class _HVXVideoMixin:
         with self._lock:
             return self._video_locks.setdefault(int(handle), threading.RLock())
 
-    def _call_video_ui(self, operation, *, handle: int | None = None, action: str = "video-control"):
+    def _call_video_ui(
+        self,
+        operation,
+        *,
+        handle: int | None = None,
+        action: str = "video-control",
+        completion=None,
+    ):
         started = time.monotonic()
 
         def note(**fields):
@@ -203,19 +321,35 @@ class _HVXVideoMixin:
             except Exception as exc:
                 note(control_result="error", control_error=str(exc)[:240])
                 raise
+            finally:
+                if completion is not None:
+                    try:
+                        completion()
+                    except Exception:
+                        logging.getLogger("smartpark.hvx").debug(
+                            "Video control completion callback failed", exc_info=True,
+                        )
             note(control_result="ok")
             return value
         self._ensure_ui_thread()
         ready = threading.Event()
         result = {}
+        if completion is not None:
+            # Store the callback before enqueueing. The UI owner can consume
+            # the command immediately on another thread.
+            result["completion"] = completion
         with self._ui_submit_lock:
             now = time.monotonic()
             if now < self._ui_control_not_before:
+                if completion is not None:
+                    completion()
                 note(control_result="busy", control_error="recovery holdoff")
                 raise HVXSDKError("Video control is busy; previous decoder recovery is still unwinding")
             try:
                 self._ui_commands.put_nowait((operation, ready, result))
             except queue.Full:
+                if completion is not None:
+                    completion()
                 self._ui_control_not_before = now + 2.0
                 note(control_result="busy", control_error="control queue full")
                 raise HVXSDKError("Video control is busy")
@@ -352,6 +486,9 @@ class _HVXVideoMixin:
                     getattr(self, "_draw_encoded_seq", {}).pop(int(handle), None)
                     getattr(self, "_window_frame_seq", {}).pop(int(handle), None)
                     getattr(self, "_window_last_jpeg", {}).pop(int(handle), None)
+                    # Do not clear _live_frame_seq here. It is the external
+                    # HTTP generation counter and must survive a decoder
+                    # stop/start; disconnect() clears it with the SDK handle.
                     getattr(self, "_native_jpeg_disabled_until", {}).pop(int(handle), None)
                     self._live_received_at.pop(int(handle), None)
                     self._live_requested_at.pop(int(handle), None)
@@ -540,24 +677,10 @@ class _HVXVideoMixin:
                 if time.monotonic() >= retry_at:
                     retry_at = time.monotonic() + 30.0
                     try:
-                        def restart():
-                            with self._video_control(handle):
-                                with self._lock:
-                                    active = handle in self._video_handles
-                                if not active:
-                                    return None
-                                logging.getLogger("smartpark.hvx").warning("Restarting empty video decoder: handle=%s", handle)
-                                if hasattr(self.dll, "Net_StopVideo"):
-                                    self.dll.Net_StopVideo(handle)
-                                current = self._video_streams.get(handle)
-                                if current is None:
-                                    current = self.selected_stream_type(handle)
-                                current = int(current or 0)
-                                fallback = self.selected_stream_type(handle) if current in (0, 1) else current
-                                if fallback == current:
-                                    fallback = 0 if current != 0 else 1
-                                return self._start_video(handle, fallback)
-                        self._call_video_ui(restart)
+                        logging.getLogger("smartpark.hvx").warning(
+                            "Restarting empty video decoder: handle=%s", handle,
+                        )
+                        self._recover_video_decoder(handle, reason="empty decoder")
                     except Exception as exc:
                         self._note_video(handle, control_error=str(exc))
                         logging.getLogger("smartpark.hvx").warning("Video recovery failed: handle=%s error=%s", handle, exc)
@@ -719,6 +842,14 @@ class _HVXVideoMixin:
                 except Exception as exc:
                     result["error"] = exc
                 finally:
+                    completion = result.pop("completion", None)
+                    if completion is not None:
+                        try:
+                            completion()
+                        except Exception:
+                            logging.getLogger("smartpark.hvx").debug(
+                                "Video control completion callback failed", exc_info=True,
+                            )
                     ready.set()
             while True:
                 try:
@@ -922,6 +1053,8 @@ class _HVXVideoMixin:
                 if changed:
                     window_seq = int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0) + 1
                     getattr(self, "_window_frame_seq", {})[int(handle)] = window_seq
+                    live_seq = int(getattr(self, "_live_frame_seq", {}).get(int(handle), 0) or 0)
+                    getattr(self, "_live_frame_seq", {})[int(handle)] = max(live_seq + 1, window_seq)
                     self._live_received_at[int(handle)] = time.monotonic()
                 first_window_frame = not bool(self._video_diagnostics.get(int(handle), {}).get("window_capture_logged"))
                 if changed:
