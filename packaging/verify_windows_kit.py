@@ -264,6 +264,8 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("recognition decoder missing: app/services/recognition_decoder.py")
     worker = payload / "app" / "recognition_worker.py"
     if worker.is_file():
+        if not (payload / "app" / "recognition_worker" / "__main__.py").is_file():
+            errors.append("recognition worker package entrypoint missing: app/recognition_worker/__main__.py")
         worker_sources = [worker]
         worker_sources.extend(sorted((payload / "app" / "recognition_worker").glob("*.py")))
         worker_text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in worker_sources)

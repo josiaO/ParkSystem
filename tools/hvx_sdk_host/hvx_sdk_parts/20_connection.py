@@ -58,6 +58,7 @@ class _HVXConnectionMixin:
         self._video_locks = {}
         self._video_diagnostics = {}
         self._video_recovery_at = {}
+        self._video_recovery_inflight = set()
         self._last_event_jpeg = {}
         self._last_event_crop = {}
         self._pending_events = {}

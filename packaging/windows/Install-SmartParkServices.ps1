@@ -88,6 +88,16 @@ foreach ($runtimeFolder in @("logs", "model-cache")) {
         }
     }
 }
+# Repair the per-user heartbeat fallback as well.  This is separate from
+# ProgramData on purpose: an older elevated install can leave the existing
+# LocalAppData heartbeat owned by Administrator, causing the worker to run
+# while every health reader sees it as offline.
+$healthDir = Join-Path $env:LOCALAPPDATA "SmartParkEdge"
+New-Item -ItemType Directory -Force -Path $healthDir | Out-Null
+& icacls.exe $healthDir /grant $dataGrant /T /C /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Could not repair access to the per-user recognition heartbeat folder $healthDir."
+}
 
 function Write-SmartParkLauncher {
     param(

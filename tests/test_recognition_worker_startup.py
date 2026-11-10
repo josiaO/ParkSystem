@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from unittest.mock import patch
 
@@ -28,6 +32,24 @@ def test_worker_refuses_to_start_unconfigured_installation():
          patch("app.database_config.apply_runtime_database_config") as apply:
         assert not recognition_worker._configure_worker_runtime()
     apply.assert_not_called()
+
+
+def test_worker_module_entrypoint_is_executable_without_starting_a_configured_worker(tmp_path):
+    env = os.environ.copy()
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    env["SMARTPARK_HOME"] = str(Path(__file__).resolve().parents[1])
+    result = subprocess.run(
+        [sys.executable, "-m", "app.recognition_worker"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "cannot be directly executed" not in result.stderr
+    assert "configured Site Server" in result.stderr
 
 
 def test_detector_retry_backoff_is_bounded():
