@@ -11,11 +11,11 @@ RECOGNITION_FASTALPR_LEGACY = "FASTALPR_LEGACY"
 RECOGNITION_FASTALPR_NEW = "FASTALPR_NEW"
 
 DEFAULT_FLAGS: dict[str, Any] = {
-    "media_gateway_enabled": False,
+    "media_gateway_enabled": True,
     "media_gateway_camera_ids": [],
-    "fastalpr_new_pipeline_enabled": False,
-    "webrtc_live_enabled": False,
+    "fastalpr_new_pipeline_enabled": True,
+    "webrtc_live_enabled": True,
     "native_alpr_enabled": True,
-    "live_view_provider": LIVE_VIEW_DIRECT_LEGACY,
-    "recognition_pipeline": RECOGNITION_FASTALPR_LEGACY,
+    "live_view_provider": LIVE_VIEW_MEDIAMTX,
+    "recognition_pipeline": RECOGNITION_FASTALPR_NEW,
 }

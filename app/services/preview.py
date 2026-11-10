@@ -10,12 +10,19 @@ from app.config import settings
 from app.services.frame_grab import grab_camera_frame
 from app.services.http_snapshot import grab_http_snapshot
 from app.services.hvx_client import HVXHostClient
-from app.services.media_gateway import CameraLiveSpec, gateway, take_latest_jpeg
+from app.services.media_gateway import (
+    CameraLiveSpec,
+    gateway,
+    register_frame_observer,
+    register_generation_observer,
+    take_latest_jpeg,
+)
 from app.services.rtsp_probe import redact_url
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 MJPEG_BOUNDARY = "smartparkframe"
+MJPEG_HEARTBEAT_SECONDS = 1.0
 MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots", "receipts"}
 
 # Re-export for callers/tests that import from preview.
@@ -121,10 +128,16 @@ def invalidate_camera(camera_id: int, *, generation: int | None = None) -> None:
 def live_is_current(camera_id: int) -> bool:
     row = get_state(camera_id)
     session = gateway.session(camera_id)
-    # A response containing the same cached JPEG is not a fresh video frame.
-    # Prefer the gateway's unique-frame timestamp so SDK polling cannot keep a
-    # frozen picture looking healthy forever.
-    if session is not None and hasattr(session, "last_fresh_frame_at"):
+    # Transport liveness and pixel freshness are separate diagnostics.  A
+    # static scene can legitimately repeat the same JPEG while the decoder is
+    # receiving frames; the MJPEG transport must remain usable in that case.
+    # ``health_sync`` still reports duplicate/frozen pixels independently.
+    if session is not None and hasattr(session, "last_received_at"):
+        fresh_at = max(
+            float(getattr(session, "last_received_at") or 0.0),
+            float(row.captured_at or 0.0),
+        )
+    elif session is not None and hasattr(session, "last_fresh_frame_at"):
         # A session may exist before its first producer frame is admitted (or
         # when a test/operator has seeded the shared cache).  Do not turn that
         # zero value into permission for snapshot_for_camera to open another
@@ -213,6 +226,19 @@ def remember_frame(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(jpeg)
         row.disk_at = time.monotonic()
+
+
+def _observe_frame(*args, **kwargs) -> None:
+    """Late-bound gateway hook so tests and operators can replace this function."""
+    remember_frame(*args, **kwargs)
+
+
+def _observe_generation(camera_id: int, *, generation: int) -> None:
+    invalidate_camera(camera_id, generation=generation)
+
+
+register_frame_observer(_observe_frame)
+register_generation_observer(_observe_generation)
 
 
 def remember_alpr(camera_id: int, result: dict) -> None:
@@ -355,11 +381,18 @@ async def resolve_playable(
     adapter_id: str = "",
 ) -> dict:
     from app.infrastructure.hardware.cameras import adapter_requires_native_stream
+    from app.services.flags import direct_generic_media_allowed
 
     # A native handle or an explicit QY/native adapter is an ownership claim,
     # not merely a preferred source.  If the SDK frame is unavailable, report
     # the native failure instead of silently opening HTTP or RTSP beside it.
     native_only = sdk_handle is not None or adapter_requires_native_stream(adapter_id)
+    if not native_only and not direct_generic_media_allowed():
+        return {
+            "ok": False,
+            "error": "Production generic camera requires a fresh MediaMTX frame",
+            "source": "mediamtx",
+        }
     sdk = {"ok": False, "error": ""}
     if sdk_handle is not None:
         sdk = await sdk_jpeg(sdk_handle)
@@ -570,6 +603,7 @@ async def _snapshot_for_camera_unlocked(
 async def mjpeg_from_cache(camera_id: int):
     """Send the newest JPEG only. Never replay a backlog of frames."""
     last_seq = -1
+    last_sent_at = 0.0
     event = asyncio.Event()
     row = get_state(camera_id)
     row.waiters.add(event)
@@ -579,18 +613,30 @@ async def mjpeg_from_cache(camera_id: int):
             jpeg = row.jpeg
             if jpeg[:2] == JPEG_SOI and row.seq != last_seq:
                 last_seq = row.seq
+                last_sent_at = time.monotonic()
                 gateway.note_displayed(camera_id)
-                header = (
-                    f"--{MJPEG_BOUNDARY}\r\n"
-                    f"Content-Type: image/jpeg\r\n"
-                    f"Content-Length: {len(jpeg)}\r\n\r\n"
-                ).encode("ascii")
-                yield header + jpeg + b"\r\n"
+                yield _mjpeg_part(jpeg)
                 event.clear()
                 continue
             try:
                 await asyncio.wait_for(event.wait(), timeout=0.05)
             except asyncio.TimeoutError:
+                now = time.monotonic()
+                if (
+                    last_seq >= 0
+                    and jpeg[:2] == JPEG_SOI
+                    and live_is_current(camera_id)
+                    and now - last_sent_at >= MJPEG_HEARTBEAT_SECONDS
+                ):
+                    # Repeat the current bytes as a transport heartbeat. This
+                    # prevents a static scene from triggering the desktop's
+                    # reconnect watchdog without incrementing the display
+                    # sequence or growing any queue.
+                    last_sent_at = now
+                    gateway.note_displayed(camera_id)
+                    yield _mjpeg_part(jpeg)
+                    event.clear()
+                    continue
                 # Do not leave an operator on an apparently live but stale
                 # picture. Ask only this camera's producer to recover, then
                 # close the response cleanly so the browser's existing retry
@@ -611,14 +657,18 @@ async def ffmpeg_jpeg_stream(url: str):
         yield jpeg
 
 
+def _mjpeg_part(jpeg: bytes) -> bytes:
+    header = (
+        f"--{MJPEG_BOUNDARY}\r\n"
+        f"Content-Type: image/jpeg\r\n"
+        f"Content-Length: {len(jpeg)}\r\n\r\n"
+    ).encode("ascii")
+    return header + jpeg + b"\r\n"
+
+
 async def mjpeg_parts(url: str):
     async for jpeg in ffmpeg_jpeg_stream(url):
-        header = (
-            f"--{MJPEG_BOUNDARY}\r\n"
-            f"Content-Type: image/jpeg\r\n"
-            f"Content-Length: {len(jpeg)}\r\n\r\n"
-        ).encode("ascii")
-        yield header + jpeg + b"\r\n"
+        yield _mjpeg_part(jpeg)
 
 
 def viewers_for(camera_id: int) -> int:
@@ -644,6 +694,9 @@ def watch_live(spec: CameraLiveSpec) -> None:
     """
     _viewers[spec.id] = viewers_for(spec.id) + 1
     _last_view[spec.id] = time.monotonic()
+    row = gateway._session_for(spec)
+    row.viewers = viewers_for(spec.id)
+    row.last_view_at = time.monotonic()
     from app.infrastructure.media.registry import mediamtx_live_active
     from app.services.flags import flags
     if mediamtx_live_active(spec.id) and bool(flags().get("webrtc_live_enabled")):
@@ -680,15 +733,23 @@ def ensure_mjpeg_source(spec: CameraLiveSpec) -> None:
         row.last_view_at = time.monotonic()
         gateway.ensure_producer(spec)
         return
+    from app.infrastructure.media.registry import mediamtx_live_active
+    if mediamtx_live_active(spec.id):
+        # MediaMTX is the sole generic-camera owner.  Retire any legacy direct
+        # producer before acquiring the local display consumer; otherwise a
+        # stale direct task can continue competing for the same camera.
+        row = gateway._session_for(spec)
+        row.viewers = viewers_for(spec.id)
+        row.last_view_at = time.monotonic()
+        if row is not None and row.producer is not None and not row.producer.done():
+            gateway.stop_producer(spec.id, force=True)
+        from app.services.mediamtx_live import ensure_live_consumer
+        ensure_live_consumer(spec)
+        return
     row = gateway.session(spec.id)
     if row is not None and row.producer is not None and not row.producer.done():
         row.viewers = viewers_for(spec.id)
         row.last_view_at = time.monotonic()
-        return
-    from app.infrastructure.media.registry import mediamtx_live_active
-    if mediamtx_live_active(spec.id):
-        from app.services.mediamtx_live import ensure_live_consumer
-        ensure_live_consumer(spec)
         return
     touch_live(spec)
 
@@ -783,6 +844,9 @@ def start_live_pump(spec: CameraLiveSpec) -> None:
     """One gateway producer. MJPEG readers and FastALPR share the latest JPEG."""
     from app.infrastructure.media.registry import mediamtx_live_active
     if mediamtx_live_active(spec.id):
+        row = gateway._session_for(spec)
+        row.viewers = max(row.viewers, viewers_for(spec.id))
+        row.last_view_at = time.monotonic()
         from app.services.mediamtx_live import ensure_live_consumer
         ensure_live_consumer(spec)
         return

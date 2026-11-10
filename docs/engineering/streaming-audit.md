@@ -9,7 +9,7 @@ requires Windows hardware evidence. It is not a production-readiness claim.
 | Source | Physical stream owner | LIVE consumer | DETECT/ALPR consumer | Evidence/event path |
 |---|---|---|---|---|
 | QY/HVX vendor camera | 32-bit `tools/hvx_sdk_host` through `HVXHostClient`; the Site Service owns one per-camera media session | `app/services/media_gateway.py::_sdk_frames`, then the bounded preview cache | Native callback stays in Site Service; software verification uses the configured worker/legacy owner | `app/api_main.py` native event drain → `app/services/captures.py::persist_event` → parking application |
-| Generic RTSP | MediaMTX when the rollout flag is enabled; otherwise `LocalMediaGateway::_rtsp_frames` | MediaMTX WHEP/MJPEG or one direct gateway producer | `app/services/recognition_decoder.py` reads the local MediaMTX DETECT path; `app/recognition_worker.py` owns model admission | worker outbox → Site Service fusion/persistence → parking application |
+| Generic RTSP | MediaMTX in the production profile; development/commissioning may use the bounded direct compatibility lane | Production uses MediaMTX WHEP/MJPEG; the direct gateway producer is not admitted in production | `app/services/recognition_decoder.py` reads the local MediaMTX DETECT path; `app/recognition_worker.py` owns model admission | worker outbox → Site Service fusion/persistence → parking application |
 | ONVIF profile | ONVIF is discovery/configuration; the selected RTSP profile follows the generic RTSP path | Same as generic RTSP | Same as generic RTSP | Same normalized event path |
 | Simulated/recorded | Test source or MediaMTX virtual camera | Same bounded LIVE path | Same DETECT path or replay harness | Test event path only; field commands are not issued |
 
@@ -35,6 +35,9 @@ reader.
 | Native/software double ownership | Native callbacks and worker results could both reach parking logic | Recognition mode, worker heartbeat, and hybrid fusion select one software owner; paired outcomes are persisted once | `app/services/hybrid_fusion.py`, `app/core/hybrid.py`, `tests/test_hybrid_fusion.py` |
 | Duplicate session creation | Retries can occur after a database commit or outbox acknowledgement failure | Event/visit/capture uniqueness, entry claims, parking transaction checks, and durable outbox processed keys | `app/models.py`, `app/services/parking_sessions.py`, `app/services/queues.py`, `tests/test_production_stabilization.py` |
 | False recovery | Repeated cached JPEG bytes were treated as source progress | Source sequence is preferred; byte equality does not refresh freshness unless a decoder source sequence advanced | `app/services/media_gateway.py`, `tests/test_media_acquisition.py` |
+| Static-scene display stall | The preview cache waited only for a new JPEG sequence, so an unchanged but continuously arriving scene could make the Windows reader hit its no-frame watchdog and reconnect | Transport activity is tracked separately from pixel freshness; `/live.mjpeg` emits a bounded one-second heartbeat without incrementing the display sequence | `app/services/preview.py`, `app/desktop/streams.py`, `tests/test_detection_history.py` |
+| Media owner race | A stale direct producer could be returned before the code checked whether MediaMTX was now authoritative; MediaMTX consumers also depended on preview's viewer counter | MediaMTX is checked first, stale direct producers are retired, and the gateway owns the synchronized viewer lease used by live/detect consumers | `app/services/preview.py`, `app/services/mediamtx_live.py`, `app/services/mediamtx_detect.py`, `tests/test_desktop_video_recovery.py` |
+| Module coupling | The gateway imported preview and recognition directly during frame publish/reconnect | Optional frame/generation observer hooks let display and recognition subscribe without making the camera engine import them | `app/services/media_gateway/00_context.py`, `app/services/media_gateway/20_frames`, `app/services/media_gateway/10_state.py` |
 | Async/event-loop blocking | ONNX and vendor bridge work can block the service loop | Model calls run in worker threads; native reads are isolated behind the host client and bounded waits | `app/infrastructure/recognition/fastalpr.py`, `app/services/hvx_client.py`, `tests/test_recognition_worker_runtime.py` |
 | Silent background failure | A diagnostic loop could die while HTTP stayed alive | Lifespan wraps the diagnostic heartbeat in a restart supervisor; health reports camera freshness separately from process readiness | `app/api_main.py`, `app/services/health.py`, `docs/CAMERA-DELIVERY-DIAGNOSTICS.md` |
 
@@ -48,6 +51,25 @@ reader.
   firmware, exposure, or Windows desktop session works at a real site.
 - Decoder failure is not vehicle departure. Departure is driven by presence or
   detector observations and a bounded absence interval.
+
+## Software verification status
+
+- VERIFIED: native QY/HVX ownership, production generic-camera fail-closed
+  policy, bounded LIVE/DETECT/recognition buffers, generation invalidation,
+  stale-result rejection, independent camera/display ownership, static-scene
+  MJPEG heartbeats, and idempotent event/session paths are covered by source
+  inspection and automated regression tests.
+- TESTED WITH MOCKS: camera acquisition, reconnect, decoder, multi-camera,
+  slow-consumer, UI, and production-configuration paths are covered by the
+  repository test suites; the final focused run passed 147 tests with one
+  warning.
+- NOT TESTED ON HARDWARE: Windows DLL loading, physical camera codecs, real
+  MediaMTX ingest, camera-to-screen latency, day/night recognition accuracy,
+  recovery on the installed network, and 24-hour soak behavior.
+- FAILED: none in the completed focused software verification runs. The full
+  repository run reached 210 passes before it was manually stopped because
+  the remaining long-running tests had not completed; it is therefore not a
+  complete-suite sign-off.
 
 ## Remaining field questions
 

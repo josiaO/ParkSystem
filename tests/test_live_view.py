@@ -235,11 +235,10 @@ class LiveViewTests(unittest.TestCase):
         listed = {row["ip_address"]: row for row in self.client.get("/cameras", headers=self.headers).json()}
         self.assertEqual(listed["10.0.0.88"]["plate_engine"], "fastalpr")
 
-    def test_hvx_connect_falls_back_to_video_when_sdk_port_closed(self):
+    def test_hvx_connect_does_not_fall_back_to_video_when_sdk_port_closed(self):
         cam = self.client.post("/cameras", headers=self.headers, json={
             "name": "Browser Cam", "ip_address": "10.0.0.90", "adapter_id": "hvx",
         }).json()
-        jpeg = b"\xff\xd8\xff\xd9"
 
         async def probe(ip, port, timeout=1.0):
             return int(port) != 30000
@@ -247,21 +246,15 @@ class LiveViewTests(unittest.TestCase):
         with patch("app.api_main.tcp_open", new=probe):
             with patch(
                 "app.infrastructure.hardware.cameras.rtsp.grab_http_snapshot",
-                new=AsyncMock(return_value={
-                    "ok": True,
-                    "jpeg": jpeg,
-                    "url": "http://10.0.0.90/cgi-bin/snapshot.cgi",
-                    "url_redacted": "http://10.0.0.90/cgi-bin/snapshot.cgi",
-                    "source": "http",
-                }),
+                new=AsyncMock(side_effect=AssertionError("HVX must not open a generic video path")),
             ):
                 res = self.client.post(f"/cameras/{cam['id']}/sdk/connect", headers=self.headers, json={})
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
-        self.assertEqual(body["status"], "VIDEO_CONNECTED")
-        self.assertEqual(body["adapter_id"], "rtsp")
+        self.assertEqual(body["status"], "SDK_FAILED")
+        self.assertEqual(body["adapter_id"], "hvx")
         self.assertIsNone(body["sdk_handle"])
-        self.assertEqual(body["plate_engine"], "fastalpr")
+        self.assertFalse(body["sdk_result"]["connected"])
 
     def test_qy_connect_never_falls_back_to_video_when_sdk_port_closed(self):
         cam = self.client.post("/cameras", headers=self.headers, json={

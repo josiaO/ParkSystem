@@ -38,6 +38,7 @@ rsync -a --delete \
 
 cp "$ROOT/tools/hvx_sdk_host/hvx_host.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/hvx_sdk.py" "$OUT/payload/tools/hvx_sdk_host/"
+rsync -a --delete "$ROOT/tools/hvx_sdk_host/hvx_sdk_parts/" "$OUT/payload/tools/hvx_sdk_host/hvx_sdk_parts/"
 cp "$ROOT/tools/hvx_sdk_host/check_runtime.py" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/hvx_sdk_host/run_hvx_host.bat" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/tools/field_acceptance_test.py" "$OUT/payload/tools/"

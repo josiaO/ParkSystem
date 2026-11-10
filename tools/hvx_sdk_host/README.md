@@ -27,6 +27,19 @@ py -3.11-32 hvx_host.py
 
 The process refuses to start if Python is not 32-bit.
 
+The QY live preview is independent from MediaMTX. Recognition callbacks keep
+their native camera resolution, while the operator preview uses a bounded
+display-only JPEG profile so the 32-bit bridge does not encode unnecessary
+pixels. Defaults are 1280px maximum width, quality 78, and 15 FPS. Override
+these for a Windows field test with `SMARTPARK_HVX_JPEG_MAX_WIDTH`,
+`SMARTPARK_HVX_JPEG_QUALITY`, and `SMARTPARK_HVX_JPEG_FPS`.
+
+While a camera is live, inspect `http://127.0.0.1:8765/video-status/<handle>`.
+The normal path reports `capture_mode=sdk_draw_data` and
+`draw_data_primary=true`. `capture_mode=play_sdk_hwnd` means the slower
+PrintWindow/BitBlt compatibility path is active; inspect `window_capture_ms`
+before changing the preview profile.
+
 ## SDK sequence
 
 ```text

@@ -29,7 +29,6 @@ def _detect_url(camera_id: int) -> str:
 async def _consume(spec: "CameraLiveSpec") -> None:
     from app.infrastructure.media.registry import mediamtx_detect_active
     from app.services import mediamtx
-    from app.services.preview import viewers_for
 
     camera_id = int(spec.id)
     local_url = _detect_url(camera_id)
@@ -38,7 +37,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
     row = gateway._session_for(spec)
     row.detect_consumers = max(row.detect_consumers, 1)
     last_sample = 0.0
-    while mediamtx_detect_active(camera_id) and (row.detect_consumers > 0 or viewers_for(camera_id) > 0):
+    while mediamtx_detect_active(camera_id) and (row.detect_consumers > 0 or gateway.viewers_for(camera_id) > 0):
         if not mediamtx.running():
             await asyncio.sleep(1.0)
             continue
@@ -57,7 +56,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             async for jpeg in stream:
                 if not mediamtx_detect_active(camera_id):
                     break
-                if row.detect_consumers <= 0 and viewers_for(camera_id) <= 0:
+                if row.detect_consumers <= 0 and gateway.viewers_for(camera_id) <= 0:
                     break
                 now = time.monotonic()
                 if now - last_sample >= interval:

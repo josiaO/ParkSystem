@@ -1,4 +1,4 @@
-# SmartPark media ownership — 15 October 2026
+# SmartPark media ownership — 9 November 2026
 
 The desktop is the primary operator interface on the dedicated Windows parking PC. The web interface remains available for administration and remote access. This is a deployment choice, not a measured claim that Qt always outperforms WebRTC.
 
@@ -20,13 +20,38 @@ The desktop is the primary operator interface on the dedicated Windows parking P
   existing WHEP transport; the server remains pinned to v1.11.3.
 - **Desktop:** independent latest-frame MJPEG readers feed the video canvas. Generic MediaMTX streams use one shared local JPEG consumer; SDK streams use the existing JPEG producer. Vehicle snapshots and plate crops have separate panels and bounded image requests.
 
+The camera engine is `app/services/media_gateway/`: it owns per-camera
+sessions, one upstream producer, bounded LIVE/DETECT mailboxes, generation
+invalidations, and transport telemetry. The display engine is
+`app/services/preview.py` plus `app/desktop/streams.py` and
+`app/desktop/live_pane.py`: it owns the cache-to-MJPEG boundary, latest-only
+desktop delivery, and canvas presentation. The gateway does not import the
+display or recognition engines; optional frame/generation observers are
+registered by those consumers. This makes a camera/decoder failure visible in
+gateway health without requiring the desktop or ALPR worker to be running.
+
 ## Video recovery
 
 SDK JPEG retrieval has a finite no-frame interval. The host expires JPEGs when its pump receives no frame for five seconds. Unchanged bytes from a freshly received frame are allowed; historical cache contents are not fresh video. Explicit `adapter_id=qy` never falls back to RTSP; it reports a native-host failure and preserves the camera SDK session for recovery. Legacy `adapter_id=hvx` rows may retain their historical generic fallback behavior until they are migrated to explicit `qy`. Capture callbacks remain active.
 
-RTSP tries the configured URI before guessed vendor URLs. JPEG decoding and encoding each use one FFmpeg thread, with one filter thread. A MediaMTX JPEG consumer is stopped before the direct fallback is started; another viewer reuses an active fallback producer.
+In production, MediaMTX owns generic RTSP ingest and distribution; the local
+gateway does not start a competing FFmpeg reader. Development and commissioning
+may use the bounded direct compatibility lane: it tries the configured URI
+before guessed vendor URLs, and JPEG decoding/encoding each use one FFmpeg
+thread with one filter thread. A MediaMTX JPEG consumer is stopped before that
+compatibility fallback is started; another viewer reuses an active fallback
+producer.
 
 MJPEG playback retries on errors, EOF and missing frames. Camera switches cancel the old reader without blocking the GUI and invalidate pending responses. Browser WHEP handles ICE negotiation and reconnection, with MJPEG fallback when necessary.
+
+Repeated JPEG bytes are not treated as a new display frame, so the UI mailbox
+stays bounded. They can still represent a healthy static scene when transport
+arrivals continue: `/live.mjpeg` emits a one-second heartbeat copy of the
+current JPEG without changing the display sequence. If transport arrivals stop,
+`last_received_at` expires, the response closes, and only that camera's
+decoder is restarted. Pixel freezing remains separately visible through
+`frozen`, `duplicate_frames`, `last_received_age_ms`, and
+`live_frame_age_ms` diagnostics.
 
 ## Resource defaults
 

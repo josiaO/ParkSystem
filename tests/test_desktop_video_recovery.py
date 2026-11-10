@@ -32,7 +32,7 @@ async def test_generic_video_failure_tries_rtsp_without_touching_recognition():
     from dataclasses import replace
 
     gateway = LocalMediaGateway()
-    generic = replace(spec(), sdk_handle=None)
+    generic = replace(spec(), sdk_handle=None, adapter_id='rtsp')
     row = gateway._session_for(generic)
     row.viewers = 1
     async def rtsp(_row):
@@ -157,6 +157,41 @@ def test_additional_viewer_reuses_active_direct_fallback():
     camera = replace(spec(), sdk_handle=None)
     row = SimpleNamespace(producer=SimpleNamespace(done=lambda: False), viewers=1, last_view_at=0.)
     with patch.object(preview.gateway, 'session', return_value=row), \
-         patch('app.infrastructure.media.registry.mediamtx_live_active', side_effect=AssertionError('second producer')):
+         patch('app.infrastructure.media.registry.mediamtx_live_active', return_value=False):
         preview.ensure_mjpeg_source(camera)
+    preview._last_view.pop(camera.id, None)
+
+
+def test_mediamtx_retires_stale_direct_producer_before_live_consumer():
+    from dataclasses import replace
+    from app.services import preview
+
+    camera = replace(spec(), sdk_handle=None)
+    row = SimpleNamespace(producer=SimpleNamespace(done=lambda: False), viewers=0, last_view_at=0.)
+    with patch.object(preview.gateway, '_session_for', return_value=row), \
+         patch.object(preview.gateway, 'stop_producer') as stop, \
+         patch('app.infrastructure.media.registry.mediamtx_live_active', return_value=True), \
+         patch('app.services.mediamtx_live.ensure_live_consumer') as ensure:
+        preview.ensure_mjpeg_source(camera)
+
+    stop.assert_called_once_with(camera.id, force=True)
+    ensure.assert_called_once_with(camera)
+    preview._last_view.pop(camera.id, None)
+
+
+def test_mediamtx_mjpeg_acquisition_copies_viewer_lease_into_gateway():
+    from dataclasses import replace
+    from app.services import preview
+
+    camera = replace(spec(), sdk_handle=None)
+    row = SimpleNamespace(viewers=0, last_view_at=0., producer=None)
+    with patch.object(preview.gateway, '_session_for', return_value=row), \
+         patch('app.infrastructure.media.registry.mediamtx_live_active', return_value=True), \
+         patch('app.services.mediamtx_live.ensure_live_consumer') as ensure:
+        preview._viewers[camera.id] = 1
+        preview.ensure_mjpeg_source(camera)
+
+    assert row.viewers == 1
+    ensure.assert_called_once_with(camera)
+    preview._viewers.pop(camera.id, None)
     preview._last_view.pop(camera.id, None)

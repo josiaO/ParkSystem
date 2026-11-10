@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+class _GatewayProducersMixin:
+    async def _backoff(self, row: StreamSession, error: str) -> None:
+        # A consumer may have disconnected while the in-flight read was
+        # failing. This is a normal shutdown, not a reconnect: preserve the
+        # last diagnostic sample and avoid manufacturing a new generation.
+        if not row.wanted():
+            row.state = "DISCONNECTED"
+            return
+        row.state = "RECONNECTING"
+        row.reconnects += 1
+        row.decoder_restarts += 1
+        self._invalidate_generation(row, error)
+        wait = float(reconnect_for(row.spec.id).record_failure(error))
+        row._restart_not_before = time.monotonic() + wait
+        log.warning("camera=%s media reconnect=%s decoder_restart=%s wait_s=%.1f error=%s", row.spec.id, row.reconnects, row.decoder_restarts, wait, str(error)[:300])
+        await self._reap_children(row)
+        await asyncio.sleep(wait)
+
+    async def _sdk_frames(self, row: StreamSession) -> bool:
+        spec = row.spec
+        generation = row.generation
+        if spec.sdk_handle is None:
+            row.last_error = f"{spec.adapter_id or 'sdk'} adapter requires a connected native SDK handle"
+            row.state = "DEGRADED"
+            return False
+        host = HVXHostClient()
+        interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
+        got = False
+        last_jpeg_at = time.monotonic()
+        previous_response_jpeg = b""
+        initial_sequence_map = getattr(host, "last_live_seq", {})
+        previous_response_seq = (
+            int(initial_sequence_map.get(int(spec.sdk_handle), 0) or 0)
+            if isinstance(initial_sequence_map, dict) else 0
+        )
+        next_diag_at = 0.0
+        silence_limit = max(1.0, float(settings.stream_read_timeout_seconds))
+        row.state = "STREAMING"
+        row.source = "sdk"
+        while row.wanted() or row.viewers > 0:
+            started = time.monotonic()
+            try:
+                jpeg = await host.live_jpeg(int(spec.sdk_handle))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                row.last_error = str(exc)[:300]
+                jpeg = b""
+            handle = int(spec.sdk_handle)
+            metadata_map = getattr(host, "last_live_meta", {})
+            raw_meta = metadata_map.get(handle) if isinstance(metadata_map, dict) else {}
+            meta = dict(raw_meta or {})
+            row.request_duration_ms = meta.get("duration_ms")
+            row.request_status = meta.get("status_code")
+            row.request_error = str(meta.get("error") or "")[:200]
+            sequence_map = getattr(host, "last_live_seq", {})
+            sequence_reliable = isinstance(sequence_map, dict)
+            current_seq = int(sequence_map.get(handle, 0) or 0) if sequence_reliable else 0
+            # New hosts stamp every latest-frame response. For older hosts,
+            # use a byte edge only as a compatibility signal; an identical
+            # cached JPEG is never source progress.
+            source_advanced = (
+                current_seq > previous_response_seq
+                if current_seq > 0 or previous_response_seq > 0
+                else bool(jpeg[:2] == JPEG_SOI and jpeg != previous_response_jpeg)
+            )
+            # A legacy/mocked host may expose a non-zero sequence without
+            # advancing it per handle. The first complete JPEG still proves
+            # that this decoder attempt received source data.
+            if (
+                jpeg[:2] == JPEG_SOI
+                and not got
+                and not previous_response_jpeg
+                and (not sequence_reliable or current_seq <= 0)
+            ):
+                source_advanced = True
+            metadata_fresh = meta.get("fresh") if isinstance(meta, dict) else None
+            source_progress_capable = sequence_reliable or isinstance(metadata_fresh, bool)
+            # Older hosts do not expose a sequence or freshness bit. A
+            # complete response proves that the bridge is alive, but it does
+            # not prove that the pixels changed. Keep the no-response watchdog
+            # alive without treating the frame as new source progress.
+            pump_activity = bool(jpeg[:2] == JPEG_SOI and (source_advanced or not source_progress_capable))
+            previous_response_seq = max(previous_response_seq, current_seq)
+            if jpeg[:2] == JPEG_SOI:
+                self.publish(
+                    spec.id, jpeg,
+                    source="sdk",
+                    url=f"sdk://handle/{int(spec.sdk_handle)}",
+                    source_seq=current_seq or None,
+                    generation=generation,
+                )
+                previous_response_jpeg = jpeg
+                if pump_activity:
+                    last_jpeg_at = time.monotonic()
+                    got = True
+                if source_advanced:
+                    row.last_source_progress_at = last_jpeg_at
+                    row.recovery_reason = "fresh_source_frame"
+                    reconnect_for(spec.id).record_success()
+                # The host keeps returning the last JPEG until the camera
+                # encodes a new one. Repeating those bytes is not a dead pump.
+                if self._stale_fresh(row):
+                    row.frozen = True
+                    row.state = "DEGRADED"
+                else:
+                    row.state = "STREAMING"
+            now = time.monotonic()
+            # A native camera that has not produced even its first JPEG must
+            # reach the no-frame recovery boundary before the optional
+            # diagnostics call.  This keeps recovery deterministic and avoids
+            # adding another clock/network operation to the first-frame path.
+            no_jpeg_stale = (
+                not jpeg
+                and now - last_jpeg_at >= max(float(getattr(settings, "stale_stream_seconds", 2.5)), 0.01)
+            )
+            if no_jpeg_stale:
+                row.state = "DEGRADED"
+                row.last_error = "OcxConfig/NetSDK video supplied no fresh JPEG"
+                return False
+            if now >= next_diag_at:
+                try:
+                    diagnostics = await host.video_status(handle)
+                    if isinstance(diagnostics, dict):
+                        row.sdk_diagnostics = diagnostics
+                        if diagnostics.get("recovery_state") not in {None, "STABLE"}:
+                            row.recovery_reason = str(
+                                diagnostics.get("recovery_reason")
+                                or diagnostics.get("recovery_state")
+                                or row.recovery_reason
+                            )[:200]
+                except Exception as exc:
+                    row.sdk_diagnostics = {
+                        **row.sdk_diagnostics,
+                        "diagnostics_error": type(exc).__name__,
+                    }
+                next_diag_at = now + 2.0
+            elif (
+                (source_progress_capable and got and self._stale_fresh(row, factor=1.0))
+                or now - last_jpeg_at >= silence_limit
+            ):
+                row.state = "DEGRADED"
+                row.last_error = "OcxConfig/NetSDK video supplied no fresh JPEG"
+                return False
+            delay = interval - (now - started)
+            await asyncio.sleep(delay if delay > 0.002 else 0.002)
+        return got
+
+    async def ffmpeg_jpeg_stream(
+        self,
+        url: str,
+        *,
+        profile: str = DEFAULT_PROFILE,
+        transport: str = "TCP",
+        scale: int | None = 960,
+        output_fps: float | None = None,
+        session: StreamSession | None = None,
+        jpeg_q: int = 8,
+    ):
+        """Keep one ffmpeg process open so live view is a real stream, not one still per spawn."""
+        binary = ffmpeg_bin()
+        if not binary:
+            raise RuntimeError("ffmpeg is not installed")
+        cmd = [
+            binary,
+            "-hide_banner", "-loglevel", "error",
+            *profile_args(profile, transport=transport),
+            "-threads", "1", "-i", url,
+            "-threads", "1", "-filter_threads", "1",
+            "-an", "-vsync", "0", "-flush_packets", "1",
+        ]
+        filters: list[str] = []
+        if output_fps:
+            filters.append(f"fps={max(1.0, min(float(output_fps), 30.0)):g}")
+        if scale:
+            filters.append(live_scale_filter(scale))
+        if filters:
+            cmd.extend(["-vf", ",".join(filters)])
+        quality = max(2, min(int(jpeg_q), 31))
+        cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", str(quality), "pipe:1"])
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=512 * 1024,
+        )
+        if session is not None and proc.pid:
+            session.child_pids.add(proc.pid)
+            session.ffmpeg_pid = proc.pid
+        errors = bytearray()
+        fault_event = asyncio.Event()
+        fault_detail: list[str] = []
+        stderr_task = asyncio.create_task(
+            drain_stderr(proc.stderr, errors, fault_event=fault_event, fault_detail=fault_detail)
+        )
+        buf = b""
+        timeout = float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            while True:
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "live decoder H264 fault")
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("live decoder produced no complete frame")
+                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=remaining)
+                if not chunk:
+                    text = errors.decode(errors="replace").strip()
+                    raise RuntimeError(text[-300:] or "ffmpeg live stream ended")
+                if fault_event.is_set():
+                    raise RuntimeError(fault_detail[0] if fault_detail else "live decoder H264 fault")
+                buf += chunk
+                if len(buf) > 2_000_000:
+                    start = buf.rfind(JPEG_SOI)
+                    buf = buf[start:] if start >= 0 else buf[-200_000:]
+                jpeg, buf = take_latest_jpeg(buf)
+                if jpeg:
+                    deadline = loop.time() + timeout
+                    yield jpeg
+        finally:
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            await _terminate_proc(proc)
+            if session is not None and proc.pid:
+                session.child_pids.discard(proc.pid)
+                if session.ffmpeg_pid == proc.pid:
+                    session.ffmpeg_pid = None
+
+    async def _reap_children(self, row: StreamSession) -> None:
+        pids = list(row.child_pids)
+        row.child_pids.clear()
+        row.ffmpeg_pid = None
+        for pid in pids:
+            _kill_pid(pid)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(_wait_pid, pid), timeout=2.0)
+            except Exception:
+                _kill_pid(pid, force=True)
+
+    async def _produce(self, row: StreamSession) -> None:
+        spec = row.spec
+        if row.startup_started_at <= 0:
+            row.startup_started_at = time.monotonic()
+        try:
+            while row.wanted() or row.viewers > 0:
+                row.state = "CONNECTING"
+                ok = False
+                try:
+                    native_sdk = adapter_requires_native_stream(spec.adapter_id) or spec.sdk_handle is not None or any(
+                        str(profile.get("protocol") or "").lower() == "sdk"
+                        for profile in (spec.stream_profiles or {}).values()
+                        if isinstance(profile, dict)
+                    )
+                    if native_sdk:
+                        # OcxConfig is the authoritative streaming backend for
+                        # SDK cameras. The Windows host owns stop/restart
+                        # recovery; this task only consumes its newest JPEG.
+                        # Never open a second RTSP/HTTP reader for the same
+                        # physical camera.
+                        ok = await self._sdk_frames(row)
+                        if not ok:
+                            row.native_fallback_until = 0.0
+                            row.last_error = row.last_error or "OcxConfig/NetSDK video supplied no fresh JPEG"
+                            row.state = "DEGRADED"
+                            row.decode_errors += 1
+                            await self._backoff(row, row.last_error)
+                            continue
+                    else:
+                        try:
+                            ok = await self._rtsp_frames(row)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as rtsp_exc:
+                            # Keep live moving via HTTP stills if RTSP/ffmpeg fails.
+                            row.last_error = str(rtsp_exc)[:300]
+                            ok = False
+                        if not ok:
+                            ok = await self._http_stills(row)
+                    # SDK progress resets the policy at the source-frame edge
+                    # inside _sdk_frames. Do not reset here when a consumer
+                    # disconnect merely causes that loop to return; doing so
+                    # was the confirmed replay-policy defect.
+                    if ok:
+                        if not native_sdk:
+                            reconnect_for(spec.id).record_success()
+                    else:
+                        row.state = "DEGRADED"
+                        row.decode_errors += 1
+                        await self._backoff(row, "no frames")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    row.last_error = str(exc)[:300]
+                    row.decode_errors += 1
+                    row.state = "DEGRADED"
+                    await self._backoff(row, str(exc))
+                await asyncio.sleep(0.05)
+        finally:
+            if row.producer is asyncio.current_task():
+                row.producer = None
+            if not row.wanted():
+                row.state = "DISCONNECTED"
+
+    async def _idle_watch(self) -> None:
+        idle = float(getattr(settings, "live_idle_seconds", 20.0) or 20.0)
+        while True:
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            for camera_id, row in list(self._sessions.items()):
+                if row.wanted():
+                    continue
+                last = row.last_view_at or 0.0
+                if now - last >= idle:
+                    self.stop_producer(camera_id, force=True)
+
+    async def _rtsp_frames(self, row: StreamSession) -> bool:
+        spec = row.spec
+        generation = row.generation
+        role = spec.live_role or ROLE_LIVE
+        profiles = spec.stream_profiles or {}
+        if role in {ROLE_MAIN, ROLE_EVIDENCE}:
+            preferred = uri_for_role(profiles, ROLE_MAIN, spec.rtsp_url)
+        else:
+            # Live view should prefer the substream to keep decode latency low.
+            preferred = (
+                uri_for_role(profiles, ROLE_SUB, "")
+                or uri_for_role(profiles, ROLE_LIVE, spec.rtsp_url)
+                or spec.rtsp_url
+            )
+        if role == ROLE_MAIN:
+            preferred = uri_for_role(profiles, ROLE_MAIN, preferred)
+        qy_source = spec.sdk_handle is not None or any(
+            str(row.get("protocol") or "").lower() == "sdk"
+            for row in profiles.values()
+            if isinstance(row, dict)
+        )
+        urls = vendor_candidates(
+            spec.ip,
+            spec.username,
+            spec.password,
+            preferred or spec.rtsp_url,
+            prefer_qy=qy_source,
+        )
+        if preferred.startswith("rtsp://"):
+            urls = [preferred] + [url for url in urls if url != preferred]
+        # When live view fell back to a main-style URL, try known substream paths first.
+        if role not in {ROLE_MAIN, ROLE_EVIDENCE} and not preferred.startswith("rtsp://"):
+            subs = [
+                url for url in vendor_candidates(
+                    spec.ip,
+                    spec.username,
+                    spec.password,
+                    "",
+                    prefer_qy=qy_source,
+                )
+                if "sub" in url.lower() or "102" in url or "av0_1" in url or "subtype=1" in url
+            ]
+            urls = subs + [url for url in urls if url not in subs]
+        profiles_to_try = [normalize_profile(spec.ffmpeg_profile)]
+        fallback = fallback_profile(spec.ffmpeg_profile)
+        if fallback not in profiles_to_try:
+            profiles_to_try.append(fallback)
+        transports = [normalize_transport(spec.transport)]
+        if transports[0] == "AUTO":
+            transports = ["TCP", "UDP"]
+        for url in urls:
+            for profile_name in profiles_to_try:
+                for transport in transports:
+                    stream = self.ffmpeg_jpeg_stream(
+                        url,
+                        profile=profile_name,
+                        transport=transport,
+                        scale=720 if role != ROLE_MAIN else None,
+                        output_fps=(float(settings.live_mjpeg_fps) if role != ROLE_MAIN else None),
+                        session=row,
+                    )
+                    try:
+                        first = await asyncio.wait_for(stream.__anext__(), timeout=4.0)
+                        row.ffmpeg_profile = profile_name
+                        row.using_fallback = profile_name != normalize_profile(spec.ffmpeg_profile)
+                        row.transport = transport
+                        row.source = "rtsp"
+                        row.url = url
+                        row.state = "STREAMING"
+                        # A decoder can emit identical JPEG bytes for an empty
+                        # lane or a low-motion night scene. The decoder frame
+                        # sequence, not byte equality, is the RTSP freshness
+                        # signal.
+                        rtsp_sequence = int(row.source_frame_seq or 0) + 1
+                        self.publish(
+                            spec.id, first, source="rtsp", url=url,
+                            source_seq=rtsp_sequence,
+                            generation=generation,
+                        )
+                        async for jpeg in stream:
+                            if not (row.wanted() or row.viewers > 0):
+                                break
+                            rtsp_sequence += 1
+                            self.publish(
+                                spec.id, jpeg, source="rtsp", url=url,
+                                source_seq=rtsp_sequence,
+                                generation=generation,
+                            )
+                        # Normal generator exhaustion while demand remains is
+                        # a decoder termination, not a successful connection.
+                        # Route it through the per-camera backoff so stale
+                        # frames are invalidated and only this camera retries.
+                        if row.wanted() or row.viewers > 0:
+                            row.last_error = "RTSP decoder ended"
+                            return False
+                        return True
+                    except asyncio.CancelledError:
+                        await stream.aclose()
+                        raise
+                    except Exception as exc:
+                        row.last_error = str(exc)[:300]
+                        try:
+                            await stream.aclose()
+                        except Exception:
+                            pass
+        return False
+
+    async def _stale_watch(self) -> None:
+        """Mark a frozen session and recover only that camera. Neighbours are not touched."""
+        stale = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
+        while True:
+            await asyncio.sleep(0.5)
+            now = time.monotonic()
+            for row in list(self._sessions.values()):
+                producer = row.producer
+                if (producer is None or producer.done()) and row.wanted() and now >= row._restart_not_before:
+                    self.ensure_producer(row.spec)
+                    continue
+                if producer is None or producer.done() or row.last_fresh_frame_at <= 0:
+                    continue
+                age = now - row.last_fresh_frame_at
+                received_age = (now - row.last_received_at) if row.last_received_at else age
+                if age >= stale and received_age < stale and row.duplicate_frames > 0:
+                    row.frozen = True
+                if age >= stale and row.state == "STREAMING":
+                    row.state = "DEGRADED"
+                # Restart only when bytes have stopped. A repeated SDK JPEG is
+                # still a live host response and must not tear this camera down.
+                if age >= stale * 6 and received_age >= stale:
+                    self.restart_decoder(row.spec.id)
+
+    async def _http_stills(self, row: StreamSession) -> bool:
+        """Poll HTTP snapshot endpoints slowly — not a live transport."""
+        spec = row.spec
+        generation = row.generation
+        interval = 0.2
+        got = False
+        last_jpeg_at = time.monotonic()
+        silence_limit = max(1.0, float(getattr(settings, "stream_read_timeout_seconds", 3.0) or 3.0))
+        source_sequence = int(row.source_frame_seq or 0)
+        row.state = "CONNECTING"
+        while row.wanted() or row.viewers > 0:
+            started = time.monotonic()
+            http = await grab_http_snapshot(spec.ip, spec.username, spec.password)
+            if http.get("ok") and http["jpeg"][:2] == JPEG_SOI:
+                row.source = "http"
+                row.url = str(http.get("url") or "")
+                row.state = "STREAMING"
+                source_sequence += 1
+                self.publish(
+                    spec.id, http["jpeg"],
+                    source="http",
+                    url=str(http.get("url") or ""),
+                    source_seq=source_sequence,
+                    generation=generation,
+                )
+                last_jpeg_at = time.monotonic()
+                got = True
+            elif got and time.monotonic() - last_jpeg_at >= silence_limit:
+                row.state = "DEGRADED"
+                return False
+            delay = interval - (time.monotonic() - started)
+            await asyncio.sleep(delay if delay > 0.002 else 0.002)
+        return got

@@ -8,6 +8,52 @@ from app.services.rtsp_probe import vendor_candidates
 from app.services.stream_roles import ROLE_DETECT, ROLE_EVIDENCE, ROLE_LIVE, ROLE_SUB, uri_for_role
 
 
+def validate_camera_source(camera, *, production: bool | None = None) -> dict[str, Any]:
+    """Validate the source contract without opening a camera connection.
+
+    This is intentionally a pure configuration check.  Fresh-frame health is
+    established only by the owning media producer, never by this function.
+    """
+    from app.domain.cameras import GENERIC_CAMERA_ADAPTER_IDS, NATIVE_STREAM_ADAPTER_IDS
+    from app.config import settings
+
+    errors: list[str] = []
+    raw_adapter = getattr(camera, "adapter_id", None)
+    explicit = str(getattr(camera, "rtsp_url", None) or "").strip()
+    # ORM rows always carry the hvx default. Lightweight discovery/onboarding
+    # records may omit it; an explicit RTSP URL makes that intent unambiguous.
+    adapter = str(raw_adapter or ("rtsp" if explicit else "hvx")).strip().lower()
+    ip = str(getattr(camera, "ip_address", None) or "").strip()
+    if not ip:
+        errors.append("camera IP address is required")
+    if adapter in NATIVE_STREAM_ADAPTER_IDS:
+        try:
+            port = int(getattr(camera, "sdk_port", None) or 30000)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            errors.append("native SDK port must be between 1 and 65535")
+        if production is None:
+            production = str(getattr(settings, "deployment_profile", "DEVELOPMENT")).upper() == "PRODUCTION"
+        if production and not str(getattr(camera, "username", None) or "").strip():
+            errors.append("native camera username is required in production")
+        return {"valid": not errors, "errors": errors, "owner": "OcxConfig/NetSDK", "adapter_id": adapter}
+
+    if adapter not in GENERIC_CAMERA_ADAPTER_IDS:
+        errors.append(f"unsupported camera adapter {adapter!r}")
+    if explicit and not explicit.lower().startswith("rtsp://"):
+        errors.append("generic camera rtsp_url must start with rtsp://")
+    profiles = dict(getattr(camera, "stream_profiles", None) or {})
+    for role, profile in profiles.items():
+        if not isinstance(profile, dict):
+            errors.append(f"stream profile {role!r} must be an object")
+            continue
+        protocol = str(profile.get("protocol") or "").lower()
+        if protocol == "sdk":
+            errors.append(f"generic camera stream profile {role!r} cannot use sdk protocol")
+    return {"valid": not errors, "errors": errors, "owner": "MediaMTX", "adapter_id": adapter}
+
+
 def _pick_hvx_sub(candidates: list[str]) -> str:
     for url in candidates:
         if "/subvideo" in url.lower():
@@ -150,6 +196,20 @@ def sync_camera(camera, *, db=None) -> dict[str, Any]:
                 "reason": "Camera is outside this node's assigned gate",
             }
 
+    validation = validate_camera_source(camera)
+    if not validation["valid"]:
+        try:
+            unregister_camera_source(int(camera.id))
+        except Exception:
+            pass
+        return {
+            "registered": False,
+            "valid": False,
+            "camera_id": int(camera.id),
+            "owner": validation["owner"],
+            "errors": validation["errors"],
+            "reason": "Invalid camera media configuration",
+        }
     cfg = source_config_for_camera(camera)
     if not str(cfg.get("uri") or "").startswith("rtsp://"):
         # A camera with no usable RTSP source remains on the bounded SDK/direct

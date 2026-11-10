@@ -119,6 +119,24 @@ def test_last_evidence_loads_without_reviving_a_departed_plate(fixture_ui, monke
     pane.close()
 
 
+def test_repeated_alpr_poll_does_not_repaint_an_unchanged_live_overlay(fixture_ui, monkeypatch):
+    pane = live_pane.CameraLivePane()
+    pane.camera = {"id": 901}
+    pane._last_jpeg = b"jpeg"
+    painted = []
+    monkeypatch.setattr(pane, "_set_pixmap", lambda *args: painted.append(args))
+    payload = {
+        "last_car": {"plate": "T123ABC"},
+        "overlay": {"x1": 10, "y1": 4, "x2": 70, "y2": 20, "image_width": 80, "image_height": 24},
+    }
+
+    pane._show_alpr(payload)
+    pane._show_alpr(payload)
+
+    assert len(painted) == 1
+    pane.close()
+
+
 def test_old_evidence_response_cannot_replace_newer_capture(fixture_ui, monkeypatch):
     class DeferredWorker(InlineWorker):
         def start(self):

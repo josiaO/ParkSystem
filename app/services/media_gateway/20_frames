@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+class _GatewayFramesMixin:
+    def restart_decoder(self, camera_id: int) -> bool:
+        """Drop and later restart only this camera's decoder. Other sessions stay up."""
+        row = self._sessions.get(int(camera_id))
+        if row is None:
+            return False
+        now = time.monotonic()
+        if now < row._restart_not_before:
+            return False
+        wait = float(reconnect_for(row.spec.id).record_failure("stale or frozen video"))
+        row._restart_not_before = now + wait
+        row.decoder_restarts += 1
+        row.reconnects += 1
+        row.state = "RECONNECTING"
+        row.last_error = "stale or frozen video"
+        self._invalidate_generation(row, row.last_error)
+        log.warning("camera=%s media decoder stale; restarting decoder=%s reconnect=%s", row.spec.id, row.decoder_restarts, row.reconnects)
+        pids = list(row.child_pids)
+        row.child_pids.clear()
+        row.ffmpeg_pid = None
+        for pid in pids:
+            _kill_pid(pid)
+        task = row.producer
+        row.producer = None
+        if task is not None and not task.done():
+            task.cancel()
+        return True
+
+    def publish_detect(
+        self,
+        camera_id: int,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        sampled: bool = False,
+    ) -> FrameSample | None:
+        """Fill only the DETECT buffer (MediaMTX local RTSP consumer)."""
+        if jpeg[:2] != JPEG_SOI:
+            return None
+        row = self._sessions.get(camera_id)
+        if row is None:
+            row = StreamSession(spec=CameraLiveSpec(
+                id=camera_id, ip="", username="", password="", rtsp_url="", sdk_handle=None,
+                need_detect=True,
+            ))
+            self._sessions[camera_id] = row
+        now = time.monotonic()
+        detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
+        ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
+        interval = 1.0 / max(ai_fps, 1.0)
+        latest_detect = row.detect.latest()
+        # ``mediamtx_detect`` already owns the one admission clock for its
+        # source stream.  ``sampled=True`` prevents a second clock here.
+        if not sampled and latest_detect is not None and (now - latest_detect.received_at) < interval:
+            row.frames_dropped_ai += 1
+            return latest_detect
+        if latest_detect is not None and latest_detect.jpeg == jpeg:
+            row.duplicate_frames += 1
+            row.last_received_at = now
+            row.frames_arrived += 1
+            return latest_detect
+        if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
+            row.frames_dropped_ai += 1
+        sample = row.detect.put(
+            jpeg, source=source or "mediamtx", url=url, camera_id=camera_id,
+            generation=row.generation,
+        )
+        row.frames_sampled_ai += 1
+        row.ai_last_at = now
+        row.ai_last_seq = sample.seq
+        return sample
+
+    def _note_arrival(self, row: StreamSession, jpeg: bytes, now: float, *, changed: bool) -> None:
+        """Count every JPEG. Freshness and live FPS move only when the bytes change."""
+        row.last_received_at = now
+        row.frames_arrived += 1
+        if row._src_at <= 0:
+            row._src_at = now
+        row._src_n += 1
+        row._bytes_window += len(jpeg)
+        if changed:
+            if row.last_fresh_frame_at > 0:
+                gap = now - row.last_fresh_frame_at
+                if gap > 0:
+                    row.frame_intervals.append(gap)
+            row.last_fresh_frame_at = now
+            row.last_frame_received_at = now
+            row.last_successful_frame_at = time.time()
+            row.last_keyframe_at = now
+            row.frames_changed += 1
+            row._chg_n += 1
+            row.frozen = False
+            if row.connected_at <= 0:
+                row.connected_at = now
+                if row.startup_started_at > 0:
+                    row.stream_startup_ms = round((now - row.startup_started_at) * 1000.0, 1)
+        else:
+            row.duplicate_frames += 1
+        elapsed = now - row._src_at
+        if elapsed >= 1.0:
+            row.source_fps = round(row._src_n / elapsed, 1)
+            row.live_fps = round(row._chg_n / elapsed, 1)
+            row.bitrate_bps = int((row._bytes_window * 8) / elapsed)
+            row._fps_at = now
+            row._fps_n = row._chg_n
+            row._src_at = now
+            row._src_n = 0
+            row._chg_n = 0
+            row._bytes_window = 0
+            row._bytes_at = now
+
+    def publish(
+        self,
+        camera_id: int,
+        jpeg: bytes,
+        *,
+        source: str = "",
+        url: str = "",
+        detect: bool = True,
+        source_seq: int | None = None,
+        generation: int | None = None,
+    ) -> FrameSample | None:
+        if jpeg[:2] != JPEG_SOI:
+            return None
+        row = self._sessions.get(camera_id)
+        if row is None:
+            row = StreamSession(spec=CameraLiveSpec(
+                id=camera_id, ip="", username="", password="", rtsp_url="", sdk_handle=None,
+            ))
+            self._sessions[camera_id] = row
+        if generation is not None and int(generation) != row.generation:
+            # A cancelled decoder may finish one read after reconnect. Its
+            # bytes belong to the old source generation and must not repopulate
+            # LIVE, DETECT, or the preview cache.
+            row.frames_dropped_ai += 1
+            return None
+        previous = row.live.latest()
+        source_advanced = False
+        if source_seq is not None:
+            incoming_seq = int(source_seq or 0)
+            source_advanced = incoming_seq > row.source_frame_seq
+            row.source_frame_seq = max(row.source_frame_seq, incoming_seq)
+        if previous is not None and previous.jpeg == jpeg:
+            now = time.monotonic()
+            self._note_arrival(row, jpeg, now, changed=False)
+            # A decoded source frame may legitimately encode to identical
+            # JPEG bytes (for example an empty lane). Keep freshness based on
+            # the source frame sequence, without sending duplicate images to
+            # the UI or growing any queue.
+            if source_advanced:
+                row.last_fresh_frame_at = now
+                row.last_successful_frame_at = time.time()
+                row.frozen = False
+            return previous
+        sample = row.live.put(
+            jpeg, source=source, url=url, camera_id=camera_id,
+            generation=row.generation,
+        )
+        self._note_arrival(row, jpeg, sample.received_at, changed=True)
+        row.source = source or row.source
+        row.url = url or row.url
+        if detect:
+            now = sample.received_at
+            detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
+            ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)
+            interval = 1.0 / max(ai_fps, 1.0)
+            latest_detect = row.detect.latest()
+            if latest_detect is None or (now - latest_detect.received_at) >= interval:
+                if latest_detect is not None and row.detect.depth() >= row.detect.maxsize:
+                    row.frames_dropped_ai += 1
+                row.detect.put(
+                    jpeg, source=source, url=url, camera_id=camera_id,
+                    generation=row.generation,
+                )
+        _notify_frame_observers(
+            camera_id,
+            jpeg,
+            url=url,
+            url_redacted=redact_url(url) if url else "",
+            source=source,
+            generation=row.generation,
+        )
+        return sample

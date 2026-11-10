@@ -3,6 +3,7 @@ import ctypes
 import struct
 import threading
 import time
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -241,6 +242,35 @@ def test_play_sdk_draw_data_callback_produces_jpeg_without_window_capture():
     assert sdk.video_status(0)["capture_mode"] == "sdk_draw_data"
     assert sdk.video_status(0)["state"] == "LIVE"
     assert sdk.video_status(0)["frames_received"] == 1
+
+
+def test_display_jpeg_profile_downscales_without_touching_native_callback_pixels(monkeypatch):
+    from PIL import Image
+
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._draw_frames = {}
+    sdk._draw_frame_seq = {}
+    sdk._draw_encoded_seq = {}
+    sdk._last_live_jpeg = {}
+    sdk._live_received_at = {}
+    sdk._video_handles = {0}
+    sdk._video_diagnostics = {}
+    monkeypatch.setenv("SMARTPARK_HVX_JPEG_MAX_WIDTH", "1")
+    monkeypatch.setenv("SMARTPARK_HVX_JPEG_QUALITY", "70")
+
+    dib = ctypes.create_string_buffer(
+        struct.pack("<IiiHHIIiiII", 40, 2, 2, 1, 24, 0, 16, 0, 0, 0, 0)
+    )
+    pixels = ctypes.create_string_buffer(bytes((0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 255, 0)))
+    sdk._on_draw_data(0, None, ctypes.cast(dib, ctypes.c_void_p), ctypes.cast(pixels, ctypes.POINTER(ctypes.c_ubyte)), 2, 2, None)
+
+    jpeg = sdk._draw_data_jpeg(0)
+    assert Image.open(BytesIO(jpeg)).size == (1, 1)
+    status = sdk.video_status(0)
+    assert status["jpeg_source_width"] == 2
+    assert status["jpeg_output_width"] == 1
+    assert status["jpeg_quality"] == 70
 
 
 def test_native_decoder_fault_reopens_only_that_camera():

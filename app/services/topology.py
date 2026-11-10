@@ -14,7 +14,7 @@ from app.models import Camera, Gate, Lane, Site, Zone
 def ensure_default_site(db: Session) -> Site:
     site = db.get(Site, DEFAULT_SITE_ID)
     if site is None:
-        site = Site(id=DEFAULT_SITE_ID, name="Default Site", timezone="UTC", locale="en", currency="USD")
+        site = Site(id=DEFAULT_SITE_ID, name="Default Site", timezone="EAT", locale="sw", currency="USD")
         db.add(site)
         db.commit()
         db.refresh(site)

@@ -1,6 +1,6 @@
 """Per-camera display lifecycle and recognition evidence controller."""
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, QSize, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QInputDialog, QMessageBox
 from app.services.live_pair import camera_label
 from .api import api
@@ -245,7 +245,8 @@ class CameraLivePane(QFrame):
             return
         self.start_live()
     def _set_pixmap(self, label, jpeg, overlay=None):
-        image=QImage.fromData(jpeg)
+        target = self._display_target(label)
+        image = self._decode_live_image(jpeg, target)
         if image.isNull(): return False
         if label is self.video and self.overlays_toggle.isChecked():
             image=self._paint_zone(image)
@@ -255,14 +256,41 @@ class CameraLivePane(QFrame):
         if isinstance(label, VideoCanvas):
             label.setPixmap(pix)
             return True
-        box=label.contentsRect().size()
-        max_h=label.maximumHeight()
+        box=target
+        label.setPixmap(pix.scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
+        return True
+
+    def _display_target(self, label):
+        """Return the largest useful decode size for this widget.
+
+        QImageReader can decode directly at this size. Decoding a 1920px QY
+        frame only to immediately paint it into a 900px widget wastes most of
+        the GUI thread's time and makes the next frame wait behind it.
+        """
+        box = label.contentsRect().size()
+        max_h = label.maximumHeight()
         if max_h and 0 < max_h < 16777215:
             box.setHeight(min(box.height() or max_h, max_h))
         if box.width() < 16 or box.height() < 16:
-            box=QSize(max(label.width(), 480), max_h if max_h and max_h < 16777215 else 360)
-        label.setPixmap(pix.scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
-        return True
+            box = QSize(max(label.width(), 480), max_h if max_h and max_h < 16777215 else 360)
+        return box
+
+    @staticmethod
+    def _decode_live_image(jpeg, target):
+        buffer = QBuffer()
+        buffer.setData(QByteArray(jpeg))
+        if buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+            reader = QImageReader(buffer)
+            reader.setAutoTransform(True)
+            source = reader.size()
+            if source.isValid() and target.isValid():
+                scaled = source.scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
+                if scaled.isValid() and (scaled.width() < source.width() or scaled.height() < source.height()):
+                    reader.setScaledSize(scaled)
+            image = reader.read()
+            if not image.isNull():
+                return image
+        return QImage.fromData(jpeg)
     def _paint_zone(self, image):
         zone=getattr(self, "_zone", None)
         if not zone:
@@ -360,6 +388,7 @@ class CameraLivePane(QFrame):
         w.finished.connect(lambda: setattr(self,"_alpr_busy",False)); self._keep(w); w.start()
     def _show_alpr(self, data):
         payload=data if isinstance(data, dict) else {}
+        previous_overlay = self._last_overlay
         if payload.get("clear_last_car"):
             self._held_car=None
             self._last_overlay=None
@@ -371,13 +400,18 @@ class CameraLivePane(QFrame):
         native=payload.get("native") or {}
         resolved=payload.get("resolved_plate") or fusion.get("resolved_plate") or shown.get("plate") or native.get("plate") or ""
         stored=shown.get("bbox") if isinstance(shown.get("bbox"), dict) else None
-        self._last_overlay=payload.get("overlay") or native.get("bbox") or stored
+        next_overlay=payload.get("overlay") or native.get("bbox") or stored
+        self._last_overlay=next_overlay
         if isinstance(self._last_overlay, dict) and "x1" in self._last_overlay:
             width=int(self._last_overlay.get("image_width") or native.get("image_width") or (stored or {}).get("image_width") or 0)
             height=int(self._last_overlay.get("image_height") or native.get("image_height") or (stored or {}).get("image_height") or 0)
             self._last_overlay={**self._last_overlay, "label": self._last_overlay.get("label") or resolved or native.get("plate") or "", "image_width": width, "image_height": height}
-            if self._last_jpeg:
+            if self._last_jpeg and self._last_overlay != previous_overlay:
                 self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
+        elif self._last_jpeg and self._last_overlay != previous_overlay:
+            # Clear an old box when the vehicle leaves without repainting the
+            # live image every two-second ALPR poll.
+            self._set_pixmap(self.video, self._last_jpeg, None)
         plate=resolved or shown.get("plate") or shown.get("plate_raw") or ""
         chars=shown.get("characters") or (" ".join(list(plate)) if plate else "—")
         self.plate.setText(chars)

@@ -20,6 +20,11 @@ def _service_step() -> dict:
         db.execute(select(Camera).limit(0))
         db.execute(select(SiteSetting).limit(0))
     cfg = _effective_flags()
+    from app.services.flags import validate_media_configuration
+    validation = validate_media_configuration(cfg)
+    if not validation["valid"]:
+        mediamtx.stop()
+        return {"state": "INVALID_CONFIGURATION", "errors": validation["errors"]}
     if not cfg.get("media_gateway_enabled"):
         mediamtx.stop()
         return {"state": "DISABLED"}

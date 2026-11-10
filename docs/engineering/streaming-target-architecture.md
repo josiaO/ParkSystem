@@ -37,8 +37,11 @@ making camera/recognition ownership explicit.
    commissioning probes, connect retries, snapshots, and Site Service
    recognition scheduling; a web/RTSP port does not override a saved `qy`
    adapter.
-3. Generic RTSP/ONVIF cameras are distributed by MediaMTX when enabled. The
-   recognition decoder reads only the local MediaMTX DETECT path.
+3. Generic RTSP/ONVIF cameras are distributed by MediaMTX in the production
+   profile. The recognition decoder reads only the local MediaMTX DETECT path.
+   The direct RTSP/HTTP lane is retained only for development and commissioning;
+   production rejects a generic direct producer so the camera cannot acquire
+   through two competing paths.
 4. LIVE, DETECT, and EVIDENCE are separate consumers. LIVE and DETECT use
    bounded latest-frame state; EVIDENCE stores immutable accepted-event media.
 5. Recognition ownership is explicit: `NATIVE_ONLY`, `FASTALPR_ONLY`, or
@@ -74,10 +77,12 @@ making camera/recognition ownership explicit.
 
 ## Rollout and rollback
 
-Roll out one camera or gate at a time. Keep the existing direct provider and
-native host bundle available. Disable `fastalpr_new_pipeline_enabled` to return
-software reads to the Site Service, disable the per-camera MediaMTX flag to
-return generic live delivery to the established direct path, and keep native
-camera adapters on the SDK path. Preserve the database and outbox; do not wipe
-or recreate them as a recovery step. See `docs/MIGRATION-AND-ROLLBACK.md`.
+Roll out one camera or gate at a time. Keep the direct compatibility provider
+and native host bundle available. Disable `fastalpr_new_pipeline_enabled` to
+return software reads to the Site Service. In development/commissioning only,
+disabling the per-camera MediaMTX flag can return generic live delivery to the
+established direct path; in production the same misconfiguration fails closed
+instead of starting a competing reader. Keep native camera adapters on the SDK
+path. Preserve the database and outbox; do not wipe or recreate them as a
+recovery step. See `docs/MIGRATION-AND-ROLLBACK.md`.
 

@@ -11,7 +11,7 @@ from typing import Any
 from app.domain.cameras import CameraLike
 from app.services.frame_grab import grab_camera_frame
 from app.services.http_snapshot import grab_http_snapshot
-from app.services.rtsp_probe import probe, vendor_candidates
+from app.services.rtsp_probe import probe, redact_url, vendor_candidates
 
 
 def _without_jpeg(payload: dict[str, Any]) -> dict[str, Any]:
@@ -41,6 +41,57 @@ class RTSPCameraAdapter:
         username = device.username
         password = device.password_secret
         explicit = (device.rtsp_url or "").strip()
+
+        # The production RTSP owner is MediaMTX.  A connect/commissioning
+        # request must therefore not start a one-shot FFmpeg reader merely to
+        # prove that a URL is plausible; doing so creates a second physical
+        # reader beside MediaMTX.  An explicit URL is a source configuration,
+        # while fresh-frame health is reported by the media gateway.
+        if explicit:
+            if not explicit.lower().startswith("rtsp://"):
+                return {
+                    "connected": False,
+                    "adapter_id": self.id,
+                    "error": "Generic RTSP camera URL must start with rtsp://",
+                }
+            return {
+                "connected": True,
+                "configured_only": True,
+                "adapter_id": self.id,
+                "handle": None,
+                "sdk_login": False,
+                "native_plates": False,
+                "local_alpr": True,
+                "source": "rtsp",
+                "url": explicit,
+                "url_redacted": redact_url(explicit),
+            }
+
+        from app.services.flags import direct_generic_media_allowed
+
+        if not direct_generic_media_allowed():
+            candidates = vendor_candidates(ip, username, password, explicit)
+            if candidates:
+                return {
+                    "connected": True,
+                    "configured_only": True,
+                    "adapter_id": self.id,
+                    "handle": None,
+                    "sdk_login": False,
+                    "native_plates": False,
+                    "local_alpr": True,
+                    "source": "mediamtx",
+                    "url": candidates[0],
+                    "url_redacted": redact_url(candidates[0]),
+                }
+            return {
+                "connected": False,
+                "configured_only": True,
+                "adapter_id": self.id,
+                "source": "mediamtx",
+                "error": "Production generic camera requires an RTSP source for MediaMTX",
+            }
+
         http = await grab_http_snapshot(ip, username, password)
         if http.get("ok"):
             return {
@@ -55,19 +106,21 @@ class RTSPCameraAdapter:
                 "url_redacted": http.get("url_redacted") or "",
                 "jpeg": http.get("jpeg"),
             }
-        grabbed = await grab_camera_frame(ip, username, password, explicit)
-        if grabbed.get("ok"):
+        # Vendor URL candidates are deterministic configuration candidates,
+        # not a physical connection. MediaMTX will own the first RTSP read.
+        candidates = vendor_candidates(ip, username, password, explicit)
+        if candidates:
             return {
                 "connected": True,
+                "configured_only": True,
                 "adapter_id": self.id,
                 "handle": None,
                 "sdk_login": False,
                 "native_plates": False,
                 "local_alpr": True,
                 "source": "rtsp",
-                "url": grabbed.get("url") or explicit,
-                "url_redacted": grabbed.get("url_redacted") or "",
-                "jpeg": grabbed.get("jpeg"),
+                "url": candidates[0],
+                "url_redacted": redact_url(candidates[0]),
             }
         return {
             "connected": False,
@@ -77,15 +130,21 @@ class RTSPCameraAdapter:
             "native_plates": False,
             "local_alpr": True,
             "error": (
-                grabbed.get("error") or http.get("error")
-                or "No live JPEG. A browser login page is not enough — SmartPark needs a snapshot or RTSP. "
-                "Install ffmpeg for RTSP, and check the camera username/password."
+                http.get("error")
+                or "No RTSP source candidate. Set an explicit rtsp:// URL or camera address."
             ),
             "http": _without_jpeg(http),
-            "rtsp": _without_jpeg(grabbed),
         }
 
     async def health(self, device: CameraLike) -> dict[str, Any]:
+        from app.services.flags import direct_generic_media_allowed
+        if not direct_generic_media_allowed():
+            return {
+                "ok": False,
+                "adapter_id": self.id,
+                "source": "mediamtx",
+                "error": "Fresh health is reported by the MediaMTX consumer in production",
+            }
         url = (device.rtsp_url or "").strip()
         if not url:
             http = await grab_http_snapshot(device.ip_address, device.username, device.password_secret)
@@ -99,6 +158,9 @@ class RTSPCameraAdapter:
         return {"ok": result.ok, "adapter_id": self.id, **result.__dict__}
 
     async def snapshot(self, device: CameraLike) -> bytes:
+        from app.services.flags import direct_generic_media_allowed
+        if not direct_generic_media_allowed():
+            return b""
         http = await grab_http_snapshot(device.ip_address, device.username, device.password_secret)
         if http.get("ok") and http.get("jpeg"):
             return http["jpeg"]
