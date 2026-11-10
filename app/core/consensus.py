@@ -217,6 +217,16 @@ class ConsensusTrack:
         self.published_at = 0.0
         self.published_visit = -1.0
 
+    def reset(self, now: float | None = None) -> None:
+        """Start a completely new physical-vehicle track."""
+        self.release()
+        self.readings.clear()
+        self.visit_started_at = float(now) if now is not None else -1.0
+        self.last_read_at = None
+        self.absence_since = None
+        self.last_plate = ""
+        self.streak = 0
+
 
 def detect_coverage(*, fps: float, dwell_seconds: float, min_frames: int = 2) -> dict:
     """Frame-interval vs time-in-view for DETECT OCR (typical entry ~1s plate dwell)."""

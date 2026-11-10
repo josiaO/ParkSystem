@@ -75,6 +75,13 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     from app.services.recognition_runtime import runtime
     lane = runtime.lane(int(camera.id))
     capture = dict(capture or {})
+    incoming_visit_id = str(capture.get("visit_id") or "").strip()
+    if incoming_visit_id and incoming_visit_id != lane.visit.visit_id:
+        # Recognition Worker and Site Service maintain separate in-memory
+        # lanes. The worker's visit identity is authoritative at this
+        # boundary; otherwise a new car can be rejected because Site Service
+        # still marks the previous car as EVENT_PUBLISHED.
+        lane.visit.adopt_visit(incoming_visit_id)
     if not capture.get("visit_id"):
         lane.visit.observe(presence=True, native_event=True)
         capture["visit_id"] = lane.visit.visit_id

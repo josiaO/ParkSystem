@@ -204,6 +204,7 @@ class ArrivalGate:
         max_ocr: int = 2,
         min_plate_width_px: int = 0,
         far_fallback_seconds: float = 0.0,
+        new_vehicle_ratio: float = 0.20,
     ) -> None:
         self.stable_seconds = float(stable_seconds)
         self.move_ratio = float(move_ratio)
@@ -211,6 +212,7 @@ class ArrivalGate:
         self.max_ocr = int(max_ocr)
         self.min_plate_width_px = max(0, int(min_plate_width_px or 0))
         self.far_fallback_seconds = max(0.0, float(far_fallback_seconds or 0.0))
+        self.new_vehicle_ratio = max(0.10, float(new_vehicle_ratio or 0.20))
         self.reset()
 
     def reset(self) -> None:
@@ -235,6 +237,20 @@ class ArrivalGate:
                     return "absent"
                 return "held"
             self._absent_since = None
+            center = _box_center(box)
+            previous = self._last
+            # A following car can enter before the detector produces an empty
+            # frame. Break the hold when its plate has moved materially in the
+            # arrival zone instead of treating it as the previous car.
+            if center is not None and previous is not None and max(
+                abs(center[0] - previous[0]), abs(center[1] - previous[1]),
+            ) >= self.new_vehicle_ratio:
+                self.reset()
+                self._last = center
+                self._seen_since = now
+                self._stable_since = now
+                self._observed_at = now
+                return "new_vehicle"
             return "held"
         if not box:
             # Detector output is not guaranteed on every decoded frame.  A

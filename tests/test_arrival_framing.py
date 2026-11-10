@@ -38,6 +38,16 @@ class ArrivalGateTests(unittest.TestCase):
         self.assertEqual(gate.observe(None, 1.6), "absent")
         self.assertEqual(gate.observe(moving, 1.7), "moving")
 
+    def test_materially_shifted_box_rearms_for_following_vehicle(self):
+        gate = ArrivalGate(stable_seconds=0.2)
+        first = _box(20, 90)
+        following = _box(110, 180)
+        self.assertEqual(gate.observe(first, 0.0), "moving")
+        self.assertEqual(gate.observe(first, 0.3), "ready")
+        gate.note_ocr(published=True)
+        self.assertEqual(gate.observe(following, 0.4), "new_vehicle")
+        self.assertEqual(gate.observe(following, 0.7), "ready")
+
     def test_settled_plate_retries_fresh_frame_without_another_settle_delay(self):
         gate = ArrivalGate(stable_seconds=0.2, max_ocr=2)
         box = _box(20, 90)

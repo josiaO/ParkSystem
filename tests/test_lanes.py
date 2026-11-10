@@ -232,7 +232,8 @@ class LaneViewTests(unittest.TestCase):
             repeated = persist_event(
                 db, camera, jpeg=JPEG, crop=CROP,
                 capture={"image_id": 102, "plate": "T123ABC", "score": 90,
-                         "have_vehicle": True, "bbox": box},
+                         "have_vehicle": True,
+                         "bbox": {"x1": 180, "y1": 120, "x2": 340, "y2": 165}},
             )
             self.assertEqual(repeated.id, first.id)
             count = db.scalar(select(func.count()).select_from(VehicleCapture).where(
