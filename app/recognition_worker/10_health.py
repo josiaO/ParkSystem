@@ -12,9 +12,21 @@ def _health_paths():
     primary = settings.data_dir / "recognition-worker.json"
     if os.name != "nt":
         return (primary,)
+
+    # The scheduled task normally uses ProgramData.  Older installations can
+    # retain a deny ACL on either the heartbeat file or its directory, so keep
+    # two per-user fallbacks.  ``TEMP`` is intentionally last: it is normally
+    # writable even when an elevated installer created LocalAppData files with
+    # the wrong owner.  Readers use the same ordered candidates and select the
+    # newest valid heartbeat, so a fallback remains process-safe.
     local_appdata = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-    fallback = local_appdata / "SmartParkEdge" / "recognition-worker.json"
-    return (primary, fallback) if fallback != primary else (primary,)
+    temp_root = Path(os.environ.get("TEMP") or tempfile.gettempdir())
+    candidates = (
+        primary,
+        local_appdata / "SmartParkEdge" / "recognition-worker.json",
+        temp_root / "SmartParkEdge" / "recognition-worker.json",
+    )
+    return tuple(dict.fromkeys(candidates))
 
 def worker_health() -> dict:
     """Read a process-safe heartbeat; stale/missing files never confer ownership."""
