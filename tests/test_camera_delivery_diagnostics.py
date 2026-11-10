@@ -137,6 +137,18 @@ def test_geometry_only_report_does_not_refresh_previous_native_plate():
     assert sdk._pending_events[0][-1]["plate_box"] == [10, 10, 50, 30]
 
 
+def test_plate_report_without_fresh_image_does_not_replay_previous_snapshot():
+    sdk = sdk_reader(Mock(return_value=0))
+    sdk._last_capture = {0: {"plate": "OLD123", "image_id": 4, "jpeg_bytes": 12}}
+    sdk._pending_events = {0: deque()}
+    parser_globals = HVXSDK._note_plate_report.__globals__
+    message = ctypes.create_string_buffer(32)
+    with patch.dict(parser_globals, {"parse_image_user_info": lambda _blob: {"plate_raw": b"NEW456", "plate_box": [10, 10, 50, 30]}}):
+        sdk._note_plate_report(0, message)
+    assert sdk._last_capture[0]["plate"] == "OLD123"
+    assert list(sdk._pending_events[0]) == []
+
+
 def test_windows_native_reader_uses_ocxconfig_jpg_polling_before_window_fallback():
     native = Mock(side_effect=OSError("the vendor JPEG poll must not run"))
     sdk = sdk_reader(native)

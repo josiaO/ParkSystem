@@ -654,16 +654,55 @@ class _HVXVideoMixin:
                     native_fault = diagnostics.get("native_decoder_fault", False)
                     window_capture = diagnostics.get("capture_mode") == "play_sdk_hwnd"
                 if native_fault:
+                    if time.monotonic() < retry_at:
+                        time.sleep(min(0.5, max(0.05, retry_at - time.monotonic())))
+                        continue
+                    now = time.monotonic()
+                    with self._lock:
+                        diagnostics = getattr(self, "_video_diagnostics", {}).get(handle, {})
+                        attempts = int(diagnostics.get("decoder_recovery_attempts") or 0)
+                        disabled_until = float(
+                            getattr(self, "_native_jpeg_disabled_until", {}).get(handle, 0.0) or 0.0
+                        )
+                        recovery_holdoff = float(
+                            getattr(self, "_video_recovery_at", {}).get(handle, 0.0) or 0.0
+                        )
+                        if attempts >= 3 and now >= max(disabled_until, recovery_holdoff):
+                            diagnostics["decoder_recovery_attempts"] = 0
                     recovered = self._recover_video_decoder(handle)
                     if recovered:
                         idle = 0
                         retry_at = time.monotonic() + 5.0
                         continue
-                    logging.getLogger("smartpark.hvx").error(
-                        "Stopping faulty JPEG pump for handle=%s after bounded recovery; recognition callbacks remain registered",
-                        handle,
+                    # Recovery exhaustion must not terminate this camera's
+                    # pump. The SDK session remains active and a dead pump
+                    # would make the camera look permanently disconnected
+                    # until the whole host is restarted. Keep the lane alive,
+                    # wait for the vendor decoder's bounded holdoff, then let
+                    # the next attempt start from the same camera only.
+                    with self._lock:
+                        diagnostics = getattr(self, "_video_diagnostics", {}).get(handle, {})
+                        disabled_until = float(
+                            getattr(self, "_native_jpeg_disabled_until", {}).get(handle, 0.0) or 0.0
+                        )
+                        attempts = int(diagnostics.get("decoder_recovery_attempts") or 0)
+                    wait_until = max(
+                        time.monotonic() + 1.0,
+                        disabled_until,
+                        float(getattr(self, "_video_recovery_at", {}).get(handle, 0.0) or 0.0),
                     )
-                    break
+                    retry_at = wait_until
+                    self._note_video(
+                        handle,
+                        recovery_state="RETRY_WAIT",
+                        recovery_reason=f"decoder recovery attempt {attempts} deferred",
+                    )
+                    logging.getLogger("smartpark.hvx").warning(
+                        "Keeping faulty JPEG pump alive for bounded retry: handle=%s attempts=%s",
+                        handle, attempts,
+                    )
+                    time.sleep(min(1.0, max(0.05, wait_until - time.monotonic())))
+                    continue
                 if window_capture and time.monotonic() - last_progress_at < 5.0:
                     # Window capture is deliberately non-destructive during
                     # the normal paint warm-up. Once it has been stale for a

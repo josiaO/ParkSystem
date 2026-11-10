@@ -317,7 +317,6 @@ class _HVXConnectionMixin:
         if not plate_box_usable(box) and not plate:
             return
         with self._lock:
-            previous = dict(self._last_capture.get(handle) or {})
             pending = self._pending_events.setdefault(handle, deque(maxlen=64))
             # A report containing only geometry is an enrichment for an image
             # callback already in the queue. It is not a new vehicle event.
@@ -331,31 +330,22 @@ class _HVXConnectionMixin:
                 # it is not a new capture. Never refresh last_capture with the
                 # previous car's plate and a new timestamp.
                 return
-            event = {
-                "image_id": int(previous.get("image_id") or 0),
-                "captured_at_epoch": time.time(),
-                "plate": plate,
-                "score": previous.get("score"),
-                "plate_box": list(box) if plate_box_usable(box) else previous.get("plate_box"),
-                "image_width": int(previous.get("image_width") or 0),
-                "image_height": int(previous.get("image_height") or 0),
-                "jpeg_bytes": previous.get("jpeg_bytes") or 0,
-                "crop_bytes": previous.get("crop_bytes") or 0,
-                "have_vehicle": True if plate_box_usable(box) else bool(previous.get("have_vehicle")),
-                "snap_type": previous.get("snap_type"),
-                "camera_timestamp": parsed.get("camera_timestamp") or previous.get("camera_timestamp", ""),
-                "vehicle_id": int(parsed.get("vehicle_id") or previous.get("vehicle_id") or 0),
-                "snapshot_index": int(parsed.get("snapshot_index") or previous.get("snapshot_index") or 0),
-            }
-            event = retain_plate_box(previous, event)
-            self._last_capture[handle] = event
-            if pending and not plate_box_usable(pending[-1].get("plate_box")):
-                pending[-1]["plate_box"] = list(event["plate_box"]) if event.get("plate_box") else pending[-1].get("plate_box")
-                pending[-1]["have_vehicle"] = bool(event.get("have_vehicle"))
-                if plate and not pending[-1].get("plate"):
-                    pending[-1]["plate"] = plate
-            elif not pending and plate_box_usable(event.get("plate_box")):
-                pending.append(dict(event))
+            # A plate report has no image identity. It may enrich the newest
+            # image callback, but it must never manufacture an event from
+            # ``previous``: that reuses the last car's JPEG/crop and makes a
+            # stale vehicle appear to be captured again when the lane is empty
+            # or another vehicle is passing.
+            if not pending:
+                return
+            target = pending[-1]
+            if target.get("plate"):
+                return
+            target["plate"] = plate
+            target["have_vehicle"] = True if plate_box_usable(box) else bool(target.get("have_vehicle"))
+            if plate_box_usable(box):
+                target["plate_box"] = list(box)
+            self._last_capture[handle] = dict(target)
+            return
 
     def close(self):
         with self._lock:

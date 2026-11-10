@@ -48,6 +48,15 @@ class ArrivalGateTests(unittest.TestCase):
         self.assertEqual(gate.observe(following, 0.4), "new_vehicle")
         self.assertEqual(gate.observe(following, 0.7), "ready")
 
+    def test_held_vehicle_position_advances_without_rearming_same_vehicle(self):
+        gate = ArrivalGate(stable_seconds=0.0, new_vehicle_ratio=0.20)
+        first = _box(20, 90)
+        gate.observe(first, 0.0)
+        self.assertEqual(gate.observe(first, 0.1), "ready")
+        gate.note_ocr(published=True)
+        self.assertEqual(gate.observe(_box(35, 105), 0.2), "held")
+        self.assertEqual(gate.observe(_box(50, 120), 0.3), "held")
+
     def test_settled_plate_retries_fresh_frame_without_another_settle_delay(self):
         gate = ArrivalGate(stable_seconds=0.2, max_ocr=2)
         box = _box(20, 90)
