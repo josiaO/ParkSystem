@@ -142,6 +142,17 @@ class CameraSelectionTests(unittest.TestCase):
         self.assertFalse(note_reading(track, "ABC123", 1.0, confidence=0.8))
         self.assertTrue(note_reading(track, "ABC123", 1.2, confidence=0.8))
 
+    def test_site_lane_adopts_worker_visit_identity_after_previous_publish(self):
+        from app.services.recognition_runtime import LaneVisit
+
+        visit = LaneVisit(camera_id=1)
+        visit.observe(presence=True, plate="OLD123")
+        self.assertTrue(visit.mark_published("OLD123"))
+        self.assertTrue(visit.adopt_visit("worker-new-visit"))
+        self.assertEqual(visit.visit_id, "worker-new-visit")
+        self.assertFalse(visit.event_published)
+        self.assertTrue(visit.mark_published("NEW456"))
+
     def test_continuously_visible_plate_does_not_republish_after_hold(self):
         track = PlateTrack()
         self.assertFalse(note_reading(track, "ABC123", 0, confidence=0.8))

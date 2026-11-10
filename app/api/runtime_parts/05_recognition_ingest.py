@@ -423,6 +423,11 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
         return True
+    if phase == "new_vehicle":
+        # A following car can replace a published one before an empty detector
+        # frame arrives. Reset the visit boundary immediately.
+        lane.visit.reset(time.monotonic())
+        lane.visit.observe(presence=True)
     if phase == "absent":
         remember_plate_box(int(camera.id), None)
         lane.visit.observe(presence=False, plate="")

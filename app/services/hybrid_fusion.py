@@ -135,7 +135,10 @@ async def offer_native(db, camera, native: dict, *, jpeg: bytes = b"", crop: byt
     _evidence[camera_id] = _Evidence(jpeg=jpeg or b"", crop=crop or b"", capture=dict(capture or {}))
     outcomes = _coordinator.offer(camera_id, candidate, now=time.monotonic(),
                                   counterpart_available=local_counterpart_available(camera_id))
-    return [await _apply(camera, o, _evidence.get(camera_id) or _Evidence(), db) for o in outcomes]
+    results = [await _apply(camera, o, _evidence.get(camera_id) or _Evidence(), db) for o in outcomes]
+    if outcomes:
+        _evidence.pop(camera_id, None)
+    return results
 
 
 async def offer_local(db, camera, recognized: dict, *, jpeg: bytes = b"", crop: bytes = b"") -> list[dict | None]:
@@ -167,7 +170,10 @@ async def offer_local(db, camera, recognized: dict, *, jpeg: bytes = b"", crop: 
             existing.crop = crop
     outcomes = _coordinator.offer(camera_id, candidate, now=time.monotonic(),
                                   counterpart_available=native_counterpart_available(camera))
-    return [await _apply(camera, o, _evidence.get(camera_id) or _Evidence(), db) for o in outcomes]
+    results = [await _apply(camera, o, _evidence.get(camera_id) or _Evidence(), db) for o in outcomes]
+    if outcomes:
+        _evidence.pop(camera_id, None)
+    return results
 
 
 async def flush(db_factory) -> int:
@@ -178,6 +184,7 @@ async def flush(db_factory) -> int:
     from app.models import Camera
 
     applied = 0
+    completed: set[int] = set()
     for outcome in outcomes:
         with db_factory() as db:
             camera = db.get(Camera, int(outcome.camera_id))
@@ -185,6 +192,9 @@ async def flush(db_factory) -> int:
                 continue
             await _apply(camera, outcome, _evidence.get(int(outcome.camera_id)) or _Evidence(), db)
             applied += 1
+            completed.add(int(outcome.camera_id))
+    for camera_id in completed:
+        _evidence.pop(camera_id, None)
     return applied
 
 

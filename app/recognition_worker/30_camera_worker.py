@@ -316,6 +316,23 @@ async def _infer_camera(
                     mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
             phase = arrival.observe(best_arrival_box(boxes, detect_roi=detect_roi), time.monotonic())
             stats["arrival"] = phase
+            if phase == "new_vehicle":
+                # The previous car was published but no empty detector frame
+                # arrived before this car entered. Reset both temporal tracks
+                # so the new plate cannot be suppressed as a duplicate.
+                now = time.monotonic()
+                track.reset(now)
+                lane.visit.reset(now)
+                lane.visit.observe(presence=True, now=now)
+                confirmed_visit_id = ""
+                stats["last_plate"] = ""
+                stats["ocr_paused"] = False
+                stats["timeline"] = {
+                    "visit_id": lane.visit.visit_id,
+                    "camera_id": camera_id,
+                    "direction": camera.get("lane_direction", "ENTRY"),
+                }
+                phase = "moving"
             if phase == "absent":
                 runtime.finish(ticket, plate="")
                 decision = note_reading_detail(track, "", time.monotonic())

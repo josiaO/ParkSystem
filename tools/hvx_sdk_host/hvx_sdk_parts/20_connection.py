@@ -323,12 +323,18 @@ class _HVXConnectionMixin:
             # callback already in the queue. It is not a new vehicle event.
             # Reusing ``previous.plate`` here made an empty-lane report create
             # another capture with the last car's plate.
-            if not plate and not pending:
+            if not plate:
+                if pending and not plate_box_usable(pending[-1].get("plate_box")):
+                    pending[-1]["plate_box"] = list(box) if plate_box_usable(box) else pending[-1].get("plate_box")
+                    pending[-1]["have_vehicle"] = bool(plate_box_usable(box))
+                # A geometry-only report enriches the pending image callback;
+                # it is not a new capture. Never refresh last_capture with the
+                # previous car's plate and a new timestamp.
                 return
             event = {
                 "image_id": int(previous.get("image_id") or 0),
                 "captured_at_epoch": time.time(),
-                "plate": plate or previous.get("plate"),
+                "plate": plate,
                 "score": previous.get("score"),
                 "plate_box": list(box) if plate_box_usable(box) else previous.get("plate_box"),
                 "image_width": int(previous.get("image_width") or 0),
