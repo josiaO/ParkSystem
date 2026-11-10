@@ -1,7 +1,7 @@
 """Authoritative database configuration and preflight helpers.
 
 The deployment file contains only connection metadata.  Passwords are kept in
-the configured SmartPark secret store and are resolved only while building a
+the configured Zirp secret store and are resolved only while building a
 runtime SQLAlchemy URL for the Site Service.
 """
 

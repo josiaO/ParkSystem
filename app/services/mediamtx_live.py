@@ -29,12 +29,11 @@ def _live_url(camera_id: int) -> str:
 async def _consume(spec: "CameraLiveSpec") -> None:
     from app.infrastructure.media.registry import mediamtx_live_active
     from app.services import mediamtx
-    from app.services.preview import viewers_for
 
     camera_id = int(spec.id)
     local_url = _live_url(camera_id)
     row = gateway._session_for(spec)
-    while mediamtx_live_active(camera_id) and viewers_for(camera_id) > 0:
+    while mediamtx_live_active(camera_id) and gateway.viewers_for(camera_id) > 0:
         if not mediamtx.running():
             await asyncio.sleep(1.0)
             continue
@@ -49,7 +48,7 @@ async def _consume(spec: "CameraLiveSpec") -> None:
                 jpeg_q=12,
             )
             async for jpeg in stream:
-                if not mediamtx_live_active(camera_id) or viewers_for(camera_id) <= 0:
+                if not mediamtx_live_active(camera_id) or gateway.viewers_for(camera_id) <= 0:
                     break
                 gateway.publish(
                     camera_id,

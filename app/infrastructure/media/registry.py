@@ -11,7 +11,7 @@ from typing import Any
 
 from app.domain.flags import LIVE_VIEW_DIRECT_LEGACY, LIVE_VIEW_MEDIAMTX
 from app.services import mediamtx
-from app.services.flags import flags, media_mtx_for_camera
+from app.services.flags import direct_generic_media_allowed, flags, media_mtx_for_camera
 from app.services.media_gateway import gateway
 
 LIVE_PROVIDER_WEBRTC = "MEDIAMTX_WEBRTC"
@@ -68,12 +68,20 @@ def _sdk_camera(camera_id: int, db=None) -> bool:
     camera = db.get(Camera, int(camera_id))
     if camera is None:
         return False
-    from app.infrastructure.hardware.cameras import adapter_requires_native_stream
     profiles = camera.stream_profiles or {}
-    return adapter_requires_native_stream(getattr(camera, "adapter_id", None)) or camera.sdk_handle is not None or any(
+    adapter_id = str(getattr(camera, "adapter_id", None) or "").strip().lower()
+    # Development fixtures and legacy onboarding rows may still use the HVX
+    # default before login. Production treats that identity as native-owned;
+    # it must never be reclassified as generic RTSP.
+    has_sdk_profile = any(
         str(profile.get("protocol") or "").lower() == "sdk"
         for profile in profiles.values() if isinstance(profile, dict)
     )
+    if has_sdk_profile or camera.sdk_handle is not None:
+        return True
+    if adapter_id == "hvx" and direct_generic_media_allowed():
+        return False
+    return adapter_id in {"hvx", "qy", "native"}
 
 
 def mediamtx_live_active(camera_id: int, db=None) -> bool:
@@ -178,9 +186,20 @@ async def get_live_endpoint(camera_id: int, db=None) -> dict[str, Any]:
             "codec_note": compat.get("reason") or "",
         }
 
-    endpoint = await gateway.get_live_endpoint(camera_id)
     cfg = _migration_flags(db)
     sdk_camera = _sdk_camera(camera_id, db) if _camera_enabled(camera_id, db) else False
+    if not sdk_camera and not direct_generic_media_allowed():
+        return {
+            "provider": LIVE_VIEW_MEDIAMTX,
+            "camera_id": camera_id,
+            "transport": "OFFLINE",
+            "live_provider": LIVE_PROVIDER_OFFLINE,
+            "state": "OFFLINE",
+            "mediamtx_selected": True,
+            "mediamtx_running": mediamtx.running(),
+            "reason": "Production generic camera has no healthy MediaMTX path",
+        }
+    endpoint = await gateway.get_live_endpoint(camera_id)
     return {
         "provider": LIVE_VIEW_DIRECT_LEGACY,
         "camera_id": camera_id,
@@ -211,6 +230,8 @@ async def get_detect_endpoint(camera_id: int, db=None) -> dict[str, Any]:
             "camera_id": camera_id,
             **endpoint,
         }
+    if not direct_generic_media_allowed() and not _sdk_camera(camera_id, db):
+        return {"provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id, "state": "OFFLINE", "rtsp": ""}
     endpoint = await gateway.get_detect_endpoint(camera_id)
     return {
         "provider": LIVE_VIEW_DIRECT_LEGACY,
@@ -226,6 +247,8 @@ async def get_evidence_endpoint(camera_id: int, db=None) -> dict[str, Any]:
     if mediamtx_detect_active(camera_id, db):
         endpoint = mediamtx.evidence_endpoint(camera_id)
         return {"provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id, **endpoint}
+    if not direct_generic_media_allowed() and not _sdk_camera(camera_id, db):
+        return {"provider": LIVE_VIEW_MEDIAMTX, "camera_id": camera_id, "kind": "snapshot", "state": "OFFLINE"}
     return {
         "provider": LIVE_VIEW_DIRECT_LEGACY,
         "camera_id": camera_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -33,15 +34,12 @@ CAMERA_CAPABILITIES = (
     "JPEG",
 )
 
-# Adapter identity is deliberately separate from recognition identity.  A QY
-# camera can use FastALPR in Zirp while its video/control plane is owned by the
-# native OcxConfig/NetSDK adapter.  ``hvx`` remains a persisted legacy alias
-# for installations created before the adapter registry was introduced.
+# Adapter identity is deliberately separate from recognition identity.  All
+# QY/HVX rows, including the persisted legacy ``hvx`` alias, have one physical
+# owner: the native OcxConfig/NetSDK host.  A missing SDK handle means the
+# camera is disconnected, not that another component may open RTSP beside it.
 SDK_CAMERA_ADAPTER_IDS = frozenset({"qy", "hvx", "native"})
-# ``hvx`` was the historical default for older rows and may describe an
-# unclassified camera until it connects. ``qy`` and ``native`` are explicit
-# native-stream selections and must never fall back to RTSP.
-NATIVE_STREAM_ADAPTER_IDS = frozenset({"qy", "native"})
+NATIVE_STREAM_ADAPTER_IDS = frozenset({"qy", "hvx", "native"})
 GENERIC_CAMERA_ADAPTER_IDS = frozenset({"rtsp", "ipcam", "dahua", "hikvision", "onvif"})
 
 
@@ -78,6 +76,46 @@ class CameraAdapter(Protocol):
     async def detection_zones(self, device: CameraLike) -> dict[str, Any]: ...
 
     async def drain_events(self, device: CameraLike) -> list[dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class CameraStreamStatus:
+    """Normalized stream contract shared by native and generic cameras."""
+
+    camera_id: int
+    state: str
+    latest_frame: dict[str, Any] | None
+    frame_timestamp: float | None
+    frame_age_seconds: float | None
+    generation: int
+    fps: float
+    reconnect_count: int
+    startup_duration_ms: float | None
+    time_since_reconnect_seconds: float | None
+    last_successful_frame_at: float | None
+    decoder_health: dict[str, Any]
+    last_error: str
+    healthy: bool
+    source: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "camera_id": self.camera_id,
+            "state": self.state,
+            "latest_frame": dict(self.latest_frame) if self.latest_frame else None,
+            "frame_timestamp": self.frame_timestamp,
+            "frame_age_seconds": self.frame_age_seconds,
+            "generation": self.generation,
+            "fps": self.fps,
+            "reconnect_count": self.reconnect_count,
+            "startup_duration_ms": self.startup_duration_ms,
+            "time_since_reconnect_seconds": self.time_since_reconnect_seconds,
+            "last_successful_frame_at": self.last_successful_frame_at,
+            "decoder_health": dict(self.decoder_health),
+            "last_error": self.last_error,
+            "healthy": self.healthy,
+            "source": self.source,
+        }
 
 
 def camera_type_for(adapter_id: str, *, native_plates: bool = False) -> str:
