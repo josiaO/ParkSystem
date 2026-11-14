@@ -11,3 +11,16 @@ def _reset_login_throttle():
     login_throttle.reset()
     yield
     login_throttle.reset()
+
+
+@pytest.fixture(autouse=True)
+def _reset_public_rate_limits():
+    """Process-wide request budgets must not leak between tests."""
+    from app.services import payment_prompt_guard
+    from app.services.public_ingress import reset_rate_limiter
+
+    reset_rate_limiter()
+    payment_prompt_guard.reset()
+    yield
+    reset_rate_limiter()
+    payment_prompt_guard.reset()

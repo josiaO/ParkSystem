@@ -256,3 +256,98 @@ def test_login_endpoints_are_throttled(endpoint, tmp_path):
         client.close()
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+# 1.4 Public payment surface ------------------------------------------------
+
+def _prompt_guard():
+    from app.services.payment_prompt_guard import PaymentPromptGuard
+
+    clock = _Clock()
+    return PaymentPromptGuard(clock=clock), clock
+
+
+def test_phone_cooldown_between_prompts_and_hourly_cap():
+    from app.services.payment_prompt_guard import PaymentPromptCooldown
+
+    guard, clock = _prompt_guard()
+    guard.claim("0712 345 678", session_id=1)
+    with pytest.raises(PaymentPromptCooldown) as exc:
+        guard.claim("+255712345678", session_id=2)  # same number, other format/session
+    assert 0 < exc.value.retry_after <= guard.phone_interval_seconds
+    for session_id in range(3, 3 + guard.phone_max_per_hour - 1):
+        clock.now += guard.phone_interval_seconds + 1
+        guard.claim("0712345678", session_id=session_id)
+    clock.now += guard.phone_interval_seconds + 1
+    with pytest.raises(PaymentPromptCooldown):
+        guard.claim("0712345678", session_id=99)
+    clock.now += 3600
+    guard.claim("0712345678", session_id=100)
+
+
+def test_one_receipt_cannot_cycle_through_phone_numbers():
+    from app.services.payment_prompt_guard import PaymentPromptCooldown
+
+    guard, clock = _prompt_guard()
+    for i in range(guard.session_max_per_hour):
+        guard.claim(f"07123456{i:02d}", session_id=7)
+        clock.now += 1
+    with pytest.raises(PaymentPromptCooldown):
+        guard.claim("0719999999", session_id=7)
+
+
+def test_prompt_guard_never_keeps_raw_phone_numbers():
+    guard, _clock = _prompt_guard()
+    guard.claim("0712345678", session_id=1)
+    assert "712345678" not in repr(guard._phones)
+
+
+def test_invalid_phone_is_rejected_before_any_prompt():
+    guard, _clock = _prompt_guard()
+    with pytest.raises(ValueError):
+        guard.claim("not-a-number", session_id=1)
+
+
+def test_public_payment_routes_are_rate_limited_on_the_lan_too():
+    from app.services.public_ingress import PublicIngressGuard, reset_rate_limiter
+
+    reset_rate_limiter()
+    calls = []
+
+    async def inner(scope, receive, send):
+        calls.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    guard = PublicIngressGuard(inner)
+    statuses = []
+
+    async def run():
+        for _ in range(12):
+            scope = {"type": "http", "path": "/api/public/payment-intents", "method": "POST",
+                     "headers": [(b"host", b"192.168.1.10:8760")], "client": ("192.168.1.77", 5000)}
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            await guard(scope, None, send)
+            statuses.append(sent[0]["status"])
+
+    import asyncio
+
+    with patch("app.services.public_ingress.settings.public_ingress_hosts", "pay.example.com"):
+        asyncio.run(run())
+    reset_rate_limiter()
+    assert statuses[:10] == [200] * 10
+    assert statuses[10:] == [429, 429]
+
+
+def test_public_client_ip_is_not_taken_from_a_client_supplied_forwarded_header():
+    from app.services.public_ingress import client_key
+
+    tunnel = {"host": "pay.example.com", "x-forwarded-for": "1.2.3.4, 203.0.113.9"}
+    assert client_key(tunnel, ("127.0.0.1", 1), public=True) == "203.0.113.9"
+    assert client_key({**tunnel, "cf-connecting-ip": "198.51.100.7"}, ("127.0.0.1", 1), public=True) == "198.51.100.7"
+    # On the LAN the TCP peer is the client; forwarded headers are ignored.
+    assert client_key({"x-forwarded-for": "1.2.3.4"}, ("192.168.1.77", 1), public=False) == "192.168.1.77"
