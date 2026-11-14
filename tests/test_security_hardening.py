@@ -524,3 +524,104 @@ def test_camera_tls_opt_in_is_a_saved_camera_setting(api_client):
     with patch("app.services.http_snapshot.short_session", Session):
         assert http_snapshot.camera_allows_insecure_tls("10.0.0.7") is True
         assert http_snapshot.camera_allows_insecure_tls("10.0.0.99") is False
+
+
+# 1.8 Public receipt page ------------------------------------------------------
+
+def test_receipt_tokens_are_256_bit():
+    import base64
+
+    from app.domain.receipt_engine import new_public_token
+
+    token = new_public_token()
+    assert len(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))) * 8 >= 256
+
+
+@pytest.fixture()
+def receipt_with_photo(api_client, tmp_path):
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.models import Camera, ParkingSession, VehicleCapture
+
+    client, token, Session = api_client
+    media = tmp_path / "media"
+    (media / "snapshots").mkdir(parents=True)
+    (media / "crops").mkdir(parents=True)
+    picture = Image.new("RGB", (64, 48))
+    for x in range(64):
+        for y in range(48):
+            picture.putpixel((x, y), (255, 255, 255) if (x // 4 + y // 4) % 2 else (0, 0, 0))
+    buffer = BytesIO()
+    picture.save(buffer, "JPEG", quality=95)
+    original = buffer.getvalue()
+    (media / "snapshots" / "entry.jpg").write_bytes(original)
+    (media / "crops" / "entry.jpg").write_bytes(original)
+    with Session() as db:
+        from app.services.modules import apply_profile
+
+        apply_profile(db, "PARKING_PRO")  # enables the public receipt pages
+        camera = Camera(name="Entry A", ip_address="10.0.0.21", adapter_id="rtsp", lane_direction="ENTRY")
+        db.add(camera)
+        db.flush()
+        session = ParkingSession(plate="T123ABC", public_token="tok-" + "x" * 40, status="ACTIVE",
+                                 camera_id=camera.id, entry_event_id="evt-1", visit_id="visit-1")
+        db.add(session)
+        db.flush()
+        db.add(VehicleCapture(plate="T123ABC", camera_id=camera.id, snapshot_path="snapshots/entry.jpg",
+                              crop_path="crops/entry.jpg", event_id="evt-1", visit_id="visit-1",
+                              lane_direction="ENTRY"))
+        db.commit()
+        public = session.public_token
+    with patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=media):
+        yield client, token, public, original
+
+
+def _receipt_status(client, public):
+    response = client.get(f"/p/{public}/status")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_public_receipt_hides_the_entry_photo_by_default(receipt_with_photo):
+    client, token, public, _original = receipt_with_photo
+    body = _receipt_status(client, public)
+    assert body["snapshot_url"] is None and body["crop_url"] is None
+    assert body["plate"] == "T123ABC"
+    assert client.get(f"/p/{public}/snapshot.jpg").status_code == 404
+    assert client.get(f"/p/{public}/crop.jpg").status_code == 404
+    assert "/snapshot.jpg" not in client.get(f"/p/{public}").text
+
+
+def test_operators_still_see_the_photo_when_public_photos_are_off(receipt_with_photo):
+    client, token, public, original = receipt_with_photo
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get(f"/p/{public}/snapshot.jpg", headers=headers).content == original
+    media = client.post("/auth/media-token", headers=headers).json()["media_token"]
+    assert client.get(f"/p/{public}/crop.jpg?media_token={media}").content == original
+
+
+def test_public_receipt_can_show_a_blurred_photo(receipt_with_photo):
+    client, _token, public, original = receipt_with_photo
+    with patch("app.services.receipt_privacy.settings.public_receipt_photo", "blurred"):
+        body = _receipt_status(client, public)
+        assert body["snapshot_url"] and body["crop_url"] is None
+        blurred = client.get(f"/p/{public}/snapshot.jpg")
+        assert blurred.status_code == 200 and blurred.content[:2] == b"\xff\xd8"
+        assert blurred.content != original
+        assert client.get(f"/p/{public}/crop.jpg").status_code == 404
+    from io import BytesIO
+
+    from PIL import Image, ImageStat
+
+    sharp = ImageStat.Stat(Image.open(BytesIO(original)).convert("L")).stddev[0]
+    soft = ImageStat.Stat(Image.open(BytesIO(blurred.content)).convert("L")).stddev[0]
+    assert soft < sharp / 2  # the checkerboard detail is gone
+
+
+def test_public_receipt_full_photo_is_an_explicit_opt_in(receipt_with_photo):
+    client, _token, public, original = receipt_with_photo
+    with patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"):
+        assert _receipt_status(client, public)["snapshot_url"]
+        assert client.get(f"/p/{public}/snapshot.jpg").content == original

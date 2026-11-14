@@ -337,6 +337,28 @@ def require_media_file(permission: str):
     return dep
 
 
+def optional_media_user(db: Session, request) -> User | None:
+    """The signed-in user behind a request, or None. Never raises.
+
+    For routes that are public but show more to staff (receipt photos):
+    accepts the Authorization header, ?media_token= or ?access_token=.
+    """
+    header = str(request.headers.get("authorization") or "")
+    bearer = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    media_token = request.query_params.get("media_token") or ""
+    access_token = request.query_params.get("access_token") or ""
+    try:
+        if bearer:
+            return load_user_from_token(db, bearer)
+        if media_token:
+            return load_user_from_media_token(db, media_token)
+        if access_token:
+            return load_user_from_token(db, access_token)
+    except HTTPException:
+        return None
+    return None
+
+
 def current_node(
     token: str | None = Depends(node_oauth2_scheme),
     db: Session = Depends(get_db),
