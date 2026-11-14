@@ -197,6 +197,10 @@ def verify_payload(payload: Path) -> list[str]:
         errors.append("QY 32-bit MSVC runtime missing: vendor/vc_redist.x86.exe")
     if not (vendor / "mediamtx" / "mediamtx.exe").is_file():
         errors.append("MediaMTX missing: vendor/mediamtx/mediamtx.exe")
+    if not (vendor / "nssm" / "nssm.exe").is_file():
+        errors.append("NSSM missing: vendor/nssm/nssm.exe (services cannot start at boot)")
+    if not (vendor / "nssm" / "LICENSE.txt").is_file():
+        errors.append("NSSM licence notice missing: vendor/nssm/LICENSE.txt")
 
     if not (vendor / "ffmpeg" / "bin" / "ffmpeg.exe").is_file():
         errors.append("FFmpeg missing: vendor/ffmpeg/bin/ffmpeg.exe")
