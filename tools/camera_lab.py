@@ -35,7 +35,11 @@ from app.infrastructure.media.diagnostics import (
 )
 
 def password_candidates(explicit: str = "") -> list[str]:
-    """Passwords to try, without printing them. The install file comes first."""
+    """Passwords to try, without printing them.
+
+    Order: --password, SMARTPARK_PASSWORD, SMARTPARK_BOOTSTRAP_PASSWORD, the
+    install file bootstrap_password.txt, then an interactive prompt.
+    """
     found: list[str] = []
 
     def add(value: str) -> None:
@@ -62,8 +66,12 @@ def password_candidates(explicit: str = "") -> list[str]:
                 add(path.read_text(encoding="utf-8"))
         except OSError:
             continue
-    add("SmartPark1!")
-    add("admin")
+    # Never guess default passwords: that teaches nothing and trips the
+    # login lockout. Ask a person at the keyboard; fail clearly otherwise.
+    if not found and sys.stdin is not None and sys.stdin.isatty():
+        import getpass
+
+        add(getpass.getpass("SmartPark password: "))
     return found
 
 
@@ -85,7 +93,7 @@ def service_up(base: str) -> bool:
 
 
 def login(base: str, username: str, passwords: list[str]) -> str:
-    last = "login failed"
+    last = "login failed" if passwords else "No password available: pass --password, set SMARTPARK_PASSWORD, or run interactively to be prompted"
     for password in passwords:
         req = urllib.request.Request(
             f"{base.rstrip('/')}/auth/login",

@@ -101,3 +101,46 @@ def test_loopback_detection(client_host, headers, expected):
 
     request = SimpleNamespace(client=SimpleNamespace(host=client_host), headers=headers)
     assert _is_loopback_request(request) is expected
+
+
+# 1.2 Default password strings ----------------------------------------------
+
+@pytest.mark.parametrize("module_name", ["tools.field_acceptance_test", "tools.camera_lab"])
+def test_tools_never_guess_default_passwords(module_name, tmp_path, monkeypatch):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    for name in ("SMARTPARK_PASSWORD", "SMARTPARK_BOOTSTRAP_PASSWORD", "PROGRAMDATA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: False, raising=False)
+    assert module.password_candidates("") == []
+    monkeypatch.setenv("SMARTPARK_PASSWORD", "from-env-123")
+    assert module.password_candidates("") == ["from-env-123"]
+
+
+@pytest.mark.parametrize("module_name", ["tools.field_acceptance_test", "tools.camera_lab"])
+def test_tools_prompt_when_interactive_and_nothing_configured(module_name, tmp_path, monkeypatch):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    for name in ("SMARTPARK_PASSWORD", "SMARTPARK_BOOTSTRAP_PASSWORD", "PROGRAMDATA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "typed-pass-123")
+    assert module.password_candidates("") == ["typed-pass-123"]
+
+
+def test_no_default_password_literals_in_scripts_or_tools():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for folder in ("tools", "scripts", "packaging"):
+        for path in (root / folder).rglob("*"):
+            if path.suffix in {".py", ".ps1", ".sh", ".bat", ".cmd"} and "SmartPark1!" in path.read_text(encoding="utf-8", errors="ignore"):
+                offenders.append(str(path.relative_to(root)))
+    assert offenders == []
