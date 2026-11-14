@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # evidence, but it must not drive an automatic barrier decision: the car
     # it describes has very likely left the lane already.
     outbox_max_action_age_seconds: float = 20.0
+    # Pipeline watchdog (fresh frames, database, HVX host). 0 disables it.
+    pipeline_watchdog_seconds: float = 30.0
+    watchdog_frame_stale_seconds: float = 10.0
     # Public receipt page entry photo: off (default) | blurred | full.
     # Signed-in operators always see the original. See app/services/receipt_privacy.py.
     public_receipt_photo: str = "off"
