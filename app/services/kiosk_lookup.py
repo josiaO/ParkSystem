@@ -137,3 +137,49 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
     return db.scalar(
         select(ParkingSession).where(ParkingSession.plate == plate).order_by(ParkingSession.id.desc())
     )
+
+
+NEAR_MATCH_MIN_SIMILARITY = 0.8  # about one character off for a 5-9 character plate
+
+
+def near_matches(
+    db: Session,
+    plate: str,
+    *,
+    site_id: int | None = None,
+    limit: int = 3,
+    min_similarity: float = NEAR_MATCH_MIN_SIMILARITY,
+) -> list[dict]:
+    """Open visits whose plate is close to *plate* (OCR confusions such as 8/B, 0/O).
+
+    For an operator "did you mean" prompt only. A fuzzy match must never open a
+    barrier by itself.
+    """
+    from app.core.plate import plate_similarity
+
+    wanted = normalize_plate(plate)
+    if not wanted:
+        return []
+    query = select(ParkingSession).where(ParkingSession.status.in_(tuple(OPEN_STATUSES)))
+    if site_id is not None:
+        query = query.where(ParkingSession.site_id == int(site_id))
+    scored = []
+    for row in db.scalars(query).all():
+        candidate = normalize_plate(row.plate)
+        if not candidate or candidate == wanted:
+            continue
+        score = plate_similarity(wanted, candidate)
+        if score >= min_similarity:
+            scored.append((score, row))
+    scored.sort(key=lambda item: (-item[0], -(item[1].id or 0)))
+    return [
+        {
+            "session_id": row.id,
+            "plate": row.plate,
+            "similarity": round(score, 2),
+            "token": row.public_token or "",
+            "entry_time": row.entry_time.isoformat() if row.entry_time else None,
+            "status": row.status,
+        }
+        for score, row in scored[: max(1, int(limit))]
+    ]

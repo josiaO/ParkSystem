@@ -284,6 +284,29 @@ class ExitLaneTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_unknown_exit_plate_suggests_near_matches_but_stays_closed(self):
+        """Phase 2.5: 'did you mean' for the operator; never auto-open on a fuzzy match."""
+        from app.services.kiosk_lookup import near_matches
+
+        async def run():
+            now = datetime.now(timezone.utc)
+            opener = FakeOpener()
+            with self.Session() as db:
+                self._active(db, "T123ABC", now - timedelta(minutes=10))
+                self._active(db, "T777XYZ", now - timedelta(minutes=10))
+                out = await ExitLaneController(opener=opener).submit_plate(
+                    db, plate="T123A8C", event_id="exit-ocr-8", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertEqual(out["reason"], "no_session")
+                self.assertFalse(out["barrier_opened"])
+                self.assertEqual(opener.calls, [])
+                self.assertEqual([row["plate"] for row in out["suggestions"]], ["T123ABC"])
+                self.assertIn("T123ABC", out["message"])
+                self.assertEqual(near_matches(db, "ZZZ0000", site_id=1), [])
+
+        asyncio.run(run())
+
     def test_wait_for_passage_does_not_close_on_open(self):
         async def run():
             now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)

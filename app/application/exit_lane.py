@@ -182,15 +182,25 @@ class ExitLaneController:
                         "message": "This exit event already belongs to its original session."}
         row = active_for_plate(db, plate, site_id=site_id)
         if row is None:
+            from app.services.kiosk_lookup import near_matches
+
+            # Exact match only for the barrier. Close plates are offered to the
+            # operator as "did you mean", never acted on automatically.
+            suggestions = [{k: v for k, v in item.items() if k != "token"} for item in near_matches(db, plate, site_id=site_id)]
             record_access_decision(
                 db, session=None, plate=plate, gate=gate, lane_direction="EXIT",
                 outcome="DENIED_NO_SESSION", reason="no active site session",
                 barrier_opened=False,
+                extra={"suggestions": suggestions} if suggestions else None,
             )
+            message = f"No active parking session for {plate}. Scan the receipt QR or call an operator."
+            if suggestions:
+                message += " Did you mean " + " or ".join(item["plate"] for item in suggestions) + "? Check with the receipt."
             return {
                 "ok": False, "action": "EXIT", "reason": "no_session",
                 "barrier_opened": False, "pay_required": False, "session": None,
-                "message": f"No active parking session for {plate}. Scan the receipt QR or call an operator.",
+                "suggestions": suggestions,
+                "message": message,
             }
         return await self._submit_session(
             db, row=row, event_id=event_id, gate=gate, camera=camera,
