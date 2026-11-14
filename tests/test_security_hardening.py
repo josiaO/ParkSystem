@@ -428,3 +428,31 @@ def test_media_token_expires_is_bound_to_session_and_tamper_proof(api_client):
         assert client.get(f"/media/snapshots/missing.jpg?media_token={media}").status_code == 401
     client.post("/auth/logout", headers={"Authorization": f"Bearer {token}"})
     assert client.get(f"/media/snapshots/missing.jpg?media_token={media}").status_code == 401
+
+
+# 1.6 Secrets backend ---------------------------------------------------------
+
+def test_plaintext_secrets_backend_warns_loudly(caplog):
+    from app.infrastructure import secrets as secret_mod
+
+    secret_mod._warned_plaintext = False
+    with patch.object(secret_mod.settings, "secrets_backend", "db"), patch("platform.system", return_value="Linux"), \
+         caplog.at_level("WARNING", logger="smartpark"):
+        secret_mod.configured_backend()
+        secret_mod.configured_backend()
+    warnings = [r for r in caplog.records if "plaintext" in r.getMessage().lower()]
+    assert len(warnings) == 1  # loud, but once per process
+
+
+def test_secrets_health_reports_plaintext_backend():
+    from app.infrastructure import secrets as secret_mod
+
+    with patch.object(secret_mod.settings, "secrets_backend", "db"), patch("platform.system", return_value="Linux"):
+        secret_mod.set_secret_store(None)
+        try:
+            info = secret_mod.describe()
+        finally:
+            secret_mod.set_secret_store(None)
+    assert info["plaintext"] is True
+    assert info["warning"]
+
