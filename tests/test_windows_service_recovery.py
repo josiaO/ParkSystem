@@ -72,7 +72,12 @@ def test_media_process_retries_schema_startup_race_instead_of_exiting():
          patch.object(media_service, "_service_step", side_effect=[missing, {"state": "RUNNING"}]), \
          patch.object(media_service, "_write_status") as status, \
          patch.object(media_service.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
-         patch.object(mediamtx, "stop"):
+         patch.object(mediamtx, "stop"), \
+         patch("app.deployment.load_deployment_config", return_value=SimpleNamespace(
+             runs_local_gate_runtime=True, configured=True, database=None)), \
+         patch("app.database_config.apply_runtime_database_config"):
+        # A configured Site Server is part of the scenario; do not depend on
+        # the deployment.json of the machine running the tests.
         assert media_service.main() == 0
     assert [call.args[0]["state"] for call in status.call_args_list] == ["WAITING_FOR_DATABASE", "RUNNING"]
 

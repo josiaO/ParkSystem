@@ -183,7 +183,10 @@ class HealthApiTests(unittest.TestCase):
         self.assertEqual(viewers_for(42), 1)
         rows = {row["camera_id"]: row for row in live_metrics()}
         self.assertEqual(rows[42]["viewers"], 1)
-        self.assertEqual(rows[42]["queue_depth"], 1)
+        # Latest-frame buffer: 0 once the newest frame has been consumed,
+        # never more than 1. The frame itself must have been received.
+        self.assertLessEqual(rows[42]["queue_depth"], 1)
+        self.assertGreaterEqual(rows[42]["frames_received"], 1)
         release_live(42)
         self.assertEqual(viewers_for(42), 0)
 

@@ -124,7 +124,8 @@ def test_software_hvx_without_sdk_handle_recognizes_existing_video_and_retries_r
                  patch("app.services.media_gateway.gateway.peek_detect", return_value=SimpleNamespace(jpeg=JPEG, received_at=api.time.monotonic())), \
                  patch("app.api_main._video_arrival_ready", new=AsyncMock(return_value=True)), \
                  patch("app.api_main._run_local_alpr", new=AsyncMock(return_value=rejected)) as recognize, \
-                 patch("app.services.camera_framing.gate_for", return_value=Mock()):
+                 patch("app.services.camera_framing.gate_for", return_value=Mock()), \
+                 patch("app.infrastructure.media.registry.mediamtx_detect_active", return_value=False):
                 await api._maybe_local_ipcam_alpr(camera.id)
                 await api._maybe_local_ipcam_alpr(camera.id)
                 assert recognize.await_count == 2

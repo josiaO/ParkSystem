@@ -157,7 +157,7 @@ class WindowsReadyTests(unittest.TestCase):
                 self.assertEqual(discovered.json()["cameras"], [])
                 self.assertEqual(probe.call_args.args[0], [])
             with patch("app.api_main._discover_cameras", new=AsyncMock(return_value={"cameras": []})):
-                response = self.client.post("/cameras/import-discovered", headers=headers, json={"connect": False})
+                response = self.client.post("/cameras/import-discovered", headers=headers, json={"connect": False, "password": "Site-Camera-Pass1"})
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["created"], [])
             self.assertEqual(self.client.get("/cameras", headers=headers).json(), [])
@@ -167,13 +167,13 @@ class WindowsReadyTests(unittest.TestCase):
         headers = self._login_admin()
         with patch.object(settings, "deployment_profile", "PRODUCTION"):
             gate = self.client.post("/gates", headers=headers, json={"name": "Warehouse West"}).json()
-            camera = self.client.post("/cameras", headers=headers, json={"name": "Replacement exit", "ip_address": "10.44.8.23", "lane_direction": "EXIT", "gate_id": gate["id"], "controller_ip": "10.44.8.60"}).json()
+            camera = self.client.post("/cameras", headers=headers, json={"name": "Replacement exit", "ip_address": "10.44.8.23", "lane_direction": "EXIT", "gate_id": gate["id"], "controller_ip": "10.44.8.60", "password": "Site-Camera-Pass1"}).json()
             with patch("app.api_main.HVXHostClient") as host, patch("app.api_main.probe_ips", new=AsyncMock(return_value={"10.44.8.23": True})) as probe:
                 host.return_value.discover = AsyncMock(return_value={"ok": True, "ips": ["10.44.8.24"]})
                 response = self.client.get("/cameras/discover", headers=headers)
                 self.assertEqual({row["ip_address"] for row in response.json()["cameras"]}, {"10.44.8.23", "10.44.8.24"})
                 self.assertEqual(set(probe.call_args.args[0]), {"10.44.8.23", "10.44.8.24"})
-            response = self.client.post("/cameras/import-discovered", headers=headers, json={"ips": ["10.44.8.23"], "connect": False})
+            response = self.client.post("/cameras/import-discovered", headers=headers, json={"ips": ["10.44.8.23"], "connect": False, "password": "Site-Camera-Pass1"})
             self.assertEqual(response.status_code, 200, response.text)
             saved = self.client.get("/cameras", headers=headers).json()[0]
             self.assertEqual(saved["id"], camera["id"])
