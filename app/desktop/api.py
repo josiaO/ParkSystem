@@ -101,6 +101,8 @@ class ApiClient:
         self.modules:dict={}
         self._base_override = str(base_url).rstrip("/") if base_url else None
         self._token_owner = token_owner
+        # Set when this desktop is an enrolled kiosk: (device_id, credential).
+        self._device: tuple[str, str] | None = None
 
     @property
     def base_url(self) -> str:
@@ -240,21 +242,53 @@ class ApiClient:
         except Exception:
             return data
 
+    def login_device(self, device_id: str, credential: str):
+        """Sign an enrolled kiosk in with its device credential (no person's password)."""
+        r=_check(httpx.post(f"{self.base_url}/kiosk/auth", json={"device_id": device_id, "credential": credential}, timeout=20, trust_env=False))
+        data=r.json()
+        self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
+        self.navigation=list(data.get("navigation") or [])
+        self.modules=dict(data.get("modules") or {})
+        self._device=(str(device_id), str(credential))
+        return data
+
+    def _device_owner(self) -> "ApiClient":
+        return self._token_owner or self
+
+    def _reauthenticate_device(self) -> bool:
+        """Kiosk sessions expire; a kiosk signs in again by itself mid-shift."""
+        owner = self._device_owner()
+        device = owner._device
+        if not device:
+            return False
+        try:
+            owner.login_device(*device)
+        except Exception:
+            return False
+        self.token = owner.token
+        return True
+
+    def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
+        response = getattr(httpx, method)(self.base_url+path, headers=self._headers(), trust_env=False, **kwargs)
+        # A 401 is returned before the server acts, so one retry is safe.
+        if response.status_code == 401 and self._device_owner()._device and self._reauthenticate_device():
+            response = getattr(httpx, method)(self.base_url+path, headers=self._headers(), trust_env=False, **kwargs)
+        return _check(response)
+
     def get(self, path, timeout=8):
-        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
+        return self._send("get", path, timeout=timeout).json()
 
     def get_bytes(self, path, timeout=8):
-        r=_check(httpx.get(self.base_url+path, headers=self._headers(), timeout=timeout, trust_env=False)); return r.content
+        return self._send("get", path, timeout=timeout).content
 
     def post(self, path, payload=None, timeout=15):
-        r=_check(httpx.post(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
+        return self._send("post", path, json=payload or {}, timeout=timeout).json()
 
     def put(self, path, payload=None, timeout=15):
-        r=_check(httpx.put(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=timeout, trust_env=False)); return r.json()
+        return self._send("put", path, json=payload or {}, timeout=timeout).json()
 
     def post_file(self, path, files, data=None, timeout=30):
-        r=_check(httpx.post(self.base_url+path, files=files, data=data or {}, headers=self._headers(), timeout=timeout, trust_env=False))
-        return r.json()
+        return self._send("post", path, files=files, data=data or {}, timeout=timeout).json()
 
     def seed_site(self):
         """Explicit example import after administrator confirmation; no fallback creation."""
@@ -294,10 +328,10 @@ class ApiClient:
         }
 
     def patch(self, path, payload=None):
-        r=_check(httpx.patch(self.base_url+path, json=payload or {}, headers=self._headers(), timeout=8, trust_env=False)); return r.json()
+        return self._send("patch", path, json=payload or {}, timeout=8).json()
 
     def delete(self, path):
-        r=_check(httpx.delete(self.base_url+path, headers=self._headers(), timeout=8, trust_env=False)); return r.json()
+        return self._send("delete", path, timeout=8).json()
 
     def can(self, permission):
         return "*" in self.permissions or permission in self.permissions
