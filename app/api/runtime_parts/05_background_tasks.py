@@ -53,6 +53,12 @@ async def _outbox_loop():
                 if event_key and box.was_processed(event_key):
                     box.ack(item["id"])
                     continue
+                # Age is measured from when the event was queued. A backlog
+                # (Site Service restart, database outage, earlier failure)
+                # must not open a barrier for a car that has already left.
+                event_age = max(0.0, time.time() - float(item.get("ts") or time.time()))
+                action_age_limit = float(getattr(settings, "outbox_max_action_age_seconds", 20.0) or 20.0)
+                stale_event = event_age > action_age_limit
                 try:
                     with short_session() as db:
                         if recognized is not None:
@@ -98,6 +104,14 @@ async def _outbox_loop():
                                     continue
                             capture = {**recognized, "plate_raw": recognized.get("raw_plate"),
                                        "score": recognized.get("confidence") or recognized.get("recognition_confidence") or 0}
+                            if stale_event:
+                                # Keep the evidence, but route it to operator
+                                # review instead of an automatic decision.
+                                log.warning(
+                                    "stale recognition event held for review camera_id=%s plate=%s age_seconds=%.1f",
+                                    camera.id, recognized.get("plate"), event_age,
+                                )
+                                capture = {**capture, "needs_review": True, "stale_replay": True}
                             await _persist_capture_event(db, camera, capture, jpeg, crop)
                             box.ack(item["id"], processed_key=event_key)
                             continue
@@ -114,6 +128,14 @@ async def _outbox_loop():
                             continue
                         side = str(payload.get("side") or "ENTRY").upper()
                         capture_id = int(payload.get("capture_id") or 0)
+                        if stale_event:
+                            log.warning(
+                                "stale plate-event retry dropped (no barrier action) camera_id=%s plate=%s side=%s age_seconds=%.1f",
+                                payload.get("camera_id"), payload.get("plate"), side, event_age,
+                            )
+                            note_worker_failure("outbox", f"stale {side} decision for {payload.get('plate')} not executed after {event_age:.0f}s")
+                            box.ack(item["id"])
+                            continue
                         if camera is not None and capture_id:
                             capture_row = db.get(VehicleCapture, capture_id)
                             if capture_row is None or capture_row.camera_id != camera.id:
@@ -134,15 +156,25 @@ async def _outbox_loop():
                             continue
                     box.ack(item["id"], processed_key=event_key)
                 except Exception as exc:
+                    # Never let one failing row block every later event (the
+                    # old ``break`` retried the same head row forever). Count
+                    # the attempt, dead-letter it after a bounded number of
+                    # tries, and continue with the next event.
                     box.note_failure()
                     note_worker_failure("outbox", str(exc))
-                    break
+                    log.exception("outbox event failed id=%s kind=%s", item.get("id"), item.get("kind"))
+                    try:
+                        if box.record_failure(item["id"], f"{type(exc).__name__}: {exc}"):
+                            log.error("outbox event moved to dead letter after repeated failures id=%s", item.get("id"))
+                    except Exception:
+                        log.exception("could not record outbox failure id=%s", item.get("id"))
+                    continue
             pending_known = bool(items)
             last_token = box.change_token()
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            log.exception("parking outbox loop iteration failed")
         await asyncio.sleep(sleep_for)
 
 
