@@ -407,10 +407,20 @@ def details() -> dict:
         "disk": _disk(settings.data_dir),
         "time": datetime.now(timezone.utc).isoformat(),
         "clock": _clock_status(),
+        "watchdog": _watchdog_status(),
     }
     from app.services.redaction import redact_obj
 
     return health_cache.set("details", redact_obj(body), ttl=1.0)
+
+
+def _watchdog_status() -> dict:
+    try:
+        from app.services.pipeline_watchdog import snapshot
+
+        return snapshot()
+    except Exception as exc:
+        return {"ok": None, "note": f"watchdog unavailable: {str(exc)[:160]}"}
 
 
 def _clock_status() -> dict:

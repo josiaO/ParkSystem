@@ -48,6 +48,10 @@ def health_sentences(details: dict | None, live: dict | None = None) -> str:
     live = live or {}
     status = str(details.get("status") or details.get("state") or live.get("state") or "ok")
     lines = [f"The site is {status.replace('_', ' ')}."]
+    watchdog = details.get("watchdog")
+    if isinstance(watchdog, dict) and watchdog.get("ok") is False:
+        for problem in (watchdog.get("problems") or [])[:4]:
+            lines.append(f"Watchdog: {problem.get('component')} — {problem.get('detail')}.")
     for clock in (details.get("clock"), details.get("workstation_clock")):
         if isinstance(clock, dict) and clock.get("ok") is False and clock.get("warning"):
             lines.append(str(clock["warning"]))
