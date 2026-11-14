@@ -158,6 +158,7 @@ def _camera_rows() -> list[dict]:
                 "recognition_mode": camera_recognition_mode(camera),
                 "detect_roi": framing["detect_roi"],
                 "detect_zoom": framing["detect_zoom"],
+                "detect_width": framing["detect_width"],
             })
     return rows
 
