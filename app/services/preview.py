@@ -23,6 +23,10 @@ JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 MJPEG_BOUNDARY = "smartparkframe"
 MJPEG_HEARTBEAT_SECONDS = 1.0
+# Poll interval while waiting for a new frame, and how long a new viewer
+# waits for a current frame before the stream asks for recovery and closes.
+MJPEG_POLL_SECONDS = 0.05
+MJPEG_FIRST_FRAME_TIMEOUT_SECONDS = 5.0
 MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots", "receipts"}
 
 # Re-export for callers/tests that import from preview.
@@ -597,6 +601,7 @@ async def mjpeg_from_cache(camera_id: int):
     """Send the newest JPEG only. Never replay a backlog of frames."""
     last_seq = -1
     last_sent_at = 0.0
+    first_frame_waited = 0.0
     event = asyncio.Event()
     row = get_state(camera_id)
     row.waiters.add(event)
@@ -604,7 +609,12 @@ async def mjpeg_from_cache(camera_id: int):
         while True:
             row = get_state(camera_id)
             jpeg = row.jpeg
-            if jpeg[:2] == JPEG_SOI and row.seq != last_seq:
+            # A new viewer must not be shown whatever happens to be cached
+            # (possibly from a previous connection minutes ago). The first
+            # frame is sent only while the cache is proven current; otherwise
+            # wait for the producer to publish a fresh source frame.
+            first_frame_stale = last_seq < 0 and not live_is_current(camera_id)
+            if jpeg[:2] == JPEG_SOI and row.seq != last_seq and not first_frame_stale:
                 last_seq = row.seq
                 last_sent_at = time.monotonic()
                 gateway.note_displayed(camera_id)
@@ -612,7 +622,7 @@ async def mjpeg_from_cache(camera_id: int):
                 event.clear()
                 continue
             try:
-                await asyncio.wait_for(event.wait(), timeout=0.05)
+                await asyncio.wait_for(event.wait(), timeout=MJPEG_POLL_SECONDS)
             except asyncio.TimeoutError:
                 now = time.monotonic()
                 if (
@@ -639,6 +649,15 @@ async def mjpeg_from_cache(camera_id: int):
                 if last_seq >= 0 and not live_is_current(camera_id):
                     gateway.restart_decoder(camera_id)
                     return
+                if last_seq < 0:
+                    # A new viewer is never shown a stale cached frame, but it
+                    # must not wait forever either: with a dead source it
+                    # would get no bytes and no recovery. Ask this camera's
+                    # producer to recover and close so the client retries.
+                    first_frame_waited += MJPEG_POLL_SECONDS
+                    if first_frame_waited >= MJPEG_FIRST_FRAME_TIMEOUT_SECONDS:
+                        gateway.restart_decoder(camera_id)
+                        return
             finally:
                 event.clear()
     finally:
