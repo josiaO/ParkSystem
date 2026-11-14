@@ -275,6 +275,48 @@ class EntryLaneController:
             camera=camera, policy=policy, entitlement=entitlement, source="receipt_taken", created=False,
         )
 
+    async def operator_admit_without_receipt(
+        self,
+        db: Session,
+        row: ParkingSession,
+        *,
+        reason: str,
+        user_id: int | None,
+        policy: LanePolicy | None = None,
+        gate: Gate | None = None,
+        camera: Camera | None = None,
+    ) -> dict[str, Any]:
+        """Audited operator exception when no receipt can be confirmed.
+
+        Used when the printer is missing/failed or no taken sensor is fitted.
+        It records RECEIPT_OPERATOR_OVERRIDE in the audit log and then uses
+        the normal authorization path (idempotent command claim, gate
+        controller, access decision). It never runs for a closed/cancelled
+        session and never bypasses developer gate switches.
+        """
+        from app.domain.parking_engine import ENTRY_CANCELLED
+        from app.services.parking_sessions import mark_receipt_taken as persist_taken
+        from app.services.receipt_jobs import operator_override
+
+        policy = policy or LanePolicy(receipt_required_before_open=True)
+        if row.lifecycle == ENTRY_CANCELLED or (row.status or "").upper() == "CLOSED":
+            return {"ok": False, "action": "ENTRY", "reason": "session_closed", "barrier_opened": False,
+                    "session": snapshot(row), "message": "This visit is closed or cancelled."}
+        if row.lifecycle not in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}:
+            operator_override(db, row, reason=reason, user_id=user_id)
+            row.receipt_taken_at = row.receipt_taken_at or row.receipt_printed_at
+            persist_taken(db, row, policy=policy)
+            # The lifecycle needs RECEIPT_TAKEN to authorize entry, but the
+            # record must say this was an operator override, not a sensor.
+            row.receipt_status = "OVERRIDE"
+            db.commit()
+            db.refresh(row)
+        entitlement = lookup_entitlement(db, row.plate, site_id=row.site_id, strict=True)
+        return await self._authorize_and_open(
+            db, row, gate=gate or (db.get(Gate, row.gate_id) if row.gate_id else None),
+            camera=camera, policy=policy, entitlement=entitlement, source="operator_override", created=False,
+        )
+
     async def retry_gate(
         self,
         db: Session,
