@@ -95,13 +95,19 @@ def reset_bootstrap_admin(db: Session) -> str:
     return "reset"
 
 
-def setup_status(db: Session) -> dict:
+def setup_status(db: Session, *, local_request: bool = True) -> dict:
+    """First-run sign-in help.
+
+    The bootstrap password and the account list are only disclosed to a
+    request from this computer. The Site Server listens on the LAN, and
+    anyone on the network could otherwise read the administrator password.
+    """
     from app.services.platform_capabilities import platform_snapshot, recommended_camera_adapter
 
     created = ensure_bootstrap_admin(db)
     bootstrap = db.scalar(select(User).where(User.username == settings.bootstrap_username))
     password_ok = bootstrap_password_works(db)
-    usernames = [user.username for user in db.scalars(select(User)).all()]
+    usernames = [user.username for user in db.scalars(select(User)).all()] if local_request else []
     platform = platform_snapshot()
     password = effective_bootstrap_password() if created or password_ok else ""
     if created:
@@ -118,6 +124,12 @@ def setup_status(db: Session) -> dict:
             "If that password is rejected, run: python -m app.cli reset-admin"
         )
         password = ""
+    if not local_request:
+        password = ""
+        hint = (
+            "Sign in with your account. The first-run administrator password is shown only "
+            f"on the Site Server itself (and stored in {bootstrap_password_path().name} there)."
+        )
     if not platform["hvx_host_supported"]:
         hint = (
             f"{hint}. This host is {platform['os']}: use the browser UI. "
