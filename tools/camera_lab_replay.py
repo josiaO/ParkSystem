@@ -693,6 +693,165 @@ def run_ground_truth(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- measure: plate size at the OCR input, read rate, accuracy (Phase 4.1) ---
+
+MEASURE_VARIANTS = ("production", "roi_before_scale", "detect_1280", "full_resolution")
+
+
+def char_accuracy(predicted: str, truth: str) -> float:
+    """1 - edit distance / len(truth): per-character accuracy of one read."""
+    a, b = (predicted or "").upper(), (truth or "").upper()
+    if not b:
+        return 0.0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return max(0.0, 1.0 - prev[-1] / len(b))
+
+
+def _variant_filter(variant: str, roi: tuple[float, float, float, float] | None) -> tuple[list[str], str | None]:
+    """FFmpeg arguments for one variant, and the detect_roi to use afterwards."""
+    if variant == "production":
+        # Exactly the worker decoder: scale to 960 wide, MJPEG q 8, ROI later.
+        return ["-vf", "scale=960:-2", "-q:v", "8"], None
+    if variant == "detect_1280":
+        return ["-vf", "scale=1280:-2", "-q:v", "8"], None
+    if variant == "full_resolution":
+        return ["-q:v", "2"], None
+    if variant == "roi_before_scale":
+        if roi is None:
+            return ["-vf", "scale=960:-2", "-q:v", "8"], None
+        x1, y1, x2, y2 = roi
+        crop = f"crop=trunc(iw*{x2 - x1:.4f}/2)*2:trunc(ih*{y2 - y1:.4f}/2)*2:trunc(iw*{x1:.4f}):trunc(ih*{y1:.4f})"
+        return ["-vf", f"{crop},scale='min(960,iw)':-2", "-q:v", "8"], "off"
+    raise ValueError(variant)
+
+
+def _extract(source: Path, variant: str, roi, out_dir: Path, *, video_fps: float, max_seconds: float) -> list[tuple[Path, float]]:
+    args, _ = _variant_filter(variant, roi)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if source.suffix.lower() in VIDEO_EXTENSIONS:
+        vf_index = args.index("-vf") if "-vf" in args else -1
+        sampled = [arg for arg in args]
+        sample = f"fps={video_fps}"
+        if vf_index >= 0:
+            sampled[vf_index + 1] = f"{sample},{sampled[vf_index + 1]}"
+        else:
+            sampled = ["-vf", sample, *sampled]
+        command = [_which("ffmpeg"), "-v", "error", "-y"]
+        if max_seconds > 0:
+            command += ["-t", str(max_seconds)]
+        command += ["-i", str(source), "-an", *sampled, str(out_dir / "f%05d.jpg")]
+        subprocess.run(command, check=True)
+        frames = sorted(out_dir.glob("f*.jpg"))
+        return [(frame, round(index / video_fps, 2)) for index, frame in enumerate(frames)]
+    target = out_dir / f"{_safe(source.stem)}.jpg"
+    subprocess.run([_which("ffmpeg"), "-v", "error", "-y", "-i", str(source), *args, str(target)], check=True)
+    return [(target, 0.0)]
+
+
+def _video_label(truth: dict[str, Any], video: Path, seconds: float) -> str:
+    for row in truth.get("video") or []:
+        if not isinstance(row, dict) or str(row.get("file") or video.name) != video.name:
+            continue
+        start = float(row.get("start", row.get("t", -1)) or 0)
+        end = float(row.get("end", start + 1.0))
+        if start - 0.5 <= seconds <= end + 0.5 and row.get("plate"):
+            return str(row["plate"]).upper()
+    return "UNLABELED"
+
+
+def summarize_measure(rows: list[dict[str, Any]], min_width: int) -> dict[str, Any]:
+    """Per-variant figures from measure rows (pure, for tests and reports)."""
+    out: dict[str, Any] = {}
+    for variant in sorted({row["variant"] for row in rows}):
+        items = [row for row in rows if row["variant"] == variant]
+        detected = [row for row in items if row.get("plate_width_px")]
+        widths = [row["plate_width_px"] for row in detected]
+        reads = [row for row in detected if row.get("plate")]
+        labelled = [row for row in items if row.get("truth") not in (None, "", "UNLABELED")]
+        out[variant] = {
+            "frames": len(items),
+            "plate_detected": len(detected),
+            "detection_rate": round(len(detected) / len(items), 3) if items else None,
+            "plate_width_px": {"min": min(widths) if widths else None, "p10": _percentile(widths, 0.10),
+                               "p50": _percentile(widths, 0.50), "p90": _percentile(widths, 0.90)},
+            "below_min_width": sum(1 for width in widths if width < min_width),
+            "below_min_width_rate": round(sum(1 for width in widths if width < min_width) / len(widths), 3) if widths else None,
+            "read_rate": round(len(reads) / len(detected), 3) if detected else None,
+            "labelled_frames": len(labelled),
+            "exact_match_rate": round(sum(1 for row in labelled if row.get("plate") == row["truth"]) / len(labelled), 3) if labelled else None,
+            "char_accuracy": round(statistics.mean(char_accuracy(row.get("plate") or "", row["truth"]) for row in labelled), 3) if labelled else None,
+            "ocr_ms_p50": _percentile([row["ocr_ms"] for row in reads if row.get("ocr_ms") is not None], 0.5),
+            "detector_ms_p50": _percentile([row["detector_ms"] for row in items if row.get("detector_ms") is not None], 0.5),
+        }
+    return out
+
+
+def run_measure(args: argparse.Namespace) -> int:
+    import tempfile
+
+    from app.config import settings
+    from app.services.alpr import locate_plate_boxes, parse_detect_roi, recognize_arrival_bytes
+
+    dataset = Path(args.dataset).resolve()
+    output = Path(args.output).resolve() if args.output else dataset / "results" / "measure"
+    roi_text = args.roi if args.roi is not None else str(getattr(settings, "alpr_detect_roi", "off"))
+    roi = parse_detect_roi(roi_text)
+    min_width = int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 64)
+    truth = _truth(dataset)
+    sources = [Path(item) if Path(item).is_absolute() else dataset / item for item in args.sources] if args.sources else sorted(
+        path for path in dataset.iterdir() if path.suffix.lower() in MEDIA_EXTENSIONS)
+    variants = args.variants or list(MEASURE_VARIANTS)
+    rows: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="smartpark-measure-") as tmp:
+        for source in sources:
+            for variant in variants:
+                _, detect_roi = _variant_filter(variant, roi)
+                detect_roi = detect_roi if detect_roi is not None else roi_text
+                frames = _extract(source, variant, roi, Path(tmp) / _safe(source.stem) / variant,
+                                  video_fps=args.video_fps, max_seconds=args.max_seconds)
+                for frame, seconds in frames:
+                    jpeg = frame.read_bytes()
+                    boxes, meta = locate_plate_boxes(jpeg, detect_roi=detect_roi)
+                    if not meta.get("available"):
+                        print(f"ERROR: detector unavailable: {meta.get('detail') or meta.get('reason')}")
+                        return 2
+                    widest = max((int(box["x2"]) - int(box["x1"]) for box in boxes), default=0)
+                    row = {
+                        "source": source.name, "variant": variant, "t": seconds,
+                        "frame_width": None, "plate_width_px": widest or None,
+                        "detector_ms": meta.get("detector_ms"), "plate": "", "confidence": None, "ocr_ms": None,
+                        "truth": _video_label(truth, source, seconds) if source.suffix.lower() in VIDEO_EXTENSIONS
+                        else _label(dataset, source, truth),
+                    }
+                    if boxes:
+                        started = time.perf_counter()
+                        result = recognize_arrival_bytes(jpeg, camera_label=f"measure-{variant}", detect_roi=detect_roi,
+                                                         save_evidence=False, detected_boxes=boxes)
+                        best = result.get("best") if isinstance(result.get("best"), dict) else None
+                        row["ocr_ms"] = round((time.perf_counter() - started) * 1000, 1)
+                        if best:
+                            row["plate"] = str(best.get("plate_normalized") or best.get("plate") or "").upper()
+                            row["confidence"] = best.get("confidence")
+                    rows.append(row)
+    summary = {
+        "dataset": str(dataset), "sources": [source.name for source in sources], "roi": roi_text,
+        "min_capture_plate_width_px": min_width, "video_fps": args.video_fps,
+        "variants": summarize_measure(rows, min_width),
+        "labelled": any(row["truth"] != "UNLABELED" for row in rows),
+    }
+    _dump(output / "measure-rows.json", rows)
+    _dump(output / "measure-summary.json", summary)
+    print(json.dumps(summary, indent=2))
+    if not summary["labelled"]:
+        print("NOTE: no ground-truth labels; character accuracy needs human labels in ground_truth.json.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SmartPark recorded-footage camera lab")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -757,6 +916,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("results", nargs="?", default="TestingData/results")
     report.add_argument("--output")
     report.set_defaults(func=run_report)
+
+    measure = sub.add_parser("measure", help="plate width at the OCR input, read rate and accuracy per decode variant")
+    measure.add_argument("sources", nargs="*", help="files in the dataset (default: every image and video)")
+    measure.add_argument("--dataset", default="TestingData")
+    measure.add_argument("--output")
+    measure.add_argument("--roi", default=None, help="x1,y1,x2,y2 or off (default: the site alpr_detect_roi)")
+    measure.add_argument("--variants", nargs="*", choices=MEASURE_VARIANTS)
+    measure.add_argument("--video-fps", type=float, default=2.0)
+    measure.add_argument("--max-seconds", type=float, default=0.0)
+    measure.set_defaults(func=run_measure)
 
     truth = sub.add_parser("ground-truth", help="create an editable local annotation template")
     truth.add_argument("--dataset", default="TestingData")
