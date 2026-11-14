@@ -2,7 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+KNOWN_CAMERA_ADAPTERS = frozenset({
+    "hvx", "qy", "native", "rtsp", "ipcam", "dahua", "hikvision", "onvif", "simulated",
+})
+
+
+def _check_camera_adapter(value):
+    """Reject unknown adapter ids instead of silently treating them as HVX/QY."""
+    if value is None:
+        return value
+    key = str(value).strip().lower()
+    if not key:
+        return key
+    if key not in KNOWN_CAMERA_ADAPTERS:
+        raise ValueError(f"Unknown camera adapter {value!r}. Use one of: {', '.join(sorted(KNOWN_CAMERA_ADAPTERS))}")
+    return key
 
 
 class LoginRequest(BaseModel):
@@ -32,6 +49,11 @@ class CameraCreate(BaseModel):
     display_ip: str = ""
     rtsp_url: str = ""
     adapter_id: str = "hvx"
+
+    @field_validator("adapter_id")
+    @classmethod
+    def _known_adapter(cls, value):
+        return _check_camera_adapter(value)
     connection_mode: str = "DIRECT"
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
@@ -47,6 +69,11 @@ class CameraCreate(BaseModel):
 class CameraImportItem(BaseModel):
     ip_address: str
     adapter_id: str = "rtsp"
+
+    @field_validator("adapter_id")
+    @classmethod
+    def _known_adapter(cls, value):
+        return _check_camera_adapter(value)
     name: str | None = None
     lane_direction: str = "ENTRY"
 
@@ -72,6 +99,11 @@ class CameraUpdate(BaseModel):
     display_ip: str | None = None
     rtsp_url: str | None = None
     adapter_id: str | None = None
+
+    @field_validator("adapter_id")
+    @classmethod
+    def _known_adapter(cls, value):
+        return _check_camera_adapter(value)
     connection_mode: str | None = None
     ffmpeg_profile: str | None = None
     rtsp_transport: str | None = None
@@ -287,6 +319,11 @@ class CameraOnboardTest(BaseModel):
     username: str = "admin"
     password: str = "admin"
     adapter_id: str = "rtsp"
+
+    @field_validator("adapter_id")
+    @classmethod
+    def _known_adapter(cls, value):
+        return _check_camera_adapter(value)
     sdk_port: int = Field(default=30000, ge=1, le=65535)
     rtsp_url: str = ""
     duration_seconds: float = Field(default=8.0, ge=0.2, le=60)
