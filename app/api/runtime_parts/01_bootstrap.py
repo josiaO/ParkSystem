@@ -784,14 +784,41 @@ def auth_setup(request: Request, db: Session = Depends(get_db)):
     return setup_status(db, local_request=_is_loopback_request(request))
 
 
+def _throttled_login(request: Request, db: Session, username: str, password: str) -> LoginResponse:
+    """Password sign-in with per-IP and per-username backoff and lockout."""
+    import math
+
+    from app.services.login_throttle import throttle
+
+    guard = throttle()
+    ip = str(getattr(getattr(request, "client", None), "host", "") or "unknown")
+    wait = guard.check(ip, username)
+    if wait > 0:
+        seconds = max(1, math.ceil(wait))
+        log.warning("sign-in throttled ip=%s username=%s retry_after_seconds=%s", ip, username, seconds)
+        raise HTTPException(
+            429,
+            f"Too many failed sign-in attempts. Try again in {seconds} seconds.",
+            headers={"Retry-After": str(seconds)},
+        )
+    try:
+        response = _login_response(db, username, password)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            guard.record_failure(ip, username)
+        raise
+    guard.record_success(ip, username)
+    return response
+
+
 @app.post("/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    return _login_response(db, payload.username, payload.password)
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    return _throttled_login(request, db, payload.username, payload.password)
 
 
 @app.post("/auth/token", response_model=LoginResponse)
-def login_token(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    return _login_response(db, form.username, form.password)
+def login_token(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    return _throttled_login(request, db, form.username, form.password)
 
 
 @app.post("/auth/logout")

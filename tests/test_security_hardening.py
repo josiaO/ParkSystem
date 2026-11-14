@@ -144,3 +144,115 @@ def test_no_default_password_literals_in_scripts_or_tools():
             if path.suffix in {".py", ".ps1", ".sh", ".bat", ".cmd"} and "SmartPark1!" in path.read_text(encoding="utf-8", errors="ignore"):
                 offenders.append(str(path.relative_to(root)))
     assert offenders == []
+
+
+# 1.3 Login throttling -----------------------------------------------------
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _throttle():
+    from app.services.login_throttle import LoginThrottle
+
+    clock = _Clock()
+    return LoginThrottle(clock=clock), clock
+
+
+def test_throttle_allows_free_attempts_then_backs_off_and_locks():
+    throttle, clock = _throttle()
+    for _ in range(throttle.user_free_failures):
+        assert throttle.check("10.0.0.5", "admin") == 0
+        throttle.record_failure("10.0.0.5", "admin")
+    wait = throttle.check("10.0.0.5", "admin")
+    assert 0 < wait <= throttle.max_lockout_seconds
+    throttle.record_failure("10.0.0.5", "admin")  # attempts while blocked are not even checked
+    clock.now += wait + 0.01
+    assert throttle.check("10.0.0.5", "admin") == 0
+    throttle.record_failure("10.0.0.5", "admin")
+    longer = throttle.check("10.0.0.5", "admin")
+    assert longer > wait  # exponential backoff
+    for _ in range(20):
+        clock.now += throttle.check("10.0.0.5", "admin") + 0.01
+        throttle.record_failure("10.0.0.5", "admin")
+    assert throttle.check("10.0.0.5", "admin") <= throttle.max_lockout_seconds
+
+
+def test_throttle_is_per_username_and_per_ip():
+    throttle, _clock = _throttle()
+    for _ in range(throttle.user_free_failures):
+        throttle.record_failure("10.0.0.5", "admin")
+    assert throttle.check("10.0.0.6", "admin") > 0       # same account, other PC
+    assert throttle.check("10.0.0.5", "operator1") == 0  # same PC, other account
+    throttle2, _ = _throttle()
+    for i in range(throttle2.ip_free_failures):
+        throttle2.record_failure("10.0.0.9", f"user{i}")  # spraying many accounts
+    assert throttle2.check("10.0.0.9", "someone-else") > 0
+
+
+def test_throttle_success_clears_account_and_failures_expire():
+    throttle, clock = _throttle()
+    for _ in range(throttle.user_free_failures - 1):
+        throttle.record_failure("10.0.0.5", "Admin")
+    throttle.record_success("10.0.0.5", "admin")  # usernames are case-insensitive
+    throttle.record_failure("10.0.0.5", "admin")
+    assert throttle.check("10.0.0.5", "admin") == 0
+    for _ in range(throttle.user_free_failures):
+        throttle.record_failure("10.0.0.7", "kiosk")
+    clock.now += throttle.window_seconds + throttle.max_lockout_seconds + 1
+    assert throttle.check("10.0.0.7", "kiosk") == 0
+
+
+def _login_client(tmp_path):
+    from app.api_main import app, ensure_roles
+    from app.db import get_db
+    from app.models import Role, User, UserRole
+    from app.security import hash_password
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session() as db:
+        ensure_roles(db)
+        user = User(username="operator1", full_name="Op", password_hash=hash_password("right-password-1"))
+        db.add(user)
+        db.flush()
+        db.add(UserRole(user_id=user.id, role_id=db.scalar(select(Role).where(Role.name == "Operator")).id))
+        db.commit()
+
+    def override():
+        with Session() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override
+    return TestClient(app, client=("10.0.0.50", 40000)), engine
+
+
+@pytest.mark.parametrize("endpoint", ["/auth/login", "/auth/token"])
+def test_login_endpoints_are_throttled(endpoint, tmp_path):
+    from app.api_main import app
+    from app.services import login_throttle
+
+    login_throttle.reset()
+    client, engine = _login_client(tmp_path)
+
+    def attempt(password):
+        if endpoint == "/auth/login":
+            return client.post(endpoint, json={"username": "operator1", "password": password})
+        return client.post(endpoint, data={"username": "operator1", "password": password})
+
+    try:
+        for _ in range(login_throttle.throttle().user_free_failures):
+            assert attempt("wrong").status_code == 401
+        blocked = attempt("right-password-1")  # even the right password waits
+        assert blocked.status_code == 429
+        assert int(blocked.headers["retry-after"]) >= 1
+    finally:
+        login_throttle.reset()
+        client.close()
+        app.dependency_overrides.clear()
+        engine.dispose()
