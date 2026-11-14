@@ -78,7 +78,10 @@ class Settings(BaseSettings):
     # dpapi, file, memory, or db (legacy raw column).
     secrets_backend: str = "auto"
     hvx_host_url: str = "http://127.0.0.1:8765"
-    alpr_mode: str = "FASTALPR_ONLY"
+    # Default for cameras without a per-camera mode. Generic RTSP cameras are
+    # always software-only (they have no native reader); QY/HVX cameras use
+    # their native plate read verified by FastALPR.
+    alpr_mode: str = "HYBRID"
     alpr_engine: str = "fastalpr"
     live_idle_seconds: float = 20.0
     # Polling only reads the SDK host's latest frame; it is not a frame queue.

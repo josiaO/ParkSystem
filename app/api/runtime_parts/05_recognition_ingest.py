@@ -68,6 +68,40 @@ def _show_camera_read(
     })
 
 
+async def _native_fallback_if_unread(
+    db: Session,
+    camera: Camera,
+    capture: dict,
+    jpeg: bytes,
+    crop: bytes,
+    native: dict,
+    result: dict | None,
+) -> bool:
+    """Keep the camera's own plate when software verification produced nothing.
+
+    In NATIVE_WITH_LOCAL_VERIFY the software read is a second opinion. When
+    it times out, errors, or never runs, discarding the native read lost the
+    car. Persist the native capture instead; the normal plate policy,
+    duplicate suppression and parking controller still apply.
+    """
+    from app.core.plate import is_empty_scene_ocr
+    from app.services.ocr_policy import NATIVE_WITH_LOCAL_VERIFY, camera_recognition_mode
+
+    if not _local_read_failed(result):
+        return False
+    if camera_recognition_mode(camera) != NATIVE_WITH_LOCAL_VERIFY:
+        return False
+    plate = str(native.get("plate") or "")
+    if not plate or is_empty_scene_ocr(plate, confidence=float(native.get("confidence") or 0)):
+        return False
+    log.warning(
+        "software verification unavailable; using native plate camera_id=%s plate=%s reason=%s",
+        camera.id, plate, (result or {}).get("error") or (result or {}).get("persist_skipped") or "not run",
+    )
+    await _persist_capture_event(db, camera, {**capture, "source": "native-fallback"}, jpeg, crop)
+    return True
+
+
 async def _process_native_capture(
     camera_id: int,
     capture: dict,
@@ -115,10 +149,10 @@ async def _process_native_capture(
                 camera=row,
             ):
                 frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
-                await _run_local_alpr(
-                    db, row, frame, native=native, presence=True,
-                    image_id=image_id, force=False, plate_crop=crop,
+                result = await _run_event_alpr(
+                    db, row, frame, native=native, image_id=image_id, plate_crop=crop,
                 )
+                await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -308,10 +342,10 @@ async def _drain_camera_events(
                     # The camera callback is the capture trigger. FastALPR reads the
                     # JPEG even when the camera sent no plate text.
                     frame = jpeg if jpeg[:2] == b"\xff\xd8" else crop
-                    await _run_local_alpr(
-                        db, row, frame, native=native, presence=True,
-                        image_id=image_id, force=False, plate_crop=crop,
+                    result = await _run_event_alpr(
+                        db, row, frame, native=native, image_id=image_id, plate_crop=crop,
                     )
+                    await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
     return processed
 
 

@@ -167,7 +167,16 @@ async def _run_local_alpr(
     image_id: int = 0,
     force: bool = False,
     plate_crop: bytes = b"",
+    event_still: bool = False,
 ) -> dict | None:
+    """Run FastALPR for one camera.
+
+    ``event_still`` marks a JPEG captured by a native vehicle event. Such a
+    still is the evidence of one physical arrival: it is not rate-limited by
+    the live-video cooldown and its result is never discarded as a "stale
+    frame" merely because OCR took longer than the live-video freshness
+    window. Dropping it used to lose the car entirely.
+    """
     jpeg = jpeg or b""
     if jpeg[:2] != b"\xff\xd8":
         return None
@@ -195,10 +204,10 @@ async def _run_local_alpr(
         return None
     from app.services.recognition_runtime import runtime
     runtime.offer_frame(int(camera.id), jpeg, source="site-alpr")
-    if not force and not _local_alpr_ready(camera.id):
+    if not force and not event_still and not _local_alpr_ready(camera.id):
         return None
     from app.domain.recognition_engine import policy_from_settings
-    stale_frame_ms = policy_from_settings().stale_frame_ms
+    stale_frame_ms = EVENT_STILL_MAX_AGE_MS if event_still else policy_from_settings().stale_frame_ms
     ticket = runtime.begin_if_idle(int(camera.id), stale_frame_ms=stale_frame_ms)
     if ticket is None:
         return None
@@ -206,11 +215,15 @@ async def _run_local_alpr(
     # OCR is native/CPU work and may take several seconds. Do not keep the
     # caller's PostgreSQL connection checked out while the inference task runs.
     release_connection(db)
-    jpeg = ticket.jpeg or jpeg
+    if not event_still:
+        # Live-video reads use the newest mailbox frame. An event read must
+        # keep its own still: a newer live frame may no longer show the car.
+        jpeg = ticket.jpeg or jpeg
     abandon = asyncio.Event()
     work = asyncio.create_task(_run_local_alpr_locked(
         db, camera, jpeg, native=native, presence=presence, image_id=image_id,
         force=force, plate_crop=plate_crop, ticket=ticket, abandon=abandon,
+        stale_frame_ms=stale_frame_ms,
     ))
     _local_alpr_pending[int(camera.id)] = work
     try:
@@ -246,6 +259,50 @@ async def _run_local_alpr(
             _local_alpr_pending.pop(int(camera.id), None)
 
 
+EVENT_STILL_MAX_AGE_MS = 120_000.0
+
+
+async def _run_event_alpr(
+    db: Session,
+    camera: Camera,
+    jpeg: bytes,
+    *,
+    native: dict | None = None,
+    image_id: int = 0,
+    plate_crop: bytes = b"",
+    attempts: int = 3,
+) -> dict | None:
+    """Read one native-event still, waiting for an in-flight read instead of dropping it.
+
+    Two cars can trigger the same camera within one OCR duration. The second
+    event used to get ``busy``/``None`` and vanish. Wait (bounded) for the
+    previous read to finish, then read this still.
+    """
+    timeout = float(getattr(settings, "alpr_timeout_seconds", 15.0) or 15.0)
+    result: dict | None = None
+    for _ in range(max(1, attempts)):
+        pending = _local_alpr_pending.get(int(camera.id))
+        if pending is not None and not pending.done():
+            await asyncio.wait({pending}, timeout=timeout)
+        result = await _run_local_alpr(
+            db, camera, jpeg, native=native, presence=True,
+            image_id=image_id, force=False, plate_crop=plate_crop, event_still=True,
+        )
+        if result is not None and result.get("error") != "busy":
+            return result
+        await asyncio.sleep(0.05)
+    return result
+
+
+def _local_read_failed(result: dict | None) -> bool:
+    """True when software OCR produced no decision at all for an event."""
+    if result is None:
+        return True
+    if result.get("ok") is False:
+        return True
+    return bool(result.get("persist_skipped") == "stale recognition result")
+
+
 def _alpr_busy() -> bool:
     from app.services.recognition_runtime import runtime
     snap = runtime.scheduler.snapshot()
@@ -275,6 +332,7 @@ async def _run_local_alpr_locked(
     plate_crop: bytes = b"",
     ticket=None,
     abandon: asyncio.Event | None = None,
+    stale_frame_ms: float | None = None,
 ) -> dict | None:
     from app.services.inference_thread import run_inference
     native = native or {}
@@ -282,7 +340,8 @@ async def _run_local_alpr_locked(
     from app.services.queues import AI_FRAMES
     from app.services.recognition_runtime import runtime
     from app.domain.recognition_engine import policy_from_settings
-    stale_frame_ms = policy_from_settings().stale_frame_ms
+    if stale_frame_ms is None:
+        stale_frame_ms = policy_from_settings().stale_frame_ms
     sample = gateway.peek_detect(camera.id)
     if sample:
         AI_FRAMES.put((camera.id, sample.seq))

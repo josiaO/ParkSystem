@@ -536,7 +536,9 @@ class AlprApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()["best"]["plate"], "T123ABC")
         self.assertEqual(res.json()["camera_id"], cam_id)
-        self.assertEqual(res.json()["fusion"]["method"], "LOCAL_ONLY")
+        # QY/HVX cameras default to HYBRID: the camera's own read and the
+        # FastALPR read are fused, and matching reads agree.
+        self.assertEqual(res.json()["fusion"]["method"], "AGREED")
         self.assertEqual(res.json()["fusion"]["resolved_plate"], "T123ABC")
         self.assertEqual(res.json()["last_car"]["plate"], "T123ABC")
         self.assertTrue(res.json()["last_car"]["snapshot_url"])
