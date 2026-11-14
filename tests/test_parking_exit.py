@@ -181,6 +181,65 @@ class ExitLaneTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_failed_exit_open_releases_the_command_claim(self):
+        """Phase 2.1: a failed boom command must not strand the driver."""
+        class FlakyOpener(FakeOpener):
+            def __init__(self):
+                super().__init__(ok=False)
+
+            async def __call__(self, *args, **kwargs):
+                result = await super().__call__(*args, **kwargs)
+                self.ok = True  # relay comes back for the next attempt
+                return result
+
+        async def run():
+            now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
+            opener = FlakyOpener()
+            ctrl = ExitLaneController(opener=opener)
+            with self.Session() as db:
+                row = self._active(db, "T401EEE", now - timedelta(minutes=10))
+                first = await ctrl.submit_plate(
+                    db, plate=row.plate, event_id="exit-flaky-1", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertEqual(first["reason"], "gate_unavailable")
+                db.refresh(row)
+                self.assertFalse(row.exit_open_command_uuid)
+                # The QR fallback (or the camera's next read) now succeeds.
+                second = await ctrl.submit_qr(
+                    db, raw_scan=row.public_token, event_id="exit-flaky-qr", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertTrue(second["barrier_opened"], second)
+                self.assertEqual(len(opener.calls), 2)
+                self.assertNotEqual(opener.calls[0][3], opener.calls[1][3])
+
+        asyncio.run(run())
+
+    def test_exit_opener_exception_releases_the_command_claim(self):
+        class BrokenOpener(FakeOpener):
+            async def __call__(self, *args, **kwargs):
+                raise RuntimeError("controller socket reset")
+
+        async def run():
+            now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
+            with self.Session() as db:
+                row = self._active(db, "T402FFF", now - timedelta(minutes=10))
+                with self.assertRaises(RuntimeError):
+                    await ExitLaneController(opener=BrokenOpener()).submit_plate(
+                        db, plate=row.plate, event_id="exit-broken-1", site_id=1,
+                        gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                    )
+                db.refresh(row)
+                self.assertFalse(row.exit_open_command_uuid)
+                retry = await ExitLaneController(opener=FakeOpener()).submit_plate(
+                    db, plate=row.plate, event_id="exit-broken-2", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertTrue(retry["barrier_opened"], retry)
+
+        asyncio.run(run())
+
     def test_wait_for_passage_does_not_close_on_open(self):
         async def run():
             now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
