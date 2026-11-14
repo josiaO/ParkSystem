@@ -158,6 +158,30 @@ FFmpeg is a separate executable, licensed under GPL version 3.
 The imageio packaging license is included separately.
 FFMPEGINFO
 
+echo "Bundling NSSM (Windows service wrapper)..."
+# Services must start at boot with nobody logged in and restart on crash.
+# 2.24-101 fixes service start on Windows 10/11 (the 2014 2.24 release does not).
+NSSM_VER="2.24-101-g897c7ad"
+NSSM_SHA256="99f5045fffbffb745d67fe3a065a953c4a3d9c253b868892d9b685b0ee7d07b8"
+download "https://nssm.cc/ci/nssm-${NSSM_VER}.zip" "$CACHE/nssm-${NSSM_VER}.zip"
+echo "$NSSM_SHA256  $CACHE/nssm-${NSSM_VER}.zip" | sha256sum --check --status
+python3 - "$CACHE/nssm-${NSSM_VER}.zip" "$OUT/payload/vendor/nssm" "$NSSM_VER" <<'PYNSSM'
+import sys
+import zipfile
+from pathlib import Path
+archive, output, version = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+output.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(archive) as z:
+    binary = z.read(f"nssm-{version}/win64/nssm.exe")
+    if not binary.startswith(b"MZ"):
+        raise SystemExit("nssm.exe is not a Windows executable")
+    (output / "nssm.exe").write_bytes(binary)
+    (output / "README.txt").write_bytes(z.read(f"nssm-{version}/README.txt"))
+PYNSSM
+cp "$ROOT/packaging/licenses/NSSM-public-domain.txt" "$OUT/payload/vendor/nssm/LICENSE.txt"
+printf 'NSSM %s win64\nArchive SHA256: %s\nSource: https://nssm.cc/ci/nssm-%s.zip\n' \
+  "$NSSM_VER" "$NSSM_SHA256" "$NSSM_VER" > "$OUT/payload/vendor/nssm/PROVENANCE.txt"
+
 echo "Bundling MediaMTX (Windows amd64, optional sidecar)..."
 MEDIAMTX_VER="${MEDIAMTX_VERSION:-v1.11.3}"
 MEDIAMTX_ZIP="$CACHE/mediamtx_${MEDIAMTX_VER}_windows_amd64.zip"
@@ -405,7 +429,7 @@ for helper in \
   Install-SmartParkServices.ps1 \
   Install-SmartParkWinService.ps1 \
   Enable-MediaMTX.ps1 \
-  MediaMTX-SoakTest.ps1 \
+  MediaMTX-SoakTest.ps1 Test-HvxHostAsService.ps1 \
   Run-FieldAcceptanceTest.ps1 Run-FieldAcceptanceTest.bat \
   Run-StartupCheck.ps1 Run-StartupCheck.bat \
   Run-ServerDiagnostics.ps1 Run-ServerDiagnostics.bat \
