@@ -451,10 +451,20 @@ async def lifespan(app: FastAPI):
         _supervise_background_loop("diagnostic-heartbeat", _diagnostic_heartbeat_loop),
         name="diagnostic-heartbeat",
     )
+    watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
+    if watchdog_seconds > 0:
+        from app.services import pipeline_watchdog
+
+        watchdog_task = asyncio.create_task(
+            _supervise_background_loop("pipeline-watchdog", lambda: pipeline_watchdog.loop(watchdog_seconds)),
+            name="pipeline-watchdog",
+        )
+    else:
+        watchdog_task = asyncio.create_task(asyncio.sleep(0), name="pipeline-watchdog-disabled")
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
