@@ -65,3 +65,29 @@ def test_exit_with_receipt_reports_payment_needed():
          patch.object(desktop.QMessageBox, "information") as info:
         page.exit_with_receipt()
     assert "Payment needed" in info.call_args.args[2]
+
+
+def test_find_visit_offers_did_you_mean_for_a_near_plate():
+    from app.desktop.api import ApiError
+
+    shown = []
+
+    class Api:
+        def get(self, path, timeout=8):
+            if path.startswith("/sessions/lookup?q=T123A8C"):
+                raise ApiError(404, "No visit matches that QR code or plate")
+            if path.startswith("/sessions/near-matches"):
+                return [{"plate": "T123ABC", "token": "tok-9", "entry_time": "2026-11-15T08:00:00"}]
+            assert path == "/sessions/lookup?q=tok-9"
+            return {"plate": "T123ABC", "token": "tok-9"}
+
+    from PySide6.QtWidgets import QLabel, QLineEdit
+
+    page = SimpleNamespace(query=QLineEdit("T123A8C"), kiosk_stay=QLabel(), kiosk_note=QLabel())
+    page._show_visit = lambda data: shown.append(data)
+    page._offer_near_match = MethodType(desktop.Sessions._offer_near_match, page)
+    with patch.object(desktop, "api", Api()), \
+         patch.object(desktop.QInputDialog, "getItem", new=lambda *_a, **_k: ("T123ABC  (entered 2026-11-15 08:00)", True)):
+        desktop.Sessions.lookup(page)
+    assert shown == [{"plate": "T123ABC", "token": "tok-9"}]
+    assert "T123A8C" in page.kiosk_note.text()

@@ -337,10 +337,41 @@ class Sessions(QWidget):
         try:
             data=api.get(f"/sessions/lookup?q={quote(q, safe='')}", timeout=15)
         except Exception as exc:
+            if getattr(exc, "status_code", None)==404 and self._offer_near_match(q):
+                return
             self._show_visit(None)
             self.kiosk_stay.setText(str(exc))
             return
         self._show_visit(data)
+    def _offer_near_match(self, typed):
+        """No exact visit: offer open visits with a close plate (OCR 8/B, 0/O…).
+
+        Choosing one only shows that visit. The operator still checks the car
+        and the receipt; nothing opens a barrier from a fuzzy match.
+        """
+        from urllib.parse import quote
+        if "/" in typed or len(typed) > 16:
+            return False  # a receipt link or token, not a typed plate
+        try:
+            matches=api.get(f"/sessions/near-matches?plate={quote(typed, safe='')}", timeout=10) or []
+        except Exception:
+            return False
+        if not matches:
+            return False
+        labels=[f"{m.get('plate')}  (entered {(m.get('entry_time') or '').replace('T',' ')[:16]})" for m in matches]
+        choice,ok=QInputDialog.getItem(self,"Did you mean…",
+            f"No visit for {typed.upper()}. Did you mean one of these? Check the car and the receipt before acting.",
+            labels,0,False)
+        if not ok:
+            return False
+        picked=matches[labels.index(choice)]
+        try:
+            data=api.get(f"/sessions/lookup?q={quote(str(picked.get('token') or picked.get('plate')), safe='')}", timeout=15)
+        except Exception as exc:
+            self._show_visit(None); self.kiosk_stay.setText(str(exc)); return True
+        self._show_visit(data)
+        self.kiosk_note.setText(f"Shown because you typed {typed.upper()}. Confirm the plate on the car matches {data.get('plate')}.")
+        return True
     def _on_row(self):
         if getattr(self, "_filling", False):
             return
