@@ -207,6 +207,43 @@ class _SetupValidationMixin:
         finally:
             engine.dispose()
 
+    def _validate_timezone(self) -> bool:
+        from app.services.site_policy import validate_timezone
+
+        name = self.site_timezone.currentText().strip()
+        try:
+            validate_timezone(name)
+        except ValueError as exc:
+            self.timezone_status.setText(f"Invalid timezone: {exc}")
+            return False
+        self.timezone_status.setText(f"Tariff day/night times and receipts use {name}.")
+        return True
+
+    def _save_site_timezone(self, db_config: DatabaseConfig) -> None:
+        """Store the chosen timezone in the site policy of the selected DB.
+
+        On a re-run over an existing database a stored timezone is kept unless
+        the technician changed the picker.
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        from app.database_config import database_url
+        from app.models import SiteSetting
+        from app.services.site_policy import save_site_policy
+
+        chosen = self.site_timezone.currentText().strip()
+        engine = create_engine(database_url(db_config, password=self.pg_password.text() or None), future=True)
+        try:
+            with Session(engine) as db:
+                row = db.get(SiteSetting, "site")
+                stored = str((row.value or {}).get("timezone") or "") if row is not None and isinstance(row.value, dict) else ""
+                if stored and chosen == self._initial_site_timezone:
+                    return
+                save_site_policy(db, {"timezone": chosen})
+        finally:
+            engine.dispose()
+
     def _validate_database_page(self) -> bool:
         """Validate the local Site Server DB or the shared node DB."""
         if self.node_radio.isChecked() and self.sqlite_radio.isChecked():
