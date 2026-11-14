@@ -20,9 +20,61 @@ class Login(QDialog):
         l.addWidget(label_for("&Username", self.user)); l.addWidget(self.user)
         l.addWidget(label_for("&Password", self.pwd)); l.addWidget(self.pwd)
         l.addSpacing(6); l.addWidget(btn)
+        # Kiosk PCs sign in with a revocable device credential instead of a
+        # person's password, so they never log out mid-shift.
+        kiosk_btn=QPushButton("Kiosk device…"); kiosk_btn.clicked.connect(self.manage_kiosk_device)
+        kiosk_btn.setToolTip("Enrol this PC as a kiosk with a device credential from Admin → Kiosk devices.")
+        l.addWidget(kiosk_btn)
         self.user.setFocus()
         fit_window_to_screen(self, (420, 420), min_size=(360, 360))
         QTimer.singleShot(0, self._prefill)
+        QTimer.singleShot(0, self._kiosk_auto_sign_in)
+    def _kiosk_auto_sign_in(self):
+        from app.desktop.kiosk_device import enrolled_device_id, load_device
+        device = load_device()
+        if device is None:
+            if enrolled_device_id():
+                self.sub.setText("This kiosk's saved credential could not be read. Use Kiosk device… to enrol it again.")
+            return
+        if self.sign_in_kiosk(*device):
+            self.accept()
+    def sign_in_kiosk(self, device_id: str, credential: str) -> bool:
+        try:
+            from app.desktop.api import configure_desktop_base_url
+            configure_desktop_base_url()
+            api.login_device(device_id, credential)
+            return True
+        except Exception as e:
+            text=str(e)
+            if "401" in text or "Invalid kiosk" in text:
+                text=f"Kiosk device {device_id} was refused (revoked or wrong credential). Ask an administrator, then use Kiosk device… to enrol again."
+            self.sub.setText(text)
+            return False
+    def manage_kiosk_device(self):
+        from app.desktop.kiosk_device import enrol, enrolled_device_id, forget
+        current = enrolled_device_id()
+        if current:
+            answer = QMessageBox.question(
+                self, "Kiosk device",
+                f"This PC is enrolled as kiosk {current}.\n\nForget it? Staff will then sign in with their own accounts.",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                forget()
+                self.sub.setText("Kiosk enrolment removed from this PC.")
+            return
+        device_id, ok = QInputDialog.getText(self, "Enrol kiosk", "Kiosk device id (from Admin → Kiosk devices):")
+        if not ok or not device_id.strip():
+            return
+        credential, ok = QInputDialog.getText(self, "Enrol kiosk", "Device credential (shown once when it was created):", QLineEdit.Password)
+        if not ok or not credential:
+            return
+        if not self.sign_in_kiosk(device_id.strip(), credential):
+            return
+        try:
+            enrol(device_id.strip(), credential)
+        except Exception as e:
+            QMessageBox.warning(self, "Kiosk enrolment", f"Signed in, but the credential could not be saved on this PC: {e}")
+        self.accept()
     def _prefill(self):
         try:
             import httpx

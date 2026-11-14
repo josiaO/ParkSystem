@@ -42,9 +42,13 @@ class Users(QWidget):
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_user); delete.setVisible(api.can("users.manage")); delete.setToolTip("Delete (Del)")
         refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
         row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(refresh); row.addStretch(); l.addLayout(row); self.rows=[]; self.refresh()
+        if api.can("users.manage"):
+            self.kiosks=KioskDevicesBox(); l.addWidget(self.kiosks)
     def refresh(self):
         try: rows=api.get("/users")
         except Exception as e: QMessageBox.warning(self,"Users",str(e)); return
+        # Kiosk service accounts are managed under Kiosk devices below.
+        rows=[u for u in rows if not str(u.get("username") or "").startswith("kiosk-device:")]
         self.rows=rows
         self.table.setRowCount(len(rows))
         for r,u in enumerate(rows):
@@ -72,3 +76,71 @@ class Users(QWidget):
         if QMessageBox.question(self,"Delete user",f"Delete {user['username']}?")!=QMessageBox.Yes: return
         try: api.delete(f"/users/{user['id']}"); self.refresh()
         except Exception as e: QMessageBox.critical(self,"Delete user",str(e))
+
+
+class KioskDevicesBox(QGroupBox):
+    """Enrol and revoke kiosk PCs (revocable device credentials, Phase 2.3)."""
+
+    def __init__(self):
+        super().__init__("Kiosk devices")
+        l=QVBoxLayout(self)
+        note=QLabel("A kiosk PC signs in with its own device credential and stays signed in through a shift. "
+                    "Revoke a lost or replaced kiosk here; it is signed out at once.")
+        note.setWordWrap(True); note.setObjectName("muted"); l.addWidget(note)
+        self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(["Device id","Name","Status","Last seen","Created"])
+        configure_table(self.table); l.addWidget(self.table)
+        row=QHBoxLayout()
+        add=QPushButton("Enrol kiosk…"); add.clicked.connect(self.create_device)
+        revoke=QPushButton("Revoke"); revoke.clicked.connect(self.revoke_device)
+        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        row.addWidget(add); row.addWidget(revoke); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        self.rows=[]; self.refresh()
+
+    def refresh(self):
+        try: rows=api.get("/kiosk-devices")
+        except Exception as e:
+            self.table.setRowCount(0); self.setTitle(f"Kiosk devices — {e}"); return
+        self.setTitle("Kiosk devices")
+        self.rows=rows
+        self.table.setRowCount(len(rows))
+        for r,d in enumerate(rows):
+            values=[d.get("device_id"), d.get("name") or "—", d.get("status"),
+                    (d.get("last_seen_at") or "never").replace("T"," ")[:16], (d.get("created_at") or "").replace("T"," ")[:16]]
+            for c,v in enumerate(values):
+                self.table.setItem(r,c,QTableWidgetItem(str(v)))
+
+    def create_device(self):
+        name, ok = QInputDialog.getText(self, "Enrol kiosk", "Kiosk name (for example 'Exit B kiosk'):")
+        if not ok or not name.strip():
+            return
+        try:
+            created=api.post("/kiosk-devices", {"name": name.strip()})
+        except Exception as e:
+            QMessageBox.critical(self, "Enrol kiosk", str(e)); return
+        self.refresh()
+        self.show_credential(created)
+
+    def show_credential(self, created):
+        d=QDialog(self); d.setWindowTitle("Kiosk credential — shown once")
+        l=QVBoxLayout(d)
+        info=QLabel("On the kiosk PC choose Sign in → Kiosk device… and enter these two values. "
+                    "The credential is not shown again; revoke and enrol again if it is lost.")
+        info.setWordWrap(True); l.addWidget(info)
+        text=QPlainTextEdit(f"Device id: {created.get('device_id')}\nCredential: {created.get('credential')}")
+        text.setReadOnly(True); l.addWidget(text)
+        close=QPushButton("Done"); close.clicked.connect(d.accept); l.addWidget(close)
+        d.exec()
+
+    def revoke_device(self):
+        row=self.table.currentRow()
+        if row<0 or row>=len(self.rows):
+            QMessageBox.information(self, "Revoke kiosk", "Select a kiosk first."); return
+        device=self.rows[row]
+        if QMessageBox.question(self, "Revoke kiosk",
+                                f"Revoke {device.get('name')} ({device.get('device_id')})? It is signed out at once.") != QMessageBox.Yes:
+            return
+        try:
+            api.post(f"/kiosk-devices/{device['id']}/revoke")
+        except Exception as e:
+            QMessageBox.critical(self, "Revoke kiosk", str(e)); return
+        self.refresh()
