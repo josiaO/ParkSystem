@@ -39,6 +39,18 @@ Restart-Service SmartParkSiteService    # restart one service
 .\Install-SmartParkWinService.ps1       # re-register all services
 ```
 
+## What each service needs from the desktop
+
+Checked in the code (not yet on a site PC):
+
+| Service | Needs an interactive desktop? | Notes |
+|---|---|---|
+| Site Service | No | Python/Uvicorn. Writes to `%ProgramData%\SmartParkEdge`, which LocalSystem can use. |
+| Media Service / MediaMTX | No | Console processes; ports 8554/8889/8189. |
+| Recognition Worker | No | FFmpeg + ONNX Runtime; heartbeat in `%ProgramData%\SmartParkEdge`. |
+| HVX SDK host | **Unknown** | Hidden message-pumped window for vendor callbacks; test below. |
+| Receipt printer (inside Site Service) | No, **if installed for the machine** | LocalSystem only sees printers installed on this PC (USB or a Standard TCP/IP port). It does not see per-user network printer connections or a user's "default printer". Install the receipt printer locally and set its exact name in Settings. |
+
 ## The HVX SDK host and Session 0
 
 Windows services run in *Session 0*, which has no interactive desktop. The
