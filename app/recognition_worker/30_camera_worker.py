@@ -136,6 +136,7 @@ async def _infer_camera(
                 stats["recognition_generation"] = generation
                 stats["state"] = "RECONNECTING"
                 stats["reconnects"] = int(stats.get("reconnects", 0)) + 1
+                stats["decoder_restarts"] = int(stats.get("decoder_restarts", 0)) + 1
                 log.warning("camera=%s recognition decoder reconnecting attempt=%s backoff_s=%.1f", camera_id, stats["reconnects"], backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(8.0, backoff * 2)
