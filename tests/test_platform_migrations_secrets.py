@@ -301,11 +301,19 @@ class SecretStoreTests(unittest.TestCase):
     def test_backend_selection(self):
         with patch.object(secret_mod.settings, "secrets_backend", "auto"), patch("platform.system", return_value="Windows"):
             self.assertEqual(secret_mod.configured_backend(), "dpapi")
+        # Camera passwords never default to the plaintext database column:
+        # non-Windows uses 0600 files (Phase 1.6; previously "db").
         with patch.object(secret_mod.settings, "secrets_backend", "auto"), patch("platform.system", return_value="Linux"):
-            self.assertEqual(secret_mod.configured_backend(), "db")
+            self.assertEqual(secret_mod.configured_backend(), "file")
         with patch.object(secret_mod.settings, "secrets_backend", "dpapi"), patch("platform.system", return_value="Linux"):
             self.assertEqual(secret_mod.configured_backend(), "file")
-        with patch.object(secret_mod.settings, "secrets_backend", "bogus"):
+        # An unknown value falls back to the safe platform default, not "db".
+        with patch.object(secret_mod.settings, "secrets_backend", "bogus"), patch("platform.system", return_value="Linux"):
+            self.assertEqual(secret_mod.configured_backend(), "file")
+        with patch.object(secret_mod.settings, "secrets_backend", "bogus"), patch("platform.system", return_value="Windows"):
+            self.assertEqual(secret_mod.configured_backend(), "dpapi")
+        # The plaintext backend is still available, but only when chosen explicitly.
+        with patch.object(secret_mod.settings, "secrets_backend", "db"), patch("platform.system", return_value="Linux"):
             self.assertEqual(secret_mod.configured_backend(), "db")
 
 

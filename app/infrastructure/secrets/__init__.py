@@ -7,11 +7,12 @@ Backends (``SMARTPARK_SECRETS_BACKEND``):
   32-bit HVX host running under the same machine can both read). Blobs live in
   ``data_dir/secrets/<ref>.bin``. **Default on Windows.**
 * ``file`` — plain file per ref under ``data_dir/secrets`` with 0600
-  permissions. For Linux evaluation/dev only; not an OS keyring.
+  permissions. **Default on non-Windows.** Not an OS keyring, but the
+  secret no longer sits in the shared database or its backups.
 * ``memory`` — process-local dict (tests).
 * ``db`` — legacy: the raw value stays in the ``password_secret`` column.
-  **Default on non-Windows** so existing evaluation databases keep working
-  until an operator opts in.
+  Only when chosen explicitly; it logs a warning and health reports it.
+  Unknown values fall back to the platform default, never to ``db``.
 
 References look like ``camera:<uuid>``. ``resolve()`` returns the raw secret
 for adapters at connect time; nothing else should call it.
@@ -19,6 +20,7 @@ for adapters at connect time; nothing else should call it.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 import platform
@@ -31,6 +33,12 @@ from app.config import settings
 
 _REF_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9._-]{4,80}$")
 _lock = threading.Lock()
+log = logging.getLogger("smartpark")
+_warned_plaintext = False
+PLAINTEXT_WARNING = (
+    "Camera passwords are stored in plaintext in the database (SMARTPARK_SECRETS_BACKEND=db). "
+    "Use the default (dpapi on Windows, file elsewhere)."
+)
 
 
 class SecretStoreError(RuntimeError):
@@ -211,13 +219,19 @@ _store_injected = False
 
 
 def configured_backend() -> str:
+    global _warned_plaintext
     raw = str(getattr(settings, "secrets_backend", "auto") or "auto").strip().lower()
+    platform_default = "dpapi" if platform.system() == "Windows" else "file"
     if raw == "auto":
-        return "dpapi" if platform.system() == "Windows" else "db"
+        return platform_default
     if raw not in {"dpapi", "file", "memory", "db"}:
-        return "db"
+        log.warning("unknown SMARTPARK_SECRETS_BACKEND=%r; using %s", raw, platform_default)
+        return platform_default
     if raw == "dpapi" and platform.system() != "Windows":
         return "file"
+    if raw == "db" and not _warned_plaintext:
+        _warned_plaintext = True
+        log.warning(PLAINTEXT_WARNING)
     return raw
 
 
@@ -290,9 +304,12 @@ def resolve_secret(ref: str | None, *, fallback: str = "") -> str:
 def describe() -> dict:
     store = secret_store()
     root = getattr(store, "root", None)
+    plaintext = store.backend == "db"
     return {
         "backend": store.backend,
-        "external": store.backend != "db",
+        "external": not plaintext,
+        "plaintext": plaintext,
+        "warning": PLAINTEXT_WARNING if plaintext else "",
         "location": str(root) if root else None,
         "platform": platform.system(),
     }
