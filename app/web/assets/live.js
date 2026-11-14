@@ -91,12 +91,16 @@ async function whepStart(video, whepUrl, onState, onSession) {
             lastProgress = performance.now();
           }
         });
-        if (performance.now() - lastProgress > 8000) {
+        // Do not leave a WebRTC pane showing its last decoded frame as if it
+        // were live. The media contract declares a stream stale at about two
+        // seconds; this browser-side watchdog adds one short stats interval
+        // for scheduling jitter and then reconnects the peer.
+        if (performance.now() - lastProgress > 2500) {
           onState("no-frames", session);
           return;
         }
       } catch (_) {}
-      if (!session.closed) session.statsTimer = setTimeout(checkFrames, 2000);
+      if (!session.closed) session.statsTimer = setTimeout(checkFrames, 1000);
     };
     session.statsTimer = setTimeout(checkFrames, 2000);
   }
@@ -578,7 +582,7 @@ function startMjpegLive(slot, id) {
   };
   els.img.onerror = () => {
     if (els.img.dataset.cameraId !== String(id)) return;
-    if (els.status) els.status.textContent = "Reconnecting live stream…";
+    if (els.status) els.status.textContent = "STALE — reconnecting live stream…";
     if (snapshotTimers[slot]) clearTimeout(snapshotTimers[slot]);
     liveRetryCounts[slot] = (liveRetryCounts[slot] || 0) + 1;
     // Retry the persistent MJPEG stream. Never switch to 120 ms snapshot

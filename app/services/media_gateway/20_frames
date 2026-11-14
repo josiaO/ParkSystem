@@ -36,6 +36,7 @@ class _GatewayFramesMixin:
         source: str = "",
         url: str = "",
         sampled: bool = False,
+        generation: int | None = None,
     ) -> FrameSample | None:
         """Fill only the DETECT buffer (MediaMTX local RTSP consumer)."""
         if jpeg[:2] != JPEG_SOI:
@@ -47,6 +48,12 @@ class _GatewayFramesMixin:
                 need_detect=True,
             ))
             self._sessions[camera_id] = row
+        if generation is not None and int(generation) != row.generation:
+            # A cancelled MediaMTX/FFmpeg detect reader may still yield one
+            # buffered frame after reconnect. DETECT must obey the same
+            # generation boundary as LIVE or stale OCR can be admitted.
+            row.frames_dropped_ai += 1
+            return None
         now = time.monotonic()
         detect_row = (row.spec.stream_profiles or {}).get(ROLE_DETECT) or {}
         ai_fps = float(detect_row.get("ai_fps") or getattr(settings, "detect_fps", 8.0) or 8.0)

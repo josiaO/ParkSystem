@@ -128,6 +128,12 @@ async def _infer_camera(
                         pass
             stats["decoder_pid"] = None
             if not stop.is_set():
+                # The decoder may have yielded a frame while an older model
+                # call was still running. Advance the lane generation before
+                # reconnecting so that late OCR cannot be applied to the new
+                # vehicle stream or hold the previous visit open.
+                generation = runtime.recover(camera_id)
+                stats["recognition_generation"] = generation
                 stats["state"] = "RECONNECTING"
                 stats["reconnects"] = int(stats.get("reconnects", 0)) + 1
                 log.warning("camera=%s recognition decoder reconnecting attempt=%s backoff_s=%.1f", camera_id, stats["reconnects"], backoff)

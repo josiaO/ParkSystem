@@ -141,6 +141,25 @@ class FusionCoordinatorTests(unittest.TestCase):
         later = self.coord.flush(12.0)
         self.assertEqual([o.decision.resolved_plate for o in later], ["BBB222"])
 
+    def test_multiple_vehicles_are_not_overwritten_while_counterpart_is_late(self):
+        self.coord.offer(7, Candidate(SOURCE_NATIVE, "AAA111", 0.9, 0.0), now=0.0)
+        self.coord.offer(7, Candidate(SOURCE_NATIVE, "BBB222", 0.9, 0.5), now=0.5)
+
+        first = self.coord.offer(
+            7, Candidate(SOURCE_LOCAL, "AAA111", 0.9, 0.7), now=0.7,
+        )
+        second = self.coord.offer(
+            7, Candidate(SOURCE_LOCAL, "BBB222", 0.9, 1.0), now=1.0,
+        )
+        outcomes = first + second
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(
+            {outcome.decision.resolved_plate for outcome in outcomes},
+            {"AAA111", "BBB222"},
+        )
+        self.assertTrue(all(outcome.paired for outcome in outcomes))
+        self.assertEqual(self.coord.pending(7), {SOURCE_NATIVE: None, SOURCE_LOCAL: None})
+
     def test_held_decision_does_not_own_duplicate_window(self):
         self.coord.offer(6, Candidate(SOURCE_NATIVE, "KAA123A", 0.95, 0.0), now=0.0)
         held = self.coord.offer(6, Candidate(SOURCE_LOCAL, "KBB456B", 0.95, 0.1), now=0.1)[0]

@@ -95,6 +95,12 @@ capture or session.
 
 Default mode is `FASTALPR_ONLY`: every presence JPEG is read by the FastALPR plate engine (ParkWatch software OCR). `NATIVE_ONLY` keeps the camera text. `HYBRID` uses both. Per-camera `recognition_mode` overrides the process default.
 
+These are provider boundaries, not display labels. `NATIVE_ONLY` never falls
+back to FastALPR when a native event has no plate; an operator's explicit
+manual read is the only override. `HYBRID` is genuinely two-provider only
+when the camera advertises native plate capability; the camera contract reports
+when a generic camera can run FastALPR only.
+
 The engine is isolated and replaceable. See [PLATE-ENGINE.md](PLATE-ENGINE.md).
 
 ## DETECT FPS vs time-in-view

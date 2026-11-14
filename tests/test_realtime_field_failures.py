@@ -148,6 +148,8 @@ class IsolationAndWatchdogTests(unittest.TestCase):
         self.assertEqual(lane.mailbox.depth(), 0)
         self.assertEqual(lane.last_plate, "")
         self.assertFalse(lane.accept(ticket, plate="T123OLD"))
+        fresh_sample = lane.offer_frame(JPEG + b"fresh")
+        self.assertEqual(fresh_sample.generation, lane.generation)
 
 
 class StaleAndPhantomPlateTests(unittest.TestCase):

@@ -33,6 +33,7 @@ reader.
 | Reconnect contamination | A cancelled decoder could return one late frame and repopulate the old preview | Media generations now invalidate the gateway buffers and preview cache; late-generation publishes are rejected | `app/services/media_gateway.py`, `app/services/preview.py`, `tests/test_media_acquisition.py` |
 | Previous plate in live UI | A historical plate was separate from current live state only by age | `LaneVisit` controls current plate visibility; departure/EMPTY clears current plate while historical captures remain | `app/services/recognition_runtime.py`, `tests/test_realtime_field_failures.py` |
 | Native/software double ownership | Native callbacks and worker results could both reach parking logic | Recognition mode, worker heartbeat, and hybrid fusion select one software owner; paired outcomes are persisted once | `app/services/hybrid_fusion.py`, `app/core/hybrid.py`, `tests/test_hybrid_fusion.py` |
+| Mode label without provider boundary | `NATIVE_ONLY` could silently accept a local FastALPR result when the native provider returned no plate; persisted mode also did not expose whether the selected adapter could provide native plates | `recognition_contract()` reports the requested/canonical mode and native capability; `NATIVE_ONLY` is now strict, while explicit operator reads remain an intentional local override; hybrid reports when it is operating without a native provider | `app/services/ocr_policy.py`, `app/core/fusion.py`, `app/api/runtime_parts/02_camera_registry.py`, `app/services/lane_status.py`, `tests/test_plate_engine.py` |
 | Duplicate session creation | Retries can occur after a database commit or outbox acknowledgement failure | Event/visit/capture uniqueness, entry claims, parking transaction checks, and durable outbox processed keys | `app/models.py`, `app/services/parking_sessions.py`, `app/services/queues.py`, `tests/test_production_stabilization.py` |
 | False recovery | Repeated cached JPEG bytes were treated as source progress | Source sequence is preferred; byte equality does not refresh freshness unless a decoder source sequence advanced | `app/services/media_gateway.py`, `tests/test_media_acquisition.py` |
 | Static-scene display stall | The preview cache waited only for a new JPEG sequence, so an unchanged but continuously arriving scene could make the Windows reader hit its no-frame watchdog and reconnect | Transport activity is tracked separately from pixel freshness; `/live.mjpeg` emits a bounded one-second heartbeat without incrementing the display sequence | `app/services/preview.py`, `app/desktop/streams.py`, `tests/test_detection_history.py` |
@@ -57,12 +58,18 @@ reader.
 - VERIFIED: native QY/HVX ownership, production generic-camera fail-closed
   policy, bounded LIVE/DETECT/recognition buffers, generation invalidation,
   stale-result rejection, independent camera/display ownership, static-scene
-  MJPEG heartbeats, and idempotent event/session paths are covered by source
-  inspection and automated regression tests.
+  MJPEG heartbeats, strict recognition-mode boundaries, and idempotent
+  event/session paths are covered by source inspection and automated
+  regression tests.
 - TESTED WITH MOCKS: camera acquisition, reconnect, decoder, multi-camera,
-  slow-consumer, UI, and production-configuration paths are covered by the
-  repository test suites; the final focused run passed 147 tests with one
-  warning.
+  slow-consumer, UI, mode selection, and production-configuration paths are
+  covered by the repository test suites; the final focused run passed 80
+  tests, and the broader non-model run reached 79 passes before it was
+  manually stopped in a blocking integration test.
+- FIELD INPUT: the reported camera exercise was performed on an ALPR-capable
+  camera, not a generic RTSP camera. That validates the native-capable branch
+  only; generic RTSP ingest and its local FastALPR path still require a
+  representative RTSP source test.
 - NOT TESTED ON HARDWARE: Windows DLL loading, physical camera codecs, real
   MediaMTX ingest, camera-to-screen latency, day/night recognition accuracy,
   recovery on the installed network, and 24-hour soak behavior.

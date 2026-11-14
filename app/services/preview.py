@@ -128,33 +128,26 @@ def invalidate_camera(camera_id: int, *, generation: int | None = None) -> None:
 def live_is_current(camera_id: int) -> bool:
     row = get_state(camera_id)
     session = gateway.session(camera_id)
-    # Transport liveness and pixel freshness are separate diagnostics.  A
-    # static scene can legitimately repeat the same JPEG while the decoder is
-    # receiving frames; the MJPEG transport must remain usable in that case.
-    # ``health_sync`` still reports duplicate/frozen pixels independently.
-    if session is not None and hasattr(session, "last_received_at"):
-        fresh_at = max(
-            float(getattr(session, "last_received_at") or 0.0),
-            float(row.captured_at or 0.0),
-        )
-    elif session is not None and hasattr(session, "last_fresh_frame_at"):
-        # A session may exist before its first producer frame is admitted (or
-        # when a test/operator has seeded the shared cache).  Do not turn that
-        # zero value into permission for snapshot_for_camera to open another
-        # reader; the cache timestamp is the only freshness source available
-        # until the producer publishes its first unique frame.
-        # ``remember_frame`` is also the shared cache admission point for
-        # SDK snapshots and test/operator seed frames.  Take the newest of
-        # the producer clock and cache clock so a stale session object cannot
-        # hide a freshly admitted shared frame.
+    # ``last_received_at`` only proves that a decoder returned bytes. It is
+    # updated for duplicate JPEGs too, so using it here can keep a frozen
+    # picture looking live forever. A real StreamSession advances
+    # ``last_fresh_frame_at`` only when the source advances (or a decoder
+    # source sequence proves that an identical image is a new frame).
+    if session is not None and hasattr(session, "last_fresh_frame_at"):
         fresh_at = max(
             float(getattr(session, "last_fresh_frame_at") or 0.0),
             float(row.captured_at or 0.0),
         )
+        if bool(getattr(session, "frozen", False)):
+            return False
+    elif session is not None and hasattr(session, "last_received_at"):
+        # Compatibility for lightweight callers/tests that provide the older
+        # session shape. Real sessions always take the branch above.
+        fresh_at = max(
+            float(getattr(session, "last_received_at") or 0.0),
+            float(row.captured_at or 0.0),
+        )
     else:
-        # Compatibility for lightweight callers/tests that provide the old
-        # session shape. Real StreamSession objects always have the fresh
-        # timestamp above, even when it is zero.
         fresh_at = float(getattr(session, "last_received_at", 0.0) or row.captured_at)
     return bool(row.jpeg[:2] == JPEG_SOI and fresh_at and time.monotonic() - fresh_at <= settings.stale_stream_seconds)
 
@@ -700,7 +693,10 @@ def watch_live(spec: CameraLiveSpec) -> None:
     from app.infrastructure.media.registry import mediamtx_live_active
     from app.services.flags import flags
     if mediamtx_live_active(spec.id) and bool(flags().get("webrtc_live_enabled")):
+        # WebRTC reads MediaMTX directly. Do not create a server-side JPEG
+        # consumer merely because a browser is watching.
         return
+    gateway.acquire_live_cache(spec.id)
     if mediamtx_live_active(spec.id):
         from app.services.mediamtx_live import ensure_live_consumer
         ensure_live_consumer(spec)
@@ -712,6 +708,8 @@ def acquire_live(spec: CameraLiveSpec) -> None:
     """Acquire a JPEG/MJPEG viewer; unlike WebRTC this needs a local decoder."""
     _viewers[spec.id] = viewers_for(spec.id) + 1
     _last_view[spec.id] = time.monotonic()
+    row = gateway._session_for(spec)
+    row.live_consumers += 1
     ensure_mjpeg_source(spec)
 
 
@@ -761,6 +759,7 @@ def release_live(camera_id: int) -> None:
     row = gateway.session(camera_id)
     if row is not None:
         row.viewers = viewers_for(camera_id)
+        row.live_consumers = max(0, row.live_consumers - 1)
         row.last_view_at = time.monotonic()
 
 
