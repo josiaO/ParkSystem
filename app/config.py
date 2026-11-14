@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     # only prevents a valid read from being rejected while inference finishes
     # on a busy Windows CPU.
     recognition_stale_frame_ms: float = 2000.0
+    # Alarm when the p95 age of frames entering recognition exceeds this.
+    recognition_frame_age_alarm_ms: float = 300.0
     # After a plate is confirmed, OCR stops. A detector-only check at this
     # interval notices the vehicle leaving without reading the plate again.
     recognition_departure_check_seconds: float = 1.0

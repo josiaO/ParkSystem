@@ -155,7 +155,7 @@ async def _loop() -> None:
                                      else "IDLE" if not claimed_camera_ids else "DEGRADED" if not tasks
                                      else "READY" if warmup_status.get("ready") else "WARMING"),
                            "retiring_cameras": sorted(retiring),
-                           "cameras": [{key: value for key, value in tasks[cid][2].items() if key != "latency_samples"} for cid in sorted(tasks)]})
+                           "cameras": [_camera_health_row(cid, tasks[cid][2]) for cid in sorted(tasks)]})
             # The heartbeat is considered stale after six seconds. Keep the
             # idle worker cadence below that threshold as well; a worker with
             # no assigned cameras must still prove that its control loop is
@@ -170,3 +170,24 @@ async def _loop() -> None:
         if warmup_task is not None:
             await asyncio.gather(warmup_task, return_exceptions=True)
         _write_health({"enabled": False, "cameras": [], "state": "STOPPED"})
+
+
+_LANE_TIMING_KEYS = (
+    "frame_age_at_consumption_ms", "frame_age_at_consumption_ms_p50",
+    "frame_age_at_consumption_ms_p95", "frame_age_alarm", "pending_queue_depth",
+    "inference_ms_p50", "inference_ms_p95", "dropped_ai_frames", "stale_results_rejected",
+)
+
+
+def _camera_health_row(camera_id: int, stats: dict) -> dict:
+    """Worker stats plus the lane's frame-age/queue figures for System Health."""
+    from app.services.recognition_runtime import runtime
+
+    row = {key: value for key, value in stats.items() if key != "latency_samples"}
+    try:
+        lane = runtime.lane(int(camera_id)).snapshot()
+        row.update({key: lane.get(key) for key in _LANE_TIMING_KEYS if key in lane})
+    except Exception:
+        pass
+    row["camera_id"] = int(row.get("camera_id") or camera_id)
+    return row

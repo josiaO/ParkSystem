@@ -48,6 +48,14 @@ def health_sentences(details: dict | None, live: dict | None = None) -> str:
     live = live or {}
     status = str(details.get("status") or details.get("state") or live.get("state") or "ok")
     lines = [f"The site is {status.replace('_', ' ')}."]
+    lanes = list(((details.get("recognition_runtime") or {}).get("cameras") or []))
+    lanes += list(((details.get("recognition_worker") or {}).get("cameras") or []))
+    for lane in lanes:
+        if isinstance(lane, dict) and lane.get("frame_age_alarm"):
+            lines.append(
+                f"Camera {lane.get('camera_id')}: frames wait {lane.get('frame_age_at_consumption_ms_p95')} ms "
+                "before recognition (budget 300 ms). The PC may be overloaded."
+            )
     watchdog = details.get("watchdog")
     if isinstance(watchdog, dict) and watchdog.get("ok") is False:
         for problem in (watchdog.get("problems") or [])[:4]:
