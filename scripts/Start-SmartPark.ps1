@@ -49,7 +49,7 @@ if (-not (Test-Path $python)) {
 }
 
 Write-Host "Starting SmartPark API at http://127.0.0.1:8760"
-Write-Host "Sign in as admin / SmartPark1!"
+Write-Host "Sign in as admin with the first-run password shown on this PC (or in bootstrap_password.txt in the SmartParkEdge data folder)."
 Write-Host "Then: Discover or Add site cameras, then Connect all."
 
 Start-Job -ScriptBlock {
