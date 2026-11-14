@@ -297,6 +297,82 @@ def _start_scheduled_task(name: str) -> bool:
         return False
 
 
+# Windows services registered by Install-SmartParkWinService.ps1 (NSSM).
+_SERVICE_SITE = "SmartParkSiteService"
+_SERVICE_HVX = "SmartParkHvxHost"
+_SERVICE_DEPENDENTS = {
+    "SmartParkMediaService": "app.media_service",
+    "SmartParkRecognitionWorker": "app.recognition_worker",
+}
+_SERVICE_STOP_ORDER = ("SmartParkRecognitionWorker", "SmartParkMediaService", _SERVICE_SITE, _SERVICE_HVX)
+
+
+def _windows_service_state(name: str) -> str | None:
+    """RUNNING / STOPPED / START_PENDING …, or None when the service is not installed."""
+    if os.name != "nt":
+        return None
+    try:
+        result = subprocess.run(["sc.exe", "query", name], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in (result.stdout or "").splitlines():
+        if "STATE" in line and ":" in line:
+            parts = line.split(":", 1)[1].split()
+            if len(parts) >= 2:
+                return parts[1].strip().upper()
+    return None
+
+
+def _start_windows_service(name: str) -> bool:
+    try:
+        result = subprocess.run(["sc.exe", "start", name], capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    # 1056 = already running.
+    return result.returncode in (0, 1056)
+
+
+def _stop_windows_service(name: str) -> None:
+    try:
+        subprocess.run(["sc.exe", "stop", name], capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _service_failure(name: str) -> RuntimeError:
+    return RuntimeError(
+        f"Windows service '{name}' could not be started. Open services.msc to see its status, and check "
+        f"{_log_dir() / 'services' / (name + '.log')}. The desktop will not start a second copy."
+    )
+
+
+def _ensure_windows_services(root: Path, local_url: str) -> None:
+    """Services own the runtime: start what is stopped, never spawn duplicates."""
+    if _windows_service_state(_SERVICE_HVX) is not None:
+        if not _start_windows_service(_SERVICE_HVX):
+            raise _service_failure(_SERVICE_HVX)
+    elif _scheduled_task_exists("SmartPark HVX Host"):
+        # The vendor SDK host stays a logon task until proven in Session 0.
+        if not _start_scheduled_task("SmartPark HVX Host"):
+            raise _scheduled_task_failure("SmartPark HVX Host")
+    else:
+        start_hvx_host(root)
+    if _windows_service_state(_SERVICE_SITE) != "RUNNING" and not _start_windows_service(_SERVICE_SITE):
+        raise _service_failure(_SERVICE_SITE)
+    wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
+    missing = []
+    for service, module in _SERVICE_DEPENDENTS.items():
+        state = _windows_service_state(service)
+        if state is None:
+            missing.append(module)
+        elif state != "RUNNING" and not _start_windows_service(service):
+            raise _service_failure(service)
+    if missing:
+        start_pipeline_services(root, modules=missing)
+
+
 def ensure_background_services(root: Path | None = None, config=None) -> None:
     from app.deployment import SITE_SERVER, load_deployment_config
 
@@ -313,6 +389,9 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
     # while that task is still booting.  Starting a second Python API here can
     # win the instance-lock race, leave the real task without the port, and
     # produce WinError 10061.  Prefer the task and wait for its one API owner.
+    if os.name == "nt" and _windows_service_state(_SERVICE_SITE) is not None:
+        _ensure_windows_services(root, local_url)
+        return
     if os.name == "nt" and _scheduled_site_service_exists():
         # The camera SDK host must be available before Site Service begins its
         # camera reconciliation loop. Starting Site Service first causes a
@@ -391,6 +470,9 @@ def stop_background_services(config=None) -> None:
     if os.name == "nt":
         # Stop consumers before their API and hardware host so no worker keeps
         # an old database configuration alive during repair.
+        for service in _SERVICE_STOP_ORDER:
+            if _windows_service_state(service) not in (None, "STOPPED"):
+                _stop_windows_service(service)
         for name in (
             "SmartPark Recognition Worker",
             "SmartPark Media Service",
