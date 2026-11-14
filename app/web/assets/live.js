@@ -126,8 +126,36 @@ function whepCodec(session) {
   } catch (_) { return ""; }
 }
 
+// Images and MJPEG streams cannot send an Authorization header, so media URLs
+// carry a short-lived media token (POST /auth/media-token) instead of the
+// 12-hour session token. It is refreshed well before it expires.
+let mediaToken = "";
+let mediaTokenTimer = null;
+
+async function refreshMediaToken() {
+  if (mediaTokenTimer) { clearTimeout(mediaTokenTimer); mediaTokenTimer = null; }
+  if (!state.token) { mediaToken = ""; return; }
+  try {
+    const res = await fetch("/auth/media-token", { method: "POST", headers: { Authorization: `Bearer ${state.token}` } });
+    if (!res.ok) throw new Error(`media token ${res.status}`);
+    const body = await res.json();
+    mediaToken = body.media_token || "";
+    const ttl = Math.max(30, Number(body.expires_in) || 600);
+    mediaTokenTimer = setTimeout(refreshMediaToken, ttl * 600);  // refresh at 60% of the lifetime
+  } catch (_) {
+    mediaTokenTimer = setTimeout(refreshMediaToken, 15000);
+  }
+}
+
+function clearMediaToken() {
+  if (mediaTokenTimer) { clearTimeout(mediaTokenTimer); mediaTokenTimer = null; }
+  mediaToken = "";
+}
+
 function mediaUrl(path) {
   const join = path.includes("?") ? "&" : "?";
+  if (mediaToken) return `${path}${join}media_token=${encodeURIComponent(mediaToken)}`;
+  // Only until the first media token arrives right after sign-in.
   return `${path}${join}access_token=${encodeURIComponent(state.token)}`;
 }
 

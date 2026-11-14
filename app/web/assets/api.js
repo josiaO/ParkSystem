@@ -828,6 +828,7 @@ function setSignedIn(data) {
   state.modules = data.modules || {};
   state.roles = data.roles || state.roles || [];
   sessionStorage.setItem("smartpark_token", state.token);
+  refreshMediaToken();
   const nameEl = document.getElementById("whoami-name");
   const who = document.getElementById("whoami");
   const av = document.getElementById("user-avatar");
@@ -850,6 +851,7 @@ function setSignedOut() {
   state.token = ""; state.user = ""; state.userId = null; state.permissions = [];
   state.navigation = []; state.modules = {}; state.siteTimezone = "UTC";
   sessionStorage.removeItem("smartpark_token");
+  clearMediaToken();
   document.body.classList.remove("role-tech");
   document.body.classList.remove("kiosk-mode");
   stopHdrHealth();
