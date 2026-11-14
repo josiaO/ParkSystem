@@ -625,3 +625,64 @@ def test_public_receipt_full_photo_is_an_explicit_opt_in(receipt_with_photo):
     with patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"):
         assert _receipt_status(client, public)["snapshot_url"]
         assert client.get(f"/p/{public}/snapshot.jpg").content == original
+
+
+# Phase 2.3 Kiosk device credential ------------------------------------------
+
+def _admin_headers(client, token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_kiosk_device_credential_signs_in_as_a_kiosk_operator(api_client):
+    client, token, _Session = api_client
+    created = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "Exit B kiosk"})
+    assert created.status_code == 200, created.text
+    device = created.json()
+    assert device["device_id"].startswith("kiosk-") and len(device["credential"]) >= 40
+    listed = client.get("/kiosk-devices", headers=_admin_headers(client, token)).json()
+    assert [row["device_id"] for row in listed] == [device["device_id"]]
+    assert "credential" not in listed[0] and "credential_hash" not in listed[0]
+
+    signed = client.post("/kiosk/auth", json={"device_id": device["device_id"], "credential": device["credential"]})
+    assert signed.status_code == 200, signed.text
+    kiosk_headers = {"Authorization": f"Bearer {signed.json()['token']}"}
+    assert "kiosk.use" in signed.json()["permissions"]
+    assert "users.manage" not in signed.json()["permissions"]
+    assert client.get("/auth/me", headers=kiosk_headers).status_code == 200
+    assert client.get("/users", headers=kiosk_headers).status_code == 403
+
+
+def test_kiosk_service_account_cannot_sign_in_with_a_password(api_client):
+    client, token, Session = api_client
+    device = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "K"}).json()
+    from app.models import KioskDevice, User
+
+    with Session() as db:
+        row = db.scalar(select(KioskDevice).where(KioskDevice.device_id == device["device_id"]))
+        username = db.get(User, row.user_id).username
+    assert client.post("/auth/login", json={"username": username, "password": device["credential"]}).status_code == 401
+
+
+def test_revoking_a_kiosk_device_ends_its_sessions_at_once(api_client):
+    client, token, _Session = api_client
+    device = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "K"}).json()
+    session_token = client.post("/kiosk/auth", json=device).json()["token"]
+    kiosk_headers = {"Authorization": f"Bearer {session_token}"}
+    revoked = client.post(f"/kiosk-devices/{device['id']}/revoke", headers=_admin_headers(client, token))
+    assert revoked.status_code == 200, revoked.text
+    assert client.get("/auth/me", headers=kiosk_headers).status_code in (401, 403)
+    assert client.post("/kiosk/auth", json=device).status_code == 401
+
+
+def test_kiosk_auth_rejects_wrong_credentials_and_is_throttled(api_client):
+    client, token, _Session = api_client
+    device = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "K"}).json()
+    codes = [client.post("/kiosk/auth", json={"device_id": device["device_id"], "credential": "wrong"}).status_code
+             for _ in range(6)]
+    assert codes[:5] == [401] * 5 and codes[5] == 429
+
+
+def test_kiosk_sessions_outlast_a_shift():
+    from app.services.kiosk_devices import KIOSK_SESSION_HOURS
+
+    assert KIOSK_SESSION_HOURS >= 24

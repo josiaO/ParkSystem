@@ -112,7 +112,8 @@ def authenticate_user(db: Session, username: str, password: str) -> User:
         .options(selectinload(User.roles).selectinload(UserRole.role))
         .where(User.username == username)
     )
-    if not user or not verify_password(user.password_hash, password):
+    # Kiosk device service accounts sign in only with their device credential.
+    if not user or str(user.username).startswith("kiosk-device:") or not verify_password(user.password_hash, password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
     if user.status != UserStatus.ACTIVE.value:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account unavailable")

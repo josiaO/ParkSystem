@@ -35,3 +35,24 @@ class AuthSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(AwareDateTime())
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+
+
+class KioskDevice(Base):
+    """A revocable credential for one kiosk PC (modelled on ``Node``).
+
+    The device signs in with its credential instead of a person's password,
+    so the kiosk does not log out mid-shift. It acts through a dedicated
+    Kiosk Operator service account that can never sign in by password.
+    """
+    __tablename__ = "kiosk_devices"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", index=True)
+    credential_hash: Mapped[str] = mapped_column(String(300), default="")
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
