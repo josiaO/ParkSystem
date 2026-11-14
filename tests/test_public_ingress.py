@@ -116,7 +116,10 @@ class PublicIngressMiddlewareTests(unittest.TestCase):
             (media / "snapshots").mkdir(parents=True)
             photo = b"\xff\xd8\xff\xd9"
             (media / "snapshots" / "entry.jpg").write_bytes(photo)
-            with patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=media):
+            # Public entry photos are an explicit opt-in (Phase 1.8); this test is
+            # about serving the visit-bound photo once a site has opted in.
+            with patch.object(Settings, "media_dir", new_callable=PropertyMock, return_value=media), \
+                 patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"):
                 with self.Session() as db:
                     row = ParkingSession(
                         site_id=1,

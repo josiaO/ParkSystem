@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -136,7 +137,10 @@ class PublicSessionBoundaryTests(unittest.TestCase):
             ))
             db.commit()
 
-            body = public_session_payload(db, row)
+            # Public photos are opt-in (Phase 1.8); the projection must still
+            # point at this visit's own evidence once a site enables them.
+            with patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"):
+                body = public_session_payload(db, row)
 
         self.assertEqual(body["snapshot_url"], "/p/photo-token/snapshot.jpg")
         self.assertEqual(body["crop_url"], "/p/photo-token/crop.jpg")

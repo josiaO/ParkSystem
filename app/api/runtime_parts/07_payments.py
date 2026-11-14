@@ -642,15 +642,35 @@ def lookup_session(q: str = "", db: Session = Depends(get_db), _: User = Depends
     return public_session_payload(db, row, audience="operator")
 
 
-def _session_image(db: Session, token: str, kind: str):
+STAFF_PHOTO_PERMISSIONS = {"cameras.view", "kiosk.use", "sessions.view"}
+
+
+def _staff_may_see_photos(db: Session, request: Request | None) -> bool:
+    from app.security import optional_media_user
+
+    if request is None:
+        return False
+    user = optional_media_user(db, request)
+    if user is None:
+        return False
+    perms = user_permissions(user)
+    return "*" in perms or bool(perms & STAFF_PHOTO_PERMISSIONS)
+
+
+def _session_image(db: Session, token: str, kind: str, request: Request | None = None):
     from app.services.kiosk_lookup import capture_for_session
     from app.services.preview import media_path
     from app.services.public_pay import session_by_public_token
     from app.services.public_ingress import privacy_headers
+    from app.services.receipt_privacy import PHOTO_BLURRED, blurred_jpeg, public_image_allowed, public_photo_mode
 
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
+    staff = _staff_may_see_photos(db, request)
+    if not staff and not public_image_allowed(kind):
+        # Same answer as "no photo" so the receipt link does not reveal more.
+        raise HTTPException(404, "No photo for this visit")
     # Resolve the exact capture used to build the presentation. Never fall
     # back to the latest plate/camera capture: repeated visits may share both.
     capture = capture_for_session(db, row)
@@ -661,15 +681,21 @@ def _session_image(db: Session, token: str, kind: str):
     path = media_path(folder, name)
     if path is None:
         raise HTTPException(404, "No photo for this visit")
+    if not staff and public_photo_mode() == PHOTO_BLURRED:
+        try:
+            return Response(content=blurred_jpeg(path), media_type="image/jpeg", headers=privacy_headers())
+        except Exception:
+            log.exception("could not blur receipt photo session_id=%s", row.id)
+            raise HTTPException(404, "No photo for this visit")
     return FileResponse(path, media_type="image/jpeg", headers=privacy_headers())
 
 
-def public_snapshot(token: str, db: Session = Depends(get_db)):
-    return _session_image(db, token, "snapshot")
+def public_snapshot(token: str, request: Request, db: Session = Depends(get_db)):
+    return _session_image(db, token, "snapshot", request)
 
 
-def public_crop(token: str, db: Session = Depends(get_db)):
-    return _session_image(db, token, "crop")
+def public_crop(token: str, request: Request, db: Session = Depends(get_db)):
+    return _session_image(db, token, "crop", request)
 
 
 def public_receipt_qr(token: str, db: Session = Depends(get_db)):

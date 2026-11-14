@@ -97,6 +97,10 @@ def session_presentation(db: Session, row: ParkingSession, *, audience: str = "d
         "crop_url": images.get("crop_url"),
         **stay,
     }
+    if audience != "operator":
+        from app.services.receipt_privacy import driver_image_fields
+
+        body = driver_image_fields(body)
     if audience == "operator":
         body.update({
             "session_id": row.id,
