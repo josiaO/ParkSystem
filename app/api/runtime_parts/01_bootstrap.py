@@ -462,6 +462,11 @@ async def lifespan(app: FastAPI):
             alpr_warmup_task.cancel()
             await asyncio.gather(alpr_warmup_task, return_exceptions=True)
         await onvif_runtime.shutdown()
+        try:
+            from app.services import mediamtx_detect
+            mediamtx_detect.stop_all()
+        except Exception:
+            log.exception("stopping MediaMTX detect consumers failed")
         stop_live_pumps()
         from app.services.hvx_client import close_host_clients
         await close_host_clients()
