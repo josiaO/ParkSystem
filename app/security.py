@@ -314,6 +314,29 @@ def media_user(
         db.close()
 
 
+def media_file_user(
+    token: str | None = Depends(oauth2_scheme),
+    media_token: str | None = Query(default=None, include_in_schema=False),
+    access_token: str | None = Query(default=None, include_in_schema=False),
+    db: Session = Depends(get_db),
+) -> User:
+    """Same credentials as media_user, for short file responses (request DB session)."""
+    if token:
+        return load_user_from_token(db, token)
+    if media_token:
+        return load_user_from_media_token(db, media_token)
+    return load_user_from_token(db, access_token)
+
+
+def require_media_file(permission: str):
+    def dep(user: User = Depends(media_file_user)) -> User:
+        perms = user_permissions(user)
+        if "*" not in perms and permission not in perms:
+            raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+        return user
+    return dep
+
+
 def current_node(
     token: str | None = Depends(node_oauth2_scheme),
     db: Session = Depends(get_db),

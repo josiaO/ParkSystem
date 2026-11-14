@@ -553,7 +553,7 @@ async def _run_presence_alpr_background(camera_id: int, jpeg: bytes) -> None:
 
 
 @app.get("/media/{kind}/{name}")
-def serve_media(kind: str, name: str, _: User = Depends(require_media("cameras.view")), v: str | None = None):
+def serve_media(kind: str, name: str, _: User = Depends(require_media_file("cameras.view")), v: str | None = None):
     path = media_path(kind, name)
     if path is None:
         raise HTTPException(404, "Media not found")
