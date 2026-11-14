@@ -568,14 +568,21 @@ def start_exit(
     if row.exit_event_id and event_id and row.exit_event_id == event_id:
         return row, _current(row)
     current = _current(row)
+    # An authorized exit whose barrier command failed (the claim was released)
+    # is not in flight: the next camera read or the QR fallback must be able
+    # to retry it. The conditional exit_open_command_uuid claim still stops a
+    # second pulse if two attempts race.
+    stalled_after_gate_failure = current == AUTHORIZED and not (row.exit_open_command_uuid or "")
     if (
         row.exit_event_id
         and event_id
         and row.exit_event_id != event_id
         and current != DENIED_PAYMENT_REQUIRED
+        and not stalled_after_gate_failure
     ):
         # One event owns an in-flight exit attempt. A different event may only
-        # take over after a payment denial, when a new approach is expected.
+        # take over after a payment denial, when a new approach is expected,
+        # or after the barrier failed to open for the authorized attempt.
         return row, current
     if current == CLOSED:
         return row, CLOSED

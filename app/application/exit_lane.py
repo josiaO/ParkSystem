@@ -9,6 +9,8 @@ Plate recognition and QR fallback both resolve into the same controller.
 
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -38,6 +40,8 @@ from app.services.parking_sessions import (
     start_exit,
 )
 from app.domain.tariff_engine import quote_stay
+
+log = logging.getLogger("smartpark")
 
 
 GateOpener = Callable[..., Awaitable[Any]]
@@ -358,28 +362,37 @@ class ExitLaneController:
         cameras = _cameras(gate, camera)
         from app.services.lane_timing import mark
         mark("gate_requested", command_uuid=command_uuid)
-        if self.opener is None:
-            from app.services.simulation import _pulse_gate
-            release_connection(db)
-            opened = await _pulse_gate(
-                db, gate, cameras, reason=f"exit {row.plate}", side="EXIT",
-                led_text="THANKYOU", session=row, automatic=True,
-                command_uuid=command_uuid,
-            )
-        else:
-            release_connection(db)
-            opened = await self.opener(
-                db, gate, cameras, reason=f"exit {row.plate}", session=row,
-                side="EXIT", command_uuid=command_uuid,
-            )
-            record_gate_command(
-                db, gate=gate, session=row, reason=f"exit {row.plate}",
-                automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
-                ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
-                command_uuid=command_uuid,
-            )
+        try:
+            if self.opener is None:
+                from app.services.simulation import _pulse_gate
+                release_connection(db)
+                opened = await _pulse_gate(
+                    db, gate, cameras, reason=f"exit {row.plate}", side="EXIT",
+                    led_text="THANKYOU", session=row, automatic=True,
+                    command_uuid=command_uuid,
+                )
+            else:
+                release_connection(db)
+                opened = await self.opener(
+                    db, gate, cameras, reason=f"exit {row.plate}", session=row,
+                    side="EXIT", command_uuid=command_uuid,
+                )
+                record_gate_command(
+                    db, gate=gate, session=row, reason=f"exit {row.plate}",
+                    automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
+                    ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
+                    command_uuid=command_uuid,
+                )
+        except BaseException:
+            db.rollback()
+            self._release_exit_claim(db, row, command_uuid)
+            raise
 
         if opened is None or not opened.ok:
+            # The boom did not accept the command: give the claim back so the
+            # camera's next read, the QR fallback or an operator can retry.
+            # Compare-and-clear: never release a claim another attempt owns.
+            self._release_exit_claim(db, row, command_uuid)
             record_access_decision(
                 db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
                 outcome="GATE_UNAVAILABLE", reason=getattr(opened, "message", "") or "gate unavailable",
@@ -416,6 +429,19 @@ class ExitLaneController:
             "financial": financial,
             "message": "Exit authorized. Barrier opening.",
         }
+
+    @staticmethod
+    def _release_exit_claim(db: Session, row: ParkingSession, command_uuid: str) -> None:
+        try:
+            db.execute(update(ParkingSession).where(
+                ParkingSession.id == row.id,
+                ParkingSession.exit_open_command_uuid == command_uuid,
+            ).values(exit_open_command_uuid=""))
+            db.commit()
+            db.refresh(row)
+        except Exception:
+            db.rollback()
+            log.exception("could not release exit command claim session_id=%s", row.id)
 
     async def vehicle_passed(
         self,
