@@ -351,3 +351,80 @@ def test_public_client_ip_is_not_taken_from_a_client_supplied_forwarded_header()
     assert client_key({**tunnel, "cf-connecting-ip": "198.51.100.7"}, ("127.0.0.1", 1), public=True) == "198.51.100.7"
     # On the LAN the TCP peer is the client; forwarded headers are ignored.
     assert client_key({"x-forwarded-for": "1.2.3.4"}, ("192.168.1.77", 1), public=False) == "192.168.1.77"
+
+
+# 1.5 Tokens in query strings -------------------------------------------------
+
+@pytest.fixture()
+def api_client(tmp_path):
+    from app.api_main import app, ensure_roles
+    from app.db import get_db
+    from app.models import Role, User, UserRole
+    from app.security import hash_password
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session() as db:
+        ensure_roles(db)
+        user = User(username="viewer", full_name="V", password_hash=hash_password("viewer-pass-1"))
+        db.add(user)
+        db.flush()
+        db.add(UserRole(user_id=user.id, role_id=db.scalar(select(Role).where(Role.name == "Admin")).id))
+        db.commit()
+
+    def override():
+        with Session() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override
+    with patch("app.security.short_session", Session), \
+         patch.object(Settings, "data_dir", new_callable=PropertyMock, return_value=tmp_path):
+        client = TestClient(app)
+        token = client.post("/auth/login", json={"username": "viewer", "password": "viewer-pass-1"}).json()["token"]
+        yield client, token, Session
+        client.close()
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_session_token_in_query_is_refused_on_ordinary_routes(api_client):
+    client, token, _ = api_client
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    assert client.get(f"/auth/me?access_token={token}").status_code == 401
+    assert client.get(f"/users?access_token={token}").status_code == 401
+
+
+def test_media_routes_still_accept_query_tokens(api_client):
+    client, token, _ = api_client
+    # 404 = authenticated (the file does not exist); 401 = refused.
+    assert client.get("/media/snapshots/missing.jpg").status_code == 401
+    assert client.get(f"/media/snapshots/missing.jpg?access_token={token}").status_code == 404
+
+
+def test_short_lived_media_token(api_client):
+    client, token, _ = api_client
+    issued = client.post("/auth/media-token", headers={"Authorization": f"Bearer {token}"})
+    assert issued.status_code == 200, issued.text
+    media = issued.json()["media_token"]
+    assert 0 < issued.json()["expires_in"] <= 15 * 60
+    assert media != token and token not in media
+    assert client.get(f"/media/snapshots/missing.jpg?media_token={media}").status_code == 404
+    # A media token is not a session token anywhere else.
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {media}"}).status_code == 401
+    assert client.get(f"/auth/me?media_token={media}").status_code == 401
+    assert client.post("/auth/media-token").status_code == 401
+
+
+def test_media_token_expires_is_bound_to_session_and_tamper_proof(api_client):
+    from app import security
+
+    client, token, _ = api_client
+    media = client.post("/auth/media-token", headers={"Authorization": f"Bearer {token}"}).json()["media_token"]
+    head, sig = media.rsplit(".", 1)
+    forged = head + "." + ("A" if sig[0] != "A" else "B") + sig[1:]
+    assert client.get(f"/media/snapshots/missing.jpg?media_token={forged}").status_code == 401
+    with patch.object(security.time, "time", return_value=security.time.time() + security.MEDIA_TOKEN_TTL_SECONDS + 5):
+        assert client.get(f"/media/snapshots/missing.jpg?media_token={media}").status_code == 401
+    client.post("/auth/logout", headers={"Authorization": f"Bearer {token}"})
+    assert client.get(f"/media/snapshots/missing.jpg?media_token={media}").status_code == 401
