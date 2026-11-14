@@ -2,14 +2,21 @@
 <#
 .SYNOPSIS
     Register SmartPark background processes so parking does not need the Desktop UI.
-    The main installer runs this automatically. This scheduled-task path stays
-    the supported default until Install-SmartParkWinService.ps1 is verified on
-    site hardware — do not remove this file in the same change as SCM.
+    The main installer runs this automatically.
+
+    Default: when the kit contains vendor\nssm\nssm.exe and this runs elevated,
+    real Windows services are registered by Install-SmartParkWinService.ps1
+    (start at boot with nobody logged in). Otherwise, or with
+    -ScheduledTasksOnly, the older AtLogOn scheduled tasks are registered.
+    -Only limits the scheduled tasks to the listed names (the service
+    installer uses it to keep only the HVX host as a logon task).
 #>
 [CmdletBinding()]
 param(
     [string]$InstallDir = "",
-    [switch]$RegisterOnly
+    [switch]$RegisterOnly,
+    [switch]$ScheduledTasksOnly,
+    [string[]]$Only = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +43,12 @@ if (Test-Path $DeploymentPath) {
         $deployment = Get-Content -LiteralPath $DeploymentPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$deployment.role -eq "OPERATOR_CLIENT") {
             Write-Host "Operator Workstation selected: removing local SmartPark service tasks."
+            foreach ($svc in @("SmartParkRecognitionWorker", "SmartParkMediaService", "SmartParkSiteService", "SmartParkHvxHost")) {
+                if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {
+                    & sc.exe stop $svc 2>$null | Out-Null
+                    & sc.exe delete $svc 2>$null | Out-Null
+                }
+            }
             foreach ($task in @(
                 "SmartPark Site Service",
                 "SmartPark Recognition Worker",
@@ -60,6 +73,19 @@ if (Test-Path $DeploymentPath) {
 } else {
     Write-Host "No deployment configuration found: registering tasks without starting them."
     $RegisterOnly = $true
+}
+$WinServiceScript = Join-Path $PSScriptRoot "Install-SmartParkWinService.ps1"
+$NssmExe = Join-Path $InstallDir "vendor\nssm\nssm.exe"
+if (-not $ScheduledTasksOnly -and (Test-Path $NssmExe) -and (Test-Path $WinServiceScript)) {
+    $elevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($elevated) {
+        Write-Host "Registering Windows services (start at boot, no logon needed)..."
+        & $WinServiceScript -InstallDir $InstallDir -RegisterOnly:$RegisterOnly
+        exit 0
+    }
+    Write-Warning ("Not elevated: registering logon scheduled tasks instead of Windows services. " +
+        "After a reboot nothing runs until someone signs in. Run Start-SmartPark-Admin.ps1 as administrator to fix.")
 }
 $TaskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
@@ -274,19 +300,23 @@ $mediaBat = Write-SmartParkLauncher -BatName "run-media-service.bat" -PythonExe 
 Write-Host "Registering SmartPark background tasks..."
 $failed = @()
 $registered = @()
-try {
+function Test-TaskWanted {
+    param([string]$Name)
+    return ($Only.Count -eq 0) -or ($Only -contains $Name)
+}
+if (Test-TaskWanted "SmartPark Site Service") { try {
     Register-SmartParkTask -Name "SmartPark Site Service" -Launcher $siteBat -WorkingDirectory $InstallDir
     $registered += "SmartPark Site Service"
 } catch {
     $failed += "Site Service: $_"
-}
-try {
+} }
+if (Test-TaskWanted "SmartPark Recognition Worker") { try {
     Register-SmartParkTask -Name "SmartPark Recognition Worker" -Launcher $recognitionBat -WorkingDirectory $InstallDir
     $registered += "SmartPark Recognition Worker"
 } catch {
     $failed += "Recognition Worker: $_"
-}
-if ($hostBat) {
+} }
+if ($hostBat -and (Test-TaskWanted "SmartPark HVX Host")) {
     try {
         Register-SmartParkTask -Name "SmartPark HVX Host" -Launcher $hostBat -WorkingDirectory (Join-Path $InstallDir "tools\hvx_sdk_host")
         $registered += "SmartPark HVX Host"
@@ -296,7 +326,7 @@ if ($hostBat) {
 } else {
     Write-Host "HVX host skipped: 32-bit Python is not in this kit."
 }
-if ($mediaBat) {
+if ($mediaBat -and (Test-TaskWanted "SmartPark Media Service")) {
     try {
         Register-SmartParkTask -Name "SmartPark Media Service" -Launcher $mediaBat -WorkingDirectory $InstallDir
         $registered += "SmartPark Media Service"

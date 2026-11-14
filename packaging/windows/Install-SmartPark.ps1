@@ -652,7 +652,7 @@ Set-Content (Join-Path $Programs "Zirp Web.url") $WebShortcut -Encoding ASCII
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
-foreach ($helper in @("Install-SmartParkWinService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Repair-SmartParkNetwork.ps1", "Repair-SmartParkNetwork.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
+foreach ($helper in @("Install-SmartParkWinService.ps1", "Test-HvxHostAsService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Repair-SmartParkNetwork.ps1", "Repair-SmartParkNetwork.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
     $src = Get-KitSupportFile $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force
@@ -744,7 +744,12 @@ function Start-SmartParkFromInstaller {
 Write-Host ""
 Write-Host "Installed."
 Write-Host "  Open: Zirp (desktop operator UI). Zirp Web is for administration/remote access."
-Write-Host "  Background: Site Service + HVX host + Media Service + Recognition Worker start at Windows logon"
+if (Get-Service -Name "SmartParkSiteService" -ErrorAction SilentlyContinue) {
+    Write-Host "  Background: Windows services start at boot with nobody signed in (logs: %ProgramData%\SmartParkEdge\logs\services)"
+    Write-Host "  HVX host: logon task until Test-HvxHostAsService.ps1 passes on this PC (see documentation)"
+} else {
+    Write-Host "  Background: Site Service + HVX host + Media Service + Recognition Worker start at Windows logon"
+}
 if (Test-Path $MediaMtxExe) {
     Write-Host "  MediaMTX: enabled for RTSP cameras; SDK cameras use their SDK JPEG path"
 }
