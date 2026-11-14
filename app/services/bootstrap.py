@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -11,10 +13,39 @@ from app.models import Role, User, UserRole, UserStatus
 from app.security import hash_password, verify_password
 
 MIN_BOOTSTRAP_LEN = 12
+# The first-run password is disclosed over HTTP at most once, to a request
+# from the Site Server itself, and only this long after the admin was made.
+FIRST_RUN_WINDOW = timedelta(hours=24)
 
 
 def bootstrap_password_path() -> Path:
     return settings.data_dir / "bootstrap_password.txt"
+
+
+def bootstrap_disclosure_marker() -> Path:
+    return settings.data_dir / "bootstrap_password.disclosed"
+
+
+def _within_first_run_window(user: User) -> bool:
+    created = getattr(user, "created_at", None)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created <= FIRST_RUN_WINDOW
+
+
+def claim_bootstrap_disclosure() -> bool:
+    """Atomically claim the single HTTP disclosure of the first-run password."""
+    marker = bootstrap_disclosure_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(datetime.now(timezone.utc).isoformat() + "\n")
+    return True
 
 
 def generate_bootstrap_password() -> str:
@@ -95,41 +126,41 @@ def reset_bootstrap_admin(db: Session) -> str:
     return "reset"
 
 
-def setup_status(db: Session, *, local_request: bool = True) -> dict:
+def setup_status(db: Session, *, local_request: bool = False) -> dict:
     """First-run sign-in help.
 
-    The bootstrap password and the account list are only disclosed to a
-    request from this computer. The Site Server listens on the LAN, and
-    anyone on the network could otherwise read the administrator password.
+    The bootstrap password is disclosed at most once: to a request from the
+    Site Server itself (loopback, not proxied), while it still works, and
+    within FIRST_RUN_WINDOW of the admin being created. After that it is
+    only in the 0600 file on the server. Account names are never listed.
     """
     from app.services.platform_capabilities import platform_snapshot, recommended_camera_adapter
 
     created = ensure_bootstrap_admin(db)
     bootstrap = db.scalar(select(User).where(User.username == settings.bootstrap_username))
     password_ok = bootstrap_password_works(db)
-    usernames = [user.username for user in db.scalars(select(User)).all()] if local_request else []
     platform = platform_snapshot()
-    password = effective_bootstrap_password() if created or password_ok else ""
-    if created:
-        hint = (
-            f"First-run admin is {settings.bootstrap_username} / {password}. "
-            f"This password is also written once to {bootstrap_password_path()}."
-        )
-    elif password_ok:
-        hint = f"Sign in as {settings.bootstrap_username} with the install password"
-    else:
-        hint = (
-            "This PC already has an admin account, so an older password will be rejected. "
-            f"The install password is in {bootstrap_password_path()}. "
-            "If that password is rejected, run: python -m app.cli reset-admin"
-        )
-        password = ""
+    path = bootstrap_password_path()
+    password = ""
     if not local_request:
-        password = ""
         hint = (
             "Sign in with your account. The first-run administrator password is shown only "
-            f"on the Site Server itself (and stored in {bootstrap_password_path().name} there)."
+            f"on the Site Server itself (and stored in {path.name} there)."
         )
+    elif not password_ok:
+        hint = (
+            "This PC already has an admin account, so an older password will be rejected. "
+            f"The install password is in {path}. "
+            "If that password is rejected, run: python -m app.cli reset-admin"
+        )
+    elif bootstrap is not None and _within_first_run_window(bootstrap) and claim_bootstrap_disclosure():
+        password = effective_bootstrap_password()
+        hint = (
+            f"First-run admin is {settings.bootstrap_username} / {password}. "
+            f"It is shown only once; it is also stored in {path}. Change it after signing in."
+        )
+    else:
+        hint = f"Sign in as {settings.bootstrap_username} with the first-run password stored in {path} on this PC"
     if not platform["hvx_host_supported"]:
         hint = (
             f"{hint}. This host is {platform['os']}: use the browser UI. "
@@ -143,7 +174,6 @@ def setup_status(db: Session, *, local_request: bool = True) -> dict:
         "first_run": created,
         "bootstrap_user_present": bootstrap is not None,
         "bootstrap_password_ok": password_ok,
-        "usernames": usernames,
         "hint": hint,
         "platform": platform,
         "recommended_camera_adapter": recommended_camera_adapter(),

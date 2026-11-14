@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
-from unittest.mock import AsyncMock, patch
+import tempfile
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -15,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.api_main import app, ensure_roles
-from app.config import settings
+from app.config import Settings, settings
 from app.db import Base, get_db
 from app.models import Camera, CameraStatus, Role, User, UserRole
 from app.security import hash_password
@@ -208,6 +209,23 @@ class WindowsReadyTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.engine.dispose()
 
+    def _isolated_data_dir(self):
+        """First-run disclosure state lives in data_dir; keep it per test."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        patcher = patch.object(Settings, "data_dir", new_callable=PropertyMock, return_value=Path(folder.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        bootstrap_patch = patch.object(settings, "bootstrap_password", "")
+        bootstrap_patch.start()
+        self.addCleanup(bootstrap_patch.stop)
+
+    def _local_client(self):
+        # The first-run password is only ever shown to the Site Server itself.
+        client = TestClient(app, client=("127.0.0.1", 50000))
+        self.addCleanup(client.close)
+        return client
+
     def _login_admin(self, password="correct-horse"):
         with self.Session() as db:
             if db.scalar(select(User).where(User.username == "admin")) is None:
@@ -221,10 +239,11 @@ class WindowsReadyTests(unittest.TestCase):
         return {"Authorization": f"Bearer {token}"}
 
     def test_bootstrap_creates_admin_once(self):
+        self._isolated_data_dir()
         with self.Session() as db:
             self.assertTrue(ensure_bootstrap_admin(db))
             self.assertFalse(ensure_bootstrap_admin(db))
-            status = setup_status(db)
+            status = setup_status(db, local_request=True)
         password = effective_bootstrap_password()
         self.assertTrue(status["ready"])
         self.assertEqual(status["username"], settings.bootstrap_username)
@@ -237,7 +256,8 @@ class WindowsReadyTests(unittest.TestCase):
         self.assertEqual(login.status_code, 200, login.text)
 
     def test_auth_setup_endpoint(self):
-        res = self.client.get("/auth/setup")
+        self._isolated_data_dir()
+        res = self._local_client().get("/auth/setup")
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
         self.assertEqual(body["username"], "admin")
@@ -247,9 +267,10 @@ class WindowsReadyTests(unittest.TestCase):
         self.assertTrue(body["ready"])
 
     def test_setup_hides_default_password_when_admin_already_exists(self):
+        self._isolated_data_dir()
         headers = self._login_admin("correct-horse")
         self.assertEqual(self.client.get("/auth/me", headers=headers).status_code, 200)
-        body = self.client.get("/auth/setup").json()
+        body = self._local_client().get("/auth/setup").json()
         self.assertEqual(body["username"], "admin")
         self.assertEqual(body["password"], "")
         self.assertFalse(body["bootstrap_password_ok"])

@@ -15,7 +15,7 @@ fi
 source .venv/bin/activate
 
 echo "Starting SmartPark Edge (web UI) at http://127.0.0.1:8760"
-echo "Sign in as admin with the first-run password from GET /auth/setup (written to bootstrap_password.txt)."
+echo "Sign in as admin with the first-run password in bootstrap_password.txt in the SmartPark data folder (shown once on the local sign-in page)."
 echo "Non-LAPR cameras: set Adapter to rtsp (or dahua/hikvision), then Connect."
 echo "HVX LAPR / camera GPIO: needs a Windows PC with the 32-bit SDK host."
 exec python -m app.web.launch
