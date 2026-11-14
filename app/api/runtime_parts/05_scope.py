@@ -131,14 +131,9 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     gate = None
     if camera.gate_id:
         gate = db.get(Gate, camera.gate_id)
-    elif row and row.plate:
-        # Auto-link only when the site has a single enabled lane (unambiguous).
-        gates = list(db.scalars(select(Gate).where(Gate.enabled == True).order_by(Gate.id)).all())
-        if len(gates) == 1:
-            gate = gates[0]
-            if camera.gate_id is None:
-                camera.gate_id = gate.id
-                db.commit()
+    # A camera without an explicit gate never drives a barrier. Silently
+    # binding it to the only gate (the previous behaviour) attached exit or
+    # test cameras to the entry barrier as soon as one gate existed.
     needs_session = False
     if row and row.plate and side == "ENTRY":
         from app.services.parking_sessions import active_for_plate
