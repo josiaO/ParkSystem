@@ -432,3 +432,21 @@ document.getElementById("connect-all").addEventListener("click", async () => {
     error.textContent = err.message;
   }
 });
+
+document.getElementById("admit-without-receipt").addEventListener("click", async () => {
+  const err = document.getElementById("session-error");
+  err.textContent = "";
+  if (!selectedSessionId) { err.textContent = "Select a visit that is waiting for its receipt."; return; }
+  const reason = (window.prompt("Reason for opening the entry without a taken receipt:") || "").trim();
+  if (reason.length < 3) { err.textContent = "A reason is required."; return; }
+  try {
+    const data = await api(`/sessions/${selectedSessionId}/admit-without-receipt`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+    toast(data.message || data.reason || "Done.", data.ok ? "ok" : "warn");
+    await loadSessions();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+});

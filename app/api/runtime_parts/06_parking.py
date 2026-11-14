@@ -678,6 +678,48 @@ async def session_receipt_taken(
     return result
 
 
+@app.post("/sessions/{session_id}/admit-without-receipt")
+async def session_admit_without_receipt(
+    session_id: int,
+    payload: dict = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+    user: User = Depends(require("gates.open")),
+):
+    """Audited operator override for a casual entry waiting on a receipt.
+
+    There is no physical receipt-taken confirmation (no printer, a failed
+    printer, or no taken sensor). The operator states a reason; the entry then
+    follows the normal authorization and gate path.
+    """
+    from app.application.entry_lane import EntryLaneController, policy_from_parking_settings
+    from app.infrastructure.hardware.receipt_printers import receipt_printer_for
+
+    reason = str((payload or {}).get("reason") or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(400, "A reason is required to admit a vehicle without a receipt.")
+    row = db.get(ParkingSession, session_id)
+    if row is None:
+        raise HTTPException(404, "Session not found")
+    gate = db.get(Gate, row.gate_id) if row.gate_id else None
+    if gate is not None:
+        _gate_for_node(db, gate.id, action="admit-without-receipt")
+    cfg = parking_settings(db)
+    controller = EntryLaneController(
+        printer=receipt_printer_for(
+            str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
+            str(cfg.get("printer_name") or settings.printer_name or ""),
+        )
+    )
+    camera = db.get(Camera, row.camera_id) if row.camera_id else None
+    result = await controller.operator_admit_without_receipt(
+        db, row, reason=reason, user_id=user.id,
+        policy=policy_from_parking_settings(cfg), gate=gate, camera=camera,
+    )
+    write_audit(db, user, "receipt.override", "parking_session", str(row.id), f"{row.plate}: {reason}"[:240])
+    db.commit()
+    return result
+
+
 @app.post("/sessions/{session_id}/correct-plate")
 async def correct_session_plate(
     session_id: int,

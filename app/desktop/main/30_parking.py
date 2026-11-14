@@ -218,8 +218,27 @@ class Sessions(QWidget):
         pay=QPushButton("Record kiosk payment"); pay.clicked.connect(self.pay); pay.setVisible(can_pay)
         receipt=QPushButton("Show / print receipt"); receipt.clicked.connect(self.print_receipt)
         refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
-        row.addWidget(pay); row.addWidget(receipt); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        admit=QPushButton("Admit without receipt…"); admit.clicked.connect(self.admit_without_receipt)
+        admit.setVisible(api.can("gates.open"))
+        admit.setToolTip("Open the entry barrier for a visit waiting on a receipt. Requires a reason; recorded in the audit log.")
+        row.addWidget(pay); row.addWidget(receipt); row.addWidget(admit); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
         self.rows=[]; self.visit=None; self.refresh()
+    def admit_without_receipt(self):
+        s=self.selected()
+        if not s: QMessageBox.information(self,"Admit without receipt","Select a session first."); return
+        if str(s.get("status") or "").upper()!="WAITING_RECEIPT":
+            QMessageBox.information(self,"Admit without receipt","Only a visit that is waiting for its receipt can be admitted this way."); return
+        reason,ok=QInputDialog.getText(self,"Admit without receipt",f"Reason for opening the entry for {s.get('plate') or 'this visit'} without a taken receipt:")
+        if not ok: return
+        reason=(reason or "").strip()
+        if len(reason)<3:
+            QMessageBox.warning(self,"Admit without receipt","Enter a reason (at least 3 characters)."); return
+        try:
+            result=api.post(f"/sessions/{s['id']}/admit-without-receipt", {"reason": reason}, timeout=20)
+        except Exception as exc:
+            QMessageBox.warning(self,"Admit without receipt",str(exc)); return
+        QMessageBox.information(self,"Admit without receipt",str((result or {}).get("message") or (result or {}).get("reason") or "Done."))
+        self.refresh()
     def _pixmap(self, label, path, empty):
         if not path:
             label.setPixmap(QPixmap()); label.setText(empty); return
