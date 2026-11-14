@@ -63,3 +63,36 @@ def test_desktop_health_mentions_old_frames():
     text = health_sentences({"status": "ok", "recognition_runtime": {"cameras": [
         {"camera_id": 3, "frame_age_alarm": True, "frame_age_at_consumption_ms_p95": 820.0}]}})
     assert "camera 3" in text.lower() and "820" in text
+
+
+# Phase 4.2: per-camera recognition decode width ----------------------------
+
+def test_detect_width_defaults_to_site_setting_and_is_per_camera():
+    from app.config import settings
+    from app.services.camera_framing import apply_framing, framing_from_profiles
+
+    assert settings.recognition_detect_width == 960
+    assert framing_from_profiles({})["detect_width"] == 960
+    profiles = apply_framing({}, detect_roi="", detect_zoom=1.0, detect_width=1920)
+    assert framing_from_profiles(profiles)["detect_width"] == 1920
+    # Saving the zone again without a width keeps the chosen width.
+    again = apply_framing(profiles, detect_roi="off", detect_zoom=1.0)
+    assert framing_from_profiles(again)["detect_width"] == 1920
+
+
+def test_detect_width_rejects_odd_values():
+    import pytest
+
+    from app.services.camera_framing import apply_framing
+
+    with pytest.raises(ValueError):
+        apply_framing({}, detect_roi="", detect_zoom=1.0, detect_width=1000)
+
+
+def test_worker_decoder_uses_the_camera_detect_width():
+    from app.services.recognition_decoder import decoder_command
+
+    command = decoder_command("rtsp://127.0.0.1:8554/cam1_detect", sample_fps=3, scale=1920)
+    assert command[command.index("-vf") + 1] == "scale=1920:-2"
+    source = open("app/recognition_worker/30_camera_worker.py", encoding="utf-8").read()
+    assert 'scale=detect_width' in source

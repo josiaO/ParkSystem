@@ -122,6 +122,7 @@ class CameraUpdate(BaseModel):
 class CameraFramingUpdate(BaseModel):
     detect_roi: str = ""
     detect_zoom: float = Field(default=1.0, ge=1.0, le=4.0)
+    detect_width: int | None = None  # recognition decode width; None keeps the current one
 
 
 class GateCreate(BaseModel):
