@@ -143,10 +143,11 @@ def test_setup_status_hides_password_and_accounts_from_lan_requests(tmp_path):
             ensure_roles(db)
             remote = bootstrap.setup_status(db, local_request=False)
             assert remote["password"] == ""
-            assert remote["usernames"] == []
+            assert "usernames" not in remote
             local = bootstrap.setup_status(db, local_request=True)
             assert local["password"]
-            assert local["usernames"]
+            # Account names are never listed, not even to the server itself.
+            assert "usernames" not in local
     engine.dispose()
 
 
