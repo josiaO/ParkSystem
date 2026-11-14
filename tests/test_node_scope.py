@@ -42,7 +42,11 @@ class NodeScopeTests(unittest.TestCase):
                 self.assertEqual({row["id"] for row in scope["cameras"]}, {self.cam1e["id"], self.cam1x["id"]})
                 self.assertFalse(camera_in_recognition_scope(self.cam2e, db=db))
             from app.recognition_worker import _camera_rows
-            with patch("app.db.SessionLocal", self.Session), patch("app.services.flags.media_mtx_for_camera", return_value=True), patch("app.recognition_worker._software_camera", return_value=True):
+            # These fixtures use the default QY/HVX adapter, which production
+            # never hands to the software worker. Treat them as software
+            # cameras here: this assertion is about installation scope.
+            with patch("app.db.SessionLocal", self.Session), patch("app.services.flags.media_mtx_for_camera", return_value=True), patch("app.recognition_worker._software_camera", return_value=True), \
+                 patch("app.infrastructure.media.registry._sdk_camera", return_value=False):
                 self.assertEqual({row["id"] for row in _camera_rows()}, {self.cam1e["id"], self.cam1x["id"], self.cam2e["id"]})
             response = self.client.post("/runtime/recognition-scope", headers=self.headers, json={"gate_id": self.gate2["id"]})
             self.assertEqual(response.status_code, 409)

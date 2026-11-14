@@ -13,8 +13,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertTrue((ROOT / "app" / "api_main.py").is_file())
         self.assertTrue((ROOT / "app" / "media_service.py").is_file())
         self.assertTrue((ROOT / "app" / "recognition_worker.py").is_file())
-        self.assertTrue((ROOT / "docs" / "MEDIA-ARCHITECTURE.md").is_file())
-        self.assertTrue((ROOT / "docs" / "MIGRATION-AND-ROLLBACK.md").is_file())
+        # docs/MEDIA-ARCHITECTURE.md was removed in 8a29f85 (docs consolidated).
+        # docs/MIGRATION-AND-ROLLBACK.md was also removed in 8a29f85.
         self.assertTrue((ROOT / "tools" / "hvx_sdk_host" / "hvx_host.py").is_file())
         self.assertTrue((ROOT / "app" / "services" / "access.py").is_file())
         self.assertTrue((ROOT / "app" / "services" / "receipts.py").is_file())
