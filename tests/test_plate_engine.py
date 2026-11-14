@@ -22,10 +22,14 @@ from app.services.ocr_policy import LOCAL_ONLY, alpr_mode, should_run_local, sof
 
 
 class PlateEngineTests(unittest.TestCase):
-    def test_default_mode_reads_in_software(self):
-        self.assertEqual(Settings().alpr_mode, "FASTALPR_ONLY")
+    def test_default_mode_verifies_native_reads_in_software(self):
+        # QY/HVX lanes keep the camera's own read and verify it with FastALPR;
+        # generic cameras (native_plates=False) always read in software.
+        from app.services.ocr_policy import NATIVE_WITH_LOCAL_VERIFY
+
+        self.assertEqual(Settings().alpr_mode, "HYBRID")
         self.assertEqual(Settings().alpr_engine, "fastalpr")
-        self.assertEqual(alpr_mode(), LOCAL_ONLY)
+        self.assertEqual(alpr_mode(), NATIVE_WITH_LOCAL_VERIFY)
         self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, presence=True))
         self.assertFalse(should_run_local(native_plate="T123ABC", native_confidence=0.99, presence=False))
         self.assertTrue(should_run_local(native_plate="T123ABC", native_confidence=0.99, native_plates=False))
