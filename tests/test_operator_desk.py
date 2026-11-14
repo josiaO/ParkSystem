@@ -24,6 +24,15 @@ from app.services.kiosk_lookup import extract_receipt_token
 from app.services.preview import release_live
 
 
+def _site_today() -> str:
+    """Reports group by the site-local day, not the UTC day (they differ after 21:00 UTC in Dar es Salaam)."""
+    from zoneinfo import ZoneInfo
+
+    from app.services.site_policy import site_policy
+
+    return datetime.now(ZoneInfo(site_policy()["timezone"])).date().isoformat()
+
+
 class OperatorDeskTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
@@ -133,7 +142,7 @@ class OperatorDeskTests(unittest.TestCase):
     def test_report_and_offline_backup(self):
         self._open(plate="T400CCC", hours_ago=3)
         self.client.post("/p/tok-T400CCC/kiosk-pay", headers=self.headers, json={"method": "KIOSK_CASH"})
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = _site_today()
         report = self.client.get("/reports/summary", headers=self.headers, params={"start": today, "end": today})
         self.assertEqual(report.status_code, 200, report.text)
         body = report.json()
@@ -168,7 +177,7 @@ class OperatorDeskTests(unittest.TestCase):
                 },
             ))
             db.commit()
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = _site_today()
         report = self.client.get("/reports/summary", headers=self.headers, params={"start": today, "end": today})
         self.assertEqual(report.status_code, 200, report.text)
         body = report.json()
