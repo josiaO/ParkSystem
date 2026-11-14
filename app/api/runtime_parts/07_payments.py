@@ -480,9 +480,20 @@ async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session
     provider_id = (payload.provider or "").strip().lower() or mobile_payments.active_mobile_provider_id()
     if provider_id not in mobile_payments.external_provider_ids():
         raise HTTPException(409, "No external mobile-money provider is active on this site.")
+    import math
+
+    from app.services.payment_prompt_guard import PaymentPromptCooldown
+
     try:
         result = await mobile_payments.start_mobile_payment(
             db, row, phone=payload.phone, provider_id=provider_id, network=payload.network, amount=payload.amount,
+        )
+    except PaymentPromptCooldown as exc:
+        seconds = str(int(math.ceil(exc.retry_after)))
+        return JSONResponse(
+            status_code=429,
+            content={"ok": False, "detail": str(exc), "retry_after_seconds": int(seconds)},
+            headers={**privacy_headers(), "Retry-After": seconds},
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))

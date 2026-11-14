@@ -310,6 +310,20 @@ class FlutterwaveApiFlowTests(unittest.TestCase):
         self.assertEqual(st.json()["intent"]["status"], "PENDING")
         self.assertEqual(st.json()["mobile_provider"], "flutterwave")
 
+    def test_repeat_prompt_to_same_phone_is_refused_with_retry_after(self):
+        self.http.on("POST", "/charges", 200, charge_ok("ANY"))
+        self.assertEqual(self._start().status_code, 200)
+        with self.Session() as db:  # the first push failed, so no pending intent is reused
+            for intent in db.scalars(select(PaymentIntent)).all():
+                intent.status = "FAILED"
+            db.commit()
+        again = self._start(phone="+255 712 345 678")
+        self.assertEqual(again.status_code, 429, again.text)
+        self.assertGreaterEqual(int(again.headers["retry-after"]), 1)
+        self.assertNotIn("255712345678", again.text)
+        with self.Session() as db:
+            self.assertEqual(len(db.scalars(select(PaymentIntent)).all()), 1)
+
     def test_webhook_with_invalid_signature_is_rejected(self):
         self.http.on("POST", "/charges", 200, charge_ok("ANY"))
         self._start()

@@ -171,6 +171,34 @@ def describe() -> dict:
     }
 
 
+PUBLIC_RATE_LIMITS: dict[str, tuple[int, float]] = {
+    "payment-intent": (10, 60.0),
+    "provider-webhook": (120, 60.0),
+    "payment-status": (120, 60.0),
+}
+DEFAULT_PUBLIC_RATE_LIMIT: tuple[int, float] = (180, 60.0)
+
+
+def client_key(headers: dict[str, str], peer, *, public: bool) -> str:
+    """Client identity for rate limiting.
+
+    Via the tunnel every request comes from the local connector, so the
+    client is taken from the proxy: CF-Connecting-IP, else the *last*
+    X-Forwarded-For hop (the one our proxy appended; earlier hops are
+    client-supplied and spoofable). On the LAN only the TCP peer counts.
+    """
+    peer_host = str((peer or ("unknown", 0))[0])
+    if not public:
+        return peer_host
+    connecting = (headers.get("cf-connecting-ip") or "").strip()
+    if connecting:
+        return connecting
+    hops = [hop.strip() for hop in (headers.get("x-forwarded-for") or "").split(",") if hop.strip()]
+    if hops:
+        return hops[-1]
+    return (headers.get("x-real-ip") or "").strip() or peer_host
+
+
 class PublicIngressGuard:
     """Pure-ASGI middleware: 404 for non-public paths on public hostnames."""
 
@@ -186,17 +214,13 @@ class PublicIngressGuard:
         method = (scope.get("method") or "GET").upper()
         public_request = is_public_ingress_request(headers)
         if request_allowed(path, headers, method):
-            if public_request:
-                category = public_route_category(path, method) or "public"
-                client = headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-                client = client or headers.get("x-real-ip", "").strip()
-                client = client or str((scope.get("client") or ("unknown", 0))[0])
-                limits = {
-                    "payment-intent": (10, 60.0),
-                    "provider-webhook": (120, 60.0),
-                    "payment-status": (120, 60.0),
-                }
-                limit, window = limits.get(category, (180, 60.0))
+            category = public_route_category(path, method)
+            # The payment surface is rate-limited for every client, not only
+            # via the tunnel hostname: the same routes answer on the LAN.
+            # /health stays unlimited locally: launchers and watchdogs poll it.
+            if category is not None and (public_request or category != "health"):
+                client = client_key(headers, scope.get("client"), public=public_request)
+                limit, window = PUBLIC_RATE_LIMITS.get(category, DEFAULT_PUBLIC_RATE_LIMIT)
                 if not _rate_limiter.allow((client, category), limit=limit, window_seconds=window):
                     body = b'{"detail":"Too many requests"}'
                     await send({
@@ -211,6 +235,7 @@ class PublicIngressGuard:
                     })
                     await send({"type": "http.response.body", "body": body})
                     return
+            if public_request:
 
                 async def send_public(message):
                     if message.get("type") == "http.response.start":
