@@ -44,6 +44,7 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db), user: Us
         connection_mode=(payload.connection_mode or "DIRECT").upper(),
         ffmpeg_profile=payload.ffmpeg_profile or settings.ffmpeg_profile,
         rtsp_transport=(payload.rtsp_transport or settings.rtsp_transport).upper(),
+        allow_insecure_tls=bool(payload.allow_insecure_tls),
         stream_profiles=payload.stream_profiles or {},
         recognition_mode=(payload.recognition_mode or "").strip().upper(),
         vendor=payload.vendor or "",
@@ -93,6 +94,11 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
         data["rtsp_transport"] = normalize_transport(data["rtsp_transport"])
     if data.get("recognition_mode"):
         data["recognition_mode"] = str(data["recognition_mode"]).strip().upper()
+    if "allow_insecure_tls" in data:
+        if data["allow_insecure_tls"] is None:
+            data.pop("allow_insecure_tls")
+        else:
+            data["allow_insecure_tls"] = bool(data["allow_insecure_tls"])
     if data.get("stream_profiles"):
         from app.services.stream_roles import merge_profiles
         data["stream_profiles"] = merge_profiles(c.stream_profiles, data["stream_profiles"])

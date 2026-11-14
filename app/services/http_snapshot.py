@@ -6,12 +6,16 @@ the QY camera still serves a still image on its web port.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
+from app.db import short_session
 from app.services.rtsp_probe import redact_url
 from app.services.site_cameras import tcp_open
 
 JPEG_SOI = b"\xff\xd8"
+log = logging.getLogger("smartpark")
 
 SNAPSHOT_PATHS = (
     "/cgi-bin/snapshot.cgi",
@@ -39,7 +43,26 @@ def _http_base(ip: str, port: int, *, tls: bool = False) -> str:
     return f"{scheme}://{ip}:{port}"
 
 
-async def grab_http_snapshot(ip: str, username: str, password: str) -> dict:
+def camera_allows_insecure_tls(ip: str) -> bool:
+    """True only if a saved camera at *ip* explicitly opted out of TLS checks."""
+    from sqlalchemy import select
+
+    from app.models import Camera
+
+    try:
+        db = short_session()
+        try:
+            return bool(db.scalar(
+                select(Camera.id).where(Camera.ip_address == ip, Camera.allow_insecure_tls.is_(True)).limit(1)
+            ))
+        finally:
+            db.close()
+    except Exception:
+        log.debug("TLS opt-in lookup failed for %s; verifying certificates", ip, exc_info=True)
+        return False
+
+
+async def grab_http_snapshot(ip: str, username: str, password: str, *, allow_insecure_tls: bool | None = None) -> dict:
     attempts = []
     basic = httpx.BasicAuth(username, password) if username else None
     digest = httpx.DigestAuth(username, password) if username else None
@@ -51,11 +74,15 @@ async def grab_http_snapshot(ip: str, username: str, password: str) -> dict:
     if await tcp_open(ip, 443, timeout=0.35):
         targets.append((443, True))
     # Camera credentials must never follow a redirect to an unexpected host.
-    # Many cameras use self-signed certificates, so verification remains
-    # opt-in per deployment; redirecting is never safe for this credentialed
-    # request.
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False, trust_env=False) as client:
-        for port, tls in targets:
+    # HTTPS certificates are verified unless this camera is saved with
+    # allow_insecure_tls (self-signed web UI); there is no blanket opt-out.
+    for port, tls in targets:
+        if tls:
+            insecure = camera_allows_insecure_tls(ip) if allow_insecure_tls is None else bool(allow_insecure_tls)
+            client_kwargs = {"verify": not insecure}
+        else:
+            client_kwargs = {}
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False, **client_kwargs) as client:
             for path in SNAPSHOT_PATHS:
                 url = f"{_http_base(ip, port, tls=tls)}{path}"
                 try:

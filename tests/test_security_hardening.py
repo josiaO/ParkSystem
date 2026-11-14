@@ -456,3 +456,71 @@ def test_secrets_health_reports_plaintext_backend():
     assert info["plaintext"] is True
     assert info["warning"]
 
+
+# 1.7 Camera HTTPS verification ----------------------------------------------
+
+def _capture_clients(monkeypatch, module, *, open_ports):
+    created = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, auth=None):
+            raise RuntimeError("offline")
+
+    async def tcp_open(ip, port, timeout=0.0):
+        return port in open_ports
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(module, "tcp_open", tcp_open)
+    return created
+
+
+@pytest.mark.parametrize(("opt_in", "expected_verify"), [(False, True), (True, False)])
+def test_camera_https_verification_is_on_unless_the_camera_opts_out(monkeypatch, opt_in, expected_verify):
+    import asyncio
+
+    from app.services import http_snapshot
+
+    created = _capture_clients(monkeypatch, http_snapshot, open_ports={443})
+    asyncio.run(http_snapshot.grab_http_snapshot("10.0.0.9", "admin", "pw", allow_insecure_tls=opt_in))
+    # Exactly one TLS client is made (port 443); plain-HTTP clients carry no verify flag.
+    assert [c["verify"] for c in created if "verify" in c] == [expected_verify]
+    assert all(c.get("follow_redirects") is False for c in created)
+
+
+def test_camera_https_opt_in_is_looked_up_per_camera_when_not_passed(monkeypatch):
+    import asyncio
+
+    from app.services import http_snapshot
+
+    created = _capture_clients(monkeypatch, http_snapshot, open_ports={443})
+    monkeypatch.setattr(http_snapshot, "camera_allows_insecure_tls", lambda ip: ip == "10.0.0.7")
+    asyncio.run(http_snapshot.grab_http_snapshot("10.0.0.7", "admin", "pw"))
+    asyncio.run(http_snapshot.grab_http_snapshot("10.0.0.8", "admin", "pw"))
+    assert [c["verify"] for c in created if "verify" in c] == [False, True]
+
+
+def test_camera_tls_opt_in_is_a_saved_camera_setting(api_client):
+    client, token, Session = api_client
+    headers = {"Authorization": f"Bearer {token}"}
+    created = client.post("/cameras", headers=headers, json={
+        "name": "Exit B", "ip_address": "10.0.0.7", "adapter_id": "rtsp", "password": "cam-pass-123",
+    })
+    assert created.status_code == 200, created.text
+    assert created.json()["allow_insecure_tls"] is False
+    updated = client.patch(f"/cameras/{created.json()['id']}", headers=headers, json={"allow_insecure_tls": True})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["allow_insecure_tls"] is True
+    from app.services import http_snapshot
+
+    with patch("app.services.http_snapshot.short_session", Session):
+        assert http_snapshot.camera_allows_insecure_tls("10.0.0.7") is True
+        assert http_snapshot.camera_allows_insecure_tls("10.0.0.99") is False
