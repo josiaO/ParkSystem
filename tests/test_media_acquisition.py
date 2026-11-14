@@ -163,6 +163,22 @@ class AcquisitionContractTests(unittest.TestCase):
         self.assertGreater(row.last_fresh_frame_at, first_fresh)
         self.assertEqual(row.frames_changed, 1)
 
+    def test_detect_rejects_frames_from_an_old_media_generation(self):
+        gw = LocalMediaGateway()
+        gw.publish(1, JPEG, source="rtsp", source_seq=1, detect=False)
+        row = gw.session(1)
+        old_generation = row.generation
+        row.generation += 1
+        self.assertIsNone(gw.publish_detect(
+            1, JPEG + b"old", source="mediamtx", generation=old_generation,
+        ))
+        self.assertIsNone(gw.peek_detect(1))
+        current = gw.publish_detect(
+            1, JPEG + b"new", source="mediamtx", generation=row.generation,
+        )
+        self.assertIsNotNone(current)
+        self.assertEqual(current.generation, row.generation)
+
     def test_restart_affects_only_the_failed_camera(self):
         gw = LocalMediaGateway()
         gw.publish(1, JPEG + b"a", source="sdk")

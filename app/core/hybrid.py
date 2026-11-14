@@ -18,6 +18,7 @@ No I/O happens here; the service layer persists the outcome.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -72,8 +73,12 @@ class FusionOutcome:
 
 @dataclass
 class _Lane:
-    native: Candidate | None = None
-    local: Candidate | None = None
+    # Providers are asynchronous and may report the next vehicle before the
+    # other provider has finished the previous one. A single slot per provider
+    # silently overwrote that earlier vehicle. Keep a small bounded queue and
+    # pair by plate first, then by arrival time.
+    native: deque[Candidate] = field(default_factory=deque)
+    local: deque[Candidate] = field(default_factory=deque)
     decided: list[tuple[str, float]] = field(default_factory=list)
 
 
@@ -83,6 +88,7 @@ class FusionCoordinator:
     wait_seconds: float = 1.5
     hold_seconds: float = 20.0
     duplicate_similarity: float = 0.85
+    max_pending_candidates: int = 8
     settings: dict[str, Any] = field(default_factory=dict)
     _lanes: dict[int, _Lane] = field(default_factory=dict)
 
@@ -91,7 +97,10 @@ class FusionCoordinator:
 
     def pending(self, camera_id: int) -> dict[str, Candidate | None]:
         lane = self._lane(camera_id)
-        return {SOURCE_NATIVE: lane.native, SOURCE_LOCAL: lane.local}
+        return {
+            SOURCE_NATIVE: lane.native[0] if lane.native else None,
+            SOURCE_LOCAL: lane.local[0] if lane.local else None,
+        }
 
     def _duplicate_of(self, lane: _Lane, plate: str, now: float) -> str:
         lane.decided = [(p, at) for p, at in lane.decided if now - at < self.hold_seconds]
@@ -100,10 +109,8 @@ class FusionCoordinator:
                 return previous
         return ""
 
-    def _decide(self, camera_id: int, lane: _Lane, now: float) -> FusionOutcome:
-        native, local = lane.native, lane.local
-        lane.native = None
-        lane.local = None
+    def _decide(self, camera_id: int, lane: _Lane, native: Candidate | None,
+                local: Candidate | None, now: float) -> FusionOutcome:
         decision = resolve_readings(
             native_plate=native.plate if native else "",
             native_confidence=native.confidence if native else 0.0,
@@ -133,6 +140,77 @@ class FusionCoordinator:
                 lane.decided.append((plate, now))
         return outcome
 
+    def _decide_single(self, camera_id: int, lane: _Lane, candidate: Candidate,
+                       now: float) -> FusionOutcome:
+        if candidate.source == SOURCE_NATIVE:
+            return self._decide(camera_id, lane, candidate, None, now)
+        return self._decide(camera_id, lane, None, candidate, now)
+
+    @staticmethod
+    def _plate_match(left: Candidate, right: Candidate) -> bool:
+        return bool(left.plate and right.plate and (
+            left.plate == right.plate
+            or plate_similarity(left.plate, right.plate) >= 0.85
+        ))
+
+    def _match_index(self, incoming: Candidate, queue: deque[Candidate]) -> int | None:
+        if not queue:
+            return None
+        # If the two processes carry a shared visit/capture identity, use it as
+        # the strongest pairing signal. Otherwise an agreeing plate is safer
+        # than nearest-time pairing when two vehicles are close together.
+        incoming_visit = str(incoming.payload.get("visit_id") or "")
+        if incoming_visit:
+            for index, candidate in enumerate(queue):
+                if incoming_visit == str(candidate.payload.get("visit_id") or ""):
+                    return index
+        for index, candidate in enumerate(queue):
+            if self._plate_match(incoming, candidate):
+                return index
+        candidates = [
+            (index, abs(float(candidate.at) - float(incoming.at)))
+            for index, candidate in enumerate(queue)
+            if abs(float(candidate.at) - float(incoming.at)) <= self.pair_window_seconds
+        ]
+        return min(candidates, key=lambda item: item[1])[0] if candidates else None
+
+    def _pop_index(self, queue: deque[Candidate], index: int) -> Candidate:
+        queue.rotate(-index)
+        candidate = queue.popleft()
+        queue.rotate(index)
+        return candidate
+
+    def _match_ready(self, camera_id: int, lane: _Lane, now: float) -> list[FusionOutcome]:
+        outcomes: list[FusionOutcome] = []
+        # Process the oldest candidate first so a busy lane cannot let a newer
+        # car repeatedly jump ahead of a waiting one.
+        while lane.native and lane.local:
+            native = lane.native[0]
+            index = self._match_index(native, lane.local)
+            if index is None:
+                local = lane.local[0]
+                index = self._match_index(local, lane.native)
+                if index is None:
+                    break
+                local = lane.local.popleft()
+                native = self._pop_index(lane.native, index)
+            else:
+                native = lane.native.popleft()
+                local = self._pop_index(lane.local, index)
+            outcomes.append(self._decide(camera_id, lane, native, local, now))
+        return outcomes
+
+    def _expire(self, camera_id: int, lane: _Lane, now: float) -> list[FusionOutcome]:
+        outcomes: list[FusionOutcome] = []
+        for queue in (lane.native, lane.local):
+            while queue and (now - float(queue[0].at)) >= self.wait_seconds:
+                # A candidate older than the pairing wait has earned a
+                # standalone decision. It is removed, so later cars cannot be
+                # paired with a stale result.
+                candidate = queue.popleft()
+                outcomes.append(self._decide_single(camera_id, lane, candidate, now))
+        return outcomes
+
     def offer(
         self,
         camera_id: int,
@@ -143,40 +221,29 @@ class FusionCoordinator:
     ) -> list[FusionOutcome]:
         """Register a candidate. Returns zero, one or two ready decisions."""
         lane = self._lane(camera_id)
-        slot = "native" if candidate.source == SOURCE_NATIVE else "local"
-        other_slot = "local" if slot == "native" else "native"
-        outcomes: list[FusionOutcome] = []
-        # Stale unpaired candidates belong to an earlier vehicle: decide them alone
-        # before the new candidate can be mistaken for their counterpart.
-        for stale_slot in (slot, other_slot):
-            stale: Candidate | None = getattr(lane, stale_slot)
-            if stale is not None and (now - stale.at) > self.pair_window_seconds:
-                outcomes.append(self._decide_slot(camera_id, lane, stale_slot, now))
-        setattr(lane, slot, candidate)
-        counterpart: Candidate | None = getattr(lane, other_slot)
-        if counterpart is not None:
-            outcomes.append(self._decide(camera_id, lane, now))
-        elif not counterpart_available:
-            outcomes.append(self._decide(camera_id, lane, now))
+        queue = lane.native if candidate.source == SOURCE_NATIVE else lane.local
+        queue.append(candidate)
+        outcomes = self._match_ready(camera_id, lane, now)
+        if not counterpart_available:
+            # The provider is known to be unavailable; do not hold every
+            # candidate until the periodic flush loop.
+            while queue:
+                outcomes.append(self._decide_single(camera_id, lane, queue.popleft(), now))
+        else:
+            # Keep bounded memory and bounded decision latency even if a
+            # provider floods callbacks while the other process is down.
+            limit = max(1, int(self.max_pending_candidates or 1))
+            while len(queue) > limit:
+                outcomes.append(self._decide_single(camera_id, lane, queue.popleft(), now))
+            outcomes.extend(self._expire(camera_id, lane, now))
         return outcomes
-
-    def _decide_slot(self, camera_id: int, lane: _Lane, slot: str, now: float) -> FusionOutcome:
-        other_slot = "local" if slot == "native" else "native"
-        keep = getattr(lane, other_slot)
-        setattr(lane, other_slot, None)
-        try:
-            return self._decide(camera_id, lane, now)
-        finally:
-            setattr(lane, other_slot, keep)
 
     def flush(self, now: float) -> list[FusionOutcome]:
         """Decide candidates whose counterpart did not arrive within wait_seconds."""
         outcomes: list[FusionOutcome] = []
         for camera_id, lane in list(self._lanes.items()):
-            for slot in ("native", "local"):
-                waiting: Candidate | None = getattr(lane, slot)
-                if waiting is not None and now - waiting.at >= self.wait_seconds:
-                    outcomes.append(self._decide_slot(camera_id, lane, slot, now))
+            outcomes.extend(self._match_ready(camera_id, lane, now))
+            outcomes.extend(self._expire(camera_id, lane, now))
         return outcomes
 
     def reset(self, camera_id: int | None = None) -> None:

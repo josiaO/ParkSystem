@@ -79,16 +79,17 @@ async def pay_public_session(
     if pay_amount > remaining + 0.01:
         pay_amount = remaining
 
-    if method in {"MOBILE_SIMULATED", "MOBILE_MONEY", "SIMULATED"}:
+    if method in {"MOBILE_SIMULATED", "MOBILE_MONEY", "SIMULATED", "CARD_SIMULATED"}:
         from app.config import settings
         if not settings.allow_public_simulated_payments:
             raise PermissionError("Public simulated payments are disabled")
+        ledger_method = "CARD_SIMULATED" if method == "CARD_SIMULATED" else "MOBILE_SIMULATED"
         provider = payment_provider_for("simulated")
         intent = await provider.create_intent({
             "session_id": row.id,
             "amount": pay_amount,
             "currency": row.currency or "TZS",
-            "method": "MOBILE_SIMULATED",
+            "method": ledger_method,
             "token": row.public_token,
         })
         pending = await provider.initiate_collection(intent)
@@ -99,14 +100,14 @@ async def pay_public_session(
             db,
             row,
             amount=pay_amount,
-            method="MOBILE_SIMULATED",
+            method=ledger_method,
             provider_id="simulated",
             operator_id=operator_id,
-            idempotency_key=f"session:{row.id}:mobile:{pay_amount:.2f}",
+            idempotency_key=f"session:{row.id}:{ledger_method.lower()}:{pay_amount:.2f}",
         )
         return {
             "ok": True,
-            "method": "MOBILE_SIMULATED",
+            "method": ledger_method,
             "transaction": transaction_dict(recorded["transaction"]),
             "duplicate": recorded["duplicate"],
             **public_session_payload(db, recorded["session"], audience=audience),

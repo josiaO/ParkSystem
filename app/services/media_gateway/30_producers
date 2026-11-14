@@ -85,13 +85,18 @@ class _GatewayProducersMixin:
             pump_activity = bool(jpeg[:2] == JPEG_SOI and (source_advanced or not source_progress_capable))
             previous_response_seq = max(previous_response_seq, current_seq)
             if jpeg[:2] == JPEG_SOI:
-                self.publish(
+                published = self.publish(
                     spec.id, jpeg,
                     source="sdk",
                     url=f"sdk://handle/{int(spec.sdk_handle)}",
                     source_seq=current_seq or None,
                     generation=generation,
                 )
+                if published is None:
+                    # The decoder belongs to an invalidated media generation.
+                    # Stop this task before it can continue polling the old
+                    # source while its replacement is starting.
+                    return False
                 previous_response_jpeg = jpeg
                 if pump_activity:
                     last_jpeg_at = time.monotonic()
@@ -388,20 +393,22 @@ class _GatewayProducersMixin:
                         # sequence, not byte equality, is the RTSP freshness
                         # signal.
                         rtsp_sequence = int(row.source_frame_seq or 0) + 1
-                        self.publish(
+                        if self.publish(
                             spec.id, first, source="rtsp", url=url,
                             source_seq=rtsp_sequence,
                             generation=generation,
-                        )
+                        ) is None:
+                            return False
                         async for jpeg in stream:
                             if not (row.wanted() or row.viewers > 0):
                                 break
                             rtsp_sequence += 1
-                            self.publish(
+                            if self.publish(
                                 spec.id, jpeg, source="rtsp", url=url,
                                 source_seq=rtsp_sequence,
                                 generation=generation,
-                            )
+                            ) is None:
+                                return False
                         # Normal generator exhaustion while demand remains is
                         # a decoder termination, not a successful connection.
                         # Route it through the per-camera backoff so stale
@@ -463,13 +470,14 @@ class _GatewayProducersMixin:
                 row.url = str(http.get("url") or "")
                 row.state = "STREAMING"
                 source_sequence += 1
-                self.publish(
+                if self.publish(
                     spec.id, http["jpeg"],
                     source="http",
                     url=str(http.get("url") or ""),
                     source_seq=source_sequence,
                     generation=generation,
-                )
+                ) is None:
+                    return False
                 last_jpeg_at = time.monotonic()
                 got = True
             elif got and time.monotonic() - last_jpeg_at >= silence_limit:

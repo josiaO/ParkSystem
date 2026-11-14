@@ -25,7 +25,7 @@ from app.services.latest_frame import LatestFrameBuffer
 from app.services.media_gateway import LocalMediaGateway, live_scale_filter, take_latest_jpeg
 from app.services.circuit import reconnect_for
 from app.services.onvif_discover import parse_media_xaddr, parse_profiles, parse_stream_uri
-from app.services.preview import CameraLiveSpec, acquire_live, live_metrics, release_live, remember_frame, stop_live_pumps, viewers_for
+from app.services.preview import CameraLiveSpec, acquire_live, live_metrics, release_live, remember_frame, stop_live_pumps, viewers_for, watch_live
 from app.services.queues import AI_FRAMES, BoundedQueue
 from app.services.stream_roles import classify_stream, hvx_profiles, profile_warnings, recommend_roles
 
@@ -276,14 +276,30 @@ class MediaApiTests(unittest.TestCase):
         self.assertNotIn("live_sdk_interval_seconds", http_fn)
 
     def test_hidden_view_releases_viewers(self):
+        from app.services.media_gateway import gateway
+
         spec = CameraLiveSpec(id=77, ip="127.0.0.1", username="a", password="b", rtsp_url="", sdk_handle=None)
         remember_frame(77, JPEG, source="sdk")
         acquire_live(spec)
         self.assertEqual(viewers_for(77), 1)
+        self.assertEqual(gateway.session(77).live_consumers, 1)
         release_live(77)
         self.assertEqual(viewers_for(77), 0)
+        self.assertEqual(gateway.session(77).live_consumers, 0)
         rows = {row["camera_id"]: row for row in live_metrics()}
         self.assertEqual(rows[77]["viewers"], 0)
+
+    def test_webrtc_viewer_does_not_hold_a_server_jpeg_consumer(self):
+        from app.services.media_gateway import gateway
+
+        spec = CameraLiveSpec(id=78, ip="127.0.0.1", username="a", password="b", rtsp_url="", sdk_handle=None)
+        with patch("app.infrastructure.media.registry.mediamtx_live_active", return_value=True), \
+             patch("app.services.flags.flags", return_value={"webrtc_live_enabled": True}):
+            watch_live(spec)
+            self.assertEqual(viewers_for(78), 1)
+            self.assertEqual(gateway.session(78).live_consumers, 0)
+            release_live(78)
+        self.assertEqual(gateway.session(78).live_consumers, 0)
 
 
 class LiveDecodeTests(unittest.IsolatedAsyncioTestCase):

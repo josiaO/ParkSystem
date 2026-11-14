@@ -261,7 +261,10 @@ class SimulationTests(unittest.TestCase):
         page = self.client.get(f"/p/{token}")
         self.assertEqual(page.status_code, 200)
         self.assertIn("T123ABC", page.text)
-        self.assertIn("Pay on phone", page.text)
+        self.assertIn("Demo payment is off", page.text)
+        self.assertIn("Mobile money", page.text)
+        self.assertIn("Bank card", page.text)
+        self.assertIn("@media (max-width:1120px)", page.text)
         self.assertIn('/assets/zirp-logo.png', page.text)
         self.assertIn('@media (max-width:430px)', page.text)
         status = self.client.get(f"/p/{token}/status")
@@ -294,6 +297,32 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(lookup.status_code, 200)
         self.assertEqual(lookup.json()["plate"], "T999XYZ")
         self.assertTrue(lookup.json()["paid"])
+
+    def test_public_simulated_card_payment(self):
+        gate, _ = self._lane()
+        with patch("app.services.simulation.controller") as ctrl:
+            ctrl.return_value.open = AsyncMock(return_value=OPENED)
+            created = self.client.post("/sim/entry", headers=self.headers, json={
+                "plate": "T456CARD", "gate_id": gate["id"], "side": "ENTRY",
+            }).json()
+        sid = created["session"]["id"]
+        token = created["session"]["public_token"]
+        self._age_session(sid)
+        with self.Session() as db:
+            row = db.get(ParkingSession, sid)
+            row.amount_due = 1200
+            row.amount_paid = 0
+            db.commit()
+
+        with patch.object(settings, "allow_public_simulated_payments", True):
+            page = self.client.get(f"/p/{token}")
+            self.assertIn("Bank card", page.text)
+            self.assertIn("no card details collected", page.text)
+            paid = self.client.post(f"/p/{token}/pay", json={"method": "CARD_SIMULATED"})
+
+        self.assertEqual(paid.status_code, 200, paid.text)
+        self.assertTrue(paid.json()["paid"])
+        self.assertEqual(paid.json()["transaction"]["method"], "CARD_SIMULATED")
 
     def test_parking_settings_round_trip(self):
         res = self.client.patch("/settings/parking", headers=self.headers, json={

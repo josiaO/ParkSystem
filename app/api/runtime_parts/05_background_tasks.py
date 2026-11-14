@@ -338,7 +338,14 @@ async def _maybe_local_ipcam_alpr(camera_id: int) -> None:
     # future caller cannot start a second generic recognition path.
     with short_session() as db:
         camera = db.get(Camera, camera_id)
-        if camera is None or adapter_requires_native_stream(camera.adapter_id):
+        if camera is None:
+            return
+        # A connected native handle owns the HVX/QY event lane.  Before SDK
+        # login, however, a software-mode camera may already have a valid
+        # DETECT frame from a commissioning/media path.  Let this helper read
+        # that existing bounded frame; it must not open a second native or
+        # generic camera connection.
+        if adapter_requires_native_stream(camera.adapter_id) and camera.sdk_handle is not None:
             return
     from app.recognition_worker import worker_owns_software_reads
     if worker_owns_software_reads(camera_id):

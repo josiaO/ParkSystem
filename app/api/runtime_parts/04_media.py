@@ -177,7 +177,8 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
     spec = _live_spec(c)
     touch_live(spec)
     grabbed = await snapshot_for_camera(
-        spec.id, spec.ip, spec.username, spec.password, spec.rtsp_url, sdk_handle=spec.sdk_handle,
+        spec.id, spec.ip, spec.username, spec.password, spec.rtsp_url,
+        sdk_handle=spec.sdk_handle, adapter_id=spec.adapter_id,
     )
     if not grabbed.get("ok"):
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")

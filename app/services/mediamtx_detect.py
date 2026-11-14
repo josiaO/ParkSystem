@@ -35,9 +35,12 @@ async def _consume(spec: "CameraLiveSpec") -> None:
     ai_fps = float(getattr(settings, "detect_fps", 8.0) or 8.0)
     interval = 1.0 / max(ai_fps, 1.0)
     row = gateway._session_for(spec)
+    generation = int(row.generation)
     row.detect_consumers = max(row.detect_consumers, 1)
     last_sample = 0.0
-    while mediamtx_detect_active(camera_id) and (row.detect_consumers > 0 or gateway.viewers_for(camera_id) > 0):
+    while mediamtx_detect_active(camera_id) and row.detect_consumers > 0:
+        if int(row.generation) != generation:
+            generation = int(row.generation)
         if not mediamtx.running():
             await asyncio.sleep(1.0)
             continue
@@ -56,17 +59,22 @@ async def _consume(spec: "CameraLiveSpec") -> None:
             async for jpeg in stream:
                 if not mediamtx_detect_active(camera_id):
                     break
-                if row.detect_consumers <= 0 and gateway.viewers_for(camera_id) <= 0:
+                if row.detect_consumers <= 0:
+                    break
+                if int(row.generation) != generation:
                     break
                 now = time.monotonic()
                 if now - last_sample >= interval:
-                    gateway.publish_detect(
+                    published = gateway.publish_detect(
                         camera_id,
                         jpeg,
                         source="mediamtx",
                         url=local_url,
                         sampled=True,
+                        generation=generation,
                     )
+                    if published is None:
+                        break
                     last_sample = now
         except asyncio.CancelledError:
             raise

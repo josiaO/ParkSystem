@@ -116,10 +116,11 @@ def resolve_readings(
 
     if chosen_mode in NATIVE_MODES:
         if native:
-            method = "NATIVE_ONLY" if not local else "NATIVE_SELECTED"
-            return _finish(native, n_conf, method, "native recognition mode")
-        if local:
-            return _finish(local, l_conf, "LOCAL_ONLY", "native mode fallback to local", needs_review=True)
+            # NATIVE_ONLY is a hard provider boundary.  A local value may be
+            # present in a manual/fused payload, but accepting it here would
+            # make the camera-only setting a label while silently running
+            # FastALPR as a fallback.
+            return _finish(native, n_conf, "NATIVE_ONLY", "native recognition mode")
         return _finish("", 0.0, "NATIVE_ONLY", "no plate", needs_review=True)
     if chosen_mode in LOCAL_MODES:
         if local:

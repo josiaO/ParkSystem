@@ -171,7 +171,20 @@ class _GatewayStateMixin:
         if row is None:
             return
         row.viewers = max(0, row.viewers - 1)
+        row.live_consumers = max(0, row.live_consumers - 1)
         row.last_view_at = time.monotonic()
+
+    def acquire_live_cache(self, camera_id: int) -> None:
+        row = self._sessions.get(int(camera_id))
+        if row is not None:
+            row.live_consumers += 1
+            row.last_view_at = time.monotonic()
+
+    def release_live_cache(self, camera_id: int) -> None:
+        row = self._sessions.get(int(camera_id))
+        if row is not None:
+            row.live_consumers = max(0, row.live_consumers - 1)
+            row.last_view_at = time.monotonic()
 
     async def register_stream(self, camera_id: int, source: dict[str, Any]) -> dict[str, Any]:
         spec = source.get("spec")
@@ -312,6 +325,7 @@ class _GatewayStateMixin:
     def acquire_live(self, spec: CameraLiveSpec) -> None:
         row = self._session_for(spec)
         row.viewers += 1
+        row.live_consumers += 1
         row.last_view_at = time.monotonic()
         self.ensure_producer(spec)
 
@@ -402,6 +416,7 @@ class _GatewayStateMixin:
             "connection_state": state,
             "ok": bool(live) and fresh_ok,
             "viewers": row.viewers,
+            "live_consumers": row.live_consumers,
             "detect_consumers": row.detect_consumers,
             "pumping": pumping,
             "source": row.source or (live.source if live else ""),

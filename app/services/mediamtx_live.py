@@ -33,7 +33,12 @@ async def _consume(spec: "CameraLiveSpec") -> None:
     camera_id = int(spec.id)
     local_url = _live_url(camera_id)
     row = gateway._session_for(spec)
-    while mediamtx_live_active(camera_id) and gateway.viewers_for(camera_id) > 0:
+    generation = int(row.generation)
+    source_seq = int(row.source_frame_seq or 0)
+    while mediamtx_live_active(camera_id) and row.live_consumers > 0:
+        if int(row.generation) != generation:
+            generation = int(row.generation)
+            source_seq = int(row.source_frame_seq or 0)
         if not mediamtx.running():
             await asyncio.sleep(1.0)
             continue
@@ -48,15 +53,29 @@ async def _consume(spec: "CameraLiveSpec") -> None:
                 jpeg_q=12,
             )
             async for jpeg in stream:
-                if not mediamtx_live_active(camera_id) or gateway.viewers_for(camera_id) <= 0:
+                if not mediamtx_live_active(camera_id) or row.live_consumers <= 0:
                     break
-                gateway.publish(
+                # A stale RTSP decoder can yield one buffered JPEG after the
+                # display watchdog has forced a generation change. Do not let
+                # that old frame repopulate LIVE or make the preview look
+                # healthy while the replacement decoder is starting.
+                if int(row.generation) != generation:
+                    break
+                # A static scene can legitimately encode to identical JPEGs.
+                # The local decoder still advanced, so preserve that source
+                # progress for the gateway freshness watchdog.
+                source_seq += 1
+                published = gateway.publish(
                     camera_id,
                     jpeg,
                     source="mediamtx",
                     url=local_url,
                     detect=False,
+                    source_seq=source_seq,
+                    generation=generation,
                 )
+                if published is None:
+                    break
                 row.state = "STREAMING"
                 row.source = "mediamtx"
                 row.url = local_url

@@ -12,7 +12,7 @@ from app.config import settings
 from app.infrastructure.hardware.registry import camera_adapter_id
 from app.models import Camera, CameraStatus, Gate
 from app.services.captures import latest_for_cameras
-from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
+from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode, recognition_contract
 from app.services.media_gateway import gateway
 from app.services.site_cameras import side_label
 from app.services.site_policy import site_policy
@@ -45,6 +45,7 @@ def camera_operator_status(
     camera_ok = camera.status in ONLINE_CAMERA or pumping or bool(live)
     live_ok = bool(live and live.age_ms() <= settings.stale_stream_seconds * 1000)
     canonical = camera_recognition_mode(camera)
+    recognition = recognition_contract(camera)
     if canonical == LOCAL_ONLY:
         recog_mode = "FASTALPR_ONLY"
     elif canonical == NATIVE_ONLY:
@@ -88,6 +89,7 @@ def camera_operator_status(
         "barrier": barrier,
         "adapter_id": camera_adapter_id(camera),
         "recognition_mode": recog_mode,
+        "recognition_contract": recognition,
         "status": camera.status,
         "last_plate": last_plate,
         "gate_mode": gate_mode or "COMMISSIONING",

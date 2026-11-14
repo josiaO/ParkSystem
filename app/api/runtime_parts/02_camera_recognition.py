@@ -374,7 +374,10 @@ async def _run_local_alpr_locked(
         native_confidence=float(native.get("confidence") or 0),
         local_plate=local.get("plate") or "",
         local_confidence=float(local.get("confidence") or 0),
-        mode=fusion_mode(camera),
+        # ``force`` is the explicit operator read action. It is the one
+        # documented override that may use FastALPR even when the lane's
+        # automatic mode is NATIVE_ONLY.
+        mode="LOCAL_ONLY" if force else fusion_mode(camera),
         local_consensus=False,
     )
     if not fused.resolved_plate:

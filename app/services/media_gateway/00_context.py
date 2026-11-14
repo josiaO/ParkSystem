@@ -137,6 +137,10 @@ class StreamSession:
     producer: asyncio.Task | None = None
     producer_spec: CameraLiveSpec | None = None
     viewers: int = 0
+    # Local JPEG/MJPEG cache leases are distinct from browser/WebRTC viewers.
+    # A browser can read MediaMTX directly and must not keep a server-side
+    # decoder alive after the last snapshot/MJPEG lease is released.
+    live_consumers: int = 0
     detect_consumers: int = 0
     last_view_at: float = 0.0
     last_frame_received_at: float = 0.0
