@@ -9,6 +9,7 @@ class SystemHealth(QWidget):
         note.setWordWrap(True); l.addWidget(note)
         self.state=QLabel("…"); self.state.setStyleSheet("font-size:18px;font-weight:700"); l.addWidget(self.state)
         self.summary=QLabel("…"); self.summary.setWordWrap(True); l.addWidget(self.summary)
+        self.clock=QLabel(""); self.clock.setWordWrap(True); self.clock.setAccessibleName("Clock synchronisation"); l.addWidget(self.clock)
         self.info=QPlainTextEdit(); self.info.setReadOnly(True); self.info.setVisible(False); l.addWidget(self.info, 1)
         row=QHBoxLayout(); refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
         self.details_btn=QPushButton("Show technical details"); self.details_btn.clicked.connect(self._toggle_details)
@@ -39,9 +40,23 @@ class SystemHealth(QWidget):
                 data=api.get("/health/ready")
             except Exception as e:
                 data={"error": str(e), "live": live}
+        workstation=self._workstation_clock()
+        if workstation is not None:
+            data["workstation_clock"]=workstation
         self.state.setText(str(data.get("state") or state))
         self.summary.setText(health_sentences(data, live))
+        self.clock.setText(clock_summary(data.get("clock"), workstation))
         self.info.setPlainText(json.dumps(data, indent=2, default=str))
+    def _workstation_clock(self):
+        """This computer's clock against the Site Server (half round trip removed)."""
+        import time as _time
+        from app.services.clock_skew import skew_from_server_time
+        try:
+            started=_time.time()
+            clock=api.get("/settings/clock")
+            return skew_from_server_time(clock.get("server_time_utc") or "", round_trip_seconds=_time.time()-started)
+        except Exception:
+            return None
     def _toggle_details(self):
         show=not self.info.isVisible()
         self.info.setVisible(show)
