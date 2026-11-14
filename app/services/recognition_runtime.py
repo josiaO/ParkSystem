@@ -32,6 +32,12 @@ VISIT_STATES = (
 )
 
 
+def _frame_age_alarm_ms() -> float:
+    from app.config import settings
+
+    return float(getattr(settings, "recognition_frame_age_alarm_ms", 300.0) or 300.0)
+
+
 @dataclass(frozen=True)
 class RecognitionTicket:
     """One in-flight (or pending) recognition request."""
@@ -192,6 +198,10 @@ class CameraRecognitionLane:
     sessions_created: int = 0
     last_infer_ms: float = 0.0
     infer_samples: list = field(default_factory=list)
+    # How old a frame is when recognition starts on it (mailbox wait). The
+    # timestamp is when the decoded frame reached this process; time spent
+    # in the camera, MediaMTX and FFmpeg is not visible on an image pipe.
+    consume_age_samples: list = field(default_factory=list)
     last_error: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -239,6 +249,9 @@ class CameraRecognitionLane:
             )
             self.inflight = ticket
             self.last_recognition_started_at = now
+            self.consume_age_samples.append(max(0.0, ticket.frame_age_ms(now)))
+            if len(self.consume_age_samples) > 120:
+                del self.consume_age_samples[: len(self.consume_age_samples) - 120]
             if self.visit.state in {VEHICLE_PRESENT, IDLE}:
                 self.visit.state = RECOGNIZING if self.visit.visit_id else self.visit.state
             return ticket
@@ -426,6 +439,7 @@ class CameraRecognitionLane:
                     plate_current = self.last_plate
             pending = self.mailbox.snapshot()
             samples = list(self.infer_samples)
+            ages = list(self.consume_age_samples)
             state = self.visit.state
             if inflight is not None and state == IDLE:
                 state = RECOGNIZING
@@ -457,6 +471,10 @@ class CameraRecognitionLane:
                 "inference_ms": self.last_infer_ms,
                 "inference_ms_p50": _percentile(samples, 50),
                 "inference_ms_p95": _percentile(samples, 95),
+                "frame_age_at_consumption_ms": round(ages[-1], 1) if ages else None,
+                "frame_age_at_consumption_ms_p50": _percentile(ages, 50),
+                "frame_age_at_consumption_ms_p95": _percentile(ages, 95),
+                "frame_age_alarm": bool(ages) and float(_percentile(ages, 95) or 0.0) > _frame_age_alarm_ms(),
                 "inference_ms_max": round(max(samples), 1) if samples else None,
                 "last_error": self.last_error,
             }
