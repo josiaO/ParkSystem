@@ -206,7 +206,12 @@ class Sessions(QWidget):
         can_pay=api.can("payments.create") or api.can("kiosk.use")
         self.pay_btn.setVisible(can_pay)
         self.mobile_btn.setVisible(can_pay)
-        actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn)
+        # QR fallback at the exit (OCR failed or the plate is unreadable): the
+        # receipt identifies the visit and the normal exit decision applies.
+        self.exit_btn=QPushButton("Let out at exit with this receipt…"); self.exit_btn.clicked.connect(self.exit_with_receipt)
+        self.exit_btn.setEnabled(False); self.exit_btn.setVisible(api.can("gates.open"))
+        self.exit_btn.setToolTip("Use the scanned receipt as the exit identity. The barrier opens only if the visit is paid or free.")
+        actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn); actions.addWidget(self.exit_btn)
         detail.addWidget(self.kiosk_plate); detail.addWidget(self.kiosk_stay); detail.addWidget(self.kiosk_due); detail.addWidget(self.kiosk_note)
         detail.addWidget(label_for("&Correct plate", self.correct)); detail.addWidget(self.correct); detail.addLayout(actions)
         card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
@@ -260,6 +265,7 @@ class Sessions(QWidget):
             self.kiosk_note.setText("")
             self.pay_btn.setEnabled(False)
             self.mobile_btn.setEnabled(False)
+            self.exit_btn.setEnabled(False)
             self._pixmap(self.photo, None, "No entry photo stored.")
             self._pixmap(self.crop, None, "")
             return
@@ -278,8 +284,51 @@ class Sessions(QWidget):
         payable=bool(data.get("payable"))
         self.pay_btn.setEnabled(payable)
         self.mobile_btn.setEnabled(payable and bool(data.get("token")))
+        self.exit_btn.setEnabled(bool(data.get("token")) and data.get("still_inside") is not False)
         self._pixmap(self.photo, data.get("snapshot_url"), "No entry photo stored.")
         self._pixmap(self.crop, data.get("crop_url"), "")
+    def _exit_lanes(self):
+        lanes=[]
+        for gate in api.get("/gates") or []:
+            if gate.get("enabled") is False:
+                continue
+            for cam in gate.get("cameras") or []:
+                if str(cam.get("lane_direction") or "").upper()=="EXIT":
+                    lanes.append((f"{gate.get('name')} — {cam.get('name')}", int(gate["id"]), int(cam["id"])))
+        return lanes
+    def exit_with_receipt(self):
+        visit=self.visit or {}
+        token=visit.get("token")
+        if not token:
+            QMessageBox.information(self,"Exit with receipt","Scan the receipt QR first."); return
+        try:
+            lanes=self._exit_lanes()
+        except Exception as exc:
+            QMessageBox.warning(self,"Exit with receipt",str(exc)); return
+        if not lanes:
+            QMessageBox.information(self,"Exit with receipt","No exit lane with an exit camera is configured."); return
+        labels=[label for label,_,_ in lanes]
+        choice,ok=QInputDialog.getItem(self,"Exit with receipt",f"Which exit is {visit.get('plate') or 'this car'} at?",labels,0,False)
+        if not ok: return
+        _,gate_id,camera_id=lanes[labels.index(choice)]
+        try:
+            result=api.post("/exit/qr-scan",{"gate_id":gate_id,"camera_id":camera_id,"raw_scan":token},timeout=20)
+        except Exception as exc:
+            QMessageBox.warning(self,"Exit with receipt",str(exc)); return
+        self._report_exit(result or {})
+        self.refresh()
+    def _report_exit(self, result):
+        message=str(result.get("message") or result.get("reason") or "Done.")
+        mismatch=result.get("plate_mismatch")
+        if mismatch:
+            QMessageBox.warning(self,"Exit with receipt — check the car",
+                f"The exit camera read {mismatch.get('camera_plate')}, but this receipt is for "
+                f"{mismatch.get('session_plate')}.\n\nLook at the car before it leaves; the mismatch is recorded.\n\n{message}")
+            return
+        if result.get("pay_required"):
+            QMessageBox.information(self,"Exit with receipt",f"Payment needed before this car can leave.\n\n{message}")
+            return
+        QMessageBox.information(self,"Exit with receipt",message)
     def lookup(self):
         from urllib.parse import quote
         q=self.query.text().strip()
