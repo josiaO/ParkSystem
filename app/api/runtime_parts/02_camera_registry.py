@@ -195,6 +195,7 @@ def camera_dict(c: Camera, db: Session | None = None):
         "rtsp_url": redact_text(c.rtsp_url or ""), "status": c.status, "sdk_handle": c.sdk_handle,
         "ffmpeg_profile": getattr(c, "ffmpeg_profile", None) or settings.ffmpeg_profile,
         "rtsp_transport": getattr(c, "rtsp_transport", None) or settings.rtsp_transport,
+        "allow_insecure_tls": bool(getattr(c, "allow_insecure_tls", False)),
         "stream_profiles": public_profiles(getattr(c, "stream_profiles", None) or {}),
         "framing": framing_from_profiles(getattr(c, "stream_profiles", None)),
         "media_capabilities": list(getattr(c, "media_capabilities", None) or []),

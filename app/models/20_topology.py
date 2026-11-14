@@ -127,6 +127,9 @@ class Camera(Base):
     stream_profiles: Mapped[dict] = mapped_column(JSON, default=dict)
     ffmpeg_profile: Mapped[str] = mapped_column(String(40), default="LOW_LATENCY_LAN")
     rtsp_transport: Mapped[str] = mapped_column(String(16), default="TCP")
+    # HTTPS snapshot certificates are verified unless this camera opts out
+    # (self-signed camera web UI). Never a site-wide default.
+    allow_insecure_tls: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     media_capabilities: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(30), default=CameraStatus.UNKNOWN.value)
     sdk_handle: Mapped[int | None] = mapped_column(Integer, nullable=True)
