@@ -745,11 +745,20 @@ def camera_viewer_state(
 
 
 def _is_loopback_request(request: Request) -> bool:
-    host = str(getattr(getattr(request, "client", None), "host", "") or "")
+    """True only for a direct (not proxied) connection from this computer."""
+    import ipaddress
+
+    headers = request.headers
     # Proxied/tunnelled requests are never treated as local.
-    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+    if any(headers.get(name) for name in ("x-forwarded-for", "x-real-ip", "forwarded")):
         return False
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    host = str(getattr(getattr(request, "client", None), "host", "") or "")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool((mapped or address).is_loopback)
 
 
 @app.get("/auth/setup")
@@ -770,7 +779,6 @@ def auth_setup(request: Request, db: Session = Depends(get_db)):
             "first_run": False,
             "bootstrap_user_present": True,
             "bootstrap_password_ok": False,
-            "usernames": [config.node_username] if config.node_username else [],
             "hint": "Sign in with this Processing Node's configured account. Site Administrator accounts cannot sign in here.",
         }
     return setup_status(db, local_request=_is_loopback_request(request))
