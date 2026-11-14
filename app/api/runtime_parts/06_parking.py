@@ -763,6 +763,22 @@ def sim_pay(session_id: int, db: Session = Depends(get_db), user: User = Depends
     return sim_session_dict(row)
 
 
+OPERATOR_PAYMENT_METHODS = {"KIOSK_CASH": "KIOSK_CASH", "CASH": "KIOSK_CASH", "KIOSK": "KIOSK_CASH"}
+
+
+def _operator_payment_method(method: str | None) -> str:
+    """An operator can record cash they received; nothing else.
+
+    Mobile money is credited only by the provider-verified intent flow. A
+    free-text method let an operator record "MOBILE_MONEY" without any
+    provider proof.
+    """
+    key = str(method or "KIOSK_CASH").strip().upper()
+    if key not in OPERATOR_PAYMENT_METHODS:
+        raise HTTPException(400, "Operators can record cash only. Mobile money is confirmed by the payment provider.")
+    return OPERATOR_PAYMENT_METHODS[key]
+
+
 @app.post("/sessions/{session_id}/pay")
 def confirm_session_payment(
     session_id: int,
@@ -773,7 +789,7 @@ def confirm_session_payment(
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
-    method = payload.method or "KIOSK_CASH"
+    method = _operator_payment_method(payload.method)
     try:
         row = mark_paid(db, row, operator_id=user.id, method=method)
     except ValueError as exc:

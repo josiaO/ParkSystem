@@ -548,7 +548,7 @@ async def kiosk_receipt_pay(
         raise HTTPException(404, "Receipt not found")
     try:
         result = await pay_public_session(
-            db, row, method=payload.method or "KIOSK_CASH", amount=payload.amount, operator_id=user.id,
+            db, row, method=_operator_payment_method(payload.method), amount=payload.amount, operator_id=user.id,
             audience="operator",
         )
     except PermissionError as exc:
