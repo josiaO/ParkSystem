@@ -397,6 +397,7 @@ def update_camera_framing(
             camera.stream_profiles,
             detect_roi=payload.detect_roi,
             detect_zoom=payload.detect_zoom,
+            detect_width=payload.detect_width,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

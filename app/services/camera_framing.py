@@ -52,10 +52,30 @@ def framing_from_profiles(profiles: dict | None) -> dict:
     zoom_raw = row.get("detect_zoom")
     if zoom_raw in (None, ""):
         zoom_raw = profiles.get("detect_zoom")
-    return {"detect_roi": str(roi or "").strip(), "detect_zoom": parse_detect_zoom(zoom_raw)}
+    return {
+        "detect_roi": str(roi or "").strip(),
+        "detect_zoom": parse_detect_zoom(zoom_raw),
+        "detect_width": parse_detect_width(row.get("detect_width")),
+    }
 
 
-def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float) -> dict:
+# Width the recognition worker decodes the DETECT stream to. The display
+# stream is never affected. 960 is the measured default; wider costs CPU.
+DETECT_WIDTHS = (960, 1280, 1600, 1920)
+
+
+def parse_detect_width(value) -> int:
+    from app.config import settings
+
+    default = int(getattr(settings, "recognition_detect_width", 960) or 960)
+    try:
+        width = int(value)
+    except (TypeError, ValueError):
+        return default
+    return width if width in DETECT_WIDTHS else default
+
+
+def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float, detect_width: int | None = None) -> dict:
     from app.services.alpr import parse_detect_roi
 
     raw = str(detect_roi or "").strip()
@@ -72,10 +92,18 @@ def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float)
             )
         stored = ",".join(f"{part:.4f}" for part in parsed)
     out = dict(profiles or {})
-    out[FRAMING_KEY] = {
+    previous = (profiles or {}).get(FRAMING_KEY) if isinstance((profiles or {}).get(FRAMING_KEY), dict) else {}
+    framing = {
         "detect_roi": stored,
         "detect_zoom": round(parse_detect_zoom(detect_zoom), 3),
     }
+    if detect_width is not None:
+        if int(detect_width) not in DETECT_WIDTHS:
+            raise ValueError(f"Recognition decode width must be one of {', '.join(map(str, DETECT_WIDTHS))} pixels.")
+        framing["detect_width"] = int(detect_width)
+    elif previous.get("detect_width"):
+        framing["detect_width"] = previous["detect_width"]
+    out[FRAMING_KEY] = framing
     return out
 
 

@@ -50,6 +50,9 @@ async def _infer_camera(
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
     detect_roi = str(camera.get("detect_roi") or "") or None
     detect_zoom = camera.get("detect_zoom")
+    # Per-camera decode width for recognition only (Phase 4.2); see
+    # `camera_lab_replay measure` for the plate size it gives at the OCR input.
+    detect_width = int(camera.get("detect_width") or getattr(settings, "recognition_detect_width", 960) or 960)
     from app.services.camera_framing import best_arrival_box, gate_for
 
     arrival = gate_for(camera_id)
@@ -79,6 +82,7 @@ async def _infer_camera(
         queue_depth=0,
         ocr_paused=False,
         decoder_pid=None,
+        detect_width=detect_width,
     )
 
     def _note_pid(pid: int) -> None:
@@ -92,7 +96,7 @@ async def _infer_camera(
             first_frame = True
             stats["decoder_started_at"] = time.time()
             try:
-                stream = iter_jpegs(url, sample_fps=sample_fps, scale=960, on_pid=_note_pid)
+                stream = iter_jpegs(url, sample_fps=sample_fps, scale=detect_width, on_pid=_note_pid)
                 async for jpeg in stream:
                     if stop.is_set():
                         break
