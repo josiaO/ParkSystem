@@ -739,8 +739,16 @@ def camera_viewer_state(
     return {"ok": True, "transport": get_state(camera_id).viewer_transport}
 
 
+def _is_loopback_request(request: Request) -> bool:
+    host = str(getattr(getattr(request, "client", None), "host", "") or "")
+    # Proxied/tunnelled requests are never treated as local.
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+        return False
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
 @app.get("/auth/setup")
-def auth_setup(db: Session = Depends(get_db)):
+def auth_setup(request: Request, db: Session = Depends(get_db)):
     from app.services.node_scope import is_processing_node
     if is_processing_node():
         # This endpoint historically created the bootstrap administrator when
@@ -760,7 +768,7 @@ def auth_setup(db: Session = Depends(get_db)):
             "usernames": [config.node_username] if config.node_username else [],
             "hint": "Sign in with this Processing Node's configured account. Site Administrator accounts cannot sign in here.",
         }
-    return setup_status(db)
+    return setup_status(db, local_request=_is_loopback_request(request))
 
 
 @app.post("/auth/login", response_model=LoginResponse)
