@@ -49,7 +49,10 @@ def test_worker_claim_without_healthy_frames_does_not_disable_site_ocr(tmp_path,
                  patch.object(api_main, "_video_arrival_ready", ready), \
                  patch.object(api_main, "_run_local_alpr", read), \
                  patch.object(api_main, "_note_arrival_result", return_value=True), \
-                 patch.object(api_main, "_alpr_fp", {}):
+                 patch.object(api_main, "_alpr_fp", {}), \
+                 patch("app.services.mediamtx_detect.ensure_detect_consumer"):
+                # The media consumer is not under test; starting a real FFmpeg
+                # process here hung asyncio.run() while cancelling the spawn.
                 asyncio.run(api_main._maybe_local_ipcam_alpr(83))
             ready.assert_awaited_once()
             read.assert_awaited_once()
