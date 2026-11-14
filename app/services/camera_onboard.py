@@ -65,7 +65,10 @@ async def probe_connection(
             "ip": ip,
             "recommended_adapter": recommended,
             "camera_type": "VENDOR_SDK_CAMERA",
-            "recognition_mode": "FASTALPR_ONLY",
+            # QY/HVX cameras read plates themselves. Use that read and verify
+            # it with FastALPR; software-only mode discarded every car the
+            # PC could not re-read from the event photo.
+            "recognition_mode": "HYBRID",
             "capabilities": sorted(set(capabilities)),
             "profiles": profiles,
             "attempts": attempts,
@@ -130,7 +133,7 @@ async def probe_connection(
     camera_type = "VENDOR_SDK_CAMERA" if recommended == "hvx" else (
         "GENERIC_ONVIF" if recommended == "onvif" else "GENERIC_RTSP"
     )
-    recognition = "FASTALPR_ONLY"
+    recognition = "HYBRID" if recommended == "hvx" else "FASTALPR_ONLY"
     return {
         "ok": hvx_open or rtsp_ok or bool(http.get("ok")) or bool(onvif.get("ok")),
         "ip": ip,
