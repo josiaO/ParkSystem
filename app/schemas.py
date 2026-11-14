@@ -57,6 +57,7 @@ class CameraCreate(BaseModel):
     connection_mode: str = "DIRECT"
     ffmpeg_profile: str = "LOW_LATENCY_LAN"
     rtsp_transport: str = "TCP"
+    allow_insecure_tls: bool = False
     stream_profiles: dict | None = None
     recognition_mode: str = ""
     vendor: str = ""
@@ -107,6 +108,7 @@ class CameraUpdate(BaseModel):
     connection_mode: str | None = None
     ffmpeg_profile: str | None = None
     rtsp_transport: str | None = None
+    allow_insecure_tls: bool | None = None
     stream_profiles: dict | None = None
     enabled: bool | None = None
     recognition_mode: str | None = None
