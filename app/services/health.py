@@ -406,10 +406,20 @@ def details() -> dict:
         "recognition_runtime": {"scheduler": runtime.scheduler.snapshot(), "cameras": runtime.snapshot()},
         "disk": _disk(settings.data_dir),
         "time": datetime.now(timezone.utc).isoformat(),
+        "clock": _clock_status(),
     }
     from app.services.redaction import redact_obj
 
     return health_cache.set("details", redact_obj(body), ttl=1.0)
+
+
+def _clock_status() -> dict:
+    try:
+        from app.services.clock_skew import cached_database_skew
+
+        return cached_database_skew()
+    except Exception as exc:
+        return {"ok": True, "warning": "", "note": f"Clock check failed: {str(exc)[:160]}"}
 
 
 def _schema_status() -> dict:

@@ -30,11 +30,27 @@ REPORTS = (
 )
 
 
+def clock_summary(server_clock: dict | None, workstation_clock: dict | None) -> str:
+    """One line for System Health: is every clock within the 2 s budget?"""
+    parts = []
+    for name, clock in (("Gate PC vs database", server_clock), ("This computer vs Site Server", workstation_clock)):
+        if not isinstance(clock, dict) or clock.get("skew_seconds") is None:
+            continue
+        mark = "OK" if clock.get("ok") else "CHECK"
+        parts.append(f"{name}: {float(clock['skew_seconds']):+.1f} s ({mark})")
+    if isinstance(server_clock, dict) and server_clock.get("source") == "local-database":
+        parts.insert(0, "Database on this computer: one clock")
+    return "Clocks — " + " · ".join(parts) if parts else ""
+
+
 def health_sentences(details: dict | None, live: dict | None = None) -> str:
     details = details or {}
     live = live or {}
     status = str(details.get("status") or details.get("state") or live.get("state") or "ok")
     lines = [f"The site is {status.replace('_', ' ')}."]
+    for clock in (details.get("clock"), details.get("workstation_clock")):
+        if isinstance(clock, dict) and clock.get("ok") is False and clock.get("warning"):
+            lines.append(str(clock["warning"]))
     hvx = details.get("hvx_host") or {}
     if hvx.get("ok"):
         lines.append("The camera host that talks to HVX cameras is running.")
