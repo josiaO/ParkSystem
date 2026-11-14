@@ -190,6 +190,11 @@ async def start_mobile_payment(
         if age < REUSE_PENDING_SECONDS and to_decimal(latest.amount) == pay_amount:
             return {"ok": True, "reused": True, "intent": intent_dict(latest)}
 
+    # A new prompt reaches a real phone: rate-limit per number and per receipt.
+    from app.services.payment_prompt_guard import guard as prompt_guard
+
+    prompt_guard().claim(phone, session_id=row.id)
+
     request = await provider.create_intent({
         "session_id": row.id,
         "amount": pay_amount,
