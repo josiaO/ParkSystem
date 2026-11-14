@@ -686,3 +686,19 @@ def test_kiosk_sessions_outlast_a_shift():
     from app.services.kiosk_devices import KIOSK_SESSION_HOURS
 
     assert KIOSK_SESSION_HOURS >= 24
+
+
+# Phase 2.5 near matches (API) -------------------------------------------------
+
+def test_near_matches_route_lists_close_open_visits(api_client):
+    from app.models import ParkingSession
+
+    client, token, Session = api_client
+    with Session() as db:
+        db.add(ParkingSession(plate="T123ABC", public_token="tok-near-1", status="ACTIVE"))
+        db.add(ParkingSession(plate="T123ABD", public_token="tok-near-2", status="CLOSED"))
+        db.commit()
+    res = client.get("/sessions/near-matches?plate=T123A8C", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200, res.text
+    assert [row["plate"] for row in res.json()] == ["T123ABC"]  # closed visits are not offered
+    assert client.get("/sessions/near-matches?plate=T123A8C").status_code == 401

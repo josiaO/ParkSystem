@@ -642,6 +642,17 @@ def lookup_session(q: str = "", db: Session = Depends(get_db), _: User = Depends
     return public_session_payload(db, row, audience="operator")
 
 
+@app.get("/sessions/near-matches")
+def session_near_matches(plate: str = "", db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use", "payments.create"))):
+    """Open visits with a plate close to *plate*: an operator "did you mean" list.
+
+    Read-only. Choosing one only loads that visit; it never opens a barrier.
+    """
+    from app.services.kiosk_lookup import near_matches
+
+    return near_matches(db, plate)
+
+
 STAFF_PHOTO_PERMISSIONS = {"cameras.view", "kiosk.use", "sessions.view"}
 
 
