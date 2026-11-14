@@ -5,8 +5,35 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # A clean checkout must import. This job exists because app/models/ was once
+  # swallowed by a bare `models/` line in .gitignore, so every fresh clone
+  # failed with ImportError while the developer's machine kept working.
+  import-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Required source is tracked
+        run: |
+          test -f app/models/__init__.py
+          test -n "$(git ls-files app/models)"
+      - name: Import the application from a clean checkout
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          export XDG_DATA_HOME="$RUNNER_TEMP/xdg"
+          python -c "import app.api_main, app.models; assert hasattr(app.models, 'ParkingSession')"
+          python -c "import app.site_service, app.media_service, app.recognition_worker"
+
+  test:
+    needs: import-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,6 +42,47 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m compileall app tools
+        run: python -m compileall -q app tools
       - name: Test
-        run: pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          export XDG_DATA_HOME="$RUNNER_TEMP/xdg"
+          pytest -q -o faulthandler_timeout=300
+
+  windows:
+    needs: import-check
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q app tools
+      - name: Import the application
+        env:
+          QT_QPA_PLATFORM: offscreen
+        shell: pwsh
+        run: |
+          $env:PROGRAMDATA = Join-Path $env:RUNNER_TEMP "programdata"
+          python -c "import app.api_main, app.models; assert hasattr(app.models, 'ParkingSession')"
+          python -c "import app.site_service, app.media_service, app.recognition_worker"
+      - name: Fast test subset
+        env:
+          QT_QPA_PLATFORM: offscreen
+        shell: pwsh
+        run: |
+          $env:PROGRAMDATA = Join-Path $env:RUNNER_TEMP "programdata"
+          pytest -q -o faulthandler_timeout=300 `
+            tests/test_parking_engine.py `
+            tests/test_parking_entry.py `
+            tests/test_parking_exit.py `
+            tests/test_parking_tariff.py `
+            tests/test_windows_ready.py `
+            tests/test_windows_packaging.py `
+            tests/test_windows_service_recovery.py
