@@ -427,7 +427,7 @@ def render_report(report: dict) -> str:
 
 
 def _try_login(url: str, username: str, passwords: list[str]) -> tuple[str, str]:
-    last = ""
+    last = "" if any(passwords) else "No password available: pass --password, set SMARTPARK_PASSWORD, or run interactively to be prompted"
     for password in passwords:
         if not password:
             continue
@@ -449,7 +449,11 @@ def _default_report_dir() -> Path:
 
 
 def password_candidates(explicit: str = "") -> list[str]:
-    """Passwords to try, without printing them. The install file comes first."""
+    """Passwords to try, without printing them.
+
+    Order: --password, SMARTPARK_PASSWORD, SMARTPARK_BOOTSTRAP_PASSWORD, the
+    install file bootstrap_password.txt, then an interactive prompt.
+    """
     found: list[str] = []
 
     def add(value: str) -> None:
@@ -476,8 +480,12 @@ def password_candidates(explicit: str = "") -> list[str]:
                 add(path.read_text(encoding="utf-8"))
         except OSError:
             continue
-    add("SmartPark1!")
-    add("admin")
+    # Never guess default passwords: that teaches nothing and trips the
+    # login lockout. Ask a person at the keyboard; fail clearly otherwise.
+    if not found and sys.stdin is not None and sys.stdin.isatty():
+        import getpass
+
+        add(getpass.getpass("SmartPark password: "))
     return found
 
 
