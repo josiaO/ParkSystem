@@ -223,10 +223,67 @@ class ExitLaneController:
                 "barrier_opened": False, "pay_required": False, "session": None,
                 "message": "Receipt QR does not identify an active session at this site.",
             }
-        return await self._submit_session(
+        mismatch = self._camera_plate_mismatch(db, row, gate=gate, camera=camera, at=at)
+        out = await self._submit_session(
             db, row=row, event_id=event_id, gate=gate, camera=camera,
             lane_id=lane_id, policy=policy, at=at, source=source,
         )
+        if mismatch:
+            # The receipt decides the exit; the camera disagreement is evidence
+            # for the operator, never a reason to deny automatically.
+            out["plate_mismatch"] = mismatch
+            out["message"] = (
+                f"{out.get('message') or ''} Check the car: the exit camera read "
+                f"{mismatch['camera_plate']}, but this receipt is for {mismatch['session_plate']}."
+            ).strip()
+            record_access_decision(
+                db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
+                outcome="QR_PLATE_MISMATCH",
+                reason=f"QR session {mismatch['session_plate']} vs camera {mismatch['camera_plate']}",
+                parker_kind=row.parker_kind or "CASUAL",
+                barrier_opened=bool(out.get("barrier_opened")),
+                extra={"source": source, **mismatch},
+            )
+        return out
+
+    QR_CAMERA_READ_WINDOW_SECONDS = 120
+
+    def _camera_plate_mismatch(
+        self, db: Session, row: ParkingSession, *, gate: Gate | None, camera: Camera | None, at: datetime | None,
+    ) -> dict[str, Any] | None:
+        """The latest recent exit-camera read at this lane, if it names another plate."""
+        from datetime import timedelta
+
+        from app.core.plate import normalize_plate, plate_similarity
+        from app.models import VehicleCapture
+
+        if gate is None and camera is None:
+            return None
+        now = _aware(at) or datetime.now(timezone.utc)
+        query = select(VehicleCapture).where(
+            VehicleCapture.lane_direction == "EXIT",
+            VehicleCapture.created_at >= now - timedelta(seconds=self.QR_CAMERA_READ_WINDOW_SECONDS),
+            VehicleCapture.plate != "",
+        )
+        if camera is not None:
+            query = query.where(VehicleCapture.camera_id == camera.id)
+        else:
+            query = query.where(VehicleCapture.gate_id == gate.id)
+        latest = db.scalar(query.order_by(VehicleCapture.id.desc()).limit(1))
+        if latest is None:
+            return None
+        camera_plate, session_plate = normalize_plate(latest.plate), normalize_plate(row.plate)
+        if not camera_plate or camera_plate == session_plate:
+            return None
+        created = _aware(latest.created_at)
+        return {
+            "camera_plate": camera_plate,
+            "session_plate": session_plate,
+            "capture_id": latest.id,
+            "camera_id": latest.camera_id,
+            "similarity": round(plate_similarity(camera_plate, session_plate), 2),
+            "seconds_ago": round((now - created).total_seconds(), 1) if created else None,
+        }
 
     async def _submit_session(
         self,
