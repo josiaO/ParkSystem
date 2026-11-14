@@ -478,7 +478,8 @@ class SettingsPage(QWidget):
         combo.currentTextChanged.connect(self.change)
         window.appearanceChanged.connect(lambda name: self._sync_appearance(combo, name))
         form.addRow("Appearance", combo)
-        self.timezone=QLineEdit("UTC")
+        self.timezone=QLineEdit()
+        self.timezone.setPlaceholderText("Africa/Dar_es_Salaam")
         self.currency=QLineEdit()
         self.language=QComboBox(); self.language.addItems(["en","sw","ar","fr","pt"])
         self.plate_validation=QComboBox(); self.plate_validation.addItems(["NONE","TZ","KE","ZA","AE"])
@@ -542,7 +543,8 @@ class SettingsPage(QWidget):
             clock=api.get("/settings/clock")
         except Exception as e:
             self.site_status.setText(str(e)); return
-        self.timezone.setText(str(data.get("timezone") or "UTC"))
+        from app.config import settings as _settings
+        self.timezone.setText(str(data.get("timezone") or _settings.site_timezone))
         self.currency.setText(str(data.get("currency") or ""))
         self.public_base_url.setText(str(data.get("public_base_url") or ""))
         idx=self.language.findText(str(data.get("language") or "en"))
@@ -554,9 +556,10 @@ class SettingsPage(QWidget):
             f"Site clock ({clock.get('timezone', data.get('timezone') or 'UTC')}): {clock.get('site_time', '—')}"
         )
     def save_site(self):
+        from app.config import settings as _settings
         try:
             saved=api.patch("/settings/site",{
-                "timezone": self.timezone.text().strip() or "UTC",
+                "timezone": self.timezone.text().strip() or _settings.site_timezone,
                 "currency": self.currency.text().strip().upper(),
                 "language": self.language.currentText(),
                 "plate_validation": self.plate_validation.currentText(),

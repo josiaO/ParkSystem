@@ -52,6 +52,8 @@ starlette==1.6.0
 tqdm==4.70.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
+# zoneinfo has no system database on Windows; tariff boundaries need it.
+tzdata==2026.6
 uvicorn==0.52.4
 uvloop==0.22.1; sys_platform != "win32"
 watchfiles==1.2.0

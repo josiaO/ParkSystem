@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
+    QCheckBox, QComboBox, QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
     QPushButton, QRadioButton, QVBoxLayout, QWizard, QWizardPage,
 )
 

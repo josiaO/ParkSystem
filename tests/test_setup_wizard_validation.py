@@ -82,3 +82,80 @@ def test_node_wizard_requires_its_own_account_password(qapp):
     wizard.node_password.setText("node-password-123")
     wizard.node_password_confirm.setText("node-password-123")
     assert wizard._validate_node_credentials() is True
+
+
+def test_site_server_wizard_asks_for_the_site_timezone(qapp):
+    """Phase 2.2: tariff day/night boundaries depend on the site timezone."""
+    wizard = SetupWizard(DeploymentConfig())
+
+    assert wizard.site_timezone.currentText() == "Africa/Dar_es_Salaam"
+    assert wizard._validate_timezone() is True
+    wizard.site_timezone.setEditText("Mars/Olympus_Mons")
+    assert wizard._validate_timezone() is False
+    assert "timezone" in wizard.timezone_status.text().lower()
+    wizard.site_timezone.setEditText("Africa/Nairobi")
+    assert wizard._validate_timezone() is True
+
+
+def test_wizard_saves_timezone_without_overwriting_a_stored_choice(qapp, tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from app.database_config import DatabaseConfig
+    from app.db import Base
+    from app.services.site_policy import save_site_policy, site_policy
+
+    path = tmp_path / "site.db"
+    engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(engine)
+    config = DatabaseConfig(engine="SQLITE", sqlite_path=str(path))
+
+    wizard = SetupWizard(DeploymentConfig())
+    wizard._save_site_timezone(config)  # fresh database: the default is stored
+    with Session(engine) as db:
+        assert site_policy(db)["timezone"] == "Africa/Dar_es_Salaam"
+        save_site_policy(db, {"timezone": "Africa/Kampala"})
+
+    wizard = SetupWizard(DeploymentConfig())
+    wizard._save_site_timezone(config)  # re-run, picker untouched: keep Kampala
+    with Session(engine) as db:
+        assert site_policy(db)["timezone"] == "Africa/Kampala"
+
+    wizard.site_timezone.setEditText("Africa/Nairobi")
+    wizard._save_site_timezone(config)  # technician chose explicitly
+    with Session(engine) as db:
+        assert site_policy(db)["timezone"] == "Africa/Nairobi"
+    engine.dispose()
+
+
+def test_desktop_settings_page_round_trips_the_site_timezone(qapp):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit
+
+    import app.desktop.main as desktop
+
+    sent = {}
+
+    class FakeApi:
+        def get(self, path):
+            if path == "/settings/clock":
+                return {"server_time_utc": "t", "timezone": "Africa/Dar_es_Salaam", "site_time": "t"}
+            return {"timezone": "", "currency": "TZS", "language": "en", "plate_validation": "TZ"}
+
+        def patch(self, path, body):
+            sent.update(body)
+            return body
+
+    language, plates = QComboBox(), QComboBox()
+    language.addItems(["en", "sw"])
+    plates.addItems(["NONE", "TZ"])
+    page = SimpleNamespace(timezone=QLineEdit(), currency=QLineEdit(), public_base_url=QLineEdit(),
+                           language=language, plate_validation=plates, site_status=QLabel())
+    with patch.object(desktop, "api", FakeApi()):
+        desktop.SettingsPage.load_site(page)
+        assert page.timezone.text() == "Africa/Dar_es_Salaam"  # server sent none: site default
+        page.timezone.setText("")
+        desktop.SettingsPage.save_site(page)
+    assert sent["timezone"] == "Africa/Dar_es_Salaam"

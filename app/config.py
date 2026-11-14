@@ -243,7 +243,8 @@ class Settings(BaseSettings):
     native_alpr_enabled: bool = True
     live_view_provider: str = "MEDIAMTX"
     recognition_pipeline: str = "FASTALPR_NEW"
-    site_timezone: str = "UTC"
+    # IANA name. Tariff day/night boundaries and displayed times are site-local.
+    site_timezone: str = "Africa/Dar_es_Salaam"
     site_locale: str = "en"
     site_language: str = "en"
     plate_normalization: str = "ALNUM_UPPER"
