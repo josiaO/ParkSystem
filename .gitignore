@@ -45,7 +45,7 @@ media/
 *.log
 
 # FastALPR models (downloaded by packaging/make_windows_kit.sh)
-models/
+/models/
 *.onnx
 
 # USB install kit and download cache
