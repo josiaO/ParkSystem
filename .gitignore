@@ -94,3 +94,6 @@ prompts/
 # Real gate-camera footage and local Camera Lab evidence. Keep the originals
 # on the developer machine; reports/crops are reproducible generated output.
 TestingData/
+
+# Stray runtime artefacts (e.g. a session file created next to an in-memory DB URL)
+/:memory:*
