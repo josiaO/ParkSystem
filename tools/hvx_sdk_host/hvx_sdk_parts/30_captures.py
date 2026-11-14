@@ -76,7 +76,22 @@ class _HVXCaptureMixin:
             )
             received_at = self._live_received_at.get(handle, 0.0)
             jpeg = self._last_live_jpeg.get(handle, b"")
-            if time.monotonic() - received_at > 5.0 or jpeg[:2] != b"\xff\xd8":
+            # A first request (after=0) used to receive any JPEG up to 5 s
+            # old, which showed a car that had already left when a viewer
+            # (re)connected. Serve only frames inside the live window.
+            max_age = self._live_max_age_seconds() if hasattr(self, "_live_max_age_seconds") else 1.5
+            if after == 0 and timeout > 0 and time.monotonic() - received_at > max_age and condition is not None:
+                while time.monotonic() < deadline:
+                    condition.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    received_at = self._live_received_at.get(handle, 0.0)
+                    if time.monotonic() - received_at <= max_age:
+                        break
+                seq = max(
+                    int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0),
+                    int(getattr(self, "_window_frame_seq", {}).get(handle, 0) or 0),
+                )
+                jpeg = self._last_live_jpeg.get(handle, b"")
+            if time.monotonic() - received_at > max_age or jpeg[:2] != b"\xff\xd8":
                 return b"", seq
             if after and seq <= after:
                 return b"", seq

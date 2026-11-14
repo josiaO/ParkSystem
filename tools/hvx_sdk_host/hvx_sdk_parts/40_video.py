@@ -34,6 +34,11 @@ class _HVXVideoMixin:
             value = 15.0
         return max(1.0, min(20.0, value))
 
+    @classmethod
+    def _live_max_age_seconds(cls) -> float:
+        """Oldest frame that may still be served as live video."""
+        return cls._env_int("SMARTPARK_HVX_LIVE_MAX_AGE_MS", 1500, minimum=300, maximum=5000) / 1000.0
+
     def _hidden_hwnd(self, handle: int):
         """Create the PlaySdk HWND on the dedicated UI thread (OcxConfig pattern)."""
         handle = int(handle)
@@ -58,10 +63,15 @@ class _HVXVideoMixin:
             frame = self._draw_frames.get(handle)
             seq = int(self._draw_frame_seq.get(handle, 0))
             encoded_seq = int(self._draw_encoded_seq.get(handle, 0))
+            frame_at = float(getattr(self, "_draw_frame_at", {}).get(handle, 0.0) or 0.0)
         # A callback is an edge, not a cache. Returning the previously encoded
         # JPEG here makes a stalled decoder look healthy to the HTTP bridge.
         # The caller must receive an empty result until a newer DIB arrives.
         if not frame or seq <= encoded_seq:
+            return b""
+        # A bitmap copied before the last viewer left must never be encoded
+        # as "live" when a viewer returns; wait for the next callback instead.
+        if frame_at and time.monotonic() - frame_at > self._live_max_age_seconds():
             return b""
         raw, width, height, bit_count, stride, orientation = frame
         encode_started = time.monotonic()
@@ -390,7 +400,12 @@ class _HVXVideoMixin:
                 diagnostics = getattr(self, "_video_diagnostics", {}).get(handle, {})
                 draw_rc = diagnostics.get("draw_data_rc")
                 registered_at = float(diagnostics.get("draw_data_registered_at") or 0.0)
-                received = int(diagnostics.get("draw_data_frames") or 0)
+                # Callbacks skipped by the no-viewer/rate throttle still prove
+                # the draw callback is alive; do not fall back to the legacy
+                # JPEG API just because no bitmap was copied yet.
+                received = int(diagnostics.get("draw_data_frames") or 0) + int(
+                    getattr(self, "_draw_skipped", {}).get(handle, 0) or 0
+                )
             draw_registered = draw_rc == DC_NO_ERROR
             jpeg = self._draw_data_jpeg(handle)
             if jpeg:
@@ -1179,6 +1194,30 @@ class _HVXVideoMixin:
         height_arg = int(height or 0)
         if width <= 0 or height_arg == 0 or not data:
             return
+        # Copying every full-resolution DIB (~6 MB at 1080p, ~25 fps per
+        # camera) into Python starves the 32-bit host: the GIL and the shared
+        # lock are also needed by the native plate callbacks and the HTTP
+        # workers. Only copy while a consumer is actually reading live video,
+        # and no faster than the display JPEG rate. Skipped callbacks are
+        # counted without touching the bitmap.
+        callback_now = time.monotonic()
+        requested_at = float(getattr(self, "_live_requested_at", {}).get(handle, 0.0) or 0.0)
+        copy_interval = 1.0 / max(1.0, self._display_jpeg_fps())
+        last_copy_at = float(getattr(self, "_draw_copy_at", {}).get(handle, 0.0) or 0.0)
+        if callback_now - requested_at > 5.0 or callback_now - last_copy_at < copy_interval * 0.9:
+            skipped = getattr(self, "_draw_skipped", None)
+            if skipped is None:
+                skipped = self._draw_skipped = {}
+            skipped[handle] = int(skipped.get(handle, 0)) + 1
+            # Keep liveness visible to the watchdog without a bitmap copy.
+            diagnostics = getattr(self, "_video_diagnostics", {}).get(handle)
+            if diagnostics is not None:
+                diagnostics["callback_last_at"] = callback_now
+            return
+        copy_times = getattr(self, "_draw_copy_at", None)
+        if copy_times is None:
+            copy_times = self._draw_copy_at = {}
+        copy_times[handle] = callback_now
         height = abs(height_arg)
         bit_count = 24
         compression = 0
@@ -1220,8 +1259,11 @@ class _HVXVideoMixin:
             seq = int(self._draw_frame_seq.get(handle, 0)) + 1
             self._draw_frame_seq[handle] = seq
             self._draw_frames[handle] = (raw, width, height, bit_count, stride, -1 if int(bmi_height) > 0 else 1)
+            draw_times = getattr(self, "_draw_frame_at", None)
+            if draw_times is None:
+                draw_times = self._draw_frame_at = {}
+            draw_times[handle] = callback_now
             diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
-            callback_now = time.monotonic()
             callback_first = float(diagnostics.get("callback_window_at") or callback_now)
             callback_count = int(diagnostics.get("callback_window_frames") or 0) + 1
             diagnostics.update(

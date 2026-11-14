@@ -25,6 +25,14 @@ def _int_or(value, default: int) -> int:
     return int(default if value is None else value)
 
 
+def _env_bounded(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 class BoundedHTTPServer(HTTPServer):
     """Serve SDK requests without creating an unbounded thread per socket.
 
@@ -42,7 +50,15 @@ class BoundedHTTPServer(HTTPServer):
 
     request_queue_size = 64
 
-    def __init__(self, server_address, handler_class, *, max_workers: int = 8, max_pending: int = 16):
+    def __init__(self, server_address, handler_class, *, max_workers: int | None = None, max_pending: int | None = None):
+        # Each watched camera holds one live-video long-poll (<=1.5 s) while
+        # event drains, event photos, GPIO and coil polls also need workers.
+        # Eight workers saturated with three or four cameras and rejected the
+        # plate-event drains that recognition depends on.
+        if max_workers is None:
+            max_workers = _env_bounded("SMARTPARK_HVX_HTTP_WORKERS", 24, 4, 64)
+        if max_pending is None:
+            max_pending = _env_bounded("SMARTPARK_HVX_HTTP_PENDING", 48, 8, 256)
         super().__init__(server_address, handler_class)
         self.daemon_threads = True
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hvx-http")

@@ -276,7 +276,9 @@ class HVXHostClient:
         try:
             client = _shared_live_client(self.base_url, handle)
             previous = int(self.last_live_seq.get(handle, 0) or 0)
-            params = {"after": previous, "wait_ms": 1000} if previous else {}
+            # Always long-poll: on the first request the host waits for a
+            # frame inside its live window instead of returning an old cache.
+            params = {"after": previous, "wait_ms": 1000}
             r = await client.get(f"/live-jpeg/{handle}", params=params, timeout=1.4)
             meta["status_code"] = r.status_code
             try:

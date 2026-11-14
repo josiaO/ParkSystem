@@ -40,15 +40,16 @@ def test_stale_mjpeg_closes_cleanly_and_requests_camera_only_restart():
              patch.object(preview, "live_is_current", return_value=False), \
              patch.object(preview.gateway, "restart_decoder", return_value=True) as restart, \
              patch.object(preview.asyncio, "wait_for", new=timeout):
+            # The cache is not current, so a new viewer is never shown the
+            # cached frame. After the bounded first-frame wait the stream asks
+            # only this camera to recover and closes for a client retry.
             stream = preview.mjpeg_from_cache(4)
-            first = await stream.__anext__()
-            assert b"\xff\xd8live\xff\xd9" in first
             try:
                 await stream.__anext__()
             except StopAsyncIteration:
                 pass
             else:
-                raise AssertionError("stale stream should close for browser reconnect")
+                raise AssertionError("stale cache must not be sent; stream should close for reconnect")
             restart.assert_called_once_with(4)
 
     asyncio.run(exercise())

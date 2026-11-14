@@ -231,6 +231,7 @@ def test_sdk_read_cannot_overlap_decoder_restart():
 def test_live_http_sequence_survives_video_stop_start():
     sdk = sdk_reader(Mock(return_value=0))
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     sdk._live_frame_seq = {0: 42}
     sdk._video_diagnostics = {}
     sdk._call_video_ui = lambda operation: operation()
@@ -257,6 +258,7 @@ def test_play_sdk_draw_data_callback_produces_jpeg_without_window_capture():
     sdk._last_live_jpeg = {}
     sdk._live_received_at = {}
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     sdk._video_diagnostics = {}
 
     # Two rows of a bottom-up 24-bit BGR DIB. Each row is padded to 8 bytes.
@@ -295,6 +297,7 @@ def test_display_jpeg_profile_downscales_without_touching_native_callback_pixels
     sdk._last_live_jpeg = {}
     sdk._live_received_at = {}
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     sdk._video_diagnostics = {}
     monkeypatch.setenv("SMARTPARK_HVX_JPEG_MAX_WIDTH", "1")
     monkeypatch.setenv("SMARTPARK_HVX_JPEG_QUALITY", "70")
@@ -414,6 +417,7 @@ def test_timed_out_start_keeps_native_operation_serialized_until_it_finishes():
 def test_shutdown_keeps_window_owner_alive_until_video_stops():
     sdk = sdk_reader(Mock())
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     sdk._video_running = True
     sdk.initialized = True
     sdk.dll.Net_UNinit = Mock()
@@ -442,6 +446,7 @@ def test_forced_disconnect_releases_session_when_decoder_cannot_stop():
     sdk.stop_video = Mock(return_value=-1)
     sdk._connection_results = {"camera": {"result": {"handle": 0}}}
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     sdk.dll.Net_DisConnCamera = Mock(return_value=0)
     assert sdk.disconnect(0, force=True) == 0
     assert "camera" not in sdk._connection_results
@@ -451,6 +456,7 @@ def test_forced_disconnect_releases_session_when_decoder_cannot_stop():
 def test_waiting_jpeg_read_does_not_use_a_stopped_decoder():
     sdk = sdk_reader(Mock(return_value=7))
     sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}  # a live viewer is attached
     entered = threading.Event()
     def read():
         entered.set()
@@ -463,3 +469,47 @@ def test_waiting_jpeg_read_does_not_use_a_stopped_decoder():
     reader.join(1)
     assert not reader.is_alive()
     sdk.dll.Net_GetJpgBuffer.assert_not_called()
+
+
+def _draw_sdk():
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._draw_frames = {}
+    sdk._draw_frame_seq = {}
+    sdk._draw_encoded_seq = {}
+    sdk._video_diagnostics = {}
+    sdk._video_handles = {0}
+    sdk._last_live_jpeg = {}
+    sdk._live_received_at = {}
+    sdk._live_frame_seq = {}
+    return sdk
+
+
+def _call_draw(sdk):
+    pixels = (ctypes.c_ubyte * 16)(*([0x40] * 16))
+    sdk._on_draw_data(0, None, None, ctypes.cast(pixels, ctypes.POINTER(ctypes.c_ubyte)), 2, 2, None)
+
+
+def test_draw_callback_does_not_copy_bitmaps_without_a_live_viewer():
+    sdk = _draw_sdk()
+    sdk._live_requested_at = {}
+    _call_draw(sdk)
+    assert sdk._draw_frames == {}
+    assert sdk._draw_skipped[0] == 1
+
+
+def test_draw_callback_is_rate_limited_to_display_fps():
+    sdk = _draw_sdk()
+    sdk._live_requested_at = {0: time.monotonic()}
+    _call_draw(sdk)
+    _call_draw(sdk)  # immediately after: above display fps, skipped
+    assert sdk._draw_frame_seq[0] == 1
+    assert sdk._draw_skipped[0] == 1
+
+
+def test_old_bitmap_is_not_encoded_as_live_when_a_viewer_returns():
+    sdk = _draw_sdk()
+    sdk._live_requested_at = {0: time.monotonic()}
+    _call_draw(sdk)
+    sdk._draw_frame_at[0] -= 10.0  # copied long before the viewer came back
+    assert sdk._draw_data_jpeg(0) == b""
