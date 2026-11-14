@@ -238,6 +238,7 @@ class RegistryCodecTests(unittest.TestCase):
 
     def _run(self, telemetry):
         with patch.object(registry, "_migration_flags", return_value=self.FLAGS), \
+             patch.object(registry, "_sdk_camera", return_value=False), \
              patch.object(registry, "_camera_enabled", return_value=True), \
              patch.object(registry.mediamtx, "running", return_value=True), \
              patch.object(registry, "media_telemetry", return_value=telemetry), \
@@ -268,7 +269,8 @@ class RegistryCodecTests(unittest.TestCase):
         self.assertIn("snapshot.jpg", body["path"])
 
     def test_media_telemetry_offline_when_not_running(self):
-        with patch.object(registry.mediamtx, "running", return_value=False):
+        with patch.object(registry.mediamtx, "running", return_value=False), \
+             patch.object(registry, "_sdk_camera", return_value=False):
             body = registry.media_telemetry(7)
         self.assertEqual(body["state"], "OFFLINE")
         self.assertFalse(body["control_api_ok"])

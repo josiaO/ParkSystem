@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy.pool import NullPool, QueuePool, StaticPool
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -111,8 +111,13 @@ class SimulationTests(unittest.TestCase):
         kwargs = engine_kwargs("sqlite:///tmp/smartpark.db")
         self.assertIs(kwargs["poolclass"], NullPool)
         pg = engine_kwargs("postgresql+psycopg://u:p@localhost/smartpark")
-        self.assertEqual(pg["pool_size"], 5)
-        self.assertEqual(pg["max_overflow"], 5)
+        from app.config import settings as app_settings
+
+        self.assertIs(pg["poolclass"], QueuePool)
+        self.assertEqual(pg["pool_size"], max(1, int(app_settings.db_pool_size)))
+        self.assertEqual(pg["max_overflow"], max(0, int(app_settings.db_max_overflow)))
+        # Fail fast: a lane must not block for long waiting on a pooled
+        # connection when the central database is slow or unreachable.
         self.assertLessEqual(pg["pool_timeout"], 10)
 
     def test_developer_role_exists(self):

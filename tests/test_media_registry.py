@@ -9,8 +9,9 @@ from app.infrastructure.media import registry
 
 
 class MediaRegistryTests(unittest.TestCase):
-    def test_direct_legacy_is_default(self):
+    def test_direct_legacy_when_media_gateway_disabled(self):
         with (
+            patch.object(registry, "_sdk_camera", return_value=False),
             patch.object(registry, "_migration_flags", return_value={
                 "media_gateway_enabled": False,
                 "live_view_provider": LIVE_VIEW_DIRECT_LEGACY,
@@ -33,6 +34,7 @@ class MediaRegistryTests(unittest.TestCase):
             "webrtc_live_enabled": True,
         }
         with (
+            patch.object(registry, "_sdk_camera", return_value=False),
             patch.object(registry, "_migration_flags", return_value=flags),
             patch.object(registry, "media_mtx_for_camera", return_value=True),
             patch.object(registry.mediamtx, "running", return_value=False),
@@ -53,6 +55,7 @@ class MediaRegistryTests(unittest.TestCase):
             "running": True,
         }
         with (
+            patch.object(registry, "_sdk_camera", return_value=False),
             patch.object(registry, "_migration_flags", return_value=flags),
             patch.object(registry, "media_mtx_for_camera", return_value=True),
             patch.object(registry.mediamtx, "running", return_value=True),

@@ -269,10 +269,14 @@ class HybridFusionServiceTests(unittest.TestCase):
 
     def test_flush_decides_waiting_native_after_timeout(self):
         coordinator = hybrid_fusion.coordinator()
-        coordinator.wait_seconds = 0.0
+        original_wait = coordinator.wait_seconds
+        self.addCleanup(setattr, coordinator, "wait_seconds", original_wait)
         with patch.object(hybrid_fusion, "local_counterpart_available", return_value=True):
             asyncio.run(hybrid_fusion.offer_native(None, self.camera, {"plate": "ABC123", "confidence": 0.9}, jpeg=b"\xff\xd8x\xff\xd9"))
         self.assertEqual(self.persisted, [])
+        # The software counterpart never arrived; once the pairing wait has
+        # elapsed the flush loop decides on the native read alone.
+        coordinator.wait_seconds = 0.0
 
         class _Session:
             def __enter__(self):
@@ -287,7 +291,6 @@ class HybridFusionServiceTests(unittest.TestCase):
         applied = asyncio.run(hybrid_fusion.flush(_Session))
         self.assertEqual(applied, 1)
         self.assertEqual(self.persisted[0]["capture"]["plate"], "ABC123")
-        coordinator.wait_seconds = 1.5
 
     def test_routes_camera_requires_hybrid_mode_and_worker_ownership(self):
         local_only = _FakeCamera(id=1, recognition_mode="FASTALPR_ONLY", adapter_id="rtsp")
