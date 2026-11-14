@@ -501,12 +501,19 @@ async def _redacted_unhandled_exception(request: Request, exc: Exception):
 
 
 def _login_response(db: Session, username: str, password: str) -> LoginResponse:
-    from app.services.modules import ensure_modules_initialized, load_config, navigation_items
     from app.services.node_scope import is_processing_node
 
     processing_node = is_processing_node()
     user = authenticate_processing_node(db, username, password) if processing_node else authenticate_user(db, username, password)
     token = create_session(db, user)
+    return _session_response(db, user, token)
+
+
+def _session_response(db: Session, user: User, token: str) -> LoginResponse:
+    from app.services.modules import ensure_modules_initialized, load_config, navigation_items
+    from app.services.node_scope import is_processing_node
+
+    processing_node = is_processing_node()
     if not processing_node:
         ensure_modules_initialized(db)
     # Human permissions are independent of installation role. Machine runtime
@@ -830,6 +837,69 @@ def auth_media_token(token: str | None = Depends(oauth2_scheme), db: Session = D
         raise HTTPException(401, "Authentication required")
     media_token, ttl = issue_media_token(db, token)
     return {"media_token": media_token, "expires_in": ttl}
+
+
+@app.post("/kiosk/auth", response_model=LoginResponse)
+def kiosk_device_login(request: Request, payload: dict = Body(default_factory=dict), db: Session = Depends(get_db)):
+    """Sign a kiosk PC in with its revocable device credential (no person's password)."""
+    import math
+
+    from app.services.kiosk_devices import authenticate_device
+    from app.services.login_throttle import throttle
+
+    device_id = str(payload.get("device_id") or "").strip()
+    credential = str(payload.get("credential") or "")
+    guard = throttle()
+    ip = str(getattr(getattr(request, "client", None), "host", "") or "unknown")
+    wait = guard.check(ip, f"kiosk:{device_id}")
+    if wait > 0:
+        seconds = max(1, math.ceil(wait))
+        raise HTTPException(429, f"Too many failed kiosk sign-ins. Try again in {seconds} seconds.",
+                            headers={"Retry-After": str(seconds)})
+    try:
+        device, user, token = authenticate_device(db, device_id, credential)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            guard.record_failure(ip, f"kiosk:{device_id}")
+        raise
+    guard.record_success(ip, f"kiosk:{device_id}")
+    return _session_response(db, user, token)
+
+
+@app.get("/kiosk-devices")
+def list_kiosk_devices(db: Session = Depends(get_db), _: User = Depends(require("users.manage"))):
+    from app.models import KioskDevice
+    from app.services.kiosk_devices import device_dict
+
+    return [device_dict(row) for row in db.scalars(select(KioskDevice).order_by(KioskDevice.id)).all()]
+
+
+@app.post("/kiosk-devices")
+def create_kiosk_device(payload: dict = Body(default_factory=dict), db: Session = Depends(get_db), actor: User = Depends(require("users.manage"))):
+    """Enrol a kiosk PC. The credential is returned once and never stored in clear."""
+    from app.services.kiosk_devices import create_device, device_dict
+
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the kiosk a name (for example 'Exit B kiosk').")
+    row, credential = create_device(db, name=name, created_by=actor.id)
+    write_audit(db, actor, "kiosk_device.create", "kiosk_device", str(row.id), row.name)
+    db.commit()
+    return {**device_dict(row), "credential": credential}
+
+
+@app.post("/kiosk-devices/{device_pk}/revoke")
+def revoke_kiosk_device(device_pk: int, db: Session = Depends(get_db), actor: User = Depends(require("users.manage"))):
+    from app.models import KioskDevice
+    from app.services.kiosk_devices import device_dict, revoke_device
+
+    row = db.get(KioskDevice, device_pk)
+    if row is None:
+        raise HTTPException(404, "Kiosk device not found")
+    row = revoke_device(db, row)
+    write_audit(db, actor, "kiosk_device.revoke", "kiosk_device", str(row.id), row.name)
+    db.commit()
+    return device_dict(row)
 
 
 @app.post("/auth/logout")
