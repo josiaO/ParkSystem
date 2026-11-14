@@ -164,6 +164,11 @@ class SQLiteOutbox:
             # and "acknowledged": the ack and the processed mark commit together.
             db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY, ts REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS published (key TEXT PRIMARY KEY, event_id TEXT NOT NULL, ts REAL NOT NULL DEFAULT 0)")
+            # Poison-message handling: a row that keeps failing is moved aside
+            # after a bounded number of attempts so it cannot block every
+            # later parking event behind it.
+            db.execute("CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, count INTEGER NOT NULL, last_error TEXT NOT NULL DEFAULT '', ts REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS dead_letter (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, ts REAL NOT NULL, error TEXT NOT NULL DEFAULT '', failed_at REAL NOT NULL)")
             try:
                 db.execute("ALTER TABLE published ADD COLUMN ts REAL NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
@@ -227,10 +232,40 @@ class SQLiteOutbox:
         with self._connect() as db:
             cursor = db.execute("DELETE FROM events WHERE id = ?", (item_id,))
             self.acked += cursor.rowcount
+            db.execute("DELETE FROM attempts WHERE id = ?", (item_id,))
             if processed_key:
                 now = time.time()
                 db.execute("INSERT OR REPLACE INTO processed (key, ts) VALUES (?, ?)", (str(processed_key), now))
                 db.execute("DELETE FROM processed WHERE ts < ?", (now - self.PROCESSED_RETENTION_SECONDS,))
+
+    MAX_ATTEMPTS = 5
+
+    def record_failure(self, item_id: str, error: str = "") -> bool:
+        """Count a failed attempt. Returns True when the row was dead-lettered."""
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute("SELECT count FROM attempts WHERE id = ?", (item_id,)).fetchone()
+            count = (int(row[0]) if row else 0) + 1
+            db.execute(
+                "INSERT OR REPLACE INTO attempts (id, count, last_error, ts) VALUES (?, ?, ?, ?)",
+                (item_id, count, str(error or "")[:500], now),
+            )
+            if count < self.MAX_ATTEMPTS:
+                return False
+            event = db.execute("SELECT kind, payload, ts FROM events WHERE id = ?", (item_id,)).fetchone()
+            if event is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO dead_letter (id, kind, payload, ts, error, failed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (item_id, event[0], event[1], float(event[2]), str(error or "")[:500], now),
+                )
+            db.execute("DELETE FROM events WHERE id = ?", (item_id,))
+            db.execute("DELETE FROM attempts WHERE id = ?", (item_id,))
+        self.dead_lettered = int(getattr(self, "dead_lettered", 0)) + 1
+        return True
+
+    def dead_letter_depth(self) -> int:
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM dead_letter").fetchone()[0]
 
     def was_processed(self, key: str | None) -> bool:
         if not key:
@@ -250,6 +285,7 @@ class SQLiteOutbox:
 
     def snapshot(self) -> dict:
         return {"name": "outbox", "backend": "sqlite", "depth": self.depth(),
+                "dead_letter": self.dead_letter_depth(),
                 "acked": self.acked, "failed": self.failed, "duplicates": self.duplicates, "path": str(self.path)}
 
 
