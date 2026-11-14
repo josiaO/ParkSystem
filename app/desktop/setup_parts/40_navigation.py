@@ -33,7 +33,7 @@ class _SetupNavigationMixin:
                 self.summary.setText(f"Role: {role}\nDatabase: PostgreSQL\nAPI binding: 0.0.0.0:{int(settings.api_port)}\n\nThe node starts with no camera ownership. After login, assign this PC to its gate in Live Gates. Camera and recognition access is derived from that persisted gate assignment.")
             else:
                 engine = "PostgreSQL" if self.postgres_radio.isChecked() else "SQLite (testing/evaluation)"
-                self.summary.setText(f"Role: {role}\nSite: {self.site_name.text().strip() or settings.site_name}\nDatabase: {engine}\nAPI binding: 0.0.0.0:{int(settings.api_port)}\n\nApply will initialize/migrate the database and create the administrator transactionally.")
+                self.summary.setText(f"Role: {role}\nSite: {self.site_name.text().strip() or settings.site_name}\nTimezone: {self.site_timezone.currentText().strip()}\nDatabase: {engine}\nAPI binding: 0.0.0.0:{int(settings.api_port)}\n\nApply will initialize/migrate the database and create the administrator transactionally.")
 
     def _validate_node_credentials(self) -> bool:
         if not self.node_radio.isChecked():
@@ -110,6 +110,9 @@ class _SetupNavigationMixin:
             if not self.node_radio.isChecked() and not self._validate_admin_page():
                 QMessageBox.warning(self, "Administrator not ready", self.admin_status.text())
                 return
+            if not self.node_radio.isChecked() and not self._validate_timezone():
+                QMessageBox.warning(self, "Timezone not valid", self.timezone_status.text())
+                return
             candidate = {
                 "role": EDGE_NODE if self.node_radio.isChecked() else SITE_SERVER,
                 "server_base_url": self.server_url.text().strip().rstrip("/") if self.node_radio.isChecked() else f"http://127.0.0.1:{int(settings.api_port)}",
@@ -139,6 +142,7 @@ class _SetupNavigationMixin:
                 created_admin = False
             else:
                 created_admin = self._create_admin(db_config)
+                self._save_site_timezone(db_config)
                 if not created_admin:
                     self.admin_status.setText(
                         "An administrator already exists in this database; existing users and passwords were preserved."

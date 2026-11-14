@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+SITE_TIMEZONE_CHOICES = (
+    "Africa/Dar_es_Salaam",
+    "Africa/Nairobi",
+    "Africa/Kampala",
+    "Africa/Kigali",
+    "Africa/Lusaka",
+    "Africa/Johannesburg",
+    "UTC",
+)
+
+
 class _SetupPagesMixin:
     def _review_page(self):
         page = QWizardPage()
@@ -43,6 +54,17 @@ class _SetupPagesMixin:
         self.site_name = QLineEdit(self.current.site_name or settings.site_name)
         body.addWidget(_label("Site name"))
         body.addWidget(self.site_name)
+        # Tariff day/night boundaries and every time an operator sees are
+        # site-local. A wrong zone shifts the 05:05/23:05 boundaries.
+        self.site_timezone = QComboBox()
+        self.site_timezone.setEditable(True)
+        self.site_timezone.addItems(SITE_TIMEZONE_CHOICES)
+        self._initial_site_timezone = str(getattr(settings, "site_timezone", "") or "Africa/Dar_es_Salaam")
+        self.site_timezone.setEditText(self._initial_site_timezone)
+        self.timezone_status = _label("Tariff day/night times and receipts use this timezone.")
+        body.addWidget(_label("Site timezone (IANA name)"))
+        body.addWidget(self.site_timezone)
+        body.addWidget(self.timezone_status)
         body.addWidget(_label("Required from Operator Workstations: TCP 8760. For WebRTC live video: TCP 8889 and UDP/TCP 8189. PostgreSQL remains local to the Site Server."))
         body.addStretch()
         return page

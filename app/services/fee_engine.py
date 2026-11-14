@@ -58,16 +58,37 @@ def _parse_hms(value: str) -> time:
     return time(parts[0], parts[1], parts[2])
 
 
-def is_daytime(when: datetime, rules: dict[str, Any] | None = None) -> bool:
-    rules = rules or CAR1_RULES
+_warned_timezones: set[str] = set()
+
+
+def _site_local(when: datetime, rules: dict[str, Any]) -> datetime:
+    """*when* as wall-clock time in the tariff's site timezone.
+
+    Day/night boundaries (05:05/23:05) are local times; persisted timestamps
+    are UTC. Without the conversion a Tanzanian site is three hours off.
+    """
     dt = _aware(when)
     tz_name = str(rules.get("timezone") or "")
-    if tz_name:
-        try:
-            from zoneinfo import ZoneInfo
-            dt = dt.astimezone(ZoneInfo(tz_name))
-        except Exception:
-            pass
+    if not tz_name:
+        return dt
+    try:
+        from zoneinfo import ZoneInfo
+
+        return dt.astimezone(ZoneInfo(tz_name))
+    except Exception:
+        if tz_name not in _warned_timezones:
+            _warned_timezones.add(tz_name)
+            import logging
+
+            logging.getLogger("smartpark").error(
+                "tariff timezone %r is unavailable (is tzdata installed?); day/night boundaries use UTC", tz_name,
+            )
+        return dt
+
+
+def is_daytime(when: datetime, rules: dict[str, Any] | None = None) -> bool:
+    rules = rules or CAR1_RULES
+    dt = _site_local(when, rules)
     start = _parse_hms(str(rules["day_start"]))
     end = _parse_hms(str(rules["day_end"]))
     clock = dt.timetz().replace(tzinfo=None)
@@ -94,8 +115,9 @@ def _next_boundary(when: datetime, rules: dict[str, Any]) -> datetime:
 def _charge_span(start: datetime, end: datetime, rules: dict[str, Any]) -> tuple[int, list[str]]:
     notes: list[str] = []
     total = 0
-    cursor = _aware(start)
-    finish = _aware(end)
+    # Walk the stay in site-local time so boundaries fall at local 05:05/23:05.
+    cursor = _site_local(start, rules)
+    finish = _site_local(end, rules)
     while cursor < finish:
         boundary = _next_boundary(cursor, rules)
         chunk_end = min(finish, boundary)
