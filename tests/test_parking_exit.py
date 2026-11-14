@@ -240,6 +240,50 @@ class ExitLaneTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def _exit_read(self, db, plate: str, *, seconds_ago: float = 5, at: datetime):
+        from app.models import VehicleCapture
+
+        db.add(VehicleCapture(camera_id=200, gate_id=2, lane_direction="EXIT", plate=plate,
+                              created_at=at - timedelta(seconds=seconds_ago)))
+        db.commit()
+
+    def test_qr_exit_flags_a_disagreeing_camera_read_without_denying(self):
+        """Phase 2.4: the QR decides; a different camera plate is shown to the operator."""
+        from app.models import AccessDecision
+
+        async def run():
+            now = datetime.now(timezone.utc)
+            with self.Session() as db:
+                row = self._active(db, "T500AAA", now - timedelta(minutes=10))
+                self._exit_read(db, "T999ZZZ", at=now)
+                out = await ExitLaneController(opener=FakeOpener()).submit_qr(
+                    db, raw_scan=row.public_token, event_id="qr-mismatch", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertTrue(out["barrier_opened"], out)  # never auto-deny
+                self.assertEqual(out["plate_mismatch"]["camera_plate"], "T999ZZZ")
+                self.assertEqual(out["plate_mismatch"]["session_plate"], "T500AAA")
+                flagged = db.scalars(select(AccessDecision).where(AccessDecision.outcome == "QR_PLATE_MISMATCH")).all()
+                self.assertEqual(len(flagged), 1)
+
+        asyncio.run(run())
+
+    def test_qr_exit_without_a_conflicting_recent_read_has_no_flag(self):
+        async def run():
+            now = datetime.now(timezone.utc)
+            with self.Session() as db:
+                row = self._active(db, "T501BBB", now - timedelta(minutes=10))
+                self._exit_read(db, "T999ZZZ", seconds_ago=600, at=now)  # old read: another car
+                self._exit_read(db, "T501BBB", at=now)
+                out = await ExitLaneController(opener=FakeOpener()).submit_qr(
+                    db, raw_scan=row.public_token, event_id="qr-match", site_id=1,
+                    gate=db.get(Gate, 2), camera=db.get(Camera, 200), lane_id=20, at=now,
+                )
+                self.assertTrue(out["barrier_opened"], out)
+                self.assertIsNone(out.get("plate_mismatch"))
+
+        asyncio.run(run())
+
     def test_wait_for_passage_does_not_close_on_open(self):
         async def run():
             now = datetime(2026, 10, 1, 12, 10, tzinfo=timezone.utc)
