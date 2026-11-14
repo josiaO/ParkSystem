@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
+import hmac
+import os
 import secrets
+import time
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerificationError, VerifyMismatchError
@@ -192,6 +196,10 @@ def load_user_from_token(db: Session, token: str | None) -> User:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     row = db.scalar(select(AuthSession).where(AuthSession.token_hash == _token_hash(token)))
+    return _user_for_session(db, row)
+
+
+def _user_for_session(db: Session, row: AuthSession | None) -> User:
     if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
     expires_at = row.expires_at
@@ -210,33 +218,108 @@ def load_user_from_token(db: Session, token: str | None) -> User:
     return user
 
 
+# Short-lived media tokens --------------------------------------------------
+#
+# Browsers cannot send an Authorization header from <img src> or an MJPEG
+# stream, so media URLs carry a token in the query string, where it can end up
+# in logs and history. Instead of the 12-hour session token the web UI uses a
+# media token: valid MEDIA_TOKEN_TTL_SECONDS, accepted only by media routes,
+# bound to (and revoked with) its session, and HMAC-signed with a per-install
+# key. Format: m1.<session id>.<expiry unix>.<signature>.
+
+MEDIA_TOKEN_TTL_SECONDS = 10 * 60
+_MEDIA_TOKEN_PREFIX = "m1"
+
+
+def _media_token_key() -> bytes:
+    from .config import settings
+
+    path = settings.data_dir / "media_token.key"
+    try:
+        key = path.read_bytes()
+        if len(key) >= 32:
+            return key
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return path.read_bytes()
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
+    return key
+
+
+def _media_signature(session_id: int, expires: int, token_hash: str) -> str:
+    message = f"{_MEDIA_TOKEN_PREFIX}.{session_id}.{expires}.{token_hash}".encode("ascii")
+    digest = hmac.new(_media_token_key(), message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def issue_media_token(db: Session, session_token: str) -> tuple[str, int]:
+    row = db.scalar(select(AuthSession).where(AuthSession.token_hash == _token_hash(session_token)))
+    _user_for_session(db, row)
+    expires = int(time.time()) + MEDIA_TOKEN_TTL_SECONDS
+    signature = _media_signature(row.id, expires, row.token_hash)
+    return f"{_MEDIA_TOKEN_PREFIX}.{row.id}.{expires}.{signature}", MEDIA_TOKEN_TTL_SECONDS
+
+
+def load_user_from_media_token(db: Session, media_token: str) -> User:
+    refused = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Media link expired")
+    parts = (media_token or "").split(".")
+    if len(parts) != 4 or parts[0] != _MEDIA_TOKEN_PREFIX:
+        raise refused
+    try:
+        session_id, expires = int(parts[1]), int(parts[2])
+    except ValueError:
+        raise refused
+    now = int(time.time())
+    if expires < now or expires > now + MEDIA_TOKEN_TTL_SECONDS + 60:
+        raise refused
+    row = db.get(AuthSession, session_id)
+    if row is None or not hmac.compare_digest(parts[3], _media_signature(session_id, expires, row.token_hash)):
+        raise refused
+    return _user_for_session(db, row)
+
+
 def current_user(
     token: str | None = Depends(oauth2_scheme),
-    access_token: str | None = Query(default=None, include_in_schema=False),
     db: Session = Depends(get_db),
 ) -> User:
-    return load_user_from_token(db, token or access_token)
+    """Authorization header only. Tokens in URLs leak into logs and history."""
+    return load_user_from_token(db, token)
 
 
 def media_user(
     token: str | None = Depends(oauth2_scheme),
+    media_token: str | None = Query(default=None, include_in_schema=False),
     access_token: str | None = Query(default=None, include_in_schema=False),
 ) -> User:
-    """Auth for long-lived streams. Closes the DB before MJPEG/snapshot starts."""
+    """Auth for images and long-lived streams (``<img src>`` cannot send headers).
+
+    Prefer the header, then a short-lived ``media_token``. A session token in
+    ``access_token`` is still accepted here (and only here) for older clients.
+    Closes the DB before the MJPEG/snapshot response starts.
+    """
     db = short_session()
     try:
-        return load_user_from_token(db, token or access_token)
+        if token:
+            return load_user_from_token(db, token)
+        if media_token:
+            return load_user_from_media_token(db, media_token)
+        return load_user_from_token(db, access_token)
     finally:
         db.close()
 
 
 def current_node(
     token: str | None = Depends(node_oauth2_scheme),
-    access_token: str | None = Query(default=None, include_in_schema=False),
     db: Session = Depends(get_db),
 ) -> NodePrincipal:
-    """Authenticate a runtime as a node, never as a human User."""
-    return load_node_from_token(db, token or access_token)
+    """Authenticate a runtime as a node, never as a human User (header only)."""
+    return load_node_from_token(db, token)
 
 
 def require(permission: str, *, processing_node_allowed: bool = False):

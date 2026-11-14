@@ -821,6 +821,17 @@ def login_token(request: Request, form: OAuth2PasswordRequestForm = Depends(), d
     return _throttled_login(request, db, form.username, form.password)
 
 
+@app.post("/auth/media-token")
+def auth_media_token(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    """Short-lived token for media URLs (images, MJPEG). Header auth only."""
+    from app.security import issue_media_token
+
+    if not token:
+        raise HTTPException(401, "Authentication required")
+    media_token, ttl = issue_media_token(db, token)
+    return {"media_token": media_token, "expires_in": ttl}
+
+
 @app.post("/auth/logout")
 def logout(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     if token:
