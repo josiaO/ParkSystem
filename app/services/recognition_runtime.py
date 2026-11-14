@@ -201,7 +201,11 @@ class CameraRecognitionLane:
     def offer_frame(self, jpeg: bytes, *, source: str = "", source_ts: float | None = None) -> FrameSample | None:
         if not jpeg:
             return None
-        sample = self.mailbox.put(jpeg, source=source, source_ts=source_ts)
+        with self._lock:
+            generation = self.generation
+        sample = self.mailbox.put(
+            jpeg, source=source, source_ts=source_ts, generation=generation,
+        )
         with self._lock:
             self.last_frame_at = time.monotonic()
             self.last_frame_seq = sample.seq

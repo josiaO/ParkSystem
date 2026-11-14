@@ -44,6 +44,46 @@ def camera_recognition_mode(camera=None) -> str:
     return alpr_mode()
 
 
+def recognition_contract(camera=None) -> dict[str, object]:
+    """Describe the providers that are actually allowed for a camera.
+
+    The persisted mode is an operator choice, not proof that the selected
+    adapter can supply that provider.  Keeping this distinction explicit is
+    important for generic RTSP cameras: ``NATIVE_ONLY`` must not quietly turn
+    into FastALPR, and a camera without native plate capability cannot claim
+    that ``HYBRID`` exercised two engines.
+    """
+    from app.infrastructure.hardware.cameras import adapter_has_native_plates
+
+    mode = camera_recognition_mode(camera)
+    native_capable = False
+    try:
+        native_capable = bool(adapter_has_native_plates(camera))
+    except Exception:
+        native_capable = False
+    local_enabled = mode != NATIVE_ONLY
+    if mode == NATIVE_ONLY and not native_capable:
+        supported = False
+        reason = "NATIVE_ONLY requires an adapter with native plate events"
+    elif mode == NATIVE_WITH_LOCAL_VERIFY and not native_capable:
+        # A combined mode on a generic camera has only one available provider.
+        # Keep the requested mode visible, but make the capability loss
+        # inspectable instead of presenting it as a successful two-engine run.
+        supported = True
+        reason = "native provider unavailable; running FastALPR only"
+    else:
+        supported = True
+        reason = ""
+    return {
+        "requested_mode": str(getattr(camera, "recognition_mode", None) or "") or alpr_mode(),
+        "mode": mode,
+        "native_capable": native_capable,
+        "local_enabled": local_enabled,
+        "supported": supported,
+        "reason": reason,
+    }
+
+
 def fusion_mode(camera=None) -> str:
     mode = camera_recognition_mode(camera) if camera is not None else alpr_mode()
     if mode == LOCAL_ONLY:
@@ -74,9 +114,14 @@ def should_run_local(
     """Run FastALPR on an operator click, LOCAL_ONLY, cameras with no onboard ALPR, weak native, or a car-present frame with no plate."""
     if explicit:
         return True
+    mode = camera_recognition_mode(camera)
+    # NATIVE_ONLY is a hard provider boundary.  If the camera emits no plate,
+    # the result is an empty native read; do not silently turn the setting into
+    # FastALPR.  ``explicit=True`` above remains the operator's manual override.
+    if mode == NATIVE_ONLY:
+        return False
     if not native_plates:
         return True
-    mode = camera_recognition_mode(camera)
     native = str(native_plate or "").strip()
     conf = float(native_confidence or 0)
     if mode == LOCAL_ONLY:
@@ -88,8 +133,6 @@ def should_run_local(
         # available, always run software OCR once and fuse it with native LPR.
         # This is event-driven, not continuous video OCR.
         return bool(presence)
-    if mode == NATIVE_ONLY:
-        return (not native) and bool(presence)
     if native and conf >= VERIFY_MIN:
         return False
     if not native:

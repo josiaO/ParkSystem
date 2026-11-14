@@ -152,9 +152,10 @@ def camera_dict(c: Camera, db: Session | None = None):
     from app.services.camera_framing import framing_from_profiles
     from app.domain.cameras import camera_type_for
     native = adapter_has_native_plates(c)
-    from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode
+    from app.services.ocr_policy import LOCAL_ONLY, NATIVE_ONLY, camera_recognition_mode, recognition_contract
     from app.services.node_scope import camera_active_on_this_installation
     canonical = camera_recognition_mode(c)
+    recognition = recognition_contract(c)
     if canonical == LOCAL_ONLY:
         recog = "FASTALPR_ONLY"
         plate_engine = "fastalpr"
@@ -183,6 +184,7 @@ def camera_dict(c: Camera, db: Session | None = None):
         "native_plates": native,
         "plate_engine": plate_engine,
         "recognition_mode": recog,
+        "recognition_contract": recognition,
         "camera_type": getattr(c, "camera_type", None) or camera_type_for(camera_adapter_id(c), native_plates=native),
         "vendor": getattr(c, "vendor", None) or "",
         "model_name": getattr(c, "model_name", None) or "",

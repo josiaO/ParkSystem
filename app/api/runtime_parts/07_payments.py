@@ -74,7 +74,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         "Simulate mobile payment" if data.get("online_payment_available") else "Pay on phone (mobile unavailable)"
     )
     online_help = "" if data.get("online_payment_available") else (
-        "Mobile payment is not configured on this site. Use the kiosk or configure an external mobile-money provider."
+        "Demo payments are off. Restart the development server with SMARTPARK_ALLOW_PUBLIC_SIMULATED_PAYMENTS=true to enable them; kiosk payment remains available."
     )
     success_display = "" if data.get("payment_stage") == "PAID" else " style=\"display:none\""
     stay = data.get("duration_label") or "—"
@@ -108,6 +108,25 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         if external_pay else
         '<input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Mobile number e.g. 07XX XXX XXX" style="display:none">'
     )
+    if external_pay:
+        method_options = (
+            '<label class="method"><input type="radio" name="payment-method" value="MOBILE_MONEY" checked>'
+            '<span class="method-icon">M</span><span><b>Mobile money</b><small>Pay with your mobile wallet</small></span></label>'
+        )
+    elif data.get("online_payment_available"):
+        method_options = (
+            '<label class="method"><input type="radio" name="payment-method" value="MOBILE_SIMULATED" checked>'
+            '<span class="method-icon">M</span><span><b>Mobile money</b><small>Demo payment simulation</small></span></label>'
+            '<label class="method"><input type="radio" name="payment-method" value="CARD_SIMULATED">'
+            '<span class="method-icon">▤</span><span><b>Bank card</b><small>Demo only · no card details collected</small></span></label>'
+        )
+    else:
+        method_options = (
+            '<label class="method method-disabled"><input type="radio" name="payment-method" value="MOBILE_SIMULATED" checked disabled>'
+            '<span class="method-icon">M</span><span><b>Mobile money</b><small>Demo simulation · currently off</small></span></label>'
+            '<label class="method method-disabled"><input type="radio" name="payment-method" value="CARD_SIMULATED" disabled>'
+            '<span class="method-icon">▤</span><span><b>Bank card</b><small>Demo simulation · currently off</small></span></label>'
+        )
     network_field = ""
     if external_pay and str(data.get("mobile_provider") or "").lower() == "flutterwave":
         network_field = (
@@ -173,15 +192,19 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       .amount-box .paid{{font-size:12px;color:var(--muted);text-align:right}}
       .notice{{border:1px solid #cfe0ff;background:#f1f6ff;color:#35527e;border-radius:10px;padding:12px 13px;font-size:13px;margin-bottom:18px}}
       .notice b{{color:var(--navy)}}
-      .methods{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}}
-      .method{{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}}
-      .method.active{{border-color:#86a9ff;background:#f5f8ff;box-shadow:0 0 0 2px rgba(31,94,255,.09)}}
-      .method-title{{font-weight:750;color:var(--navy);font-size:13px}}
-      .method-sub{{font-size:12px;color:var(--muted);margin-top:2px}}
+            .methods{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}}
+            .method{{min-width:0;display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;padding:11px;background:#fff;cursor:pointer}}
+            .method:has(input:checked){{border-color:#86a9ff;background:#f5f8ff;box-shadow:0 0 0 2px rgba(31,94,255,.09)}}
+            .method-disabled{{opacity:.62;cursor:not-allowed}}
+            .method input{{width:16px;flex:0 0 16px;accent-color:var(--blue)}}
+            .method-icon{{width:30px;height:30px;flex:0 0 30px;border-radius:8px;background:#edf2fa;display:grid;place-items:center;font-weight:850;color:var(--navy)}}
+            .method b,.method small{{display:block}}
+            .method b{{font-size:13px;color:var(--navy)}}
+            .method small{{font-size:11px;line-height:1.35;color:var(--muted);margin-top:2px}}
       label.field-label{{display:block;font-size:12px;font-weight:700;color:var(--ink);margin:14px 0 6px}}
       input,select{{font:inherit;width:100%;padding:12px 13px;border:1px solid #cfd9e7;border-radius:9px;background:#fff;color:var(--ink)}}
       input:focus,select:focus{{outline:3px solid rgba(31,94,255,.16);border-color:var(--blue)}}
-      .btn{{display:block;width:100%;min-height:48px;text-align:center;background:var(--blue);color:#fff;border:0;border-radius:9px;padding:13px 15px;margin-top:17px;font-weight:750;font-size:15px;cursor:pointer;transition:background .15s ease}}
+    .btn{{display:block;width:100%;min-height:48px;text-align:center;background:var(--blue);color:#fff;border:0;border-radius:9px;padding:13px 15px;margin-top:14px;font-weight:750;font-size:15px;cursor:pointer;transition:background .15s ease}}
       .btn:hover{{background:var(--blue-dark)}}
       .btn:disabled{{opacity:.5;cursor:not-allowed}}
       .btn.secondary{{background:#eef2f8;color:var(--ink);text-decoration:none}}
@@ -199,16 +222,22 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       .kiosk-content p{{margin:0 0 9px;color:var(--muted);font-size:13px}}
       code{{background:#eef2f8;padding:2px 6px;border-radius:4px;font-size:12px}}
       .footer-note{{text-align:center;color:var(--muted);font-size:12px;margin:25px auto 0;max-width:620px}}
+            @media (max-width:1120px){{
+                main{{padding-left:20px;padding-right:20px}}
+                .heading{{align-items:flex-start}}
+                .layout{{grid-template-columns:minmax(0,1fr)}}
+                #pay-mobile{{position:fixed;z-index:20;left:20px;bottom:max(12px,env(safe-area-inset-bottom));width:calc(100% - 40px);margin:0;box-shadow:0 7px 24px rgba(13,27,52,.24)}}
+            }}
       @media (max-width:760px){{
         .topbar-inner,main{{padding-left:16px;padding-right:16px}}
         .topbar-inner{{padding-top:13px;padding-bottom:13px}}
-        main{{padding-top:24px;padding-bottom:40px}}
+        main{{padding-top:18px;padding-bottom:94px}}
         .heading{{display:block}}
         .site-label{{text-align:left;margin-top:12px}}
         h1{{font-size:27px}}
         .layout{{grid-template-columns:1fr}}
         .vehicle-media{{grid-template-columns:1fr}}
-        .vehicle-photo{{height:clamp(205px,52vw,280px)}}
+        .vehicle-photo{{height:clamp(150px,42vw,220px)}}
         .crop-panel{{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:12px}}
         .plate-crop{{height:64px}}
       }}
@@ -220,9 +249,8 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         .summary{{padding:13px 15px;gap:7px 10px}}
         .summary-divider{{display:none}}
         .summary .plate{{font-size:20px;flex:1 0 100%}}
-        .methods{{grid-template-columns:1fr}}
-        .details{{gap:13px 12px}}
-        .amount-box{{align-items:flex-start;flex-direction:column}}
+            .details{{gap:10px 12px}}
+            .amount-box{{margin-top:14px;padding:13px}}
         .amount-box .paid{{text-align:left}}
         .kiosk-content{{align-items:stretch;flex-direction:column}}
         img.qr{{width:min(180px,100%);height:auto;align-self:center}}
@@ -253,12 +281,12 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         <section class="card"><div class="card-head"><div><h2>Complete payment</h2><p>Choose how you want to settle this visit</p></div></div>
           <div class="card-body">
             <div class="notice"><b>Check the details above first.</b><br>If the photo and plate do not match, ask the parking team to review the visit before paying.</div>
-            <div class="methods"><div class="method active"><div class="method-title">Mobile money</div><div class="method-sub">Fastest option</div></div><div class="method"><div class="method-title">At the kiosk</div><div class="method-sub">Cash or operator help</div></div></div>
+            <div class="methods" role="radiogroup" aria-label="Choose a payment method">{method_options}</div>
             {phone_field}
             {network_field}
-            <button class="btn" id="pay-mobile" {pay_disabled}>{online_label}</button>
+            <button class="btn" id="pay-mobile" type="button" {pay_disabled}>{online_label if data.get('online_payment_available') else 'Demo payment is off'} · {display_currency} {remaining:,.0f}</button>
             <p id="online-help" class="muted">{online_help}</p><p id="msg" class="muted"></p>
-            <a class="btn secondary" href="#kiosk">Use the kiosk instead</a>
+            <p class="muted" style="font-size:12px;margin:12px 0 0">Prefer cash? An attendant can take payment at the kiosk using this receipt.</p>
           </div>
         </section>
       </div>
@@ -277,7 +305,15 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
       const successDetail = document.getElementById("success-detail");
       const successNext = document.getElementById("success-next");
       const onlineHelp = document.getElementById("online-help");
+        const methodInputs = document.querySelectorAll('input[name="payment-method"]');
       let pendingSince = 0;
+        function selectedMethod() {{ return document.querySelector('input[name="payment-method"]:checked')?.value || "MOBILE_SIMULATED"; }}
+            function updatePayLabel(currency, amount, available = true) {{
+          if (externalPay) payBtn.textContent = "Send mobile-money prompt · " + currency + " " + Math.round(amount).toLocaleString();
+                else if (!available) payBtn.textContent = "Demo payment is off · " + currency + " " + Math.round(amount).toLocaleString();
+          else payBtn.textContent = (selectedMethod() === "CARD_SIMULATED" ? "Simulate card payment · " : "Simulate mobile payment · ") + currency + " " + Math.round(amount).toLocaleString();
+        }}
+        methodInputs.forEach(input => input.addEventListener("change", () => updatePayLabel(document.getElementById("due").textContent.split(" ")[0], Number(document.getElementById("due").textContent.replace(/[^0-9.]/g, "")) || 0)));
       const statusUrl = externalPay
         ? "/api/public/payment-status/" + encodeURIComponent(token)
         : "/p/" + encodeURIComponent(token) + "/status";
@@ -289,14 +325,16 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         statusEl.textContent = data.paid ? "PAID" : data.status;
         statusEl.className = "status" + (data.paid ? " paid" : "");
         document.getElementById("due").textContent = data.currency + " " + Math.round(data.amount_remaining).toLocaleString();
+        updatePayLabel(data.currency, data.amount_remaining, data.online_payment_available);
         if (data.duration_label) document.getElementById("stay").textContent = data.duration_label;
         if (data.still_inside !== undefined) document.getElementById("inside-state").textContent = data.still_inside ? "Still inside" : "Visit complete";
         const intent = data.intent || null;
         const waiting = externalPay && intent && intent.status === "PENDING" && !data.paid;
         payBtn.disabled = !data.payable || !data.online_payment_available || waiting;
+        payBtn.style.display = data.payable ? "block" : "none";
         onlineHelp.textContent = data.online_payment_available
           ? ""
-          : "Mobile payment is not configured on this site. Use the kiosk or ask staff to configure mobile money.";
+                    : "Demo payments are off. Restart the development server with SMARTPARK_ALLOW_PUBLIC_SIMULATED_PAYMENTS=true to enable them; kiosk payment remains available.";
         if (data.payment_stage === "PAID") {{
           success.style.display = "block";
           successTitle.textContent = "Payment successful";
@@ -329,6 +367,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
         msg.className = "muted";
         try {{
           let res, data;
+          const method = selectedMethod();
           if (externalPay) {{
             const phone = (phoneInput && phoneInput.value || "").trim();
             if (!phone) throw new Error("Enter the mobile number that will pay.");
@@ -348,7 +387,7 @@ def public_receipt(token: str, db: Session = Depends(get_db)):
             res = await fetch("/p/" + encodeURIComponent(token) + "/pay", {{
               method: "POST",
               headers: {{"Content-Type": "application/json"}},
-              body: JSON.stringify({{method: "MOBILE_SIMULATED"}}),
+              body: JSON.stringify({{method: method}}),
             }});
             data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Payment failed");
@@ -411,6 +450,8 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
         raise HTTPException(409, "Mobile payments use POST /api/public/payment-intents on this site.")
     try:
         result = await pay_public_session(db, row, method=method, amount=payload.amount)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:

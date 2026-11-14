@@ -59,6 +59,31 @@ class PlateEngineTests(unittest.TestCase):
             native_plate="T123ABC", native_confidence=0.99, native_plates=True, presence=False, camera=hvx,
         ))
 
+    def test_native_only_is_not_a_local_fallback(self):
+        from app.core.fusion import resolve_readings
+
+        decision = resolve_readings(
+            native_plate="", native_confidence=0.0,
+            local_plate="T123ABC", local_confidence=0.99,
+            mode="NATIVE_ONLY",
+        )
+        self.assertEqual(decision.method, "NATIVE_ONLY")
+        self.assertEqual(decision.resolved_plate, "")
+        self.assertTrue(decision.needs_review)
+
+    def test_contract_reports_when_a_mode_has_no_native_provider(self):
+        from types import SimpleNamespace
+        from app.services.ocr_policy import recognition_contract
+
+        generic_native = SimpleNamespace(recognition_mode="NATIVE_ONLY", adapter_id="rtsp")
+        self.assertFalse(recognition_contract(generic_native)["supported"])
+        self.assertFalse(recognition_contract(generic_native)["native_capable"])
+
+        generic_hybrid = SimpleNamespace(recognition_mode="HYBRID", adapter_id="rtsp")
+        contract = recognition_contract(generic_hybrid)
+        self.assertTrue(contract["supported"])
+        self.assertIn("FastALPR only", contract["reason"])
+
     def test_hvx_fastalpr_gets_detect_jpeg_not_sdk_jpeg_poll(self):
         from types import SimpleNamespace
         from app.api_main import _live_spec

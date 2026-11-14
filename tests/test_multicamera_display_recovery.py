@@ -149,3 +149,14 @@ def test_live_status_requires_recent_arrivals_not_a_historical_cache():
          patch.object(preview.gateway, "session", return_value=session), \
          patch.object(preview.time, "monotonic", return_value=100.0):
         assert preview.live_is_current(2)
+
+
+def test_live_status_rejects_duplicate_jpeg_arrivals_after_freshness_expires():
+    from app.services import preview
+
+    row = preview.PreviewState(jpeg=JPEG, captured_at=10.0)
+    session = SimpleNamespace(last_fresh_frame_at=10.0, last_received_at=99.0, frozen=True)
+    with patch.object(preview, "get_state", return_value=row), \
+         patch.object(preview.gateway, "session", return_value=session), \
+         patch.object(preview.time, "monotonic", return_value=100.0):
+        assert not preview.live_is_current(2)
