@@ -29,7 +29,7 @@ from app.schemas import (
     ModuleProfileApply, ModuleEnablement, ZoneCreate, LaneCreate, OnboardingStep, AIIncidentSummaryRequest,
     RecognitionScopeUpdate, DeveloperSettingsUpdate, DeveloperDeleteRequest,
 )
-from app.security import authenticate_processing_node, authenticate_user, create_session, current_node, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, revoke_session, user_permissions
+from app.security import authenticate_processing_node, authenticate_user, create_session, current_node, current_user, oauth2_scheme, processing_node_permissions, require, require_any, require_media, require_media_file, revoke_session, user_permissions
 from app.core.fusion import resolve_readings
 from app.infrastructure.recognition.engines import active_engine, list_engines, recognize_frame
 from app.infrastructure.recognition.engines.training import apply_model_pack, record_correction, training_status
