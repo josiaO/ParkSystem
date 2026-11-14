@@ -17,7 +17,7 @@ function showKioskVisit(data) {
   const missing = document.getElementById("kiosk-photo-missing");
   if (data.snapshot_url) {
     photo.hidden = false;
-    photo.src = data.snapshot_url;
+    photo.src = mediaUrl(data.snapshot_url);
     missing.hidden = true;
   } else {
     photo.hidden = true;
@@ -26,7 +26,7 @@ function showKioskVisit(data) {
   }
   if (data.crop_url) {
     crop.hidden = false;
-    crop.src = data.crop_url;
+    crop.src = mediaUrl(data.crop_url);
   } else {
     crop.hidden = true;
     crop.removeAttribute("src");
