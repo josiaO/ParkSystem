@@ -28,7 +28,7 @@ from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
 from app.desktop.api import api, stream_http_error
 
-from app.desktop.desk import ReportsPage, clock_summary, health_sentences
+from app.desktop.desk import ReportsPage, clock_summary, health_sentences, link_banner
 
 from app.desktop.theme import APPEARANCES, apply_appearance
 

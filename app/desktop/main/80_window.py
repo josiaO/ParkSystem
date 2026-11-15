@@ -44,9 +44,50 @@ class MainWindow(DesktopShell):
         self._filter_navigation("")
         self.statusBar().showMessage("Choose a workspace page")
         self._install_shortcuts()
+        self._install_link_banner()
         # Do not setGeometry() to the full screen rect. On Windows the frame is
         # taller than the client area, Qt retries, and the window grows forever.
+    def _install_link_banner(self):
+        """Red/amber banner when the Site Service or its database link is down."""
+        self.link_banner=QLabel("")
+        self.link_banner.setObjectName("linkBanner")
+        self.link_banner.setWordWrap(True)
+        self.link_banner.setAccessibleName("Server link status")
+        self.link_banner.setVisible(False)
+        self.workspace_root.layout().insertWidget(0, self.link_banner)
+        self._link_worker=None
+        self._link_timer=QTimer(self)
+        self._link_timer.setInterval(5000)
+        self._link_timer.timeout.connect(self._poll_link)
+        self._link_timer.start()
+        QTimer.singleShot(0, self._poll_link)
+    def _poll_link(self):
+        # Render-only UI doubles have no base_url; never turn them into requests.
+        if not hasattr(api, "base_url"):
+            return
+        running=getattr(self._link_worker, "isRunning", None)
+        if callable(running) and running():
+            return  # previous check still waiting; never stack requests
+        worker=Worker(lambda: api.get("/health/live", timeout=3))
+        worker.done.connect(lambda live: self._show_link(live, None))
+        worker.failed.connect(lambda error: self._show_link(None, error))
+        self._link_worker=worker
+        worker.start()
+    def _show_link(self, live, error):
+        level,text=link_banner(live, error)
+        self.link_banner.setVisible(bool(text))
+        self.link_banner.setText(text)
+        colour={"down":"#B42318","slow":"#B54708"}.get(level,"#B42318")
+        self.link_banner.setStyleSheet(f"background:{colour};color:white;font-weight:700;padding:8px 14px")
+        if text:
+            self.statusBar().showMessage(text)
     def closeEvent(self, event):
+        timer=getattr(self, "_link_timer", None)
+        if timer is not None:
+            timer.stop()
+        wait=getattr(getattr(self, "_link_worker", None), "wait", None)
+        if callable(wait):
+            wait(4000)
         for page in self.pages:
             if page is None: continue
             fn=getattr(page, "shutdown", None)

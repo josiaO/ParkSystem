@@ -207,12 +207,16 @@ def _avg(values: deque[float]) -> float:
 
 
 def live() -> dict:
+    from app.services.db_link import monitor
+
     return {
         "ok": True,
         "status": "live",
         "state": startup_state(),
         "time": datetime.now(timezone.utc).isoformat(),
         "process": process_metrics(),
+        # In memory only: answers even when the database link is down.
+        "db_link": monitor().snapshot(),
     }
 
 

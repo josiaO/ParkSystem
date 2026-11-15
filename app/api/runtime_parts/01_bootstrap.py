@@ -451,6 +451,12 @@ async def lifespan(app: FastAPI):
         _supervise_background_loop("diagnostic-heartbeat", _diagnostic_heartbeat_loop),
         name="diagnostic-heartbeat",
     )
+    from app.services import db_link
+
+    link_probe = asyncio.create_task(
+        _supervise_background_loop("db-link-probe", lambda: db_link.probe_loop(5.0)),
+        name="db-link-probe",
+    )
     watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
     if watchdog_seconds > 0:
         from app.services import pipeline_watchdog
@@ -464,7 +470,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -485,6 +491,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+
+
+def _database_link_down(request: Request, exc: Exception):
+    """A dead or slow database link answers fast with a fallback, never hangs or 500s."""
+    from app.services.db_link import OPERATOR_MESSAGE, is_link_error, monitor
+
+    if not is_link_error(exc):
+        log.error("database error on %s %s", request.method, request.url.path, exc_info=exc)
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    monitor().note_failure(exc)
+    log.warning("database link error on %s %s: %s", request.method, request.url.path, str(exc)[:200])
+    return JSONResponse(status_code=503, content={"detail": OPERATOR_MESSAGE, "link": "DOWN"},
+                        headers={"Retry-After": "5"})
+
+
+from sqlalchemy.exc import OperationalError as _DbOperationalError, TimeoutError as _DbPoolTimeout  # noqa: E402
+
+app.add_exception_handler(_DbOperationalError, _database_link_down)
+app.add_exception_handler(_DbPoolTimeout, _database_link_down)
 from app.api.module_routes import ModuleRoute
 from app.services.public_ingress import PublicIngressGuard
 app.router.route_class = ModuleRoute
