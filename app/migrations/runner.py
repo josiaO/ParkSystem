@@ -73,6 +73,10 @@ def _has_app_tables(engine: Engine) -> bool:
 def _run(engine: Engine, fn, *args) -> None:
     cfg = alembic_config(engine)
     with engine.begin() as conn:
+        if getattr(conn.dialect, "name", "") == "postgresql":
+            # Index builds on large tables can exceed the runtime statement
+            # timeout; it applies to normal requests, not to migrations.
+            conn.exec_driver_sql("SET LOCAL statement_timeout = 0")
         cfg.attributes["connection"] = conn
         fn(cfg, *args)
 

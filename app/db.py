@@ -39,8 +39,44 @@ def engine_kwargs(url: str) -> dict:
         kwargs["poolclass"] = QueuePool
         kwargs["pool_size"] = max(1, int(getattr(settings, "db_pool_size", 5) or 5))
         kwargs["max_overflow"] = max(0, int(getattr(settings, "db_max_overflow", 5) or 5))
-        kwargs["pool_timeout"] = float(getattr(settings, "db_pool_timeout_seconds", 8) or 8)
+        kwargs["pool_timeout"] = float(getattr(settings, "db_pool_timeout_seconds", 5) or 5)
+        # Recycle before NAT/firewalls silently drop idle connections.
+        kwargs["pool_recycle"] = 1800
+        kwargs["connect_args"] = postgres_connect_args()
     return kwargs
+
+
+def postgres_connect_args() -> dict:
+    """libpq options so a lane never hangs on a dead or slow Site Server link.
+
+    * connect_timeout: give up on an unreachable server in seconds.
+    * TCP keepalives: notice a silently dropped link (cable, switch, power)
+      instead of waiting for the OS's two-hour default.
+    * statement_timeout / idle_in_transaction_session_timeout: the server
+      cancels a query stuck behind a lock or a slow disk. Migrations lift it.
+    """
+    import os
+
+    options = []
+    statement_ms = int(getattr(settings, "db_statement_timeout_ms", 15000) or 0)
+    idle_ms = int(getattr(settings, "db_idle_in_transaction_timeout_ms", 60000) or 0)
+    if statement_ms > 0:
+        options.append(f"-c statement_timeout={statement_ms}")
+    if idle_ms > 0:
+        options.append(f"-c idle_in_transaction_session_timeout={idle_ms}")
+    args: dict = {
+        "connect_timeout": max(1, int(getattr(settings, "db_connect_timeout_seconds", 5) or 5)),
+        "keepalives": 1,
+        "keepalives_idle": max(1, int(getattr(settings, "db_keepalives_idle_seconds", 10) or 10)),
+        "keepalives_interval": max(1, int(getattr(settings, "db_keepalives_interval_seconds", 5) or 5)),
+        "keepalives_count": max(1, int(getattr(settings, "db_keepalives_count", 3) or 3)),
+        "options": " ".join(options),
+        "application_name": f"smartpark-{os.path.basename(os.environ.get('SMARTPARK_PROCESS_NAME', 'service'))}"[:60],
+    }
+    sslmode = str(getattr(settings, "db_sslmode", "") or "").strip().lower()
+    if sslmode:
+        args["sslmode"] = sslmode
+    return args
 
 
 engine = create_engine(settings.resolved_database_url, **engine_kwargs(settings.resolved_database_url))
