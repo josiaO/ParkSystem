@@ -1,0 +1,8 @@
+# Development and CI: runtime plus test and lint tools.
+-r requirements-runtime.txt
+
+pytest
+pytest-asyncio
+# Linters run non-blocking in CI (not in the lockfile yet).
+ruff>=0.6
+mypy>=1.11

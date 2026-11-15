@@ -1,3 +1,6 @@
+# Pinned lockfile: every package and version the tests and kits are built
+# against. Edit requirements-runtime.txt / requirements-dev.txt for direct
+# dependencies, then refresh the pins here.
 alembic==1.20.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
