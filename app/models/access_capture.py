@@ -1,4 +1,15 @@
+"""SQLAlchemy models: access capture (was app/models/50_access_and_capture.py)."""
+
 from __future__ import annotations
+
+from datetime import datetime
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+from app.db import Base
+from app.domain.site import DEFAULT_SITE_ID
+
+from .base import AwareDateTime, utcnow
 
 class VehicleCapture(Base):
     """One car event from a QY image callback: full snapshot + plate crop + characters."""

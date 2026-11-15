@@ -1,25 +1,15 @@
-"""Compatibility facade for the split ``models`` module."""
+"""SmartPark ORM models.
+
+Ordinary modules (no exec() loader since Phase 6): ``base`` holds shared
+types and enums; the others hold the tables by area. Everything is
+re-exported here so ``from app.models import ParkingSession`` keeps working.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path as _Path
-
-_PACKAGE_DIR = _Path(__file__).resolve().parent
-_ORIGINAL_FILE = _PACKAGE_DIR.parent / "models.py"
-__file__ = str(_ORIGINAL_FILE)
-_COMPONENTS = [
-    '00_context.py',
-    '00_base.py',
-    '10_identity.py',
-    '20_topology.py',
-    '30_audit_and_billing.py',
-    '40_parking.py',
-    '50_access_and_capture.py'
-]
-
-for _component in _COMPONENTS:
-    _path = _PACKAGE_DIR / _component
-    _code = compile(_path.read_text(encoding="utf-8"), str(_path), "exec")
-    exec(_code, globals(), globals())
-
-del _code, _component, _path, _COMPONENTS, _ORIGINAL_FILE, _PACKAGE_DIR, _Path
+from .base import *  # noqa: F401,F403
+from .identity import *  # noqa: F401,F403
+from .topology import *  # noqa: F401,F403
+from .audit_billing import *  # noqa: F401,F403
+from .parking import *  # noqa: F401,F403
+from .access_capture import *  # noqa: F401,F403
