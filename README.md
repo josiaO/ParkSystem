@@ -49,4 +49,5 @@ Build the offline kit with `packaging/make_windows_kit.sh`, then follow:
 * [docs/WINDOWS-SERVICES.md](docs/WINDOWS-SERVICES.md): boot-time services, HVX Session 0 test, reboot test
 * [docs/CAMERA-TROUBLESHOOTING.md](docs/CAMERA-TROUBLESHOOTING.md) and [docs/RECOGNITION-MEASUREMENTS.md](docs/RECOGNITION-MEASUREMENTS.md)
 * [docs/OFFLINE-OPTIONS.md](docs/OFFLINE-OPTIONS.md): what happens when a gate loses the database link
+* [docs/SOAK-TEST.md](docs/SOAK-TEST.md): 72-hour soak procedure and pass criteria
 
