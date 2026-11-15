@@ -69,6 +69,9 @@ Current_ParkSystem_configs/
 # Static-analysis dumps. These are local evidence, not source.
 research/**/*.asm
 research/**/inventory.json
+# Decompiled vendor binaries: never committed (removed in Phase 6).
+research/**/*.decompiled.c
+research/**/*.named.c
 
 # OS and editors
 .DS_Store
