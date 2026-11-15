@@ -335,18 +335,9 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertEqual(provider.id, "kiosk_manual")
 
 
-class DocsExistTests(unittest.TestCase):
-    @unittest.skip("Component docs were consolidated in commit 8a29f85; see docs/ZIRP_DOCUMENTATION_CLEANUP.md")
-    def test_module_docs_tree(self):
-        root = ROOT / "docs"
-        for path in (
-            "modules/OVERVIEW.md",
-            "modules/DEPENDENCY-GRAPH.md",
-            "modules/MODULE-REGISTRY.md",
-            "onboarding/DEPLOYMENT-PROFILES.md",
-            "development/MODULE-CONTRACTS.md",
-        ):
-            self.assertTrue((root / path).is_file(), path)
+# DocsExistTests.test_module_docs_tree was removed in Phase 6: it required module/UI design documents
+# that were deleted before 8a29f85 and are archived in git history. The
+# technician documentation set is checked in test_migration_architecture.
 
 
 if __name__ == "__main__":
