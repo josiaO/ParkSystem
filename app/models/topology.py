@@ -1,4 +1,16 @@
+"""SQLAlchemy models: topology (was app/models/20_topology.py)."""
+
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+from app.db import Base
+from app.domain.site import DEFAULT_SITE_ID
+
+from .base import AwareDateTime, CameraStatus, GateMode, utcnow
+# Forward references resolved by the SQLAlchemy registry: ParkingSession
 
 class Node(Base):
     """Central registry identity for one physical Edge Node.

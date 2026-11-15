@@ -1,4 +1,15 @@
+"""SQLAlchemy models: audit billing (was app/models/30_audit_and_billing.py)."""
+
 from __future__ import annotations
+
+from datetime import datetime
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, text
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON
+from app.db import Base
+from app.domain.site import DEFAULT_SITE_ID
+
+from .base import AwareDateTime, utcnow
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
