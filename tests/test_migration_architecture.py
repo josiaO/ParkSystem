@@ -162,17 +162,28 @@ class OperatorStatusTests(unittest.TestCase):
         self.assertEqual(status["barrier"], "Unknown")
 
 
-    @unittest.skip("Component docs were consolidated in commit 8a29f85; see docs/ZIRP_DOCUMENTATION_CLEANUP.md")
+    TECHNICIAN_DOCS = (
+        "README.md",
+        "docs/DEPLOYMENT.md", "docs/DATABASE_CONFIGURATION.md", "docs/POSTGRESQL-PREREQUISITE.md",
+        "docs/LANE-DEPLOYMENT.md", "docs/CAMERA-TROUBLESHOOTING.md", "docs/WINDOWS-SERVICES.md",
+        "docs/OFFLINE-OPTIONS.md", "docs/RECOGNITION-MEASUREMENTS.md",
+    )
+
     def test_required_docs_exist(self):
-        root = __import__("pathlib").Path(__file__).resolve().parents[1] / "docs"
-        for name in (
-            "MEDIA-ARCHITECTURE.md", "CAMERA-ADAPTERS.md", "MEDIAMTX-INTEGRATION.md",
-            "FASTALPR-PIPELINE.md", "NATIVE-ALPR.md", "CAMERA-ONBOARDING.md",
-            "STREAM-PROFILES.md", "CAMERA-CAPABILITY-MATRIX.md", "ADDING-A-CAMERA-VENDOR.md",
-            "ADDING-A-RECOGNITION-PROVIDER.md", "GATE-ADAPTERS.md", "MIGRATION-AND-ROLLBACK.md",
-            "CAMERA-TROUBLESHOOTING.md",
-        ):
+        # 8a29f85 removed the generated architecture/extension docs; they are
+        # archived in git history (see the documentation assessment). What a
+        # technician needs on site must exist in the repository.
+        root = __import__("pathlib").Path(__file__).resolve().parents[1]
+        for name in self.TECHNICIAN_DOCS:
             self.assertTrue((root / name).is_file(), name)
+
+    def test_technician_docs_have_no_dead_links(self):
+        import re
+
+        root = __import__("pathlib").Path(__file__).resolve().parents[1]
+        for doc in [root / name for name in self.TECHNICIAN_DOCS]:
+            for target in re.findall(r"\]\(([^)#:]+\.md)\)", doc.read_text(encoding="utf-8")):
+                self.assertTrue((doc.parent / target).is_file(), f"{doc.name} links to missing {target}")
 
 
 if __name__ == "__main__":
