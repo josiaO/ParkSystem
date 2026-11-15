@@ -6,3 +6,28 @@ requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+# Linters run in CI as a non-blocking job (Phase 6.6). Start narrow, tighten
+# once the existing findings are triaged.
+[tool.ruff]
+target-version = "py311"
+line-length = 160
+extend-exclude = ["research", "dist", "packaging/cache", "Current_ParkSystem_configs", "TestingData"]
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# exec()-composed part files share one namespace: names come from other parts.
+"app/api/runtime_parts/*.py" = ["F821", "F811", "F401"]
+"app/desktop/main/*.py" = ["F821", "F811", "F401"]
+"app/desktop/setup_parts/*.py" = ["F821", "F811", "F401"]
+"app/recognition_worker/*.py" = ["F821", "F811", "F401"]
+"app/services/*/[0-9]*" = ["F821", "F811", "F401"]
+"tools/hvx_sdk_host/hvx_sdk_parts/*.py" = ["F821", "F811", "F401"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = false
