@@ -30,6 +30,25 @@ REPORTS = (
 )
 
 
+def link_banner(live: dict | None, error: str | None = None) -> tuple[str, str]:
+    """(level, text) for the main-window banner: "" when everything is fine.
+
+    level is "down" (red) or "slow" (amber). The text always tells the
+    operator what to do, so a lane never fails silently.
+    """
+    if error:
+        return ("down", "Site Service is not responding. Lanes cannot check parking sessions or open "
+                        "automatically. Use the receipt QR at the kiosk, or open the gate manually and note the plate.")
+    link = (live or {}).get("db_link") or {}
+    state = str(link.get("state") or "").upper()
+    if state == "DOWN":
+        seconds = int(float(link.get("seconds_in_state") or 0))
+        return ("down", f"{link.get('operator_message') or 'Server link down.'} (for {seconds} s)")
+    if state == "SLOW":
+        return ("slow", f"Server link slow ({link.get('latency_ms')} ms). Decisions may take a few seconds.")
+    return ("", "")
+
+
 def clock_summary(server_clock: dict | None, workstation_clock: dict | None) -> str:
     """One line for System Health: is every clock within the 2 s budget?"""
     parts = []

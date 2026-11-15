@@ -159,15 +159,25 @@ async def _outbox_loop():
                     # Never let one failing row block every later event (the
                     # old ``break`` retried the same head row forever). Count
                     # the attempt, dead-letter it after a bounded number of
-                    # tries, and continue with the next event.
+                    # tries, and continue with the next event. A database
+                    # link outage is different: it is not the event's fault,
+                    # so keep every event, count nothing, and pause.
+                    from app.services.db_link import handle_outbox_failure
+
                     box.note_failure()
                     note_worker_failure("outbox", str(exc))
-                    log.exception("outbox event failed id=%s kind=%s", item.get("id"), item.get("kind"))
                     try:
-                        if box.record_failure(item["id"], f"{type(exc).__name__}: {exc}"):
-                            log.error("outbox event moved to dead letter after repeated failures id=%s", item.get("id"))
+                        outcome = handle_outbox_failure(box, item, exc)
                     except Exception:
                         log.exception("could not record outbox failure id=%s", item.get("id"))
+                        outcome = "recorded"
+                    if outcome == "link-down":
+                        log.warning("database link down; %d queued event(s) kept for later", box.depth())
+                        sleep_for = max(sleep_for, 2.0)
+                        break
+                    log.exception("outbox event failed id=%s kind=%s", item.get("id"), item.get("kind"))
+                    if outcome == "dead-lettered":
+                        log.error("outbox event moved to dead letter after repeated failures id=%s", item.get("id"))
                     continue
             pending_known = bool(items)
             last_token = box.change_token()
