@@ -127,16 +127,21 @@ def _probe() -> float:
     return (time.perf_counter() - started) * 1000.0
 
 
+async def probe_once(timeout_seconds: float = 8.0, probe=None) -> dict:
+    """One probe in a worker thread so a hung connect can never block the event loop."""
+    try:
+        latency = await asyncio.wait_for(asyncio.to_thread(probe or _probe), timeout=timeout_seconds)
+        _monitor.note_ok(latency)
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        _monitor.note_failure(f"database did not answer within {timeout_seconds:g} s")
+    except Exception as exc:
+        _monitor.note_failure(exc)
+    return _monitor.snapshot()
+
+
 async def probe_loop(interval_seconds: float = 5.0, timeout_seconds: float = 8.0) -> None:
-    """Probe in a worker thread so a hung connect can never block the event loop."""
     while True:
-        try:
-            latency = await asyncio.wait_for(asyncio.to_thread(_probe), timeout=timeout_seconds)
-            _monitor.note_ok(latency)
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            _monitor.note_failure(f"database did not answer within {timeout_seconds:.0f} s")
-        except Exception as exc:
-            _monitor.note_failure(exc)
+        await probe_once(timeout_seconds)
         await asyncio.sleep(interval_seconds)
