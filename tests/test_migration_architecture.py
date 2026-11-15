@@ -166,7 +166,7 @@ class OperatorStatusTests(unittest.TestCase):
         "README.md",
         "docs/DEPLOYMENT.md", "docs/DATABASE_CONFIGURATION.md", "docs/POSTGRESQL-PREREQUISITE.md",
         "docs/LANE-DEPLOYMENT.md", "docs/CAMERA-TROUBLESHOOTING.md", "docs/WINDOWS-SERVICES.md",
-        "docs/OFFLINE-OPTIONS.md", "docs/RECOGNITION-MEASUREMENTS.md",
+        "docs/OFFLINE-OPTIONS.md", "docs/RECOGNITION-MEASUREMENTS.md", "docs/SOAK-TEST.md",
     )
 
     def test_required_docs_exist(self):

@@ -48,6 +48,7 @@ cp "$ROOT/tools/camera_lab.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/camera_lab_replay.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/__init__.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/boot_health_check.py" "$OUT/payload/tools/"
+cp "$ROOT/tools/soak_monitor.py" "$OUT/payload/tools/"
 cp "$ROOT/tools/Test-RebootRecovery.ps1" "$OUT/payload/tools/"
 if [[ -f "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" ]]; then
   cp "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
