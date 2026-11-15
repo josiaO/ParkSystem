@@ -73,7 +73,17 @@ class Settings(BaseSettings):
     # still rely on bounded sessions and the route-level module cache.
     db_pool_size: int = 10
     db_max_overflow: int = 20
-    db_pool_timeout_seconds: float = 20.0
+    # PostgreSQL link to the Site Server: fail fast so a dead or slow link
+    # cannot hang a lane (Phase 5). 0 disables a server-side timeout.
+    db_pool_timeout_seconds: float = 5.0
+    db_connect_timeout_seconds: int = 5
+    db_statement_timeout_ms: int = 15000
+    db_idle_in_transaction_timeout_ms: int = 60000
+    db_keepalives_idle_seconds: int = 10
+    db_keepalives_interval_seconds: int = 5
+    db_keepalives_count: int = 3
+    # "", disable, prefer, require, verify-ca, verify-full ("" = psycopg default)
+    db_sslmode: str = ""
     # Where camera credentials live: auto (= dpapi on Windows, db elsewhere),
     # dpapi, file, memory, or db (legacy raw column).
     secrets_backend: str = "auto"
