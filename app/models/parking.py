@@ -1,4 +1,16 @@
+"""SQLAlchemy models: parking (was app/models/40_parking.py)."""
+
 from __future__ import annotations
+
+from datetime import datetime
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+from app.db import Base
+from app.domain.site import DEFAULT_SITE_ID
+
+from .base import AwareDateTime, utcnow
+from .topology import Gate
 
 class ParkingSession(Base):
     __tablename__ = "parking_sessions"

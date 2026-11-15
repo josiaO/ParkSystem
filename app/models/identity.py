@@ -1,4 +1,13 @@
+"""SQLAlchemy models: identity (was app/models/10_identity.py)."""
+
 from __future__ import annotations
+
+from datetime import datetime
+from sqlalchemy import Boolean, ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db import Base
+
+from .base import AwareDateTime, UserStatus, utcnow
 
 class User(Base):
     __tablename__ = "users"
