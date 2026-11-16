@@ -283,6 +283,11 @@ def verify_payload(payload: Path) -> list[str]:
     replay_lab = payload / "tools" / "camera_lab_replay.py"
     if not replay_lab.is_file():
         errors.append("camera lab replay module missing: tools/camera_lab_replay.py")
+    for latency_tool in ("latency_capture.py", "latency_report.py", "windows/Run-LatencyCapture.ps1"):
+        if not (payload / "tools" / latency_tool).is_file():
+            errors.append(f"latency tool missing: tools/{latency_tool}")
+    if not (payload / "app" / "core" / "latency_trace.py").is_file():
+        errors.append("latency trace missing: app/core/latency_trace.py")
     if not (payload / "requirements-windows.txt").is_file():
         errors.append("requirements-windows.txt missing")
 

@@ -30,19 +30,23 @@ param(
     [int]$PollInput = -1,
     [int]$PulseMs = 500,
     [switch]$NoPulse,
+    [switch]$Yes,
     [string]$HostUrl = "http://127.0.0.1:8765",
-    [string]$OutDir = ""
+    [string]$OutDir = "",
+    [string]$Label = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path ([IO.Path]::Combine($PSScriptRoot, "..", ".."))).Path
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $BaseOut = if ($OutDir) { $OutDir } else { Join-Path ([Environment]::GetFolderPath("Desktop")) "SmartParkLatency" }
-$Out = Join-Path $BaseOut "capture-$Stamp"
+$SafeLabel = ($Label -replace '[^A-Za-z0-9_-]', '')
+$Out = if ($SafeLabel) { Join-Path $BaseOut "capture-$Stamp-$SafeLabel" } else { Join-Path $BaseOut "capture-$Stamp" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Transcript = Join-Path $Out "console.txt"
 Start-Transcript -Path $Transcript | Out-Null
 $Started = Get-Date
+$captureExit = 0
 
 function Find-Python64 {
     $candidates = @()
@@ -100,6 +104,7 @@ try {
     try {
         $system.services = @(Get-Service -Name "SmartPark*" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Status)" })
     } catch { }
+    $system.label = $Label
     $system.python = $Python
     $system.root = $Root
     try { $system.git_head = (& git -C $Root rev-parse --short HEAD 2>$null) } catch { }
@@ -135,6 +140,8 @@ try {
     if ($Beep) { $captureArgs += "--beep" }
     if ($PollInput -ge 0) { $captureArgs += @("--poll-input", $PollInput) }
     if ($NoPulse) { $captureArgs += "--no-pulse" }
+    # -Yes: the caller (support\Run-LatencyTest.ps1) has already asked for OPEN.
+    if ($Yes) { $captureArgs += "--yes" }
     Write-Host "Running: $Python $($captureArgs -join ' ')"
     & $Python @captureArgs
     $captureExit = $LASTEXITCODE
@@ -177,3 +184,4 @@ finally {
     Write-Host ""
     Write-Host "Send this file back: $zip"
 }
+if ($captureExit) { exit $captureExit }
