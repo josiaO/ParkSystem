@@ -443,6 +443,7 @@ for helper in \
   Run-RecordedMediaTests.ps1 Run-RecordedMediaTests.bat \
   Open-SmartParkLogs.bat \
   Run-CameraLab.ps1 Run-CameraLab.bat \
+  Run-LatencyTest.ps1 Latency-A1-BoomTiming.bat Latency-A2-RealCars.bat Latency-A3-SaturatedHost.bat \
   Repair-SmartParkNetwork.ps1 Repair-SmartParkNetwork.bat \
   Wipe-SmartPark.ps1 Wipe-SmartPark.bat; do
   cp "$ROOT/packaging/windows/$helper" "$SUPPORT/"

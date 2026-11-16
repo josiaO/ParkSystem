@@ -167,6 +167,35 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn('Install-SmartPark-Client.bat', installer)
         self.assertNotIn('Install-SmartPark-Node.bat', installer)
 
+    def test_latency_test_launchers_ship_in_kit_and_install(self):
+        windows = ROOT / "packaging" / "windows"
+        kit = (ROOT / "packaging" / "make_windows_kit.sh").read_text(encoding="utf-8")
+        installer = (windows / "Install-SmartPark.ps1").read_text(encoding="utf-8")
+        wrapper = (windows / "Run-LatencyTest.ps1").read_text(encoding="utf-8")
+        launchers = {"Latency-A1-BoomTiming.bat": "A1", "Latency-A2-RealCars.bat": "A2",
+                     "Latency-A3-SaturatedHost.bat": "A3"}
+        for name, test in launchers.items():
+            bat = (windows / name).read_bytes().decode("ascii")
+            self.assertIn("\r\n", bat)
+            self.assertIn("-Verb RunAs", bat)  # double-click elevates itself
+            self.assertIn(f'Run-LatencyTest.ps1" -Test {test}', bat)
+            self.assertIn(name, kit)
+            self.assertIn(f'"{name}"', installer)
+        self.assertIn("Run-LatencyTest.ps1", kit)
+        self.assertIn('"Run-LatencyTest.ps1"', installer)
+        for tool in ("latency_capture.py", "latency_report.py", "Run-LatencyCapture.ps1"):
+            self.assertIn(tool, kit)
+        # the wrapper runs the installed capture, and A2 never pulses the boom
+        self.assertIn("tools\\windows\\Run-LatencyCapture.ps1", wrapper)
+        a2 = wrapper.split('"A2" {', 1)[1].split('"A3" {', 1)[0]
+        self.assertIn("$capArgs.NoPulse = $true", a2)
+        self.assertNotIn("Handle", a2)
+        # A1 and A3 ask for OPEN in PowerShell before the capture is told the boom is confirmed
+        for test in ("A1", "A3"):
+            block = wrapper.split(f'"{test}" {{', 1)[1].split("\n    }", 1)[0]
+            self.assertIn("Confirm-BoomOpen", block)
+        self.assertIn('-cne "OPEN"', wrapper)
+
     def test_lan_installer_download_is_available_without_site_data(self):
         service = (ROOT / "app" / "services" / "installer_download.py").read_text(encoding="utf-8")
         api = (ROOT / "app" / "api_main.py").read_text(encoding="utf-8")

@@ -36,6 +36,9 @@ installers. Use them only after the main installation:
   Run-FieldAcceptanceTest.bat   test live vehicle flow
   Run-CameraLab.bat             check camera picture freshness
   Open-SmartParkLogs.bat        open service logs
+  Latency-A1-BoomTiming.bat     latency test A1: OPENS THE BOOM 10 times, timed
+  Latency-A2-RealCars.bat       latency test A2: 15 minutes of real cars, no scripted opens
+  Latency-A3-SaturatedHost.bat  latency test A3 (optional): saturated host, boom may open late
   Wipe-SmartPark.bat            deliberate factory reset
 
 Sign in with the administrator credentials created during Deployment

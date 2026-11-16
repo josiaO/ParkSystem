@@ -9,16 +9,34 @@ Do not edit the scripts.
 the lane clear and have someone watching it. The script lists the cameras and
 asks you to type `OPEN` before the first pulse.
 
-## 0. Update and restart (once, before any run)
+## 0. Install the new kit (once, before any run)
 
-In PowerShell, in the checkout folder:
+The rig is updated from the Windows kit, not from git.
 
-```powershell
-git pull
-```
+1. On Ubuntu, build the kit: `packaging/make_windows_kit.sh`. It writes
+   `dist/SmartParkEdge-Installer.zip`.
+2. Copy the zip to the Windows PC, extract it, and double-click
+   `Install-SmartPark.bat` (an upgrade keeps the database, cameras and
+   accounts). The installer restarts the SmartPark background services.
+3. Open Zirp and connect the cameras.
 
-Restart everything, so the instrumented code is running. If SmartPark runs
-as Windows services:
+The three tests below are one double-click each, in the extracted kit's
+`support` folder (also copied into the installation folder):
+
+| Test | File | Opens the boom |
+|---|---|---|
+| A1 | `Latency-A1-BoomTiming.bat` | yes, 10 times |
+| A2 | `Latency-A2-RealCars.bat` | no (only real cars) |
+| A3 | `Latency-A3-SaturatedHost.bat` | yes, 3 times, possibly late |
+
+Each one asks for administrator rights by itself, finds the installation,
+checks that the new HVX host is running, asks for the camera wired to the test
+boom when more than one is connected, runs the capture, and at the end opens
+Explorer on the zip to send back. The zip name says which test it was
+(`capture-<date>-<time>-A1-app-open.zip` and so on).
+
+If you run from a git checkout instead of the kit, `git pull` and restart
+the services:
 
 ```powershell
 Restart-Service SmartParkHvxHost, SmartParkSiteService, SmartParkMediaService, SmartParkRecognitionWorker
@@ -26,6 +44,7 @@ Restart-Service SmartParkHvxHost, SmartParkSiteService, SmartParkMediaService, S
 
 If you start it with `scripts\Start-SmartPark.ps1` instead, close all the
 SmartPark windows (including the 32-bit HVX host window) and start it again.
+Then use the PowerShell commands shown under each test.
 
 Check that the new host is running. This must print a list of histograms, not
 an error:
@@ -62,6 +81,10 @@ Run it **twice**:
    would have it.
 2. **Desktop app closed** (services still running).
 
+Kit: double-click `support\Latency-A1-BoomTiming.bat`. It asks whether the
+desktop app is open (and names the zip after the answer), then which camera
+drives the boom. Checkout:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\Run-LatencyCapture.ps1 -Beep
 ```
@@ -79,14 +102,19 @@ It takes about 3 minutes: 5 pulses with no extra viewers, then 5 pulses with
 "relay_on_after" figure, which is the software time from the command to the
 SDK relay call.
 
-**Send back:** both zips (they are on your Desktop under `SmartParkLatency`),
-and say which one had the desktop app open.
+**Send back:** both zips (they are on your Desktop under `SmartParkLatency`).
+With the kit launcher the zip name says whether the app was open; otherwise
+say which one had it open.
 
 ## A2. Recognition and display staleness (does not open the boom by script)
 
 This records real cars through the normal app: native camera events, worker
 reads, decisions and the age of the frame or event each decision used, plus
 the live-view frame age.
+
+Kit: double-click `support\Latency-A2-RealCars.bat`. It opens Notepad for
+your list of passes and, when the 15 minutes are up, adds the saved notes to
+the zip. Checkout:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\Run-LatencyCapture.ps1 -NoPulse -PassiveSeconds 900
@@ -103,7 +131,8 @@ Write down each pass: time, plate, lane, and anything that looked wrong
 (wrong plate, an old picture, a frozen live view and for how long, the boom
 slow). The times printed on the PC clock are fine.
 
-**Send back:** the zip and your list of passes.
+**Send back:** the zip and your list of passes (with the kit launcher the
+list is already inside the zip).
 
 ## A3. Saturated host (optional, opens the boom)
 
@@ -115,6 +144,8 @@ whether the real host does the same.
 
 During this run other SmartPark requests to the host can fail for about a
 minute and **the boom may open late**. Keep the lane clear.
+
+Kit: double-click `support\Latency-A3-SaturatedHost.bat`. Checkout:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\Run-LatencyCapture.ps1 -Saturate -Pulses 3 -Handle 1
@@ -166,7 +197,8 @@ Invoke-RestMethod "http://127.0.0.1:8765/gpio-scan/1" | ConvertTo-Json -Depth 4
 Then open the boom (with its remote or by hand) and run the same command
 again while it is **open**. Replace `1` with the camera handle. An input whose
 `value` differs between the two is the one to use. Then run A1 with polling on
-that input, for example index 2:
+that input. With the kit launcher, type the input index when A1 asks for it.
+From a checkout, for example index 2:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\Run-LatencyCapture.ps1 -Beep -Handle 1 -PollInput 2
