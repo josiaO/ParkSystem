@@ -475,14 +475,17 @@ cp "$ROOT/docs-site/styles.css" "$OUT/documentation/"
 cp "$ROOT/docs-site/app.js" "$OUT/documentation/"
 cp "$ROOT/docs-site/"*.ico "$OUT/documentation/"
 cp "$ROOT/docs-site/README.md" "$OUT/documentation/"
-cp "$ROOT/docs/DEPLOYMENT.md" "$OUT/documentation/"
-cp "$ROOT/docs/DATABASE_CONFIGURATION.md" "$OUT/documentation/"
-cp "$ROOT/docs/POSTGRESQL-PREREQUISITE.md" "$OUT/documentation/"
-cp "$ROOT/docs/LANE-DEPLOYMENT.md" "$OUT/documentation/"
-cp "$ROOT/docs/MEDIA-ARCHITECTURE.md" "$OUT/documentation/"
-cp "$ROOT/docs/CAMERA-DELIVERY-DIAGNOSTICS.md" "$OUT/documentation/"
-cp "$ROOT/docs/MIGRATION-AND-ROLLBACK.md" "$OUT/documentation/"
-cp "$ROOT/docs/SYSTEM-GUIDE.md" "$OUT/documentation/"
+# Reference documents are optional: the docs set is being consolidated, and a
+# missing document must not stop the kit (the app does not read these files).
+for doc in DEPLOYMENT.md DATABASE_CONFIGURATION.md POSTGRESQL-PREREQUISITE.md \
+  LANE-DEPLOYMENT.md MEDIA-ARCHITECTURE.md CAMERA-DELIVERY-DIAGNOSTICS.md \
+  MIGRATION-AND-ROLLBACK.md SYSTEM-GUIDE.md WINDOWS-TEST-PROTOCOL.md; do
+  if [[ -f "$ROOT/docs/$doc" ]]; then
+    cp "$ROOT/docs/$doc" "$OUT/documentation/"
+  else
+    echo "WARNING: docs/$doc not found; not included in the kit documentation."
+  fi
+done
 if [[ -f "$ROOT/FIRST_TEST_WINDOWS.md" ]]; then
   cp "$ROOT/FIRST_TEST_WINDOWS.md" "$OUT/documentation/"
 fi
