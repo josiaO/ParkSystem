@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 
 from app.config import settings
+from app.core import latency_trace
 
 
 class HVXHostUnavailable(RuntimeError):
@@ -63,6 +65,50 @@ def _shared_live_client(base_url: str, handle: int) -> httpx.AsyncClient:
         )
         _live_clients[key] = client
     return client
+
+
+def _trace_gpio_response(tracer, trace_id: str, handle: int, sent_ns: int, received_ns: int, payload) -> None:
+    """Split the round trip into queue, SDK and hold using the host's stamps.
+
+    All stamps are perf_counter_ns from processes on the same PC.
+    """
+    timing = (payload or {}).get("timing") or {} if isinstance(payload, dict) else {}
+    host = (payload or {}).get("host_timing") or {} if isinstance(payload, dict) else {}
+
+    def span(start, end):
+        try:
+            return round((int(end) - int(start)) / 1e6, 3) if start and end else None
+        except (TypeError, ValueError):
+            return None
+
+    tracer.emit(
+        "gate.http_received", trace=trace_id, camera=handle,
+        ok=bool(payload.get("ok")) if isinstance(payload, dict) else False,
+        round_trip_ms=span(sent_ns, received_ns),
+        sent_to_host_received_ms=span(sent_ns, host.get("request_received_perf_ns")),
+        host_queue_wait_ms=host.get("queue_wait_ms"),
+        host_received_to_sdk_start_ms=span(host.get("request_received_perf_ns"), timing.get("sdk_start_perf_ns")),
+        sent_to_relay_on_ms=span(sent_ns, timing.get("relay_on_perf_ns")),
+        gate_setup_ms=timing.get("gate_setup_ms"), write_on_ms=timing.get("write_on_ms"),
+        hold_ms=timing.get("hold_ms"), write_off_ms=timing.get("write_off_ms"),
+        host_response_to_received_ms=span(host.get("response_ready_perf_ns"), received_ns),
+        relay_on_perf_ns=timing.get("relay_on_perf_ns"),
+    )
+
+
+def _trace_live_frame(handle: int, headers, meta: dict, previous: int) -> None:
+    tracer = latency_trace.get_tracer()
+    captured = headers.get("x-frame-captured-perf-ns")
+    age_ms = latency_trace.age_ms_from_perf(captured) if captured else None
+    meta["frame_age_ms"] = age_ms
+    if not tracer.sample_frame(("client.frame", int(handle))):
+        return
+    tracer.emit(
+        "frame.received", camera=int(handle), seq=meta.get("frame_seq"), previous_seq=previous,
+        age_ms=age_ms, host_age_at_serve_ms=headers.get("x-frame-age-ms"),
+        request_ms=meta.get("duration_ms"), fresh=meta.get("fresh"),
+        stale=bool(age_ms is not None and age_ms > latency_trace.frame_age_limit_ms()),
+    )
 
 
 class HVXHostClient:
@@ -172,20 +218,38 @@ class HVXHostClient:
             raise HVXHostUnavailable(str(exc)) from exc
 
     async def gpio_pulse(self, *, handle: int, index: int = 0, pulse_ms: int = 500) -> dict:
+        trace_id = latency_trace.current_trace_id() or latency_trace.new_trace_id()
+        tracer = latency_trace.get_tracer()
+        created_ns = time.perf_counter_ns()
+        sent_ns = None
         try:
             async with httpx.AsyncClient(timeout=max(settings.request_timeout_seconds, 8.0)) as client:
+                sent_ns = time.perf_counter_ns()
+                tracer.emit(
+                    "gate.http_sent", trace=trace_id, camera=int(handle), index=int(index),
+                    pulse_ms=int(pulse_ms), client_create_ms=round((sent_ns - created_ns) / 1e6, 3),
+                )
                 r = await client.post(f"{self.base_url}/gpio/pulse", json={
                     "handle": int(handle), "index": int(index), "pulse_ms": int(pulse_ms),
-                })
+                    "trace_id": trace_id,
+                }, headers={"X-Trace-Id": trace_id})
+                received_ns = time.perf_counter_ns()
                 r.raise_for_status()
-                return r.json()
+                payload = r.json()
+                _trace_gpio_response(tracer, trace_id, int(handle), sent_ns, received_ns, payload)
+                return payload
         except httpx.HTTPStatusError as exc:
+            tracer.emit("gate.http_error", trace=trace_id, camera=int(handle),
+                        status_code=exc.response.status_code,
+                        elapsed_ms=round((time.perf_counter_ns() - (sent_ns or created_ns)) / 1e6, 3))
             try:
                 detail = exc.response.json()
             except Exception:
                 detail = exc.response.text
             raise HVXHostUnavailable(f"HVX GPIO error: {detail}") from exc
         except Exception as exc:
+            tracer.emit("gate.http_error", trace=trace_id, camera=int(handle), error=type(exc).__name__,
+                        elapsed_ms=round((time.perf_counter_ns() - (sent_ns or created_ns)) / 1e6, 3))
             raise HVXHostUnavailable(str(exc)) from exc
 
     async def event_jpeg(self, handle: int, image_id: int | None = None, *, capture_token: str | None = None) -> bytes:
@@ -289,6 +353,8 @@ class HVXHostClient:
             meta["wait"] = r.headers.get("x-frame-wait") or ""
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
                 meta["fresh"] = self.last_live_seq.get(handle, 0) > previous
+                meta["duration_ms"] = round((asyncio.get_running_loop().time() - started) * 1000.0, 1)
+                _trace_live_frame(handle, r.headers, meta, previous)
                 return r.content
         except (httpx.TransportError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             _drop_live_client(self.base_url, handle)
