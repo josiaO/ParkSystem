@@ -160,6 +160,32 @@ async def _process_native_capture(
         note_worker_failure("camera-capture-processing", str(exc))
 
 
+def _native_event_age_ms(capture: dict) -> float | None:
+    """Age of a host plate callback: perf clock if stamped, else wall clock."""
+    from app.core.latency_trace import age_ms_from_perf
+
+    age = age_ms_from_perf(capture.get("captured_perf_ns"))
+    if age is not None:
+        return age
+    try:
+        captured = float(capture.get("captured_at_epoch") or 0)
+    except (TypeError, ValueError):
+        return None
+    return round((time.time() - captured) * 1000.0, 2) if captured > 0 else None
+
+
+def _seed_native_timeline(camera_id: int, capture: dict, visit_id: str, age_ms: float | None) -> None:
+    """Start the visit timeline at the camera callback so decisions can report its age."""
+    from app.services.lane_timing import mark
+
+    timeline = {"visit_id": visit_id, "camera_id": camera_id,
+                "capture_token": str(capture.get("capture_token") or "") or None}
+    if age_ms is not None:
+        mark("native_event_captured", timeline, at=time.monotonic() - age_ms / 1000.0)
+    mark("native_event_ingested", timeline)
+    capture["timeline"] = timeline
+
+
 async def _drain_camera_events(
     camera_id: int,
     handle: int,
@@ -176,9 +202,11 @@ async def _drain_camera_events(
         # state() after the car has left; re-ingesting it looks hardcoded.
         return 0
     processed = len(events)
+    from app.core import latency_trace
     for capture in events:
         image_id = int(capture.get("image_id") or 0)
         plate = str(capture.get("plate") or "")
+        drained_age_ms = _native_event_age_ms(capture)
         from app.services.dedup import native_callbacks
         if native_callbacks.seen(
             camera_id=camera_id,
@@ -200,11 +228,14 @@ async def _drain_camera_events(
             media_key = {"image_id": image_id}
             if capture.get("capture_token"):
                 media_key = {"capture_token": capture["capture_token"]}
+            media_started = time.perf_counter()
             jpeg, crop = await asyncio.gather(
                 hvx.event_jpeg(handle, **media_key), hvx.event_crop(handle, **media_key),
             )
+            media_ms = round((time.perf_counter() - media_started) * 1000.0, 2)
         except Exception:
             jpeg, crop = b"", b""
+            media_ms = None
         # Do not inject event stills into live preview — that freezes the UI on the car snap.
         # Live frames come only from the media gateway producer (Net_GetJpgBuffer / RTSP / HTTP).
         from app.core.plate import is_camera_no_plate, is_empty_scene_ocr
@@ -280,6 +311,17 @@ async def _drain_camera_events(
             coil_watch.observe(camera_id, True, source="image-callback")
             lane.visit.observe(presence=True, plate=native_plate if real_native else "", native_event=True)
             capture["visit_id"] = lane.visit.visit_id
+            if not capture.get("timeline"):
+                _seed_native_timeline(camera_id, capture, lane.visit.visit_id, _native_event_age_ms(capture))
+        ingest_age_ms = _native_event_age_ms(capture)
+        latency_trace.emit(
+            "recognition.native_event", camera=camera_id, handle=handle,
+            capture_token=str(capture.get("capture_token") or "") or None, image_id=image_id,
+            plate=native_plate or None, presence=presence, visit_id=capture.get("visit_id"),
+            age_at_drain_ms=drained_age_ms, age_after_media_ms=ingest_age_ms, media_ms=media_ms,
+            batch=processed,
+            stale=bool(ingest_age_ms is not None and ingest_age_ms > latency_trace.event_age_limit_ms()),
+        )
         with short_session() as db:
             row = db.get(Camera, camera_id)
             if row is None:

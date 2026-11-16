@@ -14,8 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import time
 
 from app.config import settings
+from app.core import latency_trace
 from app.models import Camera, Gate
 from app.services.board_tcp import send_board_command
 from app.services.hvx_client import HVXHostClient, HVXHostUnavailable
@@ -83,12 +85,35 @@ class PhysicalGateController(GateController):
         hvx = HVXHostClient()
         actuators: list[dict] = []
         barrier_ok = False
+        tracer = latency_trace.get_tracer()
+        open_started = time.perf_counter_ns()
+        tracer.emit("gate.open_start", gate=gate.name, side=wanted, action=action, dry_run=dry_run,
+                    cameras=[c.id for c in rows])
+
+        def elapsed_ms(start_ns: int) -> float:
+            return round((time.perf_counter_ns() - start_ns) / 1e6, 3)
+
         for camera in rows:
             label = f"{gate.name} {side_label(camera.lane_direction)}"
+            # These run one after another. The board relay (when it is the
+            # barrier actuator) is only commanded after the GPIO pulse call
+            # has returned, which includes the pulse hold time.
+            step = time.perf_counter_ns()
             gpio = await _gpio_pulse(hvx, camera, dry_run=dry_run)
+            gpio_ms = elapsed_ms(step)
+            step = time.perf_counter_ns()
             board = await send_board_command(camera.controller_ip or "", action=action, dry_run=dry_run)
+            board_ms = elapsed_ms(step)
             text = led_text or (EXIT_LED if (camera.lane_direction or "").upper() == "EXIT" else ENTRY_LED)
+            step = time.perf_counter_ns()
             led = await send_led_text(camera.display_ip or "", text, dry_run=dry_run)
+            led_ms = elapsed_ms(step)
+            tracer.emit(
+                "gate.actuators", camera=camera.id, gpio_ok=bool(gpio.get("ok")), gpio_ms=gpio_ms,
+                board_configured=bool(camera.controller_ip), board_ok=bool(board.ok), board_ms=board_ms,
+                board_started_after_open_ms=round(gpio_ms, 3), led_ms=led_ms,
+                since_open_start_ms=elapsed_ms(open_started),
+            )
             row = {
                 "camera_id": camera.id,
                 "name": camera.name or label,
@@ -103,6 +128,7 @@ class PhysicalGateController(GateController):
             if gpio.get("ok") or board.ok:
                 barrier_ok = True
 
+        tracer.emit("gate.open_result", ok=barrier_ok, dry_run=dry_run, total_ms=elapsed_ms(open_started))
         message = (
             f"{'dry-run ' if dry_run else ''}{action} lane {gate.name}"
             + (f" {wanted}" if wanted else "")

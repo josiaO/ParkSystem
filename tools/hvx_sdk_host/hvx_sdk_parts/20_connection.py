@@ -30,18 +30,25 @@ class _HVXConnectionMixin:
                     for handle, session in self._recognition_sessions.items() if session.get("ip")]
         return [{**row, "video": self.video_status(row["handle"])} for row in rows]
 
-    def __init__(self, vendor_dir: Path):
-        if os.name != "nt":
-            raise HVXSDKError("HVX NetSDK is Windows-only")
-        if struct.calcsize("P") * 8 != 32:
-            raise HVXSDKError("NetSDK.dll is x86. Start this host with 32-bit Python.")
+    def __init__(self, vendor_dir: Path, *, dll=None):
+        # ``dll`` injects a test double (tests/fakes/fake_hvx_sdk.py) so the
+        # real callback, queue and HTTP code can run on a non-Windows
+        # developer machine. Production never passes it.
         self.vendor_dir = vendor_dir
-        dll = vendor_dir / "NetSDK.dll"
-        if not dll.exists():
-            raise HVXSDKError(f"Missing {dll}")
-        os.add_dll_directory(str(vendor_dir))
-        os.environ["PATH"] = str(vendor_dir) + os.pathsep + os.environ.get("PATH", "")
-        self.dll = ctypes.WinDLL(str(dll))  # stdcall
+        self.fake_sdk = dll is not None
+        if dll is not None:
+            self.dll = dll
+        else:
+            if os.name != "nt":
+                raise HVXSDKError("HVX NetSDK is Windows-only")
+            if struct.calcsize("P") * 8 != 32:
+                raise HVXSDKError("NetSDK.dll is x86. Start this host with 32-bit Python.")
+            dll_path = vendor_dir / "NetSDK.dll"
+            if not dll_path.exists():
+                raise HVXSDKError(f"Missing {dll_path}")
+            os.add_dll_directory(str(vendor_dir))
+            os.environ["PATH"] = str(vendor_dir) + os.pathsep + os.environ.get("PATH", "")
+            self.dll = ctypes.WinDLL(str(dll_path))  # stdcall
         self._report_cbs = {}
         self._image_cbs = {}
         self._recognition_sessions = {}
@@ -203,6 +210,15 @@ class _HVXConnectionMixin:
         return result
 
     def _on_image(self, handle, image_id, pt_info, pt_pic, user):
+        callback_perf_ns = time.perf_counter_ns()
+        try:
+            return self._on_image_inner(handle, image_id, pt_info, pt_pic, user, callback_perf_ns)
+        finally:
+            callback_ms = (time.perf_counter_ns() - callback_perf_ns) / 1_000_000.0
+            HOST_METRICS.observe("callback.image", callback_ms)
+            HOST_METRICS.incr("events.callbacks")
+
+    def _on_image_inner(self, handle, image_id, pt_info, pt_pic, user, callback_perf_ns):
         plate = ""
         score = None
         box = None
@@ -253,6 +269,9 @@ class _HVXConnectionMixin:
             "image_id": int(image_id),
             "capture_token": uuid.uuid4().hex,
             "captured_at_epoch": time.time(),
+            # perf_counter_ns is system-wide on Windows (QPC) and Linux, so a
+            # consumer on this PC can compute the event age exactly.
+            "captured_perf_ns": int(callback_perf_ns),
             "plate": plate or None,
             "score": score,
             "plate_box": box,
@@ -293,6 +312,15 @@ class _HVXConnectionMixin:
             while len(self._event_media) > 128 or media_bytes > EVENT_MEDIA_MAX_BYTES:
                 removed = self._event_media.pop(next(iter(self._event_media)))
                 media_bytes -= len(removed[1]) + len(removed[2])
+            queue_depth = len(queue)
+        HOST_METRICS.gauge(f"events.queue_depth.{key}", queue_depth)
+        _trace(
+            "host.event.callback", camera=key, capture_token=row["capture_token"],
+            image_id=row["image_id"], plate=row["plate"], have_vehicle=have_vehicle,
+            jpeg_bytes=row["jpeg_bytes"], queue_depth=queue_depth,
+            copy_ms=round((time.perf_counter_ns() - callback_perf_ns) / 1_000_000.0, 3),
+            captured_perf_ns=row["captured_perf_ns"],
+        )
         return 0
 
     def _on_report(self, handle, msg_type, message, user):

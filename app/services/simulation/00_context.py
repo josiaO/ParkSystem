@@ -94,11 +94,18 @@ async def _pulse_gate(
         return blocked
     dry_run = bool(session is not None and session.simulated) or not should_pulse_physical(gate=gate, automatic=automatic)
     started = time.perf_counter()
-    opened = await controller().open(
-        gate, cameras, reason, side=side,
-        dry_run=dry_run,
-        led_text=led_text,
-    )
+    from app.core import latency_trace
+    # The gate command uuid is the trace id from here to the camera relay.
+    with latency_trace.trace_context(command_uuid or None):
+        latency_trace.emit(
+            "gate.command_created", side=side, gate=gate.name, automatic=automatic, dry_run=dry_run,
+            session_id=getattr(session, "id", None), command_uuid=command_uuid or None,
+        )
+        opened = await controller().open(
+            gate, cameras, reason, side=side,
+            dry_run=dry_run,
+            led_text=led_text,
+        )
     try:
         from app.services.health import note_gate
         note_gate(bool(opened and opened.ok), (time.perf_counter() - started) * 1000)
