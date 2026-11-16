@@ -652,7 +652,7 @@ Set-Content (Join-Path $Programs "Zirp Web.url") $WebShortcut -Encoding ASCII
 if (Test-Path $svcScript) {
     Copy-Item $svcScript (Join-Path $InstallDir "Install-SmartParkServices.ps1") -Force
 }
-foreach ($helper in @("Install-SmartParkWinService.ps1", "Test-HvxHostAsService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Repair-SmartParkNetwork.ps1", "Repair-SmartParkNetwork.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
+foreach ($helper in @("Install-SmartParkWinService.ps1", "Test-HvxHostAsService.ps1", "Enable-MediaMTX.ps1", "MediaMTX-SoakTest.ps1", "Run-FieldAcceptanceTest.ps1", "Run-FieldAcceptanceTest.bat", "Run-StartupCheck.ps1", "Run-StartupCheck.bat", "Run-ServerDiagnostics.ps1", "Run-ServerDiagnostics.bat", "Run-RecordedMediaTests.ps1", "Run-RecordedMediaTests.bat", "Open-SmartParkLogs.bat", "Run-CameraLab.ps1", "Run-CameraLab.bat", "Run-LatencyTest.ps1", "Latency-A1-BoomTiming.bat", "Latency-A2-RealCars.bat", "Latency-A3-SaturatedHost.bat", "Repair-SmartParkNetwork.ps1", "Repair-SmartParkNetwork.bat", "Wipe-SmartPark.ps1", "Wipe-SmartPark.bat")) {
     $src = Get-KitSupportFile $helper
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir $helper) -Force
