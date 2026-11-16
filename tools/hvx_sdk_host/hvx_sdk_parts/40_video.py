@@ -64,6 +64,7 @@ class _HVXVideoMixin:
             seq = int(self._draw_frame_seq.get(handle, 0))
             encoded_seq = int(self._draw_encoded_seq.get(handle, 0))
             frame_at = float(getattr(self, "_draw_frame_at", {}).get(handle, 0.0) or 0.0)
+            frame_perf_ns = int(getattr(self, "_draw_frame_perf", {}).get(handle, 0) or 0)
         # A callback is an edge, not a cache. Returning the previously encoded
         # JPEG here makes a stalled decoder look healthy to the HTTP bridge.
         # The caller must receive an empty result until a newer DIB arrives.
@@ -104,7 +105,9 @@ class _HVXVideoMixin:
                 # for ``after=<old high value>`` forever after the new decoder
                 # starts again at sequence 1.
                 live_seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0)
-                getattr(self, "_live_frame_seq", {})[handle] = max(live_seq + 1, seq)
+                new_live_seq = max(live_seq + 1, seq)
+                getattr(self, "_live_frame_seq", {})[handle] = new_live_seq
+                self._set_live_frame_meta(handle, new_live_seq, frame_perf_ns or time.perf_counter_ns())
                 diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
                 frames_received = int(diagnostics.get("frames_received") or 0) + 1
                 first = float(diagnostics.get("jpeg_window_at") or now)
@@ -125,6 +128,15 @@ class _HVXVideoMixin:
             condition = getattr(self, "_live_condition", None)
             if condition is not None:
                 condition.notify_all()
+        HOST_METRICS.observe("frame.encode", encode_ms)
+        HOST_METRICS.incr(f"frames.encoded.{handle}")
+        if frame_perf_ns:
+            stored_ms = round((time.perf_counter_ns() - frame_perf_ns) / 1_000_000.0, 2)
+            HOST_METRICS.observe("frame.callback_to_stored", stored_ms)
+            if _trace_sample(("stored", handle)):
+                _trace("host.frame.stored", camera=handle, draw_seq=seq, encode_ms=encode_ms,
+                       callback_to_stored_ms=stored_ms, captured_perf_ns=frame_perf_ns,
+                       capture_mode="sdk_draw_data")
         self._note_video(
             handle,
             capture_mode="sdk_draw_data",
@@ -585,6 +597,7 @@ class _HVXVideoMixin:
                         self._live_received_at[handle] = time.monotonic()
                         seq = int(getattr(self, "_live_frame_seq", {}).get(handle, 0) or 0) + 1
                         getattr(self, "_live_frame_seq", {})[handle] = seq
+                        self._set_live_frame_meta(handle, seq, time.perf_counter_ns())
                         condition = getattr(self, "_live_condition", None)
                         if condition is not None:
                             condition.notify_all()
@@ -781,7 +794,19 @@ class _HVXVideoMixin:
             if not hasattr(self, "_video_diagnostics"):
                 self._video_diagnostics = {}
             row = self._video_diagnostics.setdefault(int(handle), {})
+            previous_mode = row.get("capture_mode")
             row.update(fields)
+        mode = fields.get("capture_mode")
+        if mode and mode != previous_mode:
+            HOST_METRICS.gauge(f"capture_mode.{int(handle)}", mode)
+            _trace("host.video.capture_mode", camera=int(handle), capture_mode=mode, previous=previous_mode)
+
+    def _set_live_frame_meta(self, handle: int, seq: int, captured_perf_ns: int) -> None:
+        """Remember when live sequence ``seq`` left the SDK. Caller may hold _lock."""
+        meta = getattr(self, "_live_frame_meta", None)
+        if meta is None:
+            meta = self._live_frame_meta = {}
+        meta[int(handle)] = (int(seq), int(captured_perf_ns))
 
     def _ensure_video_thread(self):
         """Compatibility wrapper — live video is now one pump per camera."""
@@ -1108,8 +1133,10 @@ class _HVXVideoMixin:
                     window_seq = int(getattr(self, "_window_frame_seq", {}).get(int(handle), 0) or 0) + 1
                     getattr(self, "_window_frame_seq", {})[int(handle)] = window_seq
                     live_seq = int(getattr(self, "_live_frame_seq", {}).get(int(handle), 0) or 0)
-                    getattr(self, "_live_frame_seq", {})[int(handle)] = max(live_seq + 1, window_seq)
+                    new_live_seq = max(live_seq + 1, window_seq)
+                    getattr(self, "_live_frame_seq", {})[int(handle)] = new_live_seq
                     self._live_received_at[int(handle)] = time.monotonic()
+                    self._set_live_frame_meta(int(handle), new_live_seq, time.perf_counter_ns())
                 first_window_frame = not bool(self._video_diagnostics.get(int(handle), {}).get("window_capture_logged"))
                 if changed:
                     condition = getattr(self, "_live_condition", None)
@@ -1189,6 +1216,14 @@ class _HVXVideoMixin:
         important because the callback buffer is owned by DecodeSdk and is only
         valid until this function returns.
         """
+        callback_perf_ns = time.perf_counter_ns()
+        try:
+            self._on_draw_data_inner(handle, hdd, bmi, data, width, height, user, callback_perf_ns)
+        finally:
+            HOST_METRICS.observe("callback.draw_data", (time.perf_counter_ns() - callback_perf_ns) / 1_000_000.0)
+            HOST_METRICS.incr(f"frames.callbacks.{int(handle)}")
+
+    def _on_draw_data_inner(self, handle, hdd, bmi, data, width, height, user, callback_perf_ns) -> None:
         handle = int(handle)
         width = int(width or 0)
         height_arg = int(height or 0)
@@ -1209,6 +1244,7 @@ class _HVXVideoMixin:
             if skipped is None:
                 skipped = self._draw_skipped = {}
             skipped[handle] = int(skipped.get(handle, 0)) + 1
+            HOST_METRICS.incr(f"frames.skipped.{handle}")
             # Keep liveness visible to the watchdog without a bitmap copy.
             diagnostics = getattr(self, "_video_diagnostics", {}).get(handle)
             if diagnostics is not None:
@@ -1263,6 +1299,10 @@ class _HVXVideoMixin:
             if draw_times is None:
                 draw_times = self._draw_frame_at = {}
             draw_times[handle] = callback_now
+            draw_perf = getattr(self, "_draw_frame_perf", None)
+            if draw_perf is None:
+                draw_perf = self._draw_frame_perf = {}
+            draw_perf[handle] = int(callback_perf_ns)
             diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
             callback_first = float(diagnostics.get("callback_window_at") or callback_now)
             callback_count = int(diagnostics.get("callback_window_frames") or 0) + 1

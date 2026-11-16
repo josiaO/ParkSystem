@@ -26,6 +26,44 @@ import time
 
 import uuid
 
+try:
+    # Standard-library-only tracer shared with the 64-bit app. hvx_host.py
+    # puts the install root on sys.path; without it tracing is just off.
+    from app.core import latency_trace as _latency
+except Exception:  # pragma: no cover - exercised only on a stripped install
+    _latency = None
+
+
+class _NullMetrics:
+    def observe(self, *args, **kwargs): pass
+    def incr(self, *args, **kwargs): pass
+    def gauge(self, *args, **kwargs): pass
+    def adjust(self, *args, **kwargs): return 0
+    def snapshot(self): return {"histograms_ms": {}, "counters": {}, "gauges": {}, "unavailable": True}
+
+
+HOST_METRICS = _latency.MetricsRegistry() if _latency is not None else _NullMetrics()
+
+
+def _trace(stage: str, **fields):
+    """Emit one host latency record; never raises."""
+    if _latency is None:
+        return None
+    try:
+        return _latency.get_tracer().emit(stage, **fields)
+    except Exception:
+        return None
+
+
+def _trace_sample(key) -> bool:
+    if _latency is None:
+        return False
+    try:
+        return _latency.get_tracer().sample_frame(key)
+    except Exception:
+        return False
+
+
 class HVXSDKError(RuntimeError):
     pass
 

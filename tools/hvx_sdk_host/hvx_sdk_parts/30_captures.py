@@ -97,6 +97,14 @@ class _HVXCaptureMixin:
                 return b"", seq
             return jpeg, seq
 
+    def live_frame_captured_perf_ns(self, handle: int, seq: int) -> int | None:
+        """SDK callback time of live frame ``seq``, or None if it was replaced."""
+        with self._lock:
+            meta = getattr(self, "_live_frame_meta", {}).get(int(handle))
+        if not meta or int(meta[0]) != int(seq):
+            return None
+        return int(meta[1])
+
     def event_crop_for(self, handle: int, image_id: int | None = None, *, capture_token=None) -> bytes:
         return self._event_image(handle, image_id, capture_token, 2)
 
@@ -108,7 +116,17 @@ class _HVXCaptureMixin:
                 return []
             items = list(queue)
             queue.clear()
-            return items
+        now_ns = time.perf_counter_ns()
+        for item in items:
+            captured = int(item.get("captured_perf_ns") or 0)
+            age_ms = round((now_ns - captured) / 1_000_000.0, 2) if captured else None
+            if age_ms is not None:
+                HOST_METRICS.observe("event.age_at_drain", age_ms)
+            _trace(
+                "host.event.drained", camera=int(handle), capture_token=item.get("capture_token"),
+                image_id=item.get("image_id"), age_ms=age_ms, batch=len(items),
+            )
+        return items
 
     def _refresh_recognition(self, handle: int, observed_state=None) -> dict:
         """Re-arm existing callbacks after an observed SDK reconnect.

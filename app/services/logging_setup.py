@@ -101,6 +101,17 @@ def configure_logging(process_name: str = "smartpark") -> logging.Logger:
         stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         log.addHandler(stream)
     _configured.add(process_name)
+    try:
+        # One latency trace file per process, next to its log
+        # (SMARTPARK_LATENCY_TRACE_DIR overrides the folder).
+        from app.core import latency_trace
+
+        latency_trace.configure(
+            process_name.replace(" ", "-").lower(),
+            None if os.environ.get(latency_trace.DIR_ENV) else dest.parent,
+        )
+    except Exception:
+        logging.getLogger().warning("Latency trace unavailable", exc_info=True)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # Secrets (RTSP passwords, provider keys, webhook hashes) never reach a log line.

@@ -1,6 +1,13 @@
 """Shared test setup."""
 
+import os
+
 import pytest
+
+# The latency trace is on by default in the product. Tests that check it build
+# their own TraceWriter in a temporary folder; everything else must not write
+# trace files into the developer's log folders.
+os.environ.setdefault("SMARTPARK_LATENCY_TRACE", "0")
 
 
 @pytest.fixture(autouse=True)
