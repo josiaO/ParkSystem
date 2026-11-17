@@ -286,8 +286,11 @@ async def _diagnostic_heartbeat_loop() -> None:
                     "warnings": list(row.get("warnings") or [])[:4],
                 })
             degraded = [row for row in cameras if row["frozen"] or row["state"] not in {"STREAMING", "READY"} or row["warnings"]]
+            from app.services import loop_monitor as _lm
+
             snapshot = {
                 "event": "runtime-heartbeat",
+                "event_loop": _lm.stats(),
                 "cameras": cameras,
                 "camera_count": len(cameras),
                 "degraded_camera_ids": [row["camera_id"] for row in degraded],
@@ -482,6 +485,12 @@ async def lifespan(app: FastAPI):
             _supervise_background_loop("node-heartbeat", node_heartbeat_loop),
             name="node-heartbeat",
         )
+    from app.services import loop_monitor
+
+    loop_task = asyncio.create_task(
+        _supervise_background_loop("loop-monitor", loop_monitor.monitor_loop),
+        name="loop-monitor",
+    )
     watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
     if watchdog_seconds > 0:
         from app.services import pipeline_watchdog
@@ -495,7 +504,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task, sweeper_task)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task, sweeper_task, loop_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
