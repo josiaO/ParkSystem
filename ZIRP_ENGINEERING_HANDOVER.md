@@ -846,3 +846,10 @@ This does not fix misreads inside a slot class (T186EEP/T188EEP, T697DHY/T697DHV
   - back-office pages 200 with a session, redirect without one, revoked token refused.
 - **Receipt QR codes now open the portal.** The site public base URL was changed from `http://192.168.1.240:8760` to `http://192.168.1.240:3000` (`PATCH /settings/site`, audited). A receipt QR decodes to `…:3000/s/<token>`, which redirects (307) to the portal page (200). The portal must keep running, and phones need inbound TCP 3000 allowed in Windows Firewall.
 - **Portal and mock start at boot.** `Register-PortalServices.ps1` registered `SmartParkPortal` (port 3000, serving `C:\SmartParkEdge\portal`) and `SmartParkMockPayments` (port 9100, test only). Both run as LocalSystem with delayed auto-start and restart on failure, log to `logs\services`, and can be started or stopped by a signed-in user without admin (verified: restarted with `sc` in 16–18 s). Undo with `-Remove`; `-NoMock` installs the portal only. Rebuilding the portal (`npm run build`) needs the portal service stopped first.
+- **Pay page redesigned to the operator's design** (`parking_payment_portal_demo_v2.html`):
+  - white header, navy headline;
+  - a vehicle card with the entry photo, a plate box with the plate crop, reference, entry time, gate, duration, free period, chargeable time and rate, and the total;
+  - a payment card with a check-before-paying notice, mobile money or kiosk cash, network, number, live approval steps and a session QR;
+  - a success screen with a receipt grid (registration, amount, method, references, status). English/Swahili kept.
+- **Driver payload additions:** `reference` (human ticket reference), `free_label`, `chargeable_label`, `rate_label` (from the stored quote; the active tariff for older sessions without a snapshot).
+- **Photos:** `SMARTPARK_PUBLIC_RECEIPT_PHOTO=full` on SERVER01, so drivers see the entry photo and plate crop, as requested; `blurred`/`off` remain available. Photo URLs are offered only while the file exists. Media older than `media_retention_days` (14) is pruned, which also removes the photo of a car still parked longer than that.

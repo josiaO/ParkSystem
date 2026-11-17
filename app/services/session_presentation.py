@@ -52,6 +52,69 @@ def _can_exit(db: Session, row: ParkingSession, *, paid: bool, remaining: float)
     return bool(entitlement.registered or (row.parker_kind or "CASUAL").upper() not in {"", "CASUAL"})
 
 
+def _minutes_label(seconds: float) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, minutes = divmod(round(seconds / 60), 60)
+    if hours and minutes:
+        return f"{hours} h {minutes} min"
+    return f"{hours} h" if hours else f"{minutes} min"
+
+
+def tariff_summary(row: ParkingSession, rules: dict | None = None) -> dict:
+    """Free period, chargeable time and rate for the driver's receipt.
+
+    Taken from the quote already stored on the session (``breakdown``, e.g.
+    ``free:2100s``) and its tariff snapshot (``tariff_rules``); nothing is
+    recomputed here, so it always matches the amount shown.
+    """
+    free_seconds = None
+    duration_seconds = None
+    for item in list(row.breakdown or []):
+        text = str(item)
+        if text.startswith("free:") and text.endswith("s"):
+            try:
+                free_seconds = int(float(text[5:-1]))
+            except ValueError:
+                pass
+        elif text.startswith("duration:") and text.endswith("s"):
+            try:
+                duration_seconds = int(float(text[9:-1]))
+            except ValueError:
+                pass
+    rules = dict(rules if rules is not None else (row.tariff_rules or {}))
+    currency = str(rules.get("currency") or row.currency or "TZS")
+    rate = ""
+    try:
+        day_fee, day_block = float(rules.get("day_block_fee") or 0), float(rules.get("day_block_seconds") or 0)
+        if day_fee and day_block:
+            rate = f"{currency} {day_fee:,.0f} per {_minutes_label(day_block)}"
+            night_fee, night_block = float(rules.get("night_block_fee") or 0), float(rules.get("night_block_seconds") or 0)
+            if night_fee and night_block and (night_fee, night_block) != (day_fee, day_block):
+                rate += f" (night {currency} {night_fee:,.0f} per {_minutes_label(night_block)})"
+    except (TypeError, ValueError):
+        rate = ""
+    chargeable = None
+    if free_seconds is not None and duration_seconds is not None:
+        chargeable = max(0, duration_seconds - free_seconds)
+    return {
+        "free_label": _minutes_label(free_seconds) if free_seconds is not None else "",
+        "chargeable_label": _minutes_label(chargeable) if chargeable is not None else "",
+        "rate_label": rate,
+    }
+
+
+def _rules_for(db: Session, row: ParkingSession) -> dict:
+    """The tariff snapshot on the session, or the active tariff for older sessions."""
+    if row.tariff_rules:
+        return dict(row.tariff_rules)
+    try:
+        from app.services.fee_engine import load_active_rules
+
+        return load_active_rules(db, getattr(row, "car_type", None) or "Car1", site_id=row.site_id or DEFAULT_SITE_ID)
+    except Exception:
+        return {}
+
+
 def session_presentation(db: Session, row: ParkingSession, *, audience: str = "driver") -> dict:
     """Return the common session/payment/evidence view.
 
@@ -95,6 +158,9 @@ def session_presentation(db: Session, row: ParkingSession, *, audience: str = "d
         "image_note": images.get("image_note") or "",
         "snapshot_url": images.get("snapshot_url"),
         "crop_url": images.get("crop_url"),
+        # Printed on the ticket; lets a driver quote the visit to an attendant.
+        "reference": getattr(row, "human_reference", "") or "",
+        **tariff_summary(row, _rules_for(db, row)),
         **stay,
     }
     if audience != "operator":

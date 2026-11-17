@@ -139,7 +139,7 @@ class PublicSessionBoundaryTests(unittest.TestCase):
 
             # Public photos are opt-in (Phase 1.8); the projection must still
             # point at this visit's own evidence once a site enables them.
-            with patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"):
+            with patch("app.services.receipt_privacy.settings.public_receipt_photo", "full"),                  patch("app.services.kiosk_lookup._media_exists", return_value=True):
                 body = public_session_payload(db, row)
 
         self.assertEqual(body["snapshot_url"], "/p/photo-token/snapshot.jpg")
