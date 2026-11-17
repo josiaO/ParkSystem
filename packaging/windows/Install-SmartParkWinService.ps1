@@ -210,7 +210,10 @@ $hvxMode = "none"
 if (Test-Path $Py32) {
     if ($HvxHostAsService) {
         Register-SmartParkService -Name "SmartParkHvxHost" -DisplayName "SmartPark HVX SDK Host (32-bit)" `
-            -Exe $Py32 -Arguments "`"$HostPy`"" -WorkDir (Join-Path $InstallDir "tools\hvx_sdk_host")
+            -Exe $Py32 -Arguments "hvx_host.py" -WorkDir (Join-Path $InstallDir "tools\hvx_sdk_host")
+        # Relative to the service working directory: Windows PowerShell 5.1
+        # drops embedded quotes when calling nssm, so a full path under
+        # "...\SmartPark Edge\..." was split at the space and never started.
         $hvxMode = "service"
     } elseif (Test-Path $TaskScript) {
         # Not yet proven in Session 0: keep the vendor SDK in the interactive

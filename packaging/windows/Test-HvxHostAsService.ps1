@@ -82,7 +82,9 @@ Start-Sleep -Seconds 2
 
 $handle = $null
 try {
-    & $Nssm install $TestService $Py32 "`"$HostPy`"" | Out-Null
+    # Relative to AppDirectory: PowerShell 5.1 drops embedded quotes on native
+    # calls, and the install path contains a space ("SmartPark Edge").
+    & $Nssm install $TestService $Py32 "hvx_host.py" | Out-Null
     & $Nssm set $TestService AppDirectory $HostDir | Out-Null
     & $Nssm set $TestService ObjectName LocalSystem | Out-Null
     & $Nssm set $TestService AppEnvironmentExtra "SMARTPARK_HOME=$InstallDir" "SMARTPARK_HVX_VENDOR_DIR=$InstallDir\vendor" "PYTHONUNBUFFERED=1" | Out-Null
