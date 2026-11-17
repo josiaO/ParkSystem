@@ -168,6 +168,9 @@ def _arm_deadline_on_stop_signal(deadline_seconds: float) -> None:
     armed = threading.Event()
 
     def _wrap(previous):
+        # Never stack wrappers: replace one installed earlier in this process.
+        previous = getattr(previous, "_smartpark_previous", previous)
+
         def _handler(signum, frame):
             if not armed.is_set():
                 armed.set()
@@ -175,6 +178,7 @@ def _arm_deadline_on_stop_signal(deadline_seconds: float) -> None:
             if callable(previous):
                 return previous(signum, frame)
             raise KeyboardInterrupt
+        _handler._smartpark_previous = previous
         return _handler
 
     for name in ("SIGINT", "SIGBREAK", "SIGTERM"):
