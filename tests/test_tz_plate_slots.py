@@ -21,6 +21,9 @@ CORRECTED = {
     "TZ77EOD": "T277EOD",   # Z in a digit slot
     "T849EH2": "T849EHZ",   # 2 in a letter slot
     "TL23E5A": "T123ESA",   # L in a digit slot, 5 in a letter slot
+    "TJ99BCR": "T399BCR",   # J for 3 (confirmed by the operator)
+    "TJ71COM": "T371COM",   # J for 3 (read correctly on another pass)
+    "TG21EMM": "T621EMM",   # G for 6 (read correctly on another pass)
 }
 UNCHANGED = [
     "T370EBS",               # already standard
