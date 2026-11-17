@@ -100,9 +100,13 @@ def main() -> int:
         access_log=False,
         reload=False,
         workers=1,
+        # Bound graceful shutdown so a Windows service stop cannot hang.
+        timeout_graceful_shutdown=8,
     )
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from app.services.runtime import run_service
+
+    raise SystemExit(run_service(main))
