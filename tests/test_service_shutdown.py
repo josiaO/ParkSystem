@@ -68,3 +68,37 @@ def test_keyboard_interrupt_is_not_written_as_a_crash():
             crash.assert_called_once()
         finally:
             sys.excepthook = sys.__excepthook__
+
+
+def test_site_service_waits_for_a_late_database_but_not_for_bad_config():
+    import pytest
+
+    from app import site_service
+
+    calls, now = [], [0.0]
+
+    def flaky(_deployment):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("PostgreSQL connection failed: ConnectionTimeout")
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    with patch.object(site_service, "_database_startup_check", flaky):
+        site_service._wait_for_database(None, sleep=sleep, clock=lambda: now[0])
+    assert len(calls) == 3
+
+    calls.clear(); now[0] = 0.0
+    with patch.object(site_service, "_database_startup_check", lambda _d: (_ for _ in ()).throw(
+            RuntimeError("PostgreSQL connection failed: refused"))):
+        with pytest.raises(RuntimeError):
+            site_service._wait_for_database(None, wait_seconds=10, sleep=sleep, clock=lambda: now[0])
+    assert now[0] <= 10
+
+    with patch.object(site_service, "_database_startup_check", lambda _d: (_ for _ in ()).throw(
+            RuntimeError("PostgreSQL password could not be read"))):
+        now[0] = 0.0
+        with pytest.raises(RuntimeError):
+            site_service._wait_for_database(None, sleep=sleep, clock=lambda: now[0])
+        assert now[0] == 0.0

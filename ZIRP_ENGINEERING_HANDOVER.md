@@ -803,8 +803,11 @@ Causes found and fixed (`7c72e90` and the commit after it):
 - About a third of captures re-read the same car under a new visit about 6 s later. Entry treats these as duplicates (no second session).
 - One car misread with a one-character difference (T186EEP/T188EEP, 1302BLB/T302BLB, T697DHY/T697DHV) opened **two sessions**. Entry now treats a plate with similarity ≥ 0.85 to one opened on the same gate in the last 10 s as the same car (`duplicate_lookalike`; barrier not opened again, no second ticket). Registered plates are exempt.
 
+Follow-ups done the same day:
+- The exit "did you mean" match (`kiosk_lookup.near_matches`, run for every unmatched exit read) was seen as a loop stall source. It now scans `(id, plate)` only, rejects candidates by length, and stops each edit distance at the allowed bound. Scores are unchanged, and a test checks equality with `plate_similarity` and that no match is missed. Over 2,000 open visits: 135 ms → 41 ms per read.
+- The Site Service now waits up to 90 s for the database at startup. A restart during a CPU-heavy test run hit the 5 s connect timeout once; the service exited and NSSM paused it until resumed by hand. At boot PostgreSQL can also start after the Site Service. A missing password still fails at once.
+
 Still open:
-- The exit fuzzy match (`kiosk_lookup.near_matches`) runs Levenshtein over open sessions on the event loop (seen once as a stall source).
 - The desktop must be restarted to use the direct-from-host live view (`c9c172d`).
 - The web UI has no capture-distance field yet (the desktop zone editor has it).
 - Ground loop: not wired to any camera input (inputs 0–7 watched across ~20 cars). Use the per-camera capture distance (plate width) as the virtual trigger.

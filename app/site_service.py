@@ -44,6 +44,42 @@ def _database_startup_check(deployment) -> None:
         engine.dispose()
 
 
+DATABASE_STARTUP_WAIT_SECONDS = 90.0
+DATABASE_RETRY_SECONDS = 3.0
+
+
+def _wait_for_database(deployment, *, wait_seconds: float = DATABASE_STARTUP_WAIT_SECONDS,
+                       retry_seconds: float = DATABASE_RETRY_SECONDS, sleep=None, clock=None) -> None:
+    """Retry the startup check while the database is unreachable.
+
+    At boot PostgreSQL may start after this service, and a loaded PC can miss
+    the 5 s connect timeout (seen on SERVER01). Exiting at once made NSSM
+    throttle and pause the service. Configuration errors (a missing password)
+    are not retried.
+    """
+    import logging
+    import time
+
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + max(0.0, float(wait_seconds))
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _database_startup_check(deployment)
+            if attempt > 1:
+                logging.getLogger("smartpark").warning("DATABASE reachable after %d attempts", attempt)
+            return
+        except RuntimeError as exc:
+            if "connection failed" not in str(exc) or clock() + retry_seconds > deadline:
+                raise
+            logging.getLogger("smartpark").warning(
+                "DATABASE not reachable yet (attempt %d); retrying in %.0f s: %s", attempt, retry_seconds, str(exc)[:200],
+            )
+            sleep(retry_seconds)
+
+
 def main() -> int:
     from app.services.logging_setup import configure_logging
     from app.services.runtime import acquire_instance_lock, install_crash_hooks
@@ -73,7 +109,7 @@ def main() -> int:
     )
     apply_runtime_database_config(deployment.database)
     try:
-        _database_startup_check(deployment)
+        _wait_for_database(deployment)
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         logging.getLogger("smartpark").error("DATABASE STARTUP FAILED: %s", message, exc_info=True)
