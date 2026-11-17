@@ -66,4 +66,6 @@ def test_dead_board_does_not_delay_a_successful_camera_relay():
 
 def test_board_is_awaited_when_the_camera_relay_failed():
     result, seconds = _open(board_delay=0.6, gpio_ok=False)
-    assert result.ok is False and seconds >= 0.6
+    # Waited for the Board (well past the 0.3 s grace); Windows sleeps can
+    # finish a few ms early, so do not compare against the exact delay.
+    assert result.ok is False and seconds > gates.BOARD_GRACE_SECONDS + 0.15
