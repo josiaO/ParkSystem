@@ -844,3 +844,4 @@ This does not fix misreads inside a slot class (T189EKP/T188EKP, T926DHY/T926DHV
   - receipt T939DXW → push → approve → webhook → status query → one ledger credit of TZS 649,000 → page "Payment received";
   - portal webhook pass-through: signed 202, tampered 401;
   - back-office pages 200 with a session, redirect without one, revoked token refused.
+- **Receipt QR codes now open the portal.** The site public base URL was changed from `http://192.168.10.240:8760` to `http://192.168.10.240:3000` (`PATCH /settings/site`, audited). A receipt QR decodes to `…:3000/s/<token>`, which redirects (307) to the portal page (200). The portal must keep running, and phones need inbound TCP 3000 allowed in Windows Firewall.
