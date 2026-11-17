@@ -769,3 +769,11 @@ Still open (needs hardware, credentials or a decision):
 - D9 (rest): camera password policy, HVX host shared secret, LAN TLS.
 - D10: database restore.
 - D11: exec-composed modules.
+
+### 17.1 D5 resolved: camera host runs as a boot-time service (2026-11-17)
+
+- `Test-HvxHostAsService.ps1` on SERVER01 (camera 192.168.1.49), Session 0, LocalSystem: **PASS** host starts, **PASS** SDK loaded, **PASS** camera connects, **PASS** live video at 7.6 fps (227 frames in 30 s) **[HW]**.
+- Its "native plate" check failed only because these QY cameras send vehicle events **without plate text**. FastALPR reads the snapshot, consistent with all captures being `source=fastalpr` (D18). The test now requires a vehicle event and reports plate text as information.
+- The first run had failed before the SDK even loaded: `Test-HvxHostAsService.ps1` and `Install-SmartParkWinService.ps1 -HvxHostAsService` passed the host script path through PowerShell 5.1, which split it at the space in `SmartPark Edge`. Fixed in `addd187`.
+- `Register-HvxHostService.ps1` registered `SmartParkHvxHost` (Running, Auto, LocalSystem). Under the service both lane 2# cameras streamed (READY_HARDWARE, 9.1 and 7.6 fps) and real cars were read on both cameras (entry: 2 reads, exit: 3 reads) **[HW]**.
+- Cameras and booms now come back after a reboot or power cut with nobody signed in. Not yet exercised by an actual reboot of SERVER01.
