@@ -554,6 +554,8 @@ async def kiosk_receipt_pay(
     """Operator confirms cash after scanning the receipt QR at the kiosk."""
     from app.services.public_pay import pay_public_session, session_by_public_token
 
+    _refuse_cash_on_unattended_kiosk(db, user)
+
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")

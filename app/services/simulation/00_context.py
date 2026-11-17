@@ -66,6 +66,8 @@ DEFAULT_PARKING_SETTINGS = {
     # Entry attempts never authorized (printer failed, receipt not taken,
     # driver left) are cancelled after this, freeing the plate.
     "stranded_entry_minutes": 15,
+    # False for an unattended kiosk: kiosk-device accounts cannot record cash.
+    "kiosk_cash_enabled": True,
 }
 
 OPEN_STATUSES = {"WAITING_RECEIPT", "ACTIVE", "PAID", "OPEN"}
