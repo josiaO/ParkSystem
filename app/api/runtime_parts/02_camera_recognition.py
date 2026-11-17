@@ -378,7 +378,13 @@ async def _run_local_alpr_locked(
     effective_roi = framing["detect_roi"] or native_roi or None
     from app.services.camera_framing import gate_for
     prepared = gate_for(int(camera.id)).prepared
-    boxes = prepared[1] if prepared and prepared[0] == hash(jpeg) else None
+    # Boxes already found on this exact still are reused when they were
+    # searched at the zoom this read would use (the read re-checks the zone).
+    boxes = None
+    if prepared and prepared[0] == hash(jpeg):
+        searched_zoom = float(prepared[2]) if len(prepared) > 2 else float(framing["detect_zoom"] or 1.0)
+        if abs(searched_zoom - float(framing["detect_zoom"] or 1.0)) < 1e-6:
+            boxes = prepared[1]
     native_box = None
     if isinstance(native.get("bbox"), dict):
         native_box = fit_plate_box(

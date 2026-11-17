@@ -777,3 +777,34 @@ Still open (needs hardware, credentials or a decision):
 - The first run had failed before the SDK even loaded: `Test-HvxHostAsService.ps1` and `Install-SmartParkWinService.ps1 -HvxHostAsService` passed the host script path through PowerShell 5.1, which split it at the space in `SmartPark Edge`. Fixed in `addd187`.
 - `Register-HvxHostService.ps1` registered `SmartParkHvxHost` (Running, Auto, LocalSystem). Under the service both lane 2# cameras streamed (READY_HARDWARE, 9.1 and 7.6 fps) and real cars were read on both cameras (entry: 2 reads, exit: 3 reads) **[HW]**.
 - Cameras and booms now come back after a reboot or power cut with nobody signed in. Not yet exercised by an actual reboot of SITE-PC01.
+
+### 17.2 Live view, recognition speed, both lanes, service stop (2026-11-17)
+
+Measured on SITE-PC01 with all four cameras connected (lane 1# .144/.145 and lane 2# .49/.50; lane 1# is served by the Site Server because its Edge Node has no heartbeat, `fbf9d8e`) **[HW]**.
+
+| Measure | Before | After |
+|---|---|---|
+| Site Service event loop lag p95 | 240–300 ms, ~0.3 stalls > 250 ms per second | 40–45 ms, 2–3 stalls in 5 min (startup one-offs) |
+| Relay frame age p95 (per camera) | 300–355 ms | 112–149 ms |
+| Event ingest → capture saved | p50 534 ms, p95 1,022 ms | p50 440–480 ms, p95 650–840 ms |
+| Camera event → parking decision | p50 0.7–0.95 s, p95 1.3–1.7 s | p50 0.73–0.81 s, p95 ~1.0 s |
+| Recognition Worker stop | stuck in StopPending (needed admin) | 2 s, no admin; whole stack restarts in < 10 s |
+
+Causes found and fixed (`7c72e90` and the commit after it):
+- A stall sampler in `loop_monitor` names the code blocking the loop (heartbeat `event_loop.stall_sources`). The main cause was `latest_for_camera`, which the desktop polls for every camera: `ORDER BY id DESC` with no `LIMIT` fetched ~10k rows per call. `LIMIT 1` was added there and on 11 other latest-row lookups.
+- A new `httpx.AsyncClient` per camera-host call built an SSL context on the loop (snapshot trigger, GPIO). These calls now use the shared client.
+- Capture persistence (JPEG crop/encode + INSERT) runs in a worker thread.
+- For QY events (no native box), the drain's detector pass is reused by the read instead of running the detector twice.
+- FastALPR itself takes ~130 ms per read on this CPU (thread count makes little difference).
+- NSSM 2.24 with `AppRotateOnline 1` stayed in StopPending after the app exited. It is now set to 0 in the installers and on SITE-PC01. The console log under a service is WARNING and above, so the NSSM stdout file stays small.
+
+"Stacking" check over 3 h (1,481 captures):
+- No missed cars: different cars 2–3 s apart on lane 1# entry were each captured.
+- About a third of captures re-read the same car under a new visit about 6 s later. Entry treats these as duplicates (no second session).
+- One car misread with a one-character difference (T189EKP/T188EKP, 1302BLB/T302BLB, T926DHY/T926DHV) opened **two sessions**. Entry now treats a plate with similarity ≥ 0.85 to one opened on the same gate in the last 10 s as the same car (`duplicate_lookalike`; barrier not opened again, no second ticket). Registered plates are exempt.
+
+Still open:
+- The exit fuzzy match (`kiosk_lookup.near_matches`) runs Levenshtein over open sessions on the event loop (seen once as a stall source).
+- The desktop must be restarted to use the direct-from-host live view (`c9c172d`).
+- The web UI has no capture-distance field yet (the desktop zone editor has it).
+- Ground loop: not wired to any camera input (inputs 0–7 watched across ~20 cars). Use the per-camera capture distance (plate width) as the virtual trigger.

@@ -263,6 +263,10 @@ async def _drain_camera_events(
             if not found:
                 continue
             box = found[0]
+            # The event read below would run the detector on this same still
+            # again (~70-120 ms on CPU); hand it these full-frame (1x) boxes.
+            from app.services.camera_framing import gate_for
+            gate_for(int(camera_id)).prepared = (hash(jpeg), found, 1.0)
             native = {
                 **native,
                 "bbox": box,
@@ -523,7 +527,7 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         runtime.lane(int(camera.id)).last_error = str(located.get("detail") or located.get("reason") or "Plate detector unavailable")
         return False
     runtime.lane(int(camera.id)).last_error = ""
-    gate.prepared = (hash(jpeg), boxes)
+    gate.prepared = (hash(jpeg), boxes, float(framing["detect_zoom"] or 1.0))
     phase = gate.observe(best_arrival_box(boxes, detect_roi=framing["detect_roi"]), time.monotonic())
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
