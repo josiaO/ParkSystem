@@ -3,6 +3,7 @@ from __future__ import annotations
 """Zirp command line.
 
     python -m app.cli env ...        settings in .env (see app/env_tool.py)
+    python -m app.cli db status|reset  site database facts / reset (see app/db_admin.py)
     python -m app.cli create-admin
     python -m app.cli reset-admin
 """
@@ -55,6 +56,10 @@ def reset_admin():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "db":
+        from .db_admin import main as db_main
+
+        raise SystemExit(db_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "env":
         from .env_tool import main as env_main
 
@@ -64,6 +69,7 @@ def main():
     sub.add_parser("create-admin")
     sub.add_parser("reset-admin")
     sub.add_parser("env", help="list / set / check settings in .env")
+    sub.add_parser("db", help="site database status / reset (factory reset)")
     args=p.parse_args()
     if args.command == "create-admin": create_admin()
     elif args.command == "reset-admin": reset_admin()
