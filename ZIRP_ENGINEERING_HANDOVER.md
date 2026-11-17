@@ -853,3 +853,12 @@ This does not fix misreads inside a slot class (T189EKP/T188EKP, T926DHY/T926DHV
   - a success screen with a receipt grid (registration, amount, method, references, status). English/Swahili kept.
 - **Driver payload additions:** `reference` (human ticket reference), `free_label`, `chargeable_label`, `rate_label` (from the stored quote; the active tariff for older sessions without a snapshot).
 - **Photos:** `SMARTPARK_PUBLIC_RECEIPT_PHOTO=full` on SITE-PC01, so drivers see the entry photo and plate crop, as requested; `blurred`/`off` remain available. Photo URLs are offered only while the file exists. **Correction:** the retention cleanup does not delete photos of parked cars. `prune_unreferenced_media` never deletes a file a capture still references and has removed 0 files on SITE-PC01 (now covered by `test_cleanup_never_removes_a_photo_a_visit_still_uses`). The 4,435 missing photos (29 Oct–10 Nov) date from a one-time media loss around 10 Nov: everything from 11 Nov is present. That matches `Wipe-SmartPark.ps1`, which deletes `%ProgramData%\SmartParkEdge` (media) but not the PostgreSQL database, leaving capture rows whose files are gone. Follow-up: the wipe should also clear the PostgreSQL data or refuse to run against it. Separately, referenced photos are kept indefinitely, so media grows without a limit.
+- **Factory reset is PostgreSQL-aware** (`Wipe-SmartPark.ps1`, `python -m app.cli db status|reset`):
+  - It first asks the app what the PC holds, falling back to `deployment.json`.
+  - When PostgreSQL holds the visit records and their photos are local, it requires `-SiteData`:
+    - `Reset` is Site Server only. The database name must be typed exactly (case-sensitive). The database is emptied *before* any file is deleted; if that fails, nothing is deleted.
+    - `Keep` keeps `media`, `deployment.json` and `secrets`, and removes only logs, caches and the program.
+  - Edge Nodes and operator workstations are refused a reset: their PostgreSQL database is the whole site's data. With shared photo storage they wipe local files only.
+  - `-Force` without a choice is refused. `-DryRun` shows the plan without changing anything.
+  - The stop list now includes the Recognition Worker, portal and mock services.
+  - Verified on SITE-PC01 with `-DryRun` across all paths; services and data were untouched.
