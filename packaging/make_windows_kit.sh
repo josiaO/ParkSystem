@@ -445,6 +445,7 @@ for helper in \
   Run-CameraLab.ps1 Run-CameraLab.bat \
   Run-LatencyTest.ps1 Latency-A1-BoomTiming.bat Latency-A2-RealCars.bat Latency-A3-SaturatedHost.bat \
   Repair-SmartParkNetwork.ps1 Repair-SmartParkNetwork.bat \
+  SmartPark-Settings.bat Start-MockPayments.bat \
   Wipe-SmartPark.ps1 Wipe-SmartPark.bat; do
   cp "$ROOT/packaging/windows/$helper" "$SUPPORT/"
 done
