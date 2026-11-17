@@ -262,6 +262,25 @@ class Settings(BaseSettings):
     live_view_provider: str = "MEDIAMTX"
     recognition_pipeline: str = "FASTALPR_NEW"
     # IANA name. Tariff day/night boundaries and displayed times are site-local.
+    # Manual barrier-open alerts. Recipients and thresholds are a site setting
+    # ("alerts", edited in the UI); provider credentials stay here (env/.env).
+    manual_open_capture_window_seconds: float = 120.0
+    manual_open_uncommanded_window_seconds: float = 8.0
+    alerts_poll_seconds: float = 5.0
+    alerts_max_attempts: int = 8
+    alerts_photo_link_hours: int = 24
+    alerts_http_timeout_seconds: float = 8.0
+    alerts_smtp_host: str = ""
+    alerts_smtp_port: int = 587
+    alerts_smtp_username: str = ""
+    alerts_smtp_password: str = ""
+    alerts_smtp_from: str = ""
+    alerts_smtp_starttls: bool = True
+    alerts_africastalking_username: str = ""
+    alerts_africastalking_api_key: str = ""
+    alerts_africastalking_sender_id: str = ""
+    alerts_africastalking_base_url: str = "https://api.africastalking.com/version1/messaging"
+    alerts_webhook_secret: str = ""
     site_timezone: str = "Africa/Dar_es_Salaam"
     site_locale: str = "en"
     site_language: str = "en"

@@ -94,6 +94,7 @@ def delete_gate(gate_id: int, db: Session = Depends(get_db), user: User = Depend
 @app.post("/gates/{gate_id}/open")
 async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
     g = _gate_for_node(db, gate_id, action="gate-open")
+    _require_manual_reason(payload)
     from app.services.developer import gate_opening_enabled
     if not gate_opening_enabled(db):
         raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
@@ -106,9 +107,38 @@ async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depe
         g.physical_control_verified = True
     write_audit(db, user, "gate.open", "gate", str(g.id), result.message)
     db.commit()
+    _record_manual_open_from_command(db, payload, result, user=user, gate=g, side=payload.side or "")
     if not result.ok:
         raise HTTPException(409, result.message)
     return result.__dict__
+
+
+def _require_manual_reason(payload: ManualGateCommand) -> None:
+    """Every manual open must say why; the reason goes into the alert."""
+    if (payload.action or "open") == "open" and not payload.dry_run and len((payload.reason or "").strip()) < 3:
+        raise HTTPException(400, "A reason (at least 3 characters) is required to open a barrier manually.")
+
+
+def _record_manual_open_from_command(db: Session, payload: ManualGateCommand, result, *, user: User,
+                                     gate: Gate | None = None, camera: Camera | None = None, side: str = "") -> None:
+    """Record a manual OPEN (never a close or dry run) with its car, visit and money."""
+    if (payload.action or "open") != "open" or payload.dry_run:
+        return
+    from app.models import MANUAL_SOURCE_CAMERA, MANUAL_SOURCE_GATE
+    from app.services.manual_open import safe_record_manual_open
+
+    safe_record_manual_open(
+        db,
+        source=MANUAL_SOURCE_CAMERA if camera is not None else MANUAL_SOURCE_GATE,
+        gate=gate if (gate is not None and gate.id) else None,
+        camera=camera,
+        side=side,
+        user=user,
+        reason=payload.reason,
+        command_ok=bool(result.ok),
+        command_message=result.message or "",
+        extra={"simulated": bool(result.simulated)},
+    )
 
 
 @app.post("/cameras/{camera_id}/led")
@@ -125,6 +155,7 @@ async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(ge
 @app.post("/cameras/{camera_id}/barrier/open")
 async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
     camera = _camera_for_node(db, camera_id, action="barrier-open")
+    _require_manual_reason(payload)
     from app.services.developer import gate_opening_enabled
     if not gate_opening_enabled(db):
         raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
@@ -135,6 +166,7 @@ async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Se
     )
     write_audit(db, user, "barrier.open", "camera", str(camera.id), result.message)
     db.commit()
+    _record_manual_open_from_command(db, payload, result, user=user, camera=camera, side=camera.lane_direction or "")
     if not result.ok:
         raise HTTPException(409, result.message)
     return result.__dict__
@@ -717,6 +749,25 @@ async def session_admit_without_receipt(
     )
     write_audit(db, user, "receipt.override", "parking_session", str(row.id), f"{row.plate}: {reason}"[:240])
     db.commit()
+    # Only when a barrier command was actually issued (accepted or failed);
+    # "already open", "in progress" and developer holds open nothing.
+    if isinstance(result, dict) and result.get("reason") in {"active", "gate_unavailable"} and gate is not None:
+        from app.models import MANUAL_SOURCE_ADMIT
+        from app.services.manual_open import safe_record_manual_open
+
+        barrier = result.get("barrier") if isinstance(result.get("barrier"), dict) else {}
+        safe_record_manual_open(
+            db,
+            source=MANUAL_SOURCE_ADMIT,
+            gate=gate,
+            camera=camera,
+            side="ENTRY",
+            user=user,
+            reason=reason,
+            session=db.get(ParkingSession, row.id),
+            command_ok=bool(result.get("barrier_command_accepted") or result.get("barrier_opened")),
+            command_message=str(barrier.get("message") or result.get("message") or ""),
+        )
     return result
 
 

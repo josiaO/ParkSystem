@@ -233,7 +233,7 @@ DEFAULT_ROLES = {
         "gates.open", "hardware.view", "fees.view", "simulation.run",
         "subscribers.view", "subscribers.manage", "sessions.view",
         "payments.view", "payments.create", "settings.view", "settings.manage",
-        "users.view",
+        "users.view", "alerts.view",
     ]),
     "Kiosk Operator": ",".join([
         "kiosk.use", "sessions.view", "payments.view", "payments.create",
@@ -457,6 +457,17 @@ async def lifespan(app: FastAPI):
         _supervise_background_loop("db-link-probe", lambda: db_link.probe_loop(5.0)),
         name="db-link-probe",
     )
+    if not processing_node:
+        # Manual-open alerts are delivered once, by the Site Server; rows are
+        # claimed atomically so a second server on the same database is safe.
+        from app.services import alerts as manual_open_alerts
+
+        alerts_task = asyncio.create_task(
+            _supervise_background_loop("manual-open-alerts", manual_open_alerts.delivery_loop),
+            name="manual-open-alerts",
+        )
+    else:
+        alerts_task = asyncio.create_task(asyncio.sleep(0), name="manual-open-alerts-disabled")
     watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
     if watchdog_seconds > 0:
         from app.services import pipeline_watchdog
@@ -470,7 +481,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

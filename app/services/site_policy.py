@@ -74,7 +74,38 @@ def site_policy(db: Session | None = None) -> dict[str, Any]:
     return merged
 
 
+def validate_public_base_url(value: Any) -> str:
+    """Return a clean base URL for receipt QR codes and alert links, or raise ValueError.
+
+    Empty is allowed (falls back to SMARTPARK_PUBLIC_BASE_URL / the API host).
+    A digits-only path such as ``http://192.168.1.240/8760`` is almost always a
+    mistyped port, and it silently breaks every printed receipt QR, so it is
+    rejected with the likely correction.
+    """
+    from urllib.parse import urlsplit
+
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError(f"Public base URL must start with http:// or https:// and name a host (got {text!r})")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("Public base URL must not contain a user name, password, query or fragment")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError(f"Public base URL has an invalid port: {text!r}") from exc
+    segment = parts.path.strip("/")
+    if segment.isdigit():
+        suggestion = f"{parts.scheme}://{parts.hostname}:{segment}"
+        raise ValueError(f"Public base URL {text!r} looks like a mistyped port; did you mean {suggestion!r}?")
+    return text
+
+
 def save_site_policy(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    if "public_base_url" in payload:
+        payload = {**payload, "public_base_url": validate_public_base_url(payload.get("public_base_url"))}
     current = site_policy(db)
     for key in DEFAULT_SITE_POLICY:
         if key in payload and payload[key] not in (None,):

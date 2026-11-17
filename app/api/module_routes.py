@@ -44,7 +44,8 @@ def modules_for_route(path: str) -> tuple[str, ...]:
                  "vehicles": "parking.subscribers", "access-plans": "parking.subscribers",
                  "alpr": "recognition.alpr", "recognition": "recognition.alpr",
                  "captures": "recognition.alpr", "reports": "reports", "ai": "recognition.alpr",
-                 "media": "media.streaming", "printers": "parking.sessions"}
+                 "media": "media.streaming", "printers": "parking.sessions",
+                 "manual-opens": "access.gates"}
     if path == "/settings/parking":
         return ("parking.sessions",)
     module = ownership.get(root)
