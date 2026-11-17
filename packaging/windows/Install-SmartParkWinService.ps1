@@ -176,6 +176,13 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
 Start-Sleep -Milliseconds 800
 
 New-Item -ItemType Directory -Force -Path $ServiceLogDir | Out-Null
+# Log files are often first created by an elevated or LocalSystem process.
+# The HVX host logon task and the desktop then run as an ordinary user and
+# could not open them, so the camera host silently failed to start. Local
+# users get Modify on the logs folder (inherited by new files).
+$logRoot = Join-Path $DataDir "logs"
+& icacls.exe $logRoot /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Warning "Could not grant Users Modify on $logRoot (icacls exit $LASTEXITCODE)" }
 
 # A Site Server with a local PostgreSQL must not start before the database.
 $siteDepends = @()

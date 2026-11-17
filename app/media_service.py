@@ -144,4 +144,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from app.services.runtime import run_service
+
+    raise SystemExit(run_service(main))
