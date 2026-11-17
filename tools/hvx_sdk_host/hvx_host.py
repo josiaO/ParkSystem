@@ -290,6 +290,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
             raise
+    def log_request(self, code="-", size="-"):
+        # One line per successful poll (events, reports, GPIO scans) filled the
+        # launch log at ~30 MB/day and drowned real errors. Per-endpoint timing
+        # lives in /metrics; only failed requests are worth a log line.
+        try:
+            status = int(getattr(code, "value", code))
+        except (TypeError, ValueError):
+            status = 0
+        if status >= 400:
+            self.log_message('"%s" %s %s', self.requestline, str(code), str(size))
     def log_message(self, fmt, *args):
         # Live JPEG is polled many times a second. Writing each one to a
         # captured stdout pipe blocks the response until that pipe drains.
@@ -572,8 +582,14 @@ def start_instrumentation():
 
 if __name__ == "__main__":
     log_directory = HOST_LOG_DIRECTORY
-    log_directory.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(log_directory / "hvx-host.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    try:
+        log_directory.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_directory / "hvx-host.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    except OSError as exc:
+        # A log file created by an elevated run is read-only for other
+        # users. Losing the file log must never stop the cameras and booms.
+        handler = logging.StreamHandler(sys.stderr)
+        print(f"hvx-host.log unavailable ({exc}); logging to stderr", file=sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     host_log = logging.getLogger("smartpark.hvx")
     host_log.setLevel(logging.INFO)

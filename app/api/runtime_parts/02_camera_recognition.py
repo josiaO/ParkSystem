@@ -92,10 +92,28 @@ _alpr_fp: dict[int, int] = {}
 _detect_at: dict[int, float] = {}
 
 
+_coil_full_scan_at: dict[int, float] = {}
+COIL_FULL_SCAN_SECONDS = 10.0
+
+
 def _coil_indexes(camera_id: int | None = None) -> list[int]:
+    """GPIO inputs to read this cycle.
+
+    Each input is a separate SDK call (~110 ms on QY cameras). Scanning all
+    seven every 0.25 s held the SDK for ~0.8 s per cycle, delayed plate-event
+    draining by ~1 s and slowed the boom relay. Until the loop input is
+    learned, read only the configured loop pin each cycle and the full
+    learning scan every COIL_FULL_SCAN_SECONDS.
+    """
     learned = coil_watch.learned_index(camera_id) if camera_id is not None else None
     if learned is not None:
         return [learned]
+    if camera_id is not None:
+        now = time.monotonic()
+        if now - _coil_full_scan_at.get(int(camera_id), float("-inf")) < COIL_FULL_SCAN_SECONDS:
+            default = int(getattr(settings, "coil_gpio_index", 1) or 1)
+            return [default]
+        _coil_full_scan_at[int(camera_id)] = now
     raw = str(getattr(settings, "coil_poll_indexes", "1,2,3,4,5,6,7") or "1,2,3,4,5,6,7")
     indexes: list[int] = []
     barrier = int(getattr(settings, "gpio_index", 0) or 0)
