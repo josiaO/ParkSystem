@@ -63,7 +63,9 @@ class _PatternPlatePolicy(NeutralPlatePolicy):
 
 _TZ_STANDARD_7 = re.compile(r"^T\d{3}[A-Z]{3}$")
 # Characters the OCR confuses between digit and letter slots.
-_TZ_TO_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"}
+# J -> 3 and G -> 6 were confirmed on SERVER01 (TJ99BCR was T399BCR,
+# TJ71COM and TG21EMM were read correctly on other passes).
+_TZ_TO_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "J": "3", "S": "5", "G": "6", "B": "8"}
 _TZ_TO_LETTER = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B"}
 # A leading T read as one of these (night glare, worn paint).
 _TZ_T_LOOKALIKES = {"1", "7", "I"}

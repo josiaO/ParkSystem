@@ -821,12 +821,12 @@ FastALPR's OCR uses fixed character slots, so a standard plate (T + 3 digits + 3
 New rule (`correct_tz_standard_plate`):
 - 7-character reads only; special prefixes (STK/STL/STM/STN/STJ, SU, SM, DFP/DFPA, CD, TCDF, JWTZ, PT, MC) never.
 - Leading 1/7/I → T.
-- Digit slots: O/D/Q→0, I/L→1, Z→2, S→5, B→8.
+- Digit slots: O/D/Q→0, I/L→1, Z→2, J→3, S→5, G→6, B→8. J→3 was confirmed by the operator (TJ99BCR was T399BCR); G→6 by a correct read of the same car. A→4 and T→7 were tested and left out: no correct read confirmed them.
 - Letter slots: 0→O, 1→I, 2→Z, 5→S, 8→B.
 - Accepted only if the result is exactly T999AAA, at most 2 characters changed, and the series letter (slot 4) is A–H. A–G covered 99.6% of 9,800 standard reads.
 - Registered plates (exact or O/0, I/1, B/8, S/5 confusion) still win.
 
-The corrected plate is now what the capture, session and live label use; the OCR text stays in `plate_raw`. On the 366 non-standard reads, the rule corrects 43 (all the 1/7/I prefixes plus TS63ESV → T563ESV, TO88EHB → T088EHB, T849EH2 → T849EHZ, TZ77EOD → T277EOD, TB19EGG → T819EGG, T39ZEEE → T392EEE). No special plate is changed.
+The corrected plate is now what the capture, session and live label use; the OCR text stays in `plate_raw`. On the 366 non-standard reads, the rule corrects 43 (all the 1/7/I prefixes plus TS63ESV → T563ESV, TO88EHB → T088EHB, T849EH2 → T849EHZ, TZ77EOD → T277EOD, TB19EGG → T819EGG, T39ZEEE → T392EEE). No special plate is changed. Of all 206 distinct corrections across the whole capture history, 101 (49%) match a correct read of the same car on another pass.
 
 This does not fix misreads inside a slot class (T186EEP/T188EEP, T697DHY/T697DHV). Those need the lookalike duplicate rule (17.2) or model fine-tuning.
 
