@@ -62,3 +62,22 @@ def test_loop_monitor_records_lag_and_stalls():
     asyncio.run(run())
     stats = loop_monitor.stats()
     assert stats["samples"] >= 3 and stats["stalls_over_250ms"] >= 1 and stats["max_ms"] >= 250
+
+
+def test_loop_monitor_names_the_code_that_blocked_the_loop():
+    loop_monitor._culprits.clear()
+
+    def block_here():
+        import time
+        time.sleep(0.4)
+
+    async def run():
+        task = asyncio.create_task(loop_monitor.monitor_loop())
+        await asyncio.sleep(0.25)
+        block_here()
+        await asyncio.sleep(0.25)
+        task.cancel()
+
+    asyncio.run(run())
+    sources = loop_monitor.stats()["stall_sources"]
+    assert sources and "block_here" in sources[0]
