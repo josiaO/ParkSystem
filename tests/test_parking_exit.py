@@ -394,3 +394,49 @@ class ExitLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_near_matches_scores_equal_plate_similarity_and_stay_fast():
+    """The exit "did you mean" scan runs on the event loop for every unmatched read."""
+    import random
+    import time as _time
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.core.plate import plate_similarity
+    from app.db import Base
+    from app.models import ParkingSession, Site
+    from app.services.kiosk_lookup import _bounded_edit_distance, near_matches
+
+    rng = random.Random(7)
+    alphabet = "ABCDEFGHJKLMNPRSTUVWXYZ0123456789"
+    for _ in range(2000):
+        a = "".join(rng.choice(alphabet) for _ in range(rng.randint(5, 9)))
+        b = list(a)
+        for _ in range(rng.randint(0, 3)):
+            b[rng.randrange(len(b))] = rng.choice(alphabet)
+        b = "".join(b)[: rng.randint(4, 9)]
+        longest = max(len(a), len(b))
+        allowed = int(0.2 * longest + 1e-9)
+        distance = _bounded_edit_distance(a, b, allowed)
+        if distance <= allowed:
+            assert abs((1 - distance / longest) - plate_similarity(a, b)) < 1e-9
+        else:
+            assert plate_similarity(a, b) < 0.8      # nothing the old scan would match is missed
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as db:
+        db.add(Site(id=1, name="Site", currency="TZS"))
+        plates = {"T%03d%s" % (n, "".join(rng.choice("ABCDEFGHJ") for _ in range(3))) for n in range(3000)}
+        db.add_all([ParkingSession(site_id=1, plate=p, status="ACTIVE", public_token=f"t{i}") for i, p in enumerate(sorted(plates))])
+        db.add(ParkingSession(site_id=1, plate="T189EKP", status="ACTIVE", public_token="near"))
+        db.commit()
+        started = _time.perf_counter()
+        found = near_matches(db, "T188EKP", site_id=1)
+        elapsed = _time.perf_counter() - started
+    assert found and found[0]["plate"] == "T189EKP" and found[0]["similarity"] == round(1 - 1 / 7, 2)
+    assert elapsed < 0.25, f"near_matches over 3000 open visits took {elapsed:.3f}s"

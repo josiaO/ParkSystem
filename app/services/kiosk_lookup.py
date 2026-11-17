@@ -142,6 +142,24 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
 NEAR_MATCH_MIN_SIMILARITY = 0.8  # about one character off for a 5-9 character plate
 
 
+def _bounded_edit_distance(a: str, b: str, limit: int) -> int:
+    """Levenshtein distance, or ``limit + 1`` as soon as it must exceed *limit*."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        best = i
+        for j, cb in enumerate(b, 1):
+            value = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb))
+            curr.append(value)
+            best = min(best, value)
+        if best > limit:
+            return limit + 1          # every alignment is already too far
+        prev = curr
+    return prev[-1]
+
+
 def near_matches(
     db: Session,
     plate: str,
@@ -154,24 +172,34 @@ def near_matches(
 
     For an operator "did you mean" prompt only. A fuzzy match must never open a
     barrier by itself.
-    """
-    from app.core.plate import plate_similarity
 
+    Runs on the Site Service event loop for every unmatched exit read, so it
+    scans (id, plate) pairs only, rejects by length first and stops each edit
+    distance once it exceeds what *min_similarity* allows. Full rows are loaded
+    only for the matches returned. Scores equal ``plate_similarity``.
+    """
     wanted = normalize_plate(plate)
     if not wanted:
         return []
-    query = select(ParkingSession).where(ParkingSession.status.in_(tuple(OPEN_STATUSES)))
+    query = select(ParkingSession.id, ParkingSession.plate).where(ParkingSession.status.in_(tuple(OPEN_STATUSES)))
     if site_id is not None:
         query = query.where(ParkingSession.site_id == int(site_id))
-    scored = []
-    for row in db.scalars(query).all():
-        candidate = normalize_plate(row.plate)
+    scored: list[tuple[float, int]] = []
+    for session_id, raw in db.execute(query).all():
+        candidate = normalize_plate(raw)
         if not candidate or candidate == wanted:
             continue
-        score = plate_similarity(wanted, candidate)
+        longest = max(len(wanted), len(candidate))
+        allowed = int((1.0 - float(min_similarity)) * longest + 1e-9)
+        distance = _bounded_edit_distance(wanted, candidate, allowed)
+        if distance > allowed:
+            continue
+        score = 1.0 - distance / longest
         if score >= min_similarity:
-            scored.append((score, row))
-    scored.sort(key=lambda item: (-item[0], -(item[1].id or 0)))
+            scored.append((score, int(session_id)))
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    top = scored[: max(1, int(limit))]
+    rows = {row.id: row for row in db.scalars(select(ParkingSession).where(ParkingSession.id.in_([sid for _, sid in top])))} if top else {}
     return [
         {
             "session_id": row.id,
@@ -181,5 +209,6 @@ def near_matches(
             "entry_time": row.entry_time.isoformat() if row.entry_time else None,
             "status": row.status,
         }
-        for score, row in scored[: max(1, int(limit))]
+        for score, sid in top
+        if (row := rows.get(sid)) is not None
     ]
