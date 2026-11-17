@@ -744,3 +744,28 @@ No application code, schema or DB rows were changed.
 | Handle-swap window | After the 19:03 restart the host assigned `.49`→0 and `.50`→1, while the DB still held the previous, opposite values until `_hvx_watch_loop` restored them at 19:03:45 and 19:03:54. For about 10 s a gate command would have pulsed the other boom (D6). | [HW] |
 | Logs | Old logs and the earlier archive were **deleted** at the owner's request at 19:02; new logs start from that restart. | [RUN] |
 | Desktop | Starts as administrator; no sign-out (D23) | [RUN] |
+
+---
+
+## 17. Production-readiness work (branch `production-readiness`, 2026-11-17)
+
+Each change is test-covered. Commits on top of `e63deca` (manual-open alerts):
+
+| Commit | Fixes | What changed |
+|---|---|---|
+| `d991a05` | D6, D21, D27 | GPIO pulse resolves the camera's **live** SDK handle by IP from the host and refuses cameras not connected on this PC. Camera relay, Board relay and LED run concurrently; a dead Board gets a 0.3 s grace period instead of adding 1.5 s to every open |
+| `5cf99da` | D3, D4, D7 | Cash idempotency key includes the paid-before total, so top-ups after the grace period are recorded. `POST /sessions` is a real manual entry through the engine (`sessions.create`). `POST /sessions/{id}/exit` is a supervised close: reason required, `sessions.close`, owed amount recorded as written off. Duplicate entries never report `barrier_opened`; open visits older than 10 min are flagged |
+| `3836fbe` | D2, D8, D16 | An exit read completes an entry still waiting for passage. Incomplete visits at an exit return an operator message (no uncaught `InvalidTransition`). Lane sweeper (Site Server, 30 s): passage assumed after `passage_timeout_seconds` (60), unauthorized entry attempts cancelled after `stranded_entry_minutes` (15) |
+| `a7aad84` | D26, D20, D22 | GPIO input scans no longer block plate-event draining (measured 0.8 s per scan); unlearned loop reads one pin per cycle and a full scan every 10 s. Event images, `/info` and `/gpio/pulse` reuse a keep-alive HTTP client (client construction measured 233–361 ms per pulse). Host access log only records failures. Hidden window class keeps a process-lifetime WNDPROC (fixes the test-suite access violation) |
+| `5c5c133` | D29, P2 | Kiosk (web and desktop) mobile money uses the real provider push flow and server-verified status. `kiosk_cash_enabled=false` blocks kiosk-device cash for unattended kiosks |
+| `85b96ca` | D28, D33 | Services always finish stopping (10 s hard deadline after main returns; uvicorn graceful shutdown bounded at 8 s). Ctrl+C is not logged as a crash. Installer grants local users Modify on the logs folder |
+
+Still open (needs hardware, credentials or a decision):
+- D1: receipt-taken sensor.
+- D25: lane 2# loop wiring.
+- Board UDP protocol capture.
+- Payment provider sandbox keys.
+- D5: HVX host as a boot-time service.
+- D9 (rest): camera password policy, HVX host shared secret, LAN TLS.
+- D10: database restore.
+- D11: exec-composed modules.
