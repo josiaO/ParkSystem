@@ -123,7 +123,10 @@ function Register-SmartParkService {
     Invoke-Nssm set $Name AppStdoutCreationDisposition 4
     Invoke-Nssm set $Name AppStderrCreationDisposition 4
     Invoke-Nssm set $Name AppRotateFiles 1
-    Invoke-Nssm set $Name AppRotateOnline 1
+    # Rotate at start only: NSSM 2.24 online rotation left services stuck in
+    # StopPending after the app had already exited (the Python services rotate
+    # their own logs; stdout here holds startup lines and tracebacks).
+    Invoke-Nssm set $Name AppRotateOnline 0
     Invoke-Nssm set $Name AppRotateBytes 10485760
     $profile = [Environment]::GetEnvironmentVariable("SMARTPARK_DEPLOYMENT_PROFILE", "User")
     if (-not $profile) { $profile = "PRODUCTION" }

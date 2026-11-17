@@ -159,7 +159,7 @@ async def issue_receipt(
     # The legacy reprint endpoint can be retried by a browser. Reuse one
     # receipt row per session instead of appending another row on every retry.
     record = db.scalar(
-        select(Receipt).where(Receipt.session_id == row.id).order_by(Receipt.id.desc())
+        select(Receipt).where(Receipt.session_id == row.id).order_by(Receipt.id.desc()).limit(1)
     )
     if record is None:
         record = Receipt(session_id=row.id)

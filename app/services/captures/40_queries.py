@@ -4,7 +4,7 @@ def latest_for_camera(db: Session, camera_id: int) -> VehicleCapture | None:
     return db.scalar(
         select(VehicleCapture)
         .where(VehicleCapture.camera_id == camera_id)
-        .order_by(VehicleCapture.id.desc())
+        .order_by(VehicleCapture.id.desc()).limit(1)
     )
 
 def latest_for_cameras(db: Session, camera_ids: list[int] | set[int]) -> dict[int, VehicleCapture]:

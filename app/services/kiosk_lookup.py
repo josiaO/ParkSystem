@@ -120,7 +120,7 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
     ref = normalize_human_reference(raw)
     if ref:
         row = db.scalar(
-            select(ParkingSession).where(ParkingSession.human_reference == ref).order_by(ParkingSession.id.desc())
+            select(ParkingSession).where(ParkingSession.human_reference == ref).order_by(ParkingSession.id.desc()).limit(1)
         )
         if row is not None:
             return row
@@ -130,12 +130,12 @@ def find_session(db: Session, query: str) -> ParkingSession | None:
     open_row = db.scalar(
         select(ParkingSession)
         .where(ParkingSession.plate == plate, ParkingSession.status.in_(tuple(OPEN_STATUSES)))
-        .order_by(ParkingSession.id.desc())
+        .order_by(ParkingSession.id.desc()).limit(1)
     )
     if open_row is not None:
         return open_row
     return db.scalar(
-        select(ParkingSession).where(ParkingSession.plate == plate).order_by(ParkingSession.id.desc())
+        select(ParkingSession).where(ParkingSession.plate == plate).order_by(ParkingSession.id.desc()).limit(1)
     )
 
 

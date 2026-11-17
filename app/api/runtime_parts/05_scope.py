@@ -88,7 +88,12 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None
     previous_plate = str(previous.plate or "") if previous else ""
-    row = persist_event(
+    # JPEG decode/crop/encode and the INSERT run off the event loop (it also
+    # carries live video, gate commands and the other lane). This coroutine
+    # owns ``db`` and waits here, so the session is used by one thread at a
+    # time; duplicate events are still resolved by the unique capture keys.
+    row = await asyncio.to_thread(
+        persist_event,
         db, camera, jpeg=jpeg, crop=crop, capture=capture,
         coil_occupied=coil_watch.occupied(camera.id),
     )

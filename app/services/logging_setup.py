@@ -13,6 +13,23 @@ from logging.handlers import RotatingFileHandler
 _configured: set[str] = set()
 
 
+def _console_level() -> int:
+    """Console output level: everything on a terminal, warnings under a service.
+
+    The log file already holds every line. Under NSSM, stdout goes to a second
+    file that is rotated only at start, so duplicating INFO there grew it by
+    ~1 MB/hour. SMARTPARK_CONSOLE_LOG_LEVEL overrides.
+    """
+    name = str(os.environ.get("SMARTPARK_CONSOLE_LOG_LEVEL") or "").strip().upper()
+    if name:
+        return getattr(logging, name, logging.WARNING)
+    try:
+        interactive = bool(sys.stderr and sys.stderr.isatty())
+    except Exception:
+        interactive = False
+    return logging.NOTSET if interactive else logging.WARNING
+
+
 def _startup_context(process_name: str, settings, log_path: Path) -> dict:
     """Return safe context that makes a field log useful without secrets."""
     from app.services.runtime import app_version, data_dir
@@ -99,6 +116,7 @@ def configure_logging(process_name: str = "smartpark") -> logging.Logger:
     if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler) for h in log.handlers):
         stream = logging.StreamHandler()
         stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        stream.setLevel(_console_level())
         log.addHandler(stream)
     _configured.add(process_name)
     try:
