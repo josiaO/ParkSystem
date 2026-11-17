@@ -280,6 +280,35 @@ async def _run_local_alpr(
 EVENT_STILL_MAX_AGE_MS = 120_000.0
 
 
+def _correct_site_plate(db, alpr: dict | None) -> dict | None:
+    """Apply the site plate policy (e.g. TZ slot rules) to FastALPR's best read.
+
+    The corrected plate is what the capture, session and live label use; the
+    OCR text stays in ``plate_raw``. Previously the corrected value was only
+    used to decide whether to hold the read, and 7716BAZ was stored as read.
+    """
+    best = (alpr or {}).get("best")
+    if not isinstance(best, dict):
+        return alpr
+    from app.core.plate import correct_ocr_confusions, normalize_plate
+
+    raw = str(best.get("plate_raw") or best.get("plate") or "")
+    read = normalize_plate(best.get("plate_normalized") or best.get("plate") or raw)
+    if not read:
+        return alpr
+    try:
+        policy = site_policy(db).get("plate_validation", "NONE")
+    except Exception:
+        return alpr
+    fixed = correct_ocr_confusions(read, policy=policy)
+    plate = str(fixed.get("plate") or "")
+    if not fixed.get("corrected") or not plate or plate == read:
+        return alpr
+    corrected = {**best, "plate": plate, "plate_normalized": plate, "plate_raw": raw or read,
+                 "ocr_correction": fixed.get("reason") or ""}
+    return {**alpr, "best": corrected}
+
+
 async def _run_event_alpr(
     db: Session,
     camera: Camera,
@@ -435,6 +464,7 @@ async def _run_local_alpr_locked(
     gateway.note_ai_sample(camera.id, infer_ms=(time.perf_counter() - started) * 1000, dropped=False)
     if alpr.get("ok") is False:
         runtime.lane(int(camera.id)).last_error = redact_text(str(alpr.get("detail") or "FastALPR crop recognition failed"))
+    alpr = _correct_site_plate(db, alpr)
     local = local_from_fastalpr(alpr)
     plate = str(local.get("plate") or "")
     accepted = True

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 from app.core.plate import (
     _AE_RE,
     _KE_RE,
     _ZA_RE,
-    _force_tz_positions,
     confusion_variants,
     normalize_plate,
-    plate_shape_score,
 )
 
 
@@ -62,8 +61,55 @@ class _PatternPlatePolicy(NeutralPlatePolicy):
         return {"plate": normalised, "corrected": False, "reason": "unchanged", "policy": self.id}
 
 
+_TZ_STANDARD_7 = re.compile(r"^T\d{3}[A-Z]{3}$")
+# Characters the OCR confuses between digit and letter slots.
+_TZ_TO_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"}
+_TZ_TO_LETTER = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B"}
+# A leading T read as one of these (night glare, worn paint).
+_TZ_T_LOOKALIKES = {"1", "7", "I"}
+# Formats that are not T + 3 digits + 3 letters and must never be rewritten.
+TZ_SPECIAL_PREFIXES = ("STK", "STL", "STM", "STN", "STJ", "SU", "SM", "DFPA", "DFP", "CD", "TCDF", "JWTZ", "PT", "MC")
+TZ_MAX_CORRECTIONS = 2
+# Registrations are issued in alphabetical series (T123 ABC ... T123 EXX in
+# 2026; F and G are just starting). On SERVER01, A-G was the first letter of
+# 99.6% of 9,800 standard reads. A correction must land in an issued series
+# (H is headroom); a read already in the standard shape is never changed.
+TZ_SERIES_LETTERS = frozenset("ABCDEFGH")
+
+
+def correct_tz_standard_plate(plate: str) -> tuple[str, list[str]]:
+    """Fit a 7-character read to T + 3 digits + 3 letters (T123ABC).
+
+    Fixed-slot OCR puts each character in a known position, so a letter in
+    a digit slot (S -> 5) or a digit in a letter slot (8 -> B) is a misread,
+    and a leading 1/7/I is a T. Accepted only when the result is exactly the
+    standard shape with at most two characters changed; special prefixes,
+    other lengths and anything else stay as read.
+    """
+    if len(plate) != 7 or plate.startswith(TZ_SPECIAL_PREFIXES) or _TZ_STANDARD_7.match(plate):
+        return plate, []
+    head = "T" if plate[0] in _TZ_T_LOOKALIKES else plate[0]
+    digits = "".join(_TZ_TO_DIGIT.get(ch, ch) for ch in plate[1:4])
+    letters = "".join(_TZ_TO_LETTER.get(ch, ch) for ch in plate[4:7])
+    candidate = head + digits + letters
+    changes = [f"{i}:{a}->{b}" for i, (a, b) in enumerate(zip(plate, candidate)) if a != b]
+    if (
+        not _TZ_STANDARD_7.match(candidate)
+        or len(changes) > TZ_MAX_CORRECTIONS
+        or candidate[4] not in TZ_SERIES_LETTERS
+    ):
+        return plate, []
+    return candidate, changes
+
+
 class TanzaniaPlatePolicy(NeutralPlatePolicy):
-    """Tanzanian private plates: T + 3 digits + letters, including T285DQP."""
+    """Tanzanian standard plates: T + 3 digits + 3 letters (T285DQP).
+
+    Measured on SERVER01 (24 h, 366 non-standard reads): the previous
+    shape-score search also rewrote government and special plates
+    (SM15411 -> SM154II, STN5711 -> STN57II, DFA7905 -> DFA79OS) and longer
+    reads (T8790DKV -> T879ODKV). Only the strict positional rule remains.
+    """
 
     id = "TZ"
 
@@ -72,28 +118,11 @@ class TanzaniaPlatePolicy(NeutralPlatePolicy):
         if base.get("reason") in {"exact-known", "known-confusion"}:
             return base
         normalised = normalize_plate(raw)
-        variants = confusion_variants(normalised)
-        # Tanzania plates begin with T. At night the camera's native OCR can
-        # render that first character as 7 or 1; only the explicit TZ profile
-        # may apply this correction, and only when the remaining characters
-        # already fit a Tanzanian registration shape.
-        if len(normalised) >= 6 and normalised[:1] in {"7", "1"}:
-            tz_leading_t = "T" + normalised[1:]
-            if plate_shape_score(tz_leading_t) >= plate_shape_score(normalised):
-                variants.append(tz_leading_t)
-        best = normalised
-        best_score = plate_shape_score(normalised)
-        for plate in variants:
-            score = plate_shape_score(plate)
-            if score > best_score:
-                best, best_score = plate, score
-        forced = _force_tz_positions(normalised)
-        if plate_shape_score(forced) > best_score:
-            best = forced
+        fixed, changes = correct_tz_standard_plate(normalised)
         return {
-            "plate": best,
-            "corrected": best != normalised,
-            "reason": "tz-shape" if best != normalised else "unchanged",
+            "plate": fixed,
+            "corrected": fixed != normalised,
+            "reason": "tz-slots " + ",".join(changes) if changes else "unchanged",
             "policy": self.id,
         }
 
