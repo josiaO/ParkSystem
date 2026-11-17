@@ -811,3 +811,22 @@ Still open:
 - The desktop must be restarted to use the direct-from-host live view (`c9c172d`).
 - The web UI has no capture-distance field yet (the desktop zone editor has it).
 - Ground loop: not wired to any camera input (inputs 0–7 watched across ~20 cars). Use the per-camera capture distance (plate width) as the virtual trigger.
+
+### 17.3 Tanzanian plate slot correction (2026-11-17)
+
+FastALPR's OCR uses fixed character slots, so a standard plate (T + 3 digits + 3 letters) has a known character class in each position. Findings on 24 h of SITE-PC01 reads (2,670 captures):
+- The site already had `plate_validation=TZ`, but the Site Service path used the corrected plate only to decide whether to hold a read. Captures and sessions kept the OCR text (37 reads like 7716BAZ, 1787DLP).
+- The old TZ policy also rewrote special and government plates (SM15711 → SM154II, STN5611 → STN57II, DFA6205 → DFA79OS) and other lengths (T8790DKV → T879ODKV).
+
+New rule (`correct_tz_standard_plate`):
+- 7-character reads only; special prefixes (STK/STL/STM/STN/STJ, SU, SM, DFP/DFPA, CD, TCDF, JWTZ, PT, MC) never.
+- Leading 1/7/I → T.
+- Digit slots: O/D/Q→0, I/L→1, Z→2, S→5, B→8.
+- Letter slots: 0→O, 1→I, 2→Z, 5→S, 8→B.
+- Accepted only if the result is exactly T999AAA, at most 2 characters changed, and the series letter (slot 4) is A–H. A–G covered 99.6% of 9,800 standard reads.
+- Registered plates (exact or O/0, I/1, B/8, S/5 confusion) still win.
+
+The corrected plate is now what the capture, session and live label use; the OCR text stays in `plate_raw`. On the 366 non-standard reads, the rule corrects 43 (all the 1/7/I prefixes plus TS94ESV → T594ESV, TO88EKB → T088EKB, T872EH2 → T872EHZ, TZ66EOD → T266EOD, TB12EGG → T812EGG, T39ZEEE → T392EEE). No special plate is changed.
+
+This does not fix misreads inside a slot class (T189EKP/T188EKP, T926DHY/T926DHV). Those need the lookalike duplicate rule (17.2) or model fine-tuning.
+
