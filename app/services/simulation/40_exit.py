@@ -27,8 +27,9 @@ def mark_paid(
     method: str = "KIOSK_CASH",
 ) -> ParkingSession:
     quote_session(db, row)
+    from app.infrastructure.payments.ledger import cash_settlement_key, paid_total
     due = float(row.amount_due or 0)
-    paid = float(row.amount_paid or 0)
+    paid = float(paid_total(db, row.id))
     remaining = max(0.0, due - paid)
     if remaining <= 0.0001:
         raise ValueError("This vehicle does not have a fee to pay")
@@ -39,7 +40,7 @@ def mark_paid(
         method=method,
         provider_id="kiosk_manual",
         operator_id=operator_id,
-        idempotency_key=f"session:{row.id}:settle",
+        idempotency_key=cash_settlement_key(row.id, paid, remaining),
     )
     cfg = parking_settings(db)
     apply_from_ledger = recorded["session"]

@@ -55,6 +55,17 @@ def paid_total(db: Session, session_id: int) -> float:
     return float(total or 0)
 
 
+def cash_settlement_key(session_id: int, paid_before: float, amount: float) -> str:
+    """Idempotency key for one cash settlement.
+
+    A repeated click on the same settlement (same visit, same amount already
+    paid, same amount collected) is a duplicate; a later top-up after the
+    payment grace ran out has a different paid-before total, so it is
+    recorded instead of being silently swallowed.
+    """
+    return f"session:{int(session_id)}:cash:{float(paid_before):.2f}:{float(amount):.2f}"
+
+
 def apply_session_payment_state(
     db: Session,
     row: ParkingSession,

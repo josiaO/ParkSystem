@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 
-from app.domain.parking import OPEN_STORED
+from app.domain.parking import OPEN_STORED, STORED_CLOSED
 from app.domain.parking_engine import (
     ACTIVE,
     AUTHORIZATION_DECISION,
@@ -691,3 +691,58 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "open_command_uuid": row.open_command_uuid,
         "exit_open_command_uuid": getattr(row, "exit_open_command_uuid", ""),
     }
+
+
+def supervised_close(db: Session, row: ParkingSession, *, reason: str, user_id: int | None = None) -> dict[str, Any]:
+    """Close a visit whose exit the lane never confirmed, with an audit trail.
+
+    For visits that cannot leave through the normal machine: the car left
+    while Zirp was not controlling the lane, a passage sensor never fired, a
+    misread plate opened a second visit, and so on. The amount owed at this
+    moment is computed and recorded as written off; nothing is paid.
+    """
+    from app.services.decisions import record_access_decision
+    from app.services.manual_open import owed_snapshot
+
+    if (row.status or "").upper() == STORED_CLOSED or _current(row) == CLOSED:
+        raise InvalidTransition("This visit is already closed")
+    reason = (reason or "").strip()
+    if len(reason) < 3:
+        raise ValueError("A reason (at least 3 characters) is required to close a visit")
+    now = utcnow()
+    money = owed_snapshot(db, row, at=now)
+    previous = _current(row)
+    row.status = STORED_CLOSED
+    row.lifecycle = CLOSED
+    row.exit_time = row.exit_time or now
+    row.closed_at = now
+    row.amount_due = money["due"]
+    row.amount_paid = money["paid"]
+    db.commit()
+    record_access_decision(
+        db, session=row, plate=row.plate, gate=None, lane_direction="EXIT",
+        outcome="SUPERVISED_CLOSE", reason=reason[:200], parker_kind=row.parker_kind or "CASUAL",
+        automatic=False, barrier_opened=False,
+        extra={"previous_lifecycle": previous, "written_off": money["owed"], "currency": money["currency"],
+               "closed_by": user_id},
+    )
+    db.refresh(row)
+    return {"session": snapshot(row), "previous_lifecycle": previous, "written_off": money["owed"],
+            "currency": money["currency"], "due": money["due"], "paid": money["paid"]}
+
+
+def manual_entry(db: Session, *, plate: str, site_id: int = DEFAULT_SITE_ID, gate_id: int | None = None,
+                 camera_id: int | None = None, lane_id: int | None = None) -> ParkingSession:
+    """Record a visit the cameras missed, through the normal engine (token, tariff, lifecycle)."""
+    from uuid import uuid4
+
+    plate = (plate or "").strip().upper()
+    if not plate:
+        raise ValueError("Plate is required")
+    if active_for_plate(db, plate, site_id=site_id) is not None:
+        raise InvalidTransition(f"{plate} already has an open visit")
+    row, _created = start_entry(
+        db, plate=plate, event_id=f"manual-{uuid4().hex}", site_id=site_id, gate_id=gate_id,
+        lane_id=lane_id, camera_id=camera_id, policy=LanePolicy(),
+    )
+    return complete_casual_entry(db, row, policy=LanePolicy())
