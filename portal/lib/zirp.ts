@@ -109,6 +109,8 @@ export type PaymentIntent = {
   error?: string;
   message?: string;
   created_at?: string;
+  reference?: string;
+  method?: string;
 };
 
 export type Receipt = {
@@ -137,6 +139,10 @@ export type Receipt = {
   crop_url?: string | null;
   duration_label?: string;
   still_inside?: boolean;
+  reference?: string;
+  free_label?: string;
+  chargeable_label?: string;
+  rate_label?: string;
   mobile_provider?: string;
   payment_mode?: "MOCK" | "LIVE" | "LIVE_DISABLED" | "UNCONFIGURED" | "SIMULATED" | string;
   pay_endpoint?: string;
