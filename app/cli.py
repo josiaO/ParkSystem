@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+"""Zirp command line.
+
+    python -m app.cli env ...        settings in .env (see app/env_tool.py)
+    python -m app.cli create-admin
+    python -m app.cli reset-admin
+"""
+
 import argparse
 import getpass
-from sqlalchemy import select
-
-from .api_main import ensure_roles
-from .config import settings
-from .db import SessionLocal, ensure_schema
-from .models import Role, User, UserRole
-from .security import hash_password
-from .services.bootstrap import effective_bootstrap_password, reset_bootstrap_admin
+import sys
 
 
 def create_admin():
+    from sqlalchemy import select
+
+    from .api_main import ensure_roles
+    from .db import SessionLocal, ensure_schema
+    from .models import Role, User, UserRole
+    from .security import hash_password
+
     ensure_schema()
     with SessionLocal() as db:
         ensure_roles(db)
@@ -33,6 +40,11 @@ def create_admin():
 
 
 def reset_admin():
+    from .api_main import ensure_roles
+    from .config import settings
+    from .db import SessionLocal, ensure_schema
+    from .services.bootstrap import effective_bootstrap_password, reset_bootstrap_admin
+
     ensure_schema()
     with SessionLocal() as db:
         ensure_roles(db)
@@ -43,10 +55,15 @@ def reset_admin():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "env":
+        from .env_tool import main as env_main
+
+        raise SystemExit(env_main(sys.argv[2:]))
     p=argparse.ArgumentParser()
     sub=p.add_subparsers(dest="command", required=True)
     sub.add_parser("create-admin")
     sub.add_parser("reset-admin")
+    sub.add_parser("env", help="list / set / check settings in .env")
     args=p.parse_args()
     if args.command == "create-admin": create_admin()
     elif args.command == "reset-admin": reset_admin()
