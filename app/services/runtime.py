@@ -115,6 +115,8 @@ def install_crash_hooks(name: str = "") -> None:
         set_process_name(name)
 
     def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return  # a service stop (NSSM sends Ctrl+C), not a crash
         write_crash(f"{exc_type.__name__}: {exc}", tb="".join(traceback.format_exception(exc_type, exc, tb)))
         sys.__excepthook__(exc_type, exc, tb)
 
@@ -128,6 +130,40 @@ def install_crash_hooks(name: str = "") -> None:
 
     if hasattr(threading, "excepthook"):
         threading.excepthook = _thread_hook
+
+
+SHUTDOWN_DEADLINE_SECONDS = 10.0
+
+
+def _exit_after(seconds: float, code: int) -> None:
+    """Exit hard if interpreter shutdown is still blocked after *seconds*.
+
+    Python joins non-daemon threads at exit; a thread stuck in ONNX inference,
+    an FFmpeg pipe read or a vendor call kept services in StopPending
+    indefinitely. This daemon timer keeps running while the main thread
+    waits, so a stop always completes.
+    """
+    def _deadline() -> None:
+        time.sleep(max(0.5, float(seconds)))
+        try:
+            sys.stderr.write(f"{process_name()} shutdown exceeded {seconds:.0f}s; exiting\n")
+            sys.stderr.flush()
+        finally:
+            os._exit(code)
+
+    threading.Thread(target=_deadline, name="shutdown-deadline", daemon=True).start()
+
+
+def run_service(main, *, deadline_seconds: float = SHUTDOWN_DEADLINE_SECONDS) -> int:
+    """Run a service entry point; a stop (Ctrl+C/Break) always ends the process."""
+    code = 1
+    try:
+        code = int(main() or 0)
+    except KeyboardInterrupt:
+        code = 0
+    finally:
+        _exit_after(deadline_seconds, code)
+    return code
 
 
 def is_benign_disconnect(exc: BaseException | None) -> bool:
