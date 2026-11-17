@@ -12,6 +12,7 @@ opened boom gate.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import time
@@ -93,21 +94,24 @@ class PhysicalGateController(GateController):
         def elapsed_ms(start_ns: int) -> float:
             return round((time.perf_counter_ns() - start_ns) / 1e6, 3)
 
+        connections = None if dry_run else await _host_connections(hvx)
         for camera in rows:
             label = f"{gate.name} {side_label(camera.lane_direction)}"
-            # These run one after another. The board relay (when it is the
-            # barrier actuator) is only commanded after the GPIO pulse call
-            # has returned, which includes the pulse hold time.
-            step = time.perf_counter_ns()
-            gpio = await _gpio_pulse(hvx, camera, dry_run=dry_run)
-            gpio_ms = elapsed_ms(step)
-            step = time.perf_counter_ns()
-            board = await send_board_command(camera.controller_ip or "", action=action, dry_run=dry_run)
-            board_ms = elapsed_ms(step)
+            # Camera relay, Board relay and LED are commanded together. The
+            # boom normally moves on the camera relay; once that is confirmed
+            # an unreachable Board only gets a short grace period instead of
+            # holding the response for its full TCP timeout.
             text = led_text or (EXIT_LED if (camera.lane_direction or "").upper() == "EXIT" else ENTRY_LED)
-            step = time.perf_counter_ns()
-            led = await send_led_text(camera.display_ip or "", text, dry_run=dry_run)
-            led_ms = elapsed_ms(step)
+            started = time.perf_counter_ns()
+            gpio_task = asyncio.create_task(_gpio_pulse(hvx, camera, dry_run=dry_run, connections=connections))
+            board_task = asyncio.create_task(send_board_command(camera.controller_ip or "", action=action, dry_run=dry_run))
+            led_task = asyncio.create_task(send_led_text(camera.display_ip or "", text, dry_run=dry_run))
+            gpio = await gpio_task
+            gpio_ms = elapsed_ms(started)
+            board = await _board_result(board_task, gpio_ok=bool(gpio.get("ok")), controller_ip=camera.controller_ip or "")
+            board_ms = elapsed_ms(started)
+            led = await _settled(led_task, BOARD_GRACE_SECONDS, _led_timeout(camera.display_ip or ""))
+            led_ms = elapsed_ms(started)
             tracer.emit(
                 "gate.actuators", camera=camera.id, gpio_ok=bool(gpio.get("ok")), gpio_ms=gpio_ms,
                 board_configured=bool(camera.controller_ip), board_ok=bool(board.ok), board_ms=board_ms,
@@ -148,8 +152,73 @@ class PhysicalGateController(GateController):
         return GateCommandResult(True, dry_run, message, _now(), actuators)
 
 
-async def _gpio_pulse(hvx: HVXHostClient, camera: Camera, *, dry_run: bool) -> dict:
+BOARD_GRACE_SECONDS = 0.3
+
+
+async def _host_connections(hvx: HVXHostClient) -> dict[str, int] | None:
+    """Live ``ip -> handle`` map from this PC's HVX host, or None if unknown."""
+    try:
+        info = await asyncio.wait_for(hvx.info(), timeout=1.5)
+    except Exception:
+        return None
+    rows = info.get("connections") if isinstance(info, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return {str(row.get("ip") or ""): int(row["handle"]) for row in rows if row.get("handle") is not None and row.get("ip")}
+
+
+def resolve_live_handle(camera: Camera, connections: dict[str, int] | None) -> tuple[int | None, str]:
+    """The SDK handle that belongs to *this* camera on *this* host right now.
+
+    ``Camera.sdk_handle`` is shared through the database and can be stale
+    after a host restart (handles are reassigned) or belong to another lane
+    PC. Pulsing it blindly can open a different boom, so the live host
+    mapping by camera IP wins, and a camera the host is not connected to is
+    refused.
+    """
+    stored = camera.sdk_handle
+    if connections is None:
+        return stored, "host connection list unavailable; using stored handle"
+    live = connections.get(str(camera.ip_address or ""))
+    if live is None:
+        return None, f"{camera.name} ({camera.ip_address}) is not connected on this PC's HVX host"
+    if stored is not None and int(stored) != int(live):
+        return live, f"stored handle {stored} was stale; using live handle {live}"
+    return live, ""
+
+
+async def _settled(task: asyncio.Task, grace: float, timeout_result):
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+    except asyncio.TimeoutError:
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        return timeout_result
+
+
+async def _board_result(task: asyncio.Task, *, gpio_ok: bool, controller_ip: str):
+    from app.services.board_tcp import BoardResult
+
+    if not gpio_ok:
+        return await task  # the board is the only remaining actuator: wait for it
+    return await _settled(
+        task, BOARD_GRACE_SECONDS,
+        BoardResult(False, controller_ip, 0, "", "", "Board relay did not answer within the grace period (camera relay already opened)", False),
+    )
+
+
+def _led_timeout(ip: str):
+    from app.services.led_udp import LedResult
+
+    return LedResult(False, ip, 0, "", 0, "LED display not confirmed within the grace period", False)
+
+
+async def _gpio_pulse(hvx: HVXHostClient, camera: Camera, *, dry_run: bool, connections: dict[str, int] | None = None) -> dict:
     handle = camera.sdk_handle
+    note = ""
+    if not dry_run:
+        handle, note = resolve_live_handle(camera, connections)
+        if handle is None:
+            return {"ok": False, "message": note}
     index = settings.gpio_index
     pulse_ms = settings.gpio_pulse_ms or CAMCMD_PULSE_DEFAULT_MS
     if dry_run:
@@ -165,7 +234,10 @@ async def _gpio_pulse(hvx: HVXHostClient, camera: Camera, *, dry_run: bool) -> d
     if handle is None:
         return {"ok": False, "message": f"{camera.name} is not SDK-connected; GPIO skipped"}
     try:
-        return await hvx.gpio_pulse(handle=int(handle), index=index, pulse_ms=pulse_ms)
+        result = await hvx.gpio_pulse(handle=int(handle), index=index, pulse_ms=pulse_ms)
+        if note and isinstance(result, dict):
+            result = {**result, "handle_note": note}
+        return result
     except HVXHostUnavailable as exc:
         return {"ok": False, "message": f"GPIO host unavailable: {exc}"}
     except Exception as exc:
