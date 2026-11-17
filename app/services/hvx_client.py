@@ -119,10 +119,9 @@ class HVXHostClient:
 
     async def info(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-                r = await client.get(f"{self.base_url}/info")
-                r.raise_for_status()
-                return r.json()
+            r = await _shared_poll_client(self.base_url).get("/info", timeout=settings.request_timeout_seconds)
+            r.raise_for_status()
+            return r.json()
         except Exception as exc:
             raise HVXHostUnavailable(str(exc)) from exc
 
@@ -223,16 +222,19 @@ class HVXHostClient:
         created_ns = time.perf_counter_ns()
         sent_ns = None
         try:
-            async with httpx.AsyncClient(timeout=max(settings.request_timeout_seconds, 8.0)) as client:
+            # Shared keep-alive client: constructing one per pulse measured
+            # 233-361 ms on the site PC before the relay command was sent.
+            if True:
+                client = _shared_poll_client(self.base_url)
                 sent_ns = time.perf_counter_ns()
                 tracer.emit(
                     "gate.http_sent", trace=trace_id, camera=int(handle), index=int(index),
                     pulse_ms=int(pulse_ms), client_create_ms=round((sent_ns - created_ns) / 1e6, 3),
                 )
-                r = await client.post(f"{self.base_url}/gpio/pulse", json={
+                r = await client.post("/gpio/pulse", json={
                     "handle": int(handle), "index": int(index), "pulse_ms": int(pulse_ms),
                     "trace_id": trace_id,
-                }, headers={"X-Trace-Id": trace_id})
+                }, headers={"X-Trace-Id": trace_id}, timeout=max(settings.request_timeout_seconds, 8.0))
                 received_ns = time.perf_counter_ns()
                 r.raise_for_status()
                 payload = r.json()
@@ -256,20 +258,20 @@ class HVXHostClient:
         from urllib.parse import urlencode
         query = {"capture_token": capture_token} if capture_token else ({"image_id": int(image_id)} if image_id is not None else {})
         suffix = "?" + urlencode(query) if query else ""
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{self.base_url}/event-jpeg/{int(handle)}{suffix}")
-            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
-                return r.content
+        # Shared keep-alive client: building an AsyncClient per call (TLS
+        # context + CA bundle on Windows) cost ~0.5 s per event image.
+        r = await _shared_poll_client(self.base_url).get(f"/event-jpeg/{int(handle)}{suffix}", timeout=2.0)
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            return r.content
         return b""
 
     async def event_crop(self, handle: int, image_id: int | None = None, *, capture_token: str | None = None) -> bytes:
         from urllib.parse import urlencode
         query = {"capture_token": capture_token} if capture_token else ({"image_id": int(image_id)} if image_id is not None else {})
         suffix = "?" + urlencode(query) if query else ""
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{self.base_url}/event-crop/{int(handle)}{suffix}")
-            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
-                return r.content
+        r = await _shared_poll_client(self.base_url).get(f"/event-crop/{int(handle)}{suffix}", timeout=2.0)
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            return r.content
         return b""
 
     async def drain_events(self, handle: int) -> list[dict] | None:
