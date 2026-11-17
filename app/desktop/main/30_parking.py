@@ -476,7 +476,52 @@ class Sessions(QWidget):
     def pay_visit(self):
         self._settle("KIOSK_CASH")
     def pay_mobile(self):
-        self._settle("MOBILE_SIMULATED")
+        """Real mobile money: push prompt to the driver's phone, then wait for the provider."""
+        visit=self.visit or {}
+        if not visit.get("payable"):
+            QMessageBox.information(self, "Mobile money", visit.get("pay_blocked_reason") or "This vehicle does not have a fee to pay.")
+            return
+        token=visit.get("token")
+        if not token:
+            QMessageBox.information(self, "Mobile money", "Scan the receipt QR first; mobile money needs the receipt code.")
+            return
+        phone,ok=QInputDialog.getText(self, "Mobile money", f"Driver's mobile number for {visit.get('plate') or 'this visit'}:")
+        if not ok or not phone.strip():
+            return
+        try:
+            api.post("/api/public/payment-intents", {"token": token, "phone": phone.strip()}, timeout=30)
+        except Exception as exc:
+            QMessageBox.critical(self, "Mobile money", str(exc)); return
+        self._mobile_token=token
+        self._mobile_deadline=time.monotonic() + 180
+        self.statusBar_message("Payment prompt sent. Ask the driver to approve it on their phone…")
+        if getattr(self, "_mobile_timer", None) is None:
+            self._mobile_timer=QTimer(self)
+            self._mobile_timer.setInterval(3000)
+            self._mobile_timer.timeout.connect(self._poll_mobile_payment)
+        self._mobile_timer.start()
+    def _poll_mobile_payment(self):
+        token=getattr(self, "_mobile_token", None)
+        if not token:
+            self._mobile_timer.stop(); return
+        try:
+            status=api.get(f"/api/public/payment-status/{token}", timeout=5)
+        except Exception:
+            return  # transient; keep waiting until the deadline
+        intent=(status or {}).get("intent") or {}
+        state=str(intent.get("status") or "").upper()
+        if not status.get("payable") and str(status.get("status") or "").upper() in {"PAID", "CLOSED"} or state == "SUCCEEDED":
+            self._mobile_timer.stop(); self._mobile_token=None
+            QMessageBox.information(self, "Mobile money", "Payment confirmed by the provider.")
+            self.lookup(); self.refresh(); return
+        if state in {"FAILED", "EXPIRED", "MISMATCH", "BLOCKED"} or time.monotonic() > self._mobile_deadline:
+            self._mobile_timer.stop(); self._mobile_token=None
+            QMessageBox.warning(self, "Mobile money", f"Payment not completed ({state or 'no answer'}). Try again or take cash.")
+    def statusBar_message(self, text):
+        window=self.window()
+        bar=getattr(window, "statusBar", None)
+        if callable(bar):
+            bar().showMessage(text, 10000)
     def pay(self):
         s=self.selected()
         if s:

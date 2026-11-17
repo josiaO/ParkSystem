@@ -108,17 +108,44 @@ document.getElementById("kiosk-mobile").addEventListener("click", async () => {
     err.textContent = (kioskVisit && kioskVisit.pay_blocked_reason) || "Scan a receipt before paying by mobile.";
     return;
   }
+  // Real mobile money: the provider pushes a prompt to the driver's phone and
+  // the server verifies the result. Nothing here marks the visit paid.
+  const phone = prompt("Driver's mobile number (e.g. 07XXXXXXXX):");
+  if (!phone || !phone.trim()) return;
+  const token = kioskVisit.token;
   try {
-    const data = await api(`/p/${encodeURIComponent(kioskVisit.token)}/pay`, {
+    await api("/api/public/payment-intents", {
       method: "POST",
-      body: JSON.stringify({ method: "MOBILE_SIMULATED" }),
+      body: JSON.stringify({ token, phone: phone.trim() }),
     });
-    showKioskVisit(data);
-    await loadSessions();
-    await loadPayments();
   } catch (e) {
     err.textContent = e.message;
+    return;
   }
+  err.textContent = "Payment prompt sent. Ask the driver to approve it on their phone…";
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    let status;
+    try {
+      status = await api(`/api/public/payment-status/${encodeURIComponent(token)}`);
+    } catch (e) {
+      continue; // transient; keep waiting
+    }
+    const state = String((status.intent && status.intent.status) || "").toUpperCase();
+    if (state === "SUCCEEDED" || (!status.payable && ["PAID", "CLOSED"].includes(String(status.status || "").toUpperCase()))) {
+      err.textContent = "Payment confirmed by the provider.";
+      showKioskVisit(await api(`/sessions/lookup?q=${encodeURIComponent(token)}`));
+      await loadSessions();
+      await loadPayments();
+      return;
+    }
+    if (["FAILED", "EXPIRED", "MISMATCH", "BLOCKED"].includes(state)) {
+      err.textContent = `Payment not completed (${state}). Try again or take cash.`;
+      return;
+    }
+  }
+  err.textContent = "No answer from the provider yet. Check Payments before retrying.";
 });
 document.getElementById("kiosk-save-plate").addEventListener("click", async () => {
   const err = document.getElementById("session-error");
