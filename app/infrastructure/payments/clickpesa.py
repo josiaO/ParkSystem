@@ -20,14 +20,25 @@ therefore refused unless the operator sets ``clickpesa_live_enabled`` AND
 (when ``payments_live_provider_confirmation_required``)
 ``payments_live_provider_confirmed``. Webhook verification and status queries
 stay available so a partially configured site can still be diagnosed.
+
+**MOCK mode.** When ``clickpesa_base_url`` points at a private test host
+(loopback, a private LAN address, or a ``.test``/``.local``/``.localhost``/
+``.internal``/single-label name), the provider runs in MOCK mode: it may
+collect without the live flags, because no real money can move. Credentials
+and webhook checksums are still required, exactly as in production. Any
+other host, including ``*.clickpesa.com`` and unknown public hosts, keeps
+the live gate, so "LIVE" always means real money. The bundled mock server is
+``tools/mock_clickpesa``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import time
+from urllib.parse import urlparse
 from typing import Any
 
 from app.config import settings
@@ -46,6 +57,23 @@ from app.infrastructure.payments.common import (
 SUCCESS_STATES = {"SUCCESS", "SETTLED"}
 FAILED_STATES = {"FAILED", "CANCELLED", "REVERSED", "REFUNDED"}
 TOKEN_TTL_SECONDS = 50 * 60
+MOCK_HOST_SUFFIXES = (".test", ".local", ".localhost", ".internal", ".lan", ".home.arpa")
+
+
+def is_mock_host(base_url: str) -> bool:
+    """True for a base URL that cannot be the real ClickPesa service.
+
+    Loopback, private/link-local addresses and reserved test names only. An
+    unknown public host is *not* a mock: it might proxy the real API.
+    """
+    host = (urlparse(str(base_url or "")).hostname or "").strip().lower().rstrip(".")
+    if not host or host == "clickpesa.com" or host.endswith(".clickpesa.com"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host == "localhost" or "." not in host or host.endswith(MOCK_HOST_SUFFIXES)
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 def canonicalize(obj: Any) -> Any:
@@ -92,7 +120,12 @@ class ClickPesaPaymentProvider:
     def configured(self) -> bool:
         return bool(self.client_id and self.api_key)
 
+    def is_mock(self) -> bool:
+        return is_mock_host(self.base_url)
+
     def live_confirmed(self) -> bool:
+        if self.is_mock():
+            return False          # a mock never counts as live money
         if not settings.clickpesa_live_enabled:
             return False
         if settings.payments_live_provider_confirmation_required and not settings.payments_live_provider_confirmed:
@@ -102,11 +135,17 @@ class ClickPesaPaymentProvider:
     def mode(self) -> str:
         if not self.configured():
             return "UNCONFIGURED"
+        if self.is_mock():
+            return "MOCK"
         return "LIVE" if self.live_confirmed() else "LIVE_DISABLED"
 
     def availability(self) -> tuple[bool, str]:
         if not self.configured():
             return False, "SMARTPARK_CLICKPESA_CLIENT_ID / SMARTPARK_CLICKPESA_API_KEY are not set"
+        if self.is_mock():
+            if not self.checksum_key:
+                return False, "MOCK mode still needs SMARTPARK_CLICKPESA_CHECKSUM_KEY (webhooks must be signed)"
+            return True, ""
         if not self.live_confirmed():
             return False, ("LIVE_PROVIDER_CONFIRMATION_REQUIRED: ClickPesa has no sandbox; set "
                            "SMARTPARK_CLICKPESA_LIVE_ENABLED=1 and SMARTPARK_PAYMENTS_LIVE_PROVIDER_CONFIRMED=1 "
@@ -118,6 +157,7 @@ class ClickPesaPaymentProvider:
         return {
             "provider_id": self.id,
             "mode": self.mode(),
+            "real_money": self.mode() == "LIVE",
             "configured": self.configured(),
             "available": ok,
             "reason": reason,

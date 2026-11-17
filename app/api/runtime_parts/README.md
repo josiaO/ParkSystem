@@ -19,7 +19,7 @@ small enough to navigate and review.
 | `05_background_tasks.py` | recognition/background loops and watchdog tasks |
 | `05_lane_runtime.py` | lane-side payload and gate progression helpers |
 | `06_parking.py` | lanes, gates, tariffs, sessions, settings, simulation, developer tools |
-| `07_payments.py` | payment compatibility endpoints, public receipt/payment flows, QR exit |
+| `07_payments.py` | re-exports `app/api/payment_handlers.py` (payments, public receipt/payment flows, QR exit), now a normal module |
 | `08_admin.py` | reports, backups, dashboard, printers, subscribers, users, route composition |
 
 Do not import a part directly. Use `app.api_main` for the stable application

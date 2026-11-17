@@ -47,6 +47,7 @@ MISMATCH = "MISMATCH"
 OPEN_STATES = (CREATED, PENDING)
 METHOD = "MOBILE_MONEY"
 REUSE_PENDING_SECONDS = 90.0
+REVERSAL_STATES = frozenset({"REVERSED", "REFUNDED"})
 MAX_WEBHOOK_EVENTS = 10
 
 _stats: dict[str, Any] = {
@@ -59,6 +60,8 @@ _stats: dict[str, Any] = {
     "mismatches": 0,
     "failed": 0,
     "expired": 0,
+    "late_credited": 0,
+    "reversals": 0,
     "reconcile_runs": 0,
     "reconcile_last_at": None,
     "reconcile_last_checked": 0,
@@ -73,6 +76,18 @@ def stats() -> dict[str, Any]:
 def reset_stats() -> None:
     for key in list(_stats):
         _stats[key] = None if key == "reconcile_last_at" else ("" if key == "last_error" else 0)
+
+
+def active_provider_mode(provider_id: str | None = None) -> str:
+    """MOCK / LIVE / LIVE_DISABLED / UNCONFIGURED, or SIMULATED for in-process demo."""
+    pid = (provider_id or active_mobile_provider_id()).strip().lower()
+    if not is_external_provider(pid):
+        return "SIMULATED"
+    mode = getattr(payment_provider_for(pid), "mode", None)
+    try:
+        return str(mode()) if callable(mode) else "LIVE"
+    except Exception:
+        return "UNCONFIGURED"
 
 
 def active_mobile_provider_id() -> str:
@@ -281,8 +296,12 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
     """Ask the provider for the truth and credit the ledger at most once."""
     if intent.status == SUCCEEDED:
         return {"status": SUCCEEDED, "credited": False, "duplicate": True}
-    if intent.status in (BLOCKED, EXPIRED, MISMATCH, FAILED):
+    if intent.status in (BLOCKED, MISMATCH, FAILED):
         return {"status": intent.status, "credited": False, "duplicate": False}
+    # EXPIRED is re-checked: a driver can approve the USSD prompt after the
+    # intent's local expiry. If the provider confirms a matching success,
+    # the money was taken and must be credited (flagged as late).
+    was_expired = intent.status == EXPIRED
     provider = payment_provider_for(intent.provider_id)
     result = await provider.query_status(_verification_ref(intent))
     status = str(result.get("status") or "UNKNOWN").upper()
@@ -321,6 +340,12 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
         )
         duplicate = bool(recorded.get("duplicate"))
         _merge_extra(intent, credited_at=now_iso, verification=redact(result.get("raw") or {}))
+        if was_expired:
+            _merge_extra(intent, late_success=True)
+            if not duplicate:
+                _stats["late_credited"] += 1
+                write_audit(db, None, "payments.late_success", "payment_intent", str(intent.id),
+                            f"{intent.provider_id} {intent.idempotency_key} confirmed after local expiry")
         if duplicate:
             _stats["duplicates"] += 1
         else:
@@ -334,6 +359,11 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
             "duplicate": duplicate,
             "transaction": transaction_dict(recorded["transaction"]),
         }
+
+    if was_expired:
+        # Still no success from the provider: stays expired, nothing changes.
+        db.commit()
+        return {"status": EXPIRED, "credited": False, "duplicate": False}
 
     if status == FAILED:
         intent.status = FAILED
@@ -383,6 +413,17 @@ async def handle_webhook(db: Session, provider_id: str, *, raw_body: bytes, head
     _merge_extra(intent, webhooks=events[-MAX_WEBHOOK_EVENTS:])
     if verified.get("provider_transaction_id") and not (intent.extra or {}).get("provider_transaction_id"):
         _merge_extra(intent, provider_transaction_id=verified["provider_transaction_id"])
+    provider_status = str(verified.get("provider_status") or "").upper()
+    if intent.status == SUCCEEDED and provider_status in REVERSAL_STATES:
+        # Money already credited came back to the payer. The ledger is not
+        # rewritten automatically: an operator must see it and decide.
+        _merge_extra(intent, reversal_reported_at=_now().isoformat(), reversal_status=provider_status)
+        _stats["reversals"] += 1
+        write_audit(db, None, "payments.reversal", "payment_intent", str(intent.id),
+                    f"{pid} {intent.idempotency_key} reported {provider_status} after success")
+        db.commit()
+        return 200, {"ok": True, "status": SUCCEEDED, "credited": False, "duplicate": False,
+                     "reversal_flagged": True}
     db.commit()
     outcome = await settle_intent(db, intent)
     return 200, {
