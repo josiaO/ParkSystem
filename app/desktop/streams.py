@@ -30,8 +30,12 @@ class MjpegStream(QThread):
         # with a car (measured 8 fps with 0.4-0.7 s gaps vs 9.8 fps / 0.2 s
         # direct). Anything else, or any failure, uses the MJPEG relay.
         direct = getattr(self, "_run_from_local_host", None)
-        if callable(direct) and direct():
-            return
+        try:
+            if callable(direct) and direct():
+                return
+        except Exception:
+            if self._stop:
+                return            # any direct-path failure falls back to the relay
         client=httpx.Client(timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0))
         self._client=client
         try:

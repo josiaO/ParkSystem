@@ -62,7 +62,7 @@ def find_capture_for_session(
             select(VehicleCapture).where(
                 VehicleCapture.camera_id == int(camera_id),
                 VehicleCapture.event_id == event_id,
-            ).order_by(VehicleCapture.id.desc())
+            ).order_by(VehicleCapture.id.desc()).limit(1)
         )
         if matched:
             return matched
@@ -71,7 +71,7 @@ def find_capture_for_session(
             select(VehicleCapture).where(
                 VehicleCapture.camera_id == int(camera_id),
                 VehicleCapture.visit_id == visit_id,
-            ).order_by(VehicleCapture.id.desc())
+            ).order_by(VehicleCapture.id.desc()).limit(1)
         )
         if matched:
             return matched
@@ -92,7 +92,7 @@ def find_capture_for_session(
         matched = db.scalar(
             select(VehicleCapture)
             .where(VehicleCapture.plate == plate)
-            .order_by(VehicleCapture.id.desc())
+            .order_by(VehicleCapture.id.desc()).limit(1)
         )
         if matched:
             return matched

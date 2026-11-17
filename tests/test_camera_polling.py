@@ -70,3 +70,21 @@ def test_host_logs_only_failed_requests():
         assert out.getvalue() == ""
         handler.log_request(404, "-")
         assert "404" in out.getvalue()
+
+
+def test_latest_capture_lookups_fetch_one_row():
+    """The desktop polls /cameras/{id}/plates per camera; an unbounded
+    ORDER BY fetched every capture of that camera and stalled the event loop."""
+    from unittest.mock import MagicMock
+
+    from app.services.captures import latest_for_camera
+    from app.services.kiosk_lookup import find_session
+
+    db = MagicMock()
+    db.scalar.return_value = None
+    latest_for_camera(db, 3)
+    find_session(db, "T123ABC")
+    statements = [call.args[0] for call in db.scalar.call_args_list if "ORDER BY" in str(call.args[0]).upper()]
+    assert len(statements) >= 2
+    for stmt in statements:
+        assert "LIMIT" in str(stmt).upper(), str(stmt)

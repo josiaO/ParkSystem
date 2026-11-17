@@ -712,7 +712,7 @@ def public_crop(token: str, request: Request, db: Session = Depends(get_db)):
 
 
 def public_receipt_qr(token: str, db: Session = Depends(get_db)):
-    row = db.scalar(select(Receipt).where(Receipt.public_token == token).order_by(Receipt.id.desc()))
+    row = db.scalar(select(Receipt).where(Receipt.public_token == token).order_by(Receipt.id.desc()).limit(1))
     from app.services.public_ingress import privacy_headers
     path = Path(row.qr_path) if row and row.qr_path else None
     if path:

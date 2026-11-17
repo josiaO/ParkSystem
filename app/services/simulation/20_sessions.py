@@ -92,7 +92,7 @@ def _active_for_plate(db: Session, plate: str) -> ParkingSession | None:
     return db.scalar(
         select(ParkingSession)
         .where(ParkingSession.plate == plate, ParkingSession.status.in_(tuple(OPEN_STATUSES)))
-        .order_by(ParkingSession.id.desc())
+        .order_by(ParkingSession.id.desc()).limit(1)
     )
 
 def receipt_text(row: ParkingSession, cfg: dict) -> str:

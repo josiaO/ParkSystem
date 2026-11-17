@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 import httpx
@@ -29,6 +30,33 @@ def _shared_poll_client(base_url: str) -> httpx.AsyncClient:
         )
         _poll_clients[key] = client
     return client
+
+
+class _TimedHostClient:
+    """The shared host client with one call's timeout (no per-call client)."""
+
+    def __init__(self, client: httpx.AsyncClient, timeout) -> None:
+        self._client = client
+        self._timeout = timeout
+
+    async def get(self, url, **kwargs):
+        kwargs.setdefault("timeout", self._timeout)
+        return await self._client.get(url, **kwargs)
+
+    async def post(self, url, **kwargs):
+        kwargs.setdefault("timeout", self._timeout)
+        return await self._client.post(url, **kwargs)
+
+
+@contextlib.asynccontextmanager
+async def _host_client(base_url: str, timeout):
+    """Use instead of ``httpx.AsyncClient(...)`` per call.
+
+    Building an AsyncClient creates an SSL context, which loads the Windows
+    certificate store: 100-500 ms of CPU on the Site Service event loop for
+    every snapshot trigger, GPIO write or capture read (seen as loop stalls).
+    """
+    yield _TimedHostClient(_shared_poll_client(base_url), timeout)
 
 
 async def close_host_clients() -> None:
@@ -129,7 +157,7 @@ class HVXHostClient:
         # ConnCameraEx (3s) then ConnCamera fallback (3s) plus StartVideo — HTTP must outlast that.
         http_timeout = max(settings.request_timeout_seconds, settings.hvx_connect_http_timeout_seconds, 20.0)
         try:
-            async with httpx.AsyncClient(timeout=http_timeout) as client:
+            async with _host_client(self.base_url, http_timeout) as client:
                 r = await client.post(f"{self.base_url}/connect", json={
                     "ip": ip,
                     "port": port,
@@ -168,7 +196,7 @@ class HVXHostClient:
 
     async def discover(self, wait_seconds: float = 2.0) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=max(settings.request_timeout_seconds, wait_seconds + 4.0)) as client:
+            async with _host_client(self.base_url, max(settings.request_timeout_seconds, wait_seconds + 4.0)) as client:
                 r = await client.post(f"{self.base_url}/discover", json={"wait_seconds": wait_seconds})
                 r.raise_for_status()
                 return r.json()
@@ -176,27 +204,27 @@ class HVXHostClient:
             raise HVXHostUnavailable(str(exc)) from exc
 
     async def disconnect(self, handle: int, *, force: bool = False) -> dict:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
             r = await client.post(f"{self.base_url}/disconnect/{handle}", json={"force": bool(force)})
             r.raise_for_status()
             _drop_live_client(self.base_url, handle)
             return r.json()
 
     async def last_captures(self) -> dict:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
             r = await client.get(f"{self.base_url}/captures")
             r.raise_for_status()
             return r.json()
 
     async def snapshot_trigger(self, handle: int) -> dict:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
             r = await client.post(f"{self.base_url}/snapshot-trigger/{int(handle)}")
             r.raise_for_status()
             return r.json()
 
     async def gpio_write(self, *, handle: int, index: int, value: int) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
                 r = await client.post(f"{self.base_url}/gpio/write", json={
                     "handle": int(handle), "index": int(index), "value": int(value),
                 })
@@ -207,7 +235,7 @@ class HVXHostClient:
 
     async def gate_setup(self, *, handle: int, state: int = 1, index: int = 0) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
                 r = await client.post(f"{self.base_url}/gate-setup", json={
                     "handle": int(handle), "state": int(state), "index": int(index),
                 })
@@ -304,7 +332,7 @@ class HVXHostClient:
 
     async def read_gpio(self, handle: int, index: int = 1) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            async with _host_client(self.base_url, settings.request_timeout_seconds) as client:
                 r = await client.get(f"{self.base_url}/gpio/{int(handle)}", params={"index": int(index)})
                 if r.status_code != 200:
                     return {"ok": False, "handle": int(handle), "index": int(index)}

@@ -282,7 +282,7 @@ def get_session_receipt(session_id: int, db: Session = Depends(get_db), _: User 
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
-    slip = db.scalar(select(Receipt).where(Receipt.session_id == session_id).order_by(Receipt.id.desc()))
+    slip = db.scalar(select(Receipt).where(Receipt.session_id == session_id).order_by(Receipt.id.desc()).limit(1))
     if slip is None:
         raise HTTPException(404, "No receipt for this session")
     return receipt_dict(slip)
@@ -293,7 +293,7 @@ def get_session_receipt_text(session_id: int, db: Session = Depends(get_db), _: 
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
-    slip = db.scalar(select(Receipt).where(Receipt.session_id == session_id).order_by(Receipt.id.desc()))
+    slip = db.scalar(select(Receipt).where(Receipt.session_id == session_id).order_by(Receipt.id.desc()).limit(1))
     if slip is None:
         raise HTTPException(404, "No receipt for this session")
     filename = f"parking-{''.join(ch for ch in (row.plate or str(session_id)) if ch.isalnum()) or session_id}.txt"
