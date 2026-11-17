@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.infrastructure.payments.ledger import cash_settlement_key
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -123,7 +125,7 @@ async def pay_public_session(
             method="KIOSK_CASH",
             provider_id="kiosk_manual",
             operator_id=operator_id,
-            idempotency_key=f"session:{row.id}:settle",
+            idempotency_key=cash_settlement_key(row.id, paid, pay_amount),
         )
         return {
             "ok": True,

@@ -225,7 +225,7 @@ DEFAULT_ROLES = {
     "Operator": ",".join([
         "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
         "gates.open", "gates.open_simulated", "fees.view",
-        "subscribers.view", "sessions.view", "payments.view", "payments.create",
+        "subscribers.view", "sessions.view", "sessions.create", "payments.view", "payments.create",
         "settings.view",
     ]),
     "Developer": ",".join([
@@ -233,7 +233,7 @@ DEFAULT_ROLES = {
         "gates.open", "hardware.view", "fees.view", "simulation.run",
         "subscribers.view", "subscribers.manage", "sessions.view",
         "payments.view", "payments.create", "settings.view", "settings.manage",
-        "users.view", "alerts.view",
+        "users.view", "alerts.view", "sessions.create", "sessions.close",
     ]),
     "Kiosk Operator": ",".join([
         "kiosk.use", "sessions.view", "payments.view", "payments.create",
