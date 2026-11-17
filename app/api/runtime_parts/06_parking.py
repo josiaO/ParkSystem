@@ -222,45 +222,52 @@ def fee_quote(payload: FeeQuoteRequest, db: Session = Depends(get_db), _: User =
 
 
 @app.post("/sessions")
-def open_session(payload: SessionCreate, db: Session = Depends(get_db), user: User = Depends(require("fees.view"))):
-    plate = payload.plate.strip().upper()
-    if not plate:
-        raise HTTPException(400, "Plate is required")
-    tariff = ensure_car1_tariff(db)
+def open_session(payload: SessionCreate, db: Session = Depends(get_db), user: User = Depends(require("sessions.create"))):
+    """Manual entry for a car the cameras missed: same engine as a camera entry."""
+    from app.domain.parking_engine import InvalidTransition
+    from app.services.parking_sessions import manual_entry
+
     camera = db.get(Camera, payload.camera_id) if payload.camera_id else None
-    row = ParkingSession(
-        plate=plate,
-        gate_id=payload.gate_id or (camera.gate_id if camera else None),
-        camera_id=payload.camera_id,
-        lane_direction=(camera.lane_direction if camera else "ENTRY"),
-        car_type=payload.car_type or "Car1",
-        currency=tariff.currency,
-        tariff_rules=tariff.rules or {},
-        status="OPEN",
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    write_audit(db, user, "session.entry", "parking_session", str(row.id), plate)
+    site_id = int((camera.site_id if camera is not None else 0) or DEFAULT_SITE_ID)
+    try:
+        row = manual_entry(
+            db, plate=payload.plate, site_id=site_id,
+            gate_id=payload.gate_id or (camera.gate_id if camera else None),
+            camera_id=payload.camera_id, lane_id=camera.lane_id if camera else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except InvalidTransition as exc:
+        raise HTTPException(409, str(exc)) from exc
+    write_audit(db, user, "session.manual_entry", "parking_session", str(row.id), row.plate)
     db.commit()
     return session_dict(row)
 
 
 @app.post("/sessions/{session_id}/exit")
-def close_session(session_id: int, db: Session = Depends(get_db), user: User = Depends(require("fees.view"))):
+def close_session(
+    session_id: int,
+    payload: dict = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+    user: User = Depends(require("sessions.close")),
+):
+    """Supervised close of a visit the lane never closed; owed amount is recorded as written off."""
+    from app.domain.parking_engine import InvalidTransition
+    from app.services.parking_sessions import supervised_close
+
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
-    row.exit_time = datetime.now(timezone.utc)
-    result = calculate_car1_fee(row.entry_time, row.exit_time, row.tariff_rules or load_active_rules(db, row.car_type))
-    row.amount_due = result.due
-    row.currency = result.currency
-    row.breakdown = result.breakdown
-    row.status = "CLOSED"
+    try:
+        result = supervised_close(db, row, reason=str((payload or {}).get("reason") or ""), user_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except InvalidTransition as exc:
+        raise HTTPException(409, str(exc)) from exc
+    write_audit(db, user, "session.supervised_close", "parking_session", str(row.id),
+                f"{row.plate} written_off={result['written_off']} {result['currency']}: {(payload or {}).get('reason')}"[:240])
     db.commit()
-    write_audit(db, user, "session.exit", "parking_session", str(row.id), f"{row.plate} due={result.due}")
-    db.commit()
-    return {**session_dict(row), "fee": result.__dict__}
+    return {**session_dict(db.get(ParkingSession, session_id)), **result}
 
 
 @app.get("/sessions")

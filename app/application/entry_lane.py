@@ -41,6 +41,10 @@ from app.services.receipts import policy_requires_taken, policy_should_print, re
 
 GateOpener = Callable[..., Awaitable[Any]]
 
+# A repeat read of the same approach is normal; an open visit older than this
+# for a car now at the entry means its exit was missed and needs an operator.
+STALE_VISIT_SECONDS = 600
+
 
 def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     cfg = cfg or {}
@@ -158,19 +162,27 @@ class EntryLaneController:
             db.refresh(row)
 
         if not created:
-            already_open = row.lifecycle in {GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE}
+            # No command is sent for a duplicate, so the barrier did not open
+            # now. An old open visit for this plate (a missed exit) needs an
+            # operator: report it instead of claiming the barrier opened.
+            entered = row.entry_time.isoformat() if row.entry_time else ""
+            from datetime import datetime, timezone
+            created_at = row.created_at if row.created_at is None or row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc)
+            stale_visit = bool(created_at and (datetime.now(timezone.utc) - created_at).total_seconds() > STALE_VISIT_SECONDS)
             return {
                 "ok": True,
                 "action": "ENTRY",
                 "reason": "duplicate",
                 "created_session": False,
                 "duplicate": True,
-                "barrier_opened": already_open,
-                "assistance_required": False,
+                "barrier_opened": False,
+                "existing_lifecycle": row.lifecycle,
+                "assistance_required": stale_visit,
+                "stale_visit": stale_visit,
                 "session": snapshot(row),
                 "entitlement": entitlement.__dict__,
                 "source": source,
-                "message": "Open session already exists for this plate.",
+                "message": f"Open visit already exists for {row.plate} (since {entered or 'unknown'}). Barrier not opened.",
             }
 
         need_receipt = bool(policy.receipt_required_before_open) and not subscriber
