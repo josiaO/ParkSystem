@@ -84,37 +84,21 @@ Read first, in this order:
 
 Create `~/zirp-sim/` with its own venv and a small FastAPI app per service, each a systemd unit. Write tests for the mocks.
 
-### 5a. Mock ClickPesa: `zirp-mock-clickpesa`, port 9100, base path `/third-parties`
+### 5a. Mock ClickPesa: already in the repo, run it (don't rebuild it)
 
-Reproduce what `app/infrastructure/payments/clickpesa.py` expects:
-- `POST /third-parties/generate-token` with headers `client-id` and `api-key` → `{"success": true, "token": "Bearer <random>"}`. Reject wrong keys with 401.
-- `POST /third-parties/payments/preview-ussd-push-request` → validate the body checksum and fields → 200 with available methods.
-- `POST /third-parties/payments/initiate-ussd-push-request`, body `{amount, currency, orderReference, phoneNumber, checksum}` → create a pending payment and return `{id, status:"PROCESSING", paymentReference, orderReference, ...}`.
-- `GET /third-parties/payments/{orderReference}` → a list with the payment's current state (`PROCESSING` | `SUCCESS` | `FAILED`), including `collectedAmount` and `collectedCurrency`.
-- **Webhook:** when a payment is approved or declined, `POST` to `https://zirp.test/api/webhooks/clickpesa` with `{"event": "PAYMENT RECEIVED" | "PAYMENT FAILED", "data": {id, status, orderReference, paymentReference, collectedAmount, collectedCurrency, ...}, "checksum": ...}`.
-- **Checksum**, exactly as `payload_checksum()` computes it: HMAC-SHA256 hex with the checksum key over `json.dumps(canonical_payload_without_checksum_and_checksumMethod, separators=(",", ":"), ensure_ascii=False)`, where canonical means dict keys sorted recursively.
-  - Import or copy that function and prove it with a test: a checksum your mock creates must verify in Zirp's `verify_callback`.
-- **Phone simulator page** at `http://UBUNTU_IP:9100/phone`: lists pending USSD pushes by phone number with **Approve**, **Decline** and **Ignore** (timeout) buttons. This stands in for the driver's handset.
-- **Fault toggles**, on an admin page or API, to rehearse real failures:
-  - delay webhook N seconds;
-  - drop the webhook (reconciliation must settle it via the status query);
-  - send the webhook twice (the ledger must credit once);
-  - pay less than asked (amount mismatch must not settle);
-  - bad checksum (must be rejected);
-  - provider down: HTTP 503 or connection refused.
+The repo ships `app/mock_services/clickpesa.py`:
+- the real API shape (token, preview, USSD push, status query, checksummed webhooks);
+- a phone page at `/phone` (approve, decline, ignore, reverse);
+- fault switches at `/admin` (late, dropped, duplicated or forged webhooks, underpayment, outage).
 
-Zirp settings (Site Server `.env`):
-- `SMARTPARK_PAYMENTS_MOBILE_PROVIDER=clickpesa`
-- `SMARTPARK_CLICKPESA_BASE_URL=http://127.0.0.1:9100/third-parties`
-- `SMARTPARK_CLICKPESA_CLIENT_ID`, `SMARTPARK_CLICKPESA_API_KEY`, `SMARTPARK_CLICKPESA_CHECKSUM_KEY`: fake, generated, matching the mock.
+The ClickPesa adapter has an explicit **MOCK mode**: a private base URL means no live flags are needed and no real money can move, while checksums are still required. Read both files and `tests/test_payments_mock_clickpesa.py` first.
 
-**Important:** today the adapter refuses to collect unless `CLICKPESA_LIVE_ENABLED=1` and `PAYMENTS_LIVE_PROVIDER_CONFIRMED=1`, because ClickPesa has no sandbox. Do not just set those flags. Implement a proper, tested **mock mode**:
-- When the base URL's host is not `api.clickpesa.com`, the provider reports mode `MOCK` and may collect without the live flags.
-- It still requires valid credentials and webhook checksums.
-- When the host **is** `api.clickpesa.com`, the existing live gate is unchanged.
-- Show the mode in `/payments/health`.
-
-Commit this on `ubuntu-sim` with tests.
+- Configure with the env tool (validates values, keeps `.env` tidy, generates test credentials):
+  `python -m app.cli env preset mock-payments --lan-ip UBUNTU_IP`, then `python -m app.cli env check`.
+- Run it as a systemd unit `zirp-mock-clickpesa`: `python -m app.mock_services.clickpesa --host 0.0.0.0 --port 9100`, with the same `SMARTPARK_HOME`/`.env` as the Site Service so the credentials match.
+- Webhooks: set `SMARTPARK_MOCK_CLICKPESA_WEBHOOK_URL=https://zirp.test/api/webhooks/clickpesa` so they travel the same public path a real provider would use (Caddy → portal → Site Service).
+- Firewall: 9100/tcp from the LAN only.
+- If you find a gap in the mock or the payment flow, fix it as a tested change on `ubuntu-sim`.
 
 ### 5b. Mock SMS: `zirp-mock-sms`, port 9200
 
@@ -132,15 +116,24 @@ Verify the signature the way `alerts.py` signs it, store deliveries, and show th
 
 Write a script `~/zirp-sim/internet.sh up|down` that blocks or unblocks the mock services' ports (or stops their units). It's used to rehearse provider outages and recovery.
 
-## Step 6: Public entry point (simulated internet-facing HTTPS)
+## Step 6: Portal and public entry point (simulated internet-facing HTTPS)
 
-- Caddy with an internal CA for the name `zirp.test`:
-  - Reverse proxy to the Site Server (`127.0.0.1:8760`).
-  - Expose only `/p/*`, `/s/*`, `/api/public/*`, `/api/webhooks/*`; return 404 for everything else on that hostname.
-  - Serve the full app on a second LAN name, `zirp-admin.test`, restricted to the LAN.
-- Phones and lane PCs resolve `zirp.test` to `UBUNTU_IP`. Use dnsmasq on Ubuntu, or document the hosts-file lines for Windows and the phone (the phone probably needs the Ubuntu box as its DNS).
+The repo ships a Next.js portal in `portal/` (read `portal/README.md`):
+- a public pay page at `/p/<code>`, with `/s/<code>` from the receipt QR;
+- a back office at `/admin`;
+- pass-through for `/api/public/*` and `/api/webhooks/*`.
+
+Steps:
+- Install Node.js 22 LTS (NodeSource or nvm), then in `~/zirp/portal` run `./start-portal.sh --api http://127.0.0.1:8760` once to build.
+- Run it as systemd `zirp-portal`, using the unit in `portal/README.md`.
+- Caddy with an internal CA:
+  - `zirp.test` → portal (`127.0.0.1:3000`): the driver and provider entry point.
+  - `zirp-admin.test` → portal as well, restricted to the LAN. Back-office users sign in at `/admin`.
+  - Do not expose the Site Service port (8760) beyond the LAN.
+  - Set `ZIRP_SECURE_COOKIES=true` in `portal/.env.local`.
+- Set the site's public base URL to `https://zirp.test` (Zirp settings), so printed QR codes open the portal.
+- Phones and lane PCs resolve `zirp.test` to `UBUNTU_IP`. Use dnsmasq on Ubuntu, or document the hosts-file lines; the phone probably needs the Ubuntu box as its DNS.
 - Export Caddy's root certificate to `~/zirp-handoff/zirp-test-root.crt` for the phone and Windows PCs to trust.
-- Receipts' QR codes must open `https://zirp.test/s/<token>` on the phone.
 
 ## Step 7: Prepare for the two Edge Nodes
 

@@ -31,7 +31,7 @@ The camera, recognition and lane software is now in good shape. What is missing 
 | 1 | **Receipt-taken sensor (D1)** | Production requires "receipt taken" before the entry barrier opens. No printer adapter reports it, so every casual entry needs an operator click. | Pick the printer: a presenter printer with taken status, or a beam on a relay/GPIO input. Or decide on a "print and open" policy for this site. |
 | 2 | **Real receipt printer** | Only simulated printing has run. The thermal printer path (ESC/POS / Windows spool) is untested on hardware. | Install the printer and run 50 tickets: QR legibility, cutter, paper-out alert. |
 | 3 | **Passage / loop signal** | The ground loop is wired to the KF "Board" I/O controllers (UDP), not the cameras. Zirp currently assumes passage after 60 s. | Capture the Board UDP protocol (pktmon) and add a loop-input adapter, or rely on the time-out by documented policy. |
-| 4 | **Mobile payment, end to end** | The ClickPesa adapter (token, preview, USSD push, checksummed webhook, status query, reconciliation) has never talked to ClickPesa. There are no keys and no sandbox. | (a) Mock ClickPesa on Ubuntu (this plan). (b) One real 100 TZS payment with live keys and the operator's phone. |
+| 4 | **Mobile payment, end to end** | Proven end to end against the bundled mock ClickPesa (adapter, webhook, status query, ledger). Never run against ClickPesa itself: there are no keys and no sandbox. | One real 100 TZS payment with live keys and the operator's phone. |
 | 5 | **Public reachability** | Webhooks and the receipt pay page must reach the Site Server from the internet over HTTPS. Today the server is plain HTTP on the LAN. | Reverse proxy with TLS (Caddy/nginx) or a tunnel, with only `/api/webhooks/*`, `/p/*`, `/s/*` and `/api/public/*` exposed. |
 | 6 | **Multi-PC on shared PostgreSQL** | Edge Node + Site Server + shared media were implemented but never run together. Row locks and unique keys are sound in code, untested live. | The Ubuntu simulation: two lane PCs as Edge Nodes and Ubuntu as Site Server + DB. |
 | 7 | **Security (D9)** | Camera passwords default to `admin`. The HVX host API has no auth. The LAN API is HTTP. Operator role can open gates. | Camera password policy, a shared secret on the HVX host, TLS or an IP allow-list on the LAN API, and a role review. |
@@ -51,20 +51,25 @@ The camera, recognition and lane software is now in good shape. What is missing 
 - **Live safety gate.** Real collection needs `CLICKPESA_LIVE_ENABLED=1` and `PAYMENTS_LIVE_PROVIDER_CONFIRMED=1`.
 - **Kiosk:** mobile money uses the same intent and status flow; kiosk cash can be disabled for unattended kiosks.
 
-Weaknesses to fix:
-- **No mock mode:** pointing ClickPesa at a mock still needs the "live" flags. Add an explicit `SANDBOX/MOCK` mode keyed on a non-ClickPesa base URL, so "live" always means real money.
-- **The simulated provider approves everything** without a phone-side step. The mock ClickPesa replaces it for realistic tests.
-- **Untested at scale:** amount mismatch, late webhooks after expiry, duplicate webhooks and refunds were covered by unit tests only.
-- **Exec-composed modules:** `07_payments.py` (732 lines) lives inside the runtime (D11). Move it into a normal module when convenient.
+Weaknesses found, now fixed (2026-11-17):
+- **Mock mode.** ClickPesa runs in `MOCK` mode when its base URL is a private host (loopback, LAN address, `.test`/`.local`). Credentials and webhook checksums are still required. Real hosts keep the live gate, so "LIVE" always means real money, and `/payments/health` reports `real_money`.
+- **Phone-side approval.** The bundled mock ClickPesa (`python -m app.mock_services.clickpesa`) has the real API shape, a phone page (approve, decline, ignore, reverse) and fault switches. It replaces the auto-approving simulated provider for realistic tests.
+- **Two money gaps found and fixed:**
+  - A driver approving *after* the local expiry was charged but never credited. It is now credited once and flagged `late_success`.
+  - A reversal after success was ignored silently. It is now flagged for an operator (audit, `reversals` stat, back-office card) and never rewrites the ledger by itself.
+- **End-to-end tests:** `tests/test_payments_mock_clickpesa.py` drives the real adapter and webhook route against the mock: approve, decline, timeout, dropped, duplicate and forged webhooks, underpayment, outage and recovery, late success, reversal.
+- **Payments module:** `07_payments.py` is now a normal module (`app/api/payment_handlers.py`). The runtime part only re-exports it, so `app.api_main.<name>` patches still work.
+- **Verified live on SITE-PC01:** pay page → mock push → approve on `/phone` → checksummed webhook → status query → ledger credited once (TZS 649,000, MOCK) → page shows "Payment received". A webhook through the portal is accepted when signed and rejected when tampered.
 
 ## Should it be rewritten in Next.js?
 
-**No.**
-- **The hard part can't move to Next.js.** The value is in the backend: the 32-bit NetSDK camera host (Python ctypes, Windows only), FastALPR/ONNX recognition, the lane engine, the ledger and gate control. That would stay Python whatever the UI is.
-- **A rewrite resets the hardening.** It would throw away the last two weeks of measured work (staleness, latency, revenue rules) and add a second runtime to every lane PC.
-- **The UIs aren't the risk.** They are the PySide6 desktop (operators, on the lane PC) and a small vanilla-JS web UI (kiosk, public receipt and pay page, back office). The go-live gaps above are hardware, payments and operations, not UI.
-
-Where Next.js could make sense later: as a separate frontend for the public pay page and a remote back-office or reporting portal, calling the existing FastAPI API. Do that only after go-live, if you need a richer web experience. Never for the lane runtime.
+**No rewrite.**
+- **The hard part stays in Python.** The NetSDK camera host, FastALPR, the lane engine, the ledger and gate control remain there.
+- **Next.js is a separate front end.** It runs as a portal (`portal/`) that calls the existing FastAPI API:
+  - public pay page (mobile first, English/Swahili, live payment status, test-mode banner);
+  - back office (overview, sessions, payment ledger and provider health, reconciliation, reports, CSV);
+  - one-command start (`start-portal.bat` / `start-portal.sh`).
+- **No secrets in the portal.** Operator tokens stay in httpOnly cookies, and provider webhooks pass through unchanged.
 
 ## Recommended order
 
