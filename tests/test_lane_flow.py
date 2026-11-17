@@ -156,3 +156,31 @@ def test_zero_disables_the_timeouts(Session):
         _age(db, row, 10_000)
         assert lane_sweeper.sweep_once(db, cfg={"passage_timeout_seconds": 0, "stranded_entry_minutes": 0}) == {
             "entry_passage_assumed": 0, "exit_passage_assumed": 0, "entry_expired": 0}
+
+
+def test_one_car_read_twice_with_an_ocr_slip_opens_one_session(Session):
+    """Bench: T186EEP then T188EEP 2.8 s apart on lane 1# opened two sessions."""
+    policy = LanePolicy(receipt_required_before_open=False, passage_sensing=PASSAGE_WAIT)
+    with Session() as db:
+        lane = EntryLaneController(opener=Opener())
+        first = asyncio.run(lane.submit(db, _event("T186EEP", "a1"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        again = asyncio.run(lane.submit(db, _event("T188EEP", "a2"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        other = asyncio.run(lane.submit(db, _event("T921EQS", "a3"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        assert first["created_session"] is True
+        assert again["reason"] == "duplicate_lookalike" and again["barrier_opened"] is False
+        assert again["session"]["plate"] == "T186EEP"
+        assert other["created_session"] is True          # a different car right behind is still admitted
+        plates = sorted(db.scalars(select(ParkingSession.plate)).all())
+        assert plates == ["T186EEP", "T921EQS"]
+
+
+def test_lookalike_rule_expires_after_the_window(Session):
+    policy = LanePolicy(receipt_required_before_open=False, passage_sensing=PASSAGE_WAIT)
+    with Session() as db:
+        lane = EntryLaneController(opener=Opener())
+        asyncio.run(lane.submit(db, _event("T186EEP", "b1"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        row = db.scalar(select(ParkingSession).where(ParkingSession.plate == "T186EEP"))
+        row.created_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        db.commit()
+        later = asyncio.run(lane.submit(db, _event("T188EEP", "b2"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        assert later["created_session"] is True

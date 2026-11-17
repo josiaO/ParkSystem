@@ -189,3 +189,20 @@ def test_historical_capture_does_not_suppress_the_next_coil_read():
             await api._read_presence_now(camera.id, 7)
             recognize.assert_awaited_once()
     asyncio.run(run())
+
+
+def test_event_read_reuses_boxes_found_on_the_same_still_at_the_same_zoom():
+    """The drain's detector pass must not be repeated by the event read."""
+    async def run():
+        camera = Camera(id=905, name="Entry", ip_address="10.0.0.7", stream_profiles={})
+        gate = ArrivalGate(stable_seconds=0)
+        found = [{"x1": 20, "y1": 30, "x2": 100, "y2": 55, "confidence": 0.9}]
+        result = {"ok": True, "best": None}
+        for zoom, reused in ((1.0, True), (2.0, False)):
+            gate.prepared = (hash(JPEG), found, zoom)
+            with patch("app.services.media_gateway.gateway.peek_detect", return_value=None), \
+                 patch("app.services.alpr.recognize_arrival_bytes", return_value=result) as read, \
+                 patch("app.services.camera_framing.gate_for", return_value=gate):
+                await api._run_local_alpr_locked(None, camera, JPEG, ticket=None)
+            assert (read.call_args.kwargs.get("detected_boxes") == found) is reused
+    asyncio.run(run())

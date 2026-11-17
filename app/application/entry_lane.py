@@ -45,6 +45,44 @@ GateOpener = Callable[..., Awaitable[Any]]
 # for a car now at the entry means its exit was missed and needs an operator.
 STALE_VISIT_SECONDS = 600
 
+# One car read twice with a one-character OCR difference (T186EEP/T188EEP,
+# 1302BLB/T302BLB) 2-3 s apart opened two sessions and would print two
+# tickets. A near-identical plate on the same entry gate this soon is the same
+# car: it is reported as a duplicate and the barrier is not opened again.
+LOOKALIKE_WINDOW_SECONDS = 10.0
+LOOKALIKE_MIN_SIMILARITY = 0.85
+
+
+def recent_lookalike_session(db: Session, plate: str, gate_id: int | None) -> ParkingSession | None:
+    """A session just opened on this gate for a plate one OCR slip away."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.core.plate import plate_similarity
+
+    if not plate or gate_id is None:
+        return None
+    rows = db.scalars(
+        select(ParkingSession)
+        .where(or_(ParkingSession.entry_gate_id == int(gate_id), ParkingSession.gate_id == int(gate_id)))
+        .order_by(ParkingSession.id.desc())
+        .limit(5)
+    ).all()
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        created = row.created_at
+        if created is None:
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if (now - created).total_seconds() > LOOKALIKE_WINDOW_SECONDS:
+            break                      # newest first: everything after is older
+        other = str(row.plate or "")
+        if other and other != plate and plate_similarity(other, plate) >= LOOKALIKE_MIN_SIMILARITY:
+            return row
+    return None
+
 
 def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     cfg = cfg or {}
@@ -133,6 +171,29 @@ class EntryLaneController:
             plate = entitlement.plate
         parker_kind = entitlement.kind if entitlement.registered else "CASUAL"
         subscriber = _is_subscriber(parker_kind) and policy.subscriber_skip_receipt
+
+        lookalike = None if entitlement.registered else recent_lookalike_session(db, plate, gate.id if gate else None)
+        if lookalike is not None:
+            record_access_decision(
+                db, session=lookalike, plate=plate, gate=gate, lane_direction="ENTRY",
+                outcome="DUPLICATE", reason=f"lookalike of {lookalike.plate} read moments ago",
+                parker_kind=parker_kind, barrier_opened=False,
+            )
+            return {
+                "ok": True,
+                "action": "ENTRY",
+                "reason": "duplicate_lookalike",
+                "created_session": False,
+                "duplicate": True,
+                "barrier_opened": False,
+                "existing_lifecycle": lookalike.lifecycle,
+                "assistance_required": False,
+                "stale_visit": False,
+                "session": snapshot(lookalike),
+                "entitlement": entitlement.__dict__,
+                "source": source,
+                "message": f"{plate} looks like {lookalike.plate} read moments ago on this gate; treated as the same car.",
+            }
 
         payload = rec.as_dict()
         payload["plate_normalized"] = plate
