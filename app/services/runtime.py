@@ -154,8 +154,42 @@ def _exit_after(seconds: float, code: int) -> None:
     threading.Thread(target=_deadline, name="shutdown-deadline", daemon=True).start()
 
 
+def _arm_deadline_on_stop_signal(deadline_seconds: float) -> None:
+    """Start the exit deadline the moment NSSM's stop signal (Ctrl+C/Break) arrives.
+
+    asyncio.run() waits for its executor threads after cancelling tasks; a
+    thread stuck in ONNX inference or model warm-up kept the Recognition
+    Worker in StopPending for minutes, so a deadline armed only after main()
+    returned never started. The previous handler still runs (it raises
+    KeyboardInterrupt), so a clean shutdown is attempted first.
+    """
+    import signal
+
+    armed = threading.Event()
+
+    def _wrap(previous):
+        def _handler(signum, frame):
+            if not armed.is_set():
+                armed.set()
+                _exit_after(deadline_seconds, 0)
+            if callable(previous):
+                return previous(signum, frame)
+            raise KeyboardInterrupt
+        return _handler
+
+    for name in ("SIGINT", "SIGBREAK", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _wrap(signal.getsignal(sig)))
+        except (ValueError, OSError):  # not the main thread, or unsupported
+            pass
+
+
 def run_service(main, *, deadline_seconds: float = SHUTDOWN_DEADLINE_SECONDS) -> int:
     """Run a service entry point; a stop (Ctrl+C/Break) always ends the process."""
+    _arm_deadline_on_stop_signal(deadline_seconds)
     code = 1
     try:
         code = int(main() or 0)
