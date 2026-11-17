@@ -316,17 +316,35 @@ class ExitLaneController:
         db.commit()
         db.refresh(row)
 
-        row, outcome = start_exit(
-            db,
-            plate=row.plate,
-            event_id=event_id,
-            site_id=site_id,
-            lane_id=lane_id,
-            camera_id=camera.id if camera else None,
-            gate_id=gate.id if gate else None,
-            policy=policy,
-            paid=bool(financial["allow"]),
-        )
+        from app.domain.parking_engine import InvalidTransition
+
+        visit = row
+        try:
+            row, outcome = start_exit(
+                db,
+                plate=row.plate,
+                event_id=event_id,
+                site_id=site_id,
+                lane_id=lane_id,
+                camera_id=camera.id if camera else None,
+                gate_id=gate.id if gate else None,
+                policy=policy,
+                paid=bool(financial["allow"]),
+            )
+        except InvalidTransition as exc:
+            # E.g. a visit still waiting for its entry receipt: it cannot leave
+            # automatically. Tell the operator instead of raising.
+            db.rollback()
+            record_access_decision(
+                db, session=visit, plate=visit.plate, gate=gate, lane_direction="EXIT",
+                outcome="ASSISTANCE_REQUIRED", reason=f"visit incomplete: {exc}"[:200],
+                parker_kind=visit.parker_kind or "CASUAL", barrier_opened=False,
+            )
+            return {
+                "ok": False, "action": "EXIT", "reason": "visit_incomplete",
+                "barrier_opened": False, "assistance_required": True, "session": snapshot(visit),
+                "message": f"Visit for {visit.plate} is not complete ({visit.lifecycle}). Operator: check the car and close or admit it.",
+            }
         if row is None:
             return {
                 "ok": False, "action": "EXIT", "reason": "no_session",

@@ -60,6 +60,12 @@ DEFAULT_PARKING_SETTINGS = {
     "printer_adapter": "simulated",
     "printer_name": "",
     "payment_exit_grace_seconds": 15 * 60,
+    # Lanes without a passage sensor: assume the car passed this long after
+    # the barrier command (0 = wait for a sensor forever).
+    "passage_timeout_seconds": 60,
+    # Entry attempts never authorized (printer failed, receipt not taken,
+    # driver left) are cancelled after this, freeing the plate.
+    "stranded_entry_minutes": 15,
 }
 
 OPEN_STATUSES = {"WAITING_RECEIPT", "ACTIVE", "PAID", "OPEN"}
