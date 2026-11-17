@@ -830,3 +830,17 @@ The corrected plate is now what the capture, session and live label use; the OCR
 
 This does not fix misreads inside a slot class (T186EEP/T188EEP, T697DHY/T697DHV). Those need the lookalike duplicate rule (17.2) or model fine-tuning.
 
+
+### 17.4 Payments: mock mode, end-to-end tests, portal, settings tool (2026-11-17)
+
+- **ClickPesa MOCK mode.** A private base URL (loopback, LAN, `.test`/`.local`) collects without the live flags. Credentials and checksums are still required. Real hosts keep the live gate. `/payments/health` and the public status show the mode.
+- **Bundled mock ClickPesa** (`app/mock_services/clickpesa.py`): phone page (approve, decline, reverse) and fault switches. Kit launcher: `Start-MockPayments.bat`.
+- **Money fixes:** a payment approved after the local expiry is now credited (`late_success`), and a reversal after success is flagged for an operator instead of dropped.
+- **End-to-end tests** against the mock, 11 scenarios (`tests/test_payments_mock_clickpesa.py`).
+- **D11 (part):** payment handlers moved to `app/api/payment_handlers.py`, with late-bound runtime helpers.
+- **Settings tool:** `python -m app.cli env list|get|set|unset|check|preset mock-payments|template|restart` (kit: `SmartPark-Settings.bat`). It validates against the settings types, keeps comments, writes a `.env.bak`, and masks secrets.
+- **Next.js portal** (`portal/`): public pay page and back office over the existing API; see `portal/README.md`.
+- **Verified on SERVER01** (kit `.env` switched to mock payments; the previous `.env` was kept as a backup):
+  - receipt T626DXW → push → approve → webhook → status query → one ledger credit of TZS 649,000 → page "Payment received";
+  - portal webhook pass-through: signed 202, tampered 401;
+  - back-office pages 200 with a session, redirect without one, revoked token refused.
