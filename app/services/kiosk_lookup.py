@@ -86,11 +86,23 @@ def capture_for_session(db: Session, row: ParkingSession) -> VehicleCapture | No
     return capture
 
 
+def _media_exists(stored: str | None) -> bool:
+    text = str(stored or "").replace("\\", "/")
+    if "/" not in text:
+        return False
+    from app.services.preview import media_path
+
+    folder, name = text.split("/", 1)
+    return media_path(folder, name) is not None
+
+
 def image_fields(db: Session, row: ParkingSession) -> dict:
     capture, matches = _capture_for_session(db, row)
     token = row.public_token or ""
-    snapshot_url = f"/p/{token}/snapshot.jpg" if token and capture and capture.snapshot_path else None
-    crop_url = f"/p/{token}/crop.jpg" if token and capture and capture.crop_path else None
+    # Offer a URL only while the file exists: media older than
+    # media_retention_days is pruned, but the capture row keeps its path.
+    snapshot_url = f"/p/{token}/snapshot.jpg" if token and _media_exists(capture.snapshot_path if capture else "") else None
+    crop_url = f"/p/{token}/crop.jpg" if token and _media_exists(capture.crop_path if capture else "") else None
     read_plate = capture.plate if capture else ""
     note = "Compare the photo with the plate. If the read is wrong, correct it before taking payment."
     if capture is None:
