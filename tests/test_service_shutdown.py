@@ -35,6 +35,29 @@ def test_deadline_exits_hard_when_shutdown_hangs():
     assert codes == [7]
 
 
+def test_stop_signal_arms_the_deadline_immediately():
+    """The deadline must start when the signal arrives, not when main() returns."""
+    import signal
+
+    armed = []
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with patch.object(runtime, "_exit_after", lambda seconds, code: armed.append(code)):
+            runtime._arm_deadline_on_stop_signal(10.0)
+            handler = signal.getsignal(signal.SIGINT)
+            try:
+                handler(signal.SIGINT, None)
+            except KeyboardInterrupt:
+                pass
+            try:
+                handler(signal.SIGINT, None)      # a second signal does not arm twice
+            except KeyboardInterrupt:
+                pass
+        assert armed == [0]
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def test_keyboard_interrupt_is_not_written_as_a_crash():
     with patch.object(runtime, "write_crash") as crash:
         runtime.install_crash_hooks("TestService")
