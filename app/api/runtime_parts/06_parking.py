@@ -821,6 +821,16 @@ def sim_pay(session_id: int, db: Session = Depends(get_db), user: User = Depends
     return sim_session_dict(row)
 
 
+def _is_kiosk_device(user: User) -> bool:
+    return str(getattr(user, "username", "") or "").startswith("kiosk-device:")
+
+
+def _refuse_cash_on_unattended_kiosk(db: Session, user: User) -> None:
+    """An unattended kiosk must not record cash: nobody is there to take it."""
+    if _is_kiosk_device(user) and not bool(parking_settings(db).get("kiosk_cash_enabled", True)):
+        raise HTTPException(403, "This kiosk is unattended: pay with mobile money or at a staffed desk.")
+
+
 OPERATOR_PAYMENT_METHODS = {"KIOSK_CASH": "KIOSK_CASH", "CASH": "KIOSK_CASH", "KIOSK": "KIOSK_CASH"}
 
 
@@ -844,6 +854,7 @@ def confirm_session_payment(
     db: Session = Depends(get_db),
     user: User = Depends(require_any("payments.create", "kiosk.use", "simulation.run")),
 ):
+    _refuse_cash_on_unattended_kiosk(db, user)
     row = db.get(ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")

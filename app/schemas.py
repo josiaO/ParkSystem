@@ -265,6 +265,7 @@ class ParkingSettingsUpdate(BaseModel):
     payment_exit_grace_seconds: int | None = Field(default=None, ge=0, le=7200)
     passage_timeout_seconds: int | None = Field(default=None, ge=0, le=3600)
     stranded_entry_minutes: int | None = Field(default=None, ge=0, le=1440)
+    kiosk_cash_enabled: bool | None = None
 
 
 class SitePolicyUpdate(BaseModel):
