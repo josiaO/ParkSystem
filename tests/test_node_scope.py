@@ -224,7 +224,10 @@ class NodeScopeTests(unittest.TestCase):
         from app.config import settings
 
         with self.Session() as db:
-            node = Node(node_id="edge-1", site_id=1, name="Remote lane", node_type="EDGE_NODE", status="ACTIVE")
+            from datetime import datetime, timezone
+
+            node = Node(node_id="edge-1", site_id=1, name="Remote lane", node_type="EDGE_NODE", status="ACTIVE",
+                        last_seen_at=datetime.now(timezone.utc))
             db.add(node)
             db.flush()
             db.add(NodeGateAssignment(node_id=node.id, gate_id=self.gate1["id"], enabled=True))
@@ -241,6 +244,47 @@ class NodeScopeTests(unittest.TestCase):
         by_id = {row["id"]: row for row in response.json()}
         self.assertFalse(by_id[self.cam1e["id"]]["stream_allowed"])
         self.assertTrue(by_id[self.cam2e["id"]]["stream_allowed"])
+
+    def test_site_server_takes_over_a_gate_whose_edge_node_is_offline(self):
+        """A node that never connected, or stopped heartbeating, must not leave its lane unserved."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.config import settings
+        from app.services import node_scope
+
+        with self.Session() as db:
+            node = Node(node_id="edge-2", site_id=1, name="Remote lane", node_type="EDGE_NODE", status="ACTIVE")
+            db.add(node)
+            db.flush()
+            db.add(NodeGateAssignment(node_id=node.id, gate_id=self.gate1["id"], enabled=True))
+            db.commit()
+            with patch.object(settings, "deployment_profile", "PRODUCTION"), \
+                 patch("app.services.node_scope.deployment_role", return_value="SITE_SERVER"):
+                def served():
+                    db.info.clear()
+                    return camera_active_on_this_installation(self.cam1e, db=db)
+
+                self.assertTrue(served())                       # never seen: server serves lane 1
+                node.last_seen_at = datetime.now(timezone.utc)
+                db.commit()
+                self.assertFalse(served())                      # node alive: node owns it
+                node.last_seen_at = datetime.now(timezone.utc) - timedelta(seconds=node_scope.NODE_LIVENESS_SECONDS + 5)
+                db.commit()
+                self.assertTrue(served())                       # node went quiet: server takes over
+
+    def test_edge_node_heartbeat_marks_itself_alive(self):
+        from app.config import settings
+        from app.services.node_scope import touch_node_heartbeat
+
+        with self.Session() as db:
+            db.add(Node(node_id="edge-hb", site_id=1, name="Lane PC", node_type="EDGE_NODE", status="ACTIVE"))
+            db.commit()
+            with patch.object(settings, "node_id", "edge-hb"):
+                self.assertTrue(touch_node_heartbeat(db))
+            row = db.scalar(select(Node).where(Node.node_id == "edge-hb"))
+            self.assertIsNotNone(row.last_seen_at)
+            with patch.object(settings, "node_id", "unknown-node"):
+                self.assertFalse(touch_node_heartbeat(db))
 
     def test_edge_node_cannot_manage_central_node_registry(self):
         with patch("app.services.node_scope.deployment_role", return_value="EDGE_NODE"):

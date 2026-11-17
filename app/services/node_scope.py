@@ -7,13 +7,18 @@ the Live Gates lane preset: pick gate 1 and gate 2 is not OCR'd or parked.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import settings
 
 NODE_SETTING_KEY = "node"
+# An Edge Node heartbeats every NODE_HEARTBEAT_SECONDS; it owns its assigned
+# gates only while its last heartbeat is younger than NODE_LIVENESS_SECONDS.
+NODE_HEARTBEAT_SECONDS = 10.0
+NODE_LIVENESS_SECONDS = 45.0
 
 
 def node_setting_key() -> str:
@@ -129,6 +134,10 @@ def edge_node_gate_ids(db, *, site_id: int | None = None) -> set[int]:
     try:
         from app.models import Node, NodeGateAssignment
 
+        # Only a node that is alive owns its gates. A node that never came
+        # online (or went down) would otherwise leave its lanes unserved: the
+        # Site Server takes over until the node's heartbeat returns.
+        alive_since = datetime.now(timezone.utc) - timedelta(seconds=NODE_LIVENESS_SECONDS)
         query = (
             select(NodeGateAssignment.gate_id)
             .join(Node, Node.id == NodeGateAssignment.node_id)
@@ -137,6 +146,8 @@ def edge_node_gate_ids(db, *, site_id: int | None = None) -> set[int]:
                 Node.status == "ACTIVE",
                 Node.revoked_at.is_(None),
                 NodeGateAssignment.enabled == True,  # noqa: E712
+                Node.last_seen_at.is_not(None),
+                Node.last_seen_at >= alive_since,
             )
         )
         if site_id is not None:
@@ -418,3 +429,37 @@ def describe_recognition_scope(db=None) -> dict[str, Any]:
                   if camera_in_recognition_scope(db=db) else "NODE NOT ASSIGNED TO GATE")
         ),
     }
+
+
+def touch_node_heartbeat(db) -> bool:
+    """Edge Node: record that this node is alive (shared database)."""
+    from app.models import Node
+
+    result = db.execute(
+        update(Node).where(Node.node_id == settings.node_id).values(last_seen_at=datetime.now(timezone.utc))
+    )
+    db.commit()
+    return bool(result.rowcount)
+
+
+async def node_heartbeat_loop() -> None:
+    """Background task on an Edge Node: heartbeat so the Site Server knows it owns its gates."""
+    import asyncio
+    import logging
+
+    from app.db import short_session
+
+    log = logging.getLogger("smartpark")
+    while True:
+        try:
+            def _touch() -> bool:
+                with short_session() as db:
+                    return touch_node_heartbeat(db)
+
+            if not await asyncio.to_thread(_touch):
+                log.warning("NODE heartbeat: node %s is not in the registry", settings.node_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("NODE heartbeat failed: %s", exc)
+        await asyncio.sleep(NODE_HEARTBEAT_SECONDS)
