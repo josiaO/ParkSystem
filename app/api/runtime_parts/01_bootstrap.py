@@ -474,7 +474,14 @@ async def lifespan(app: FastAPI):
         )
     else:
         alerts_task = asyncio.create_task(asyncio.sleep(0), name="manual-open-alerts-disabled")
-        sweeper_task = asyncio.create_task(asyncio.sleep(0), name="lane-sweeper-disabled")
+        # An Edge Node heartbeats so the Site Server leaves its gates alone;
+        # if it stops, the Site Server takes them over after 45 s.
+        from app.services.node_scope import node_heartbeat_loop
+
+        sweeper_task = asyncio.create_task(
+            _supervise_background_loop("node-heartbeat", node_heartbeat_loop),
+            name="node-heartbeat",
+        )
     watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
     if watchdog_seconds > 0:
         from app.services import pipeline_watchdog
