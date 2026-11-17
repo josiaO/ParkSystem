@@ -220,12 +220,16 @@ def test_endpoint_keys_do_not_explode_per_handle():
 
 
 def test_gate_controller_traces_each_actuator_in_order(host, monkeypatch):
-    """The board relay is commanded only after the GPIO call returns (hold included)."""
+    """Each actuator is traced; the GPIO call includes the relay hold.
+
+    The Board relay now runs alongside the camera relay (it used to start only
+    after the GPIO call returned, adding its full timeout to every open).
+    """
     from app.services import gates
 
     monkeypatch.setattr(gates.settings, "hvx_host_url", host.url)
     monkeypatch.setattr(gates.settings, "gpio_pulse_ms", 120)
-    camera = SimpleNamespace(id=5, name="Entry cam", enabled=True, lane_direction="ENTRY",
+    camera = SimpleNamespace(id=5, name="Entry cam", enabled=True, lane_direction="ENTRY", ip_address="10.0.0.5",
                              sdk_handle=host.handle, controller_ip="", display_ip="")
     gate = SimpleNamespace(name="Lane 1")
 
@@ -241,5 +245,4 @@ def test_gate_controller_traces_each_actuator_in_order(host, monkeypatch):
     assert stages.index("gate.open_start") < stages.index("gate.http_sent") < stages.index("gate.actuators")
     actuators = next(row for row in rows if row["stage"] == "gate.actuators")
     assert actuators["gpio_ms"] >= 120  # includes the relay hold
-    assert actuators["board_started_after_open_ms"] >= 120
     assert next(row for row in rows if row["stage"] == "gate.open_result")["ok"] is True

@@ -1346,7 +1346,11 @@ class _HVXVideoMixin:
         user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
         user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
         user32.DefWindowProcW.restype = ctypes.c_ssize_t
-        if self._wndproc is None:
+        # The window class is registered once per *process*; its WNDPROC must
+        # live as long as the process, not as long as one SDK object, or a
+        # second SDK object reuses a class whose callback was freed (access
+        # violation in CreateWindowExW).
+        if _HIDDEN_WINDOW_STATE["proc"] is None:
             WNDPROC = ctypes.WINFUNCTYPE(
                 ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t
             )
@@ -1356,7 +1360,7 @@ class _HVXVideoMixin:
                     return 0
                 return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-            self._wndproc = WNDPROC(_proc)
+            _HIDDEN_WINDOW_STATE["proc"] = WNDPROC(_proc)
 
             class WNDCLASS(ctypes.Structure):
                 _fields_ = [
@@ -1373,7 +1377,7 @@ class _HVXVideoMixin:
                 ]
 
             wc = WNDCLASS()
-            wc.lpfnWndProc = self._wndproc
+            wc.lpfnWndProc = _HIDDEN_WINDOW_STATE["proc"]
             wc.hInstance = kernel32.GetModuleHandleW(None)
             wc.lpszClassName = "SmartParkHVXVideo"
             if not user32.RegisterClassW(ctypes.byref(wc)):
@@ -1381,7 +1385,7 @@ class _HVXVideoMixin:
                 if err not in (0, 1410):  # already registered
                     self._hwnds[int(handle)] = None
                     return None
-            self._wndclass = wc
+            _HIDDEN_WINDOW_STATE["class"] = wc
         user32.CreateWindowExW.restype = ctypes.c_void_p
         hwnd = user32.CreateWindowExW(
             0x80 | 0x00000008,  # WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
@@ -1402,3 +1406,7 @@ class _HVXVideoMixin:
                 user32.UpdateWindow(hwnd)
         self._hwnds[int(handle)] = hwnd or None
         return hwnd or None
+
+
+# Process-lifetime holder for the hidden video window class (see _create_hidden_hwnd).
+_HIDDEN_WINDOW_STATE = {"proc": None, "class": None}

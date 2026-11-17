@@ -17,6 +17,28 @@ def _schedule_local_watch(camera_id: int, handle: int) -> None:
     task.add_done_callback(_finished)
 
 
+_coil_poll_tasks: dict[int, asyncio.Task] = {}
+
+
+def _schedule_coil_poll(camera_id: int, handle: int) -> None:
+    """Run the loop/boom input scan in the background, one per camera at a time."""
+    existing = _coil_poll_tasks.get(int(camera_id))
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(
+        _poll_coil_and_read(camera_id, handle, background=True),
+        name=f"camera-coil-{camera_id}",
+    )
+    _coil_poll_tasks[int(camera_id)] = task
+
+    def _finished(done: asyncio.Task) -> None:
+        if _coil_poll_tasks.get(int(camera_id)) is done:
+            _coil_poll_tasks.pop(int(camera_id), None)
+        _consume_background_task(done)
+
+    task.add_done_callback(_finished)
+
+
 async def _outbox_loop():
     from app.services.queues import parking_outbox
     from app.services.health import note_worker_failure
@@ -500,7 +522,9 @@ async def _camera_event_loop():
                     # in detached tasks. A slow FastALPR call cannot starve the
                     # next camera callback or GPIO edge.
                     await _drain_camera_events(camera_id, handle, defer_local_alpr=True)
-                    await _poll_coil_and_read(camera_id, handle, background=True)
+                    # GPIO input reads are slow SDK calls; never let them hold
+                    # up the next plate-event drain. One scan per camera at a time.
+                    _schedule_coil_poll(camera_id, handle)
                     camera_breaker.success()
                     note_camera(camera_id, sdk_callback="ok", last_event_at=time.time())
                 except Exception as exc:
