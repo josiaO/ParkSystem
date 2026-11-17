@@ -1,0 +1,75 @@
+# Zirp production-readiness review (2026-11-17)
+
+Branch `production-readiness` (head `01cbcad`, 22 commits on `main`). Evidence comes from SITE-PC01 with four live QY cameras on lanes 1# and 2#. ParkWatch still owns the booms, so no barrier was moved by Zirp. Details are in `ZIRP_ENGINEERING_HANDOVER.md` sections 16–17.
+
+## Verdict
+
+**Not yet ready to run an unattended lane.** It is ready for a supervised pilot: an operator present, a barrier override, and real money only after a verified payment test.
+
+The camera, recognition and lane software is now in good shape. What is missing is mostly the physical sensing around the barrier, an end-to-end payment run, and a multi-PC run against a shared PostgreSQL. The Ubuntu simulation is designed to close the multi-PC and payment gaps.
+
+## Done and verified on hardware
+
+| Area | State |
+|---|---|
+| Cameras (QY/HVX) | Host runs as a boot-time service (Session 0, LocalSystem). All 4 cameras stream at 9.3–9.6 fps direct, with gaps ≤ 273 ms. The desktop reads frames straight from the local host. |
+| Event loop / staleness | Loop p95 lag is 32–45 ms, down from 240–300 ms. Relay frame age p95 is 112–149 ms, down from 300–355 ms. A stall sampler names any new blocker. |
+| Recognition | Camera event → parking decision takes 0.73–0.81 s p50 and ~1.0 s p95. The FastALPR read itself is ~130 ms. Back-to-back cars (2–3 s apart) are each captured. |
+| Plate accuracy | Strict TZ slot correction (leading 1/7/I→T; digit and letter slot swaps, including J→3 and G→6), with special plates protected. A one-character misread within 10 s on the same gate no longer opens a second session. |
+| Both lanes | Node heartbeat and failover: the Site Server serves the gates of an Edge Node that stops heartbeating. Measured live: lane 1# was served by SITE-PC01. |
+| Capture zone | Per-camera capture distance (plate width), set in the desktop zone editor. The ground loop is not wired to camera inputs, so this is the "virtual loop". |
+| Lane flow | Passage time-out (60 s), stranded entries expire (15 min), an exit read completes an entry still waiting for passage, and an incomplete visit at exit gets an operator message. |
+| Revenue | Cash top-up after grace is recorded. Manual entry and supervised close go through the engine with permissions. Duplicates never claim the barrier opened. |
+| Manual-open alerts | Plate, amount owed and photo link go to SMS (Africa's Talking), email and a signed webhook. Verified end to end via webhook. |
+| Services | Stop in 2–5 s without admin. NSSM online rotation is off. The Site Service waits up to 90 s for the database. |
+| Gate actuation | Uses the live SDK handle by camera IP. Camera relay, Board and LED run concurrently. |
+
+## Not done, and what each needs before go-live
+
+| # | Gap | Why it matters | What closes it |
+|---|---|---|---|
+| 1 | **Receipt-taken sensor (D1)** | Production requires "receipt taken" before the entry barrier opens. No printer adapter reports it, so every casual entry needs an operator click. | Pick the printer: a presenter printer with taken status, or a beam on a relay/GPIO input. Or decide on a "print and open" policy for this site. |
+| 2 | **Real receipt printer** | Only simulated printing has run. The thermal printer path (ESC/POS / Windows spool) is untested on hardware. | Install the printer and run 50 tickets: QR legibility, cutter, paper-out alert. |
+| 3 | **Passage / loop signal** | The ground loop is wired to the KF "Board" I/O controllers (UDP), not the cameras. Zirp currently assumes passage after 60 s. | Capture the Board UDP protocol (pktmon) and add a loop-input adapter, or rely on the time-out by documented policy. |
+| 4 | **Mobile payment, end to end** | The ClickPesa adapter (token, preview, USSD push, checksummed webhook, status query, reconciliation) has never talked to ClickPesa. There are no keys and no sandbox. | (a) Mock ClickPesa on Ubuntu (this plan). (b) One real 100 TZS payment with live keys and the operator's phone. |
+| 5 | **Public reachability** | Webhooks and the receipt pay page must reach the Site Server from the internet over HTTPS. Today the server is plain HTTP on the LAN. | Reverse proxy with TLS (Caddy/nginx) or a tunnel, with only `/api/webhooks/*`, `/p/*`, `/s/*` and `/api/public/*` exposed. |
+| 6 | **Multi-PC on shared PostgreSQL** | Edge Node + Site Server + shared media were implemented but never run together. Row locks and unique keys are sound in code, untested live. | The Ubuntu simulation: two lane PCs as Edge Nodes and Ubuntu as Site Server + DB. |
+| 7 | **Security (D9)** | Camera passwords default to `admin`. The HVX host API has no auth. The LAN API is HTTP. Operator role can open gates. | Camera password policy, a shared secret on the HVX host, TLS or an IP allow-list on the LAN API, and a role review. |
+| 8 | **Backup restore (D10)** | Backups exist but restore was never rehearsed. | Implement a restore and test it on the Ubuntu box (pg_dump → pg_restore). |
+| 9 | **Reboot / power-cut test** | Services are set to start at boot, but this was never exercised by a real reboot. | Reboot each lane PC with nobody signed in. Cameras must stream and lanes decide within ~2 min. |
+| 10 | **Boom feedback (D13)** | "Barrier opened" means "command accepted". There is no boom-up sensor. | Wire a boom-up contact if the barrier has one (the manual-open watcher already supports it). |
+| 11 | **Same-class misreads** | e.g. T189EKP/T188EKP. Slot rules cannot fix these. | FastALPR fine-tuning on site images (the next accuracy step). |
+| 12 | **ParkWatch cut-over** | ParkWatch drives the cameras (snapshot triggers) and the booms today. | A cut-over plan: Zirp triggers its own snapshots, then takes the booms lane by lane with a rollback. |
+
+## Payments: is it architected well?
+
+**Yes, the core design is right, and it should be kept.**
+- **Provider seam:** a `PaymentProvider` protocol with `create_intent`, `initiate_collection`, `verify_callback` and `query_status`. ClickPesa, Flutterwave, a simulated provider and manual kiosk cash are implementations.
+- **Ledger is the authority.** A payment is recorded only from a verified webhook or a status query, never from the push response. Unique `idempotency_key` and `provider_transaction_id` stop double credit.
+- **Webhooks are authenticated.** HMAC-SHA256 checksum over canonical JSON, compared in constant time. A missing checksum key means webhooks are rejected.
+- **Reconciliation loop** (`payments_reconcile_seconds`=60) settles intents whose webhook never arrived.
+- **Live safety gate.** Real collection needs `CLICKPESA_LIVE_ENABLED=1` and `PAYMENTS_LIVE_PROVIDER_CONFIRMED=1`.
+- **Kiosk:** mobile money uses the same intent and status flow; kiosk cash can be disabled for unattended kiosks.
+
+Weaknesses to fix:
+- **No mock mode:** pointing ClickPesa at a mock still needs the "live" flags. Add an explicit `SANDBOX/MOCK` mode keyed on a non-ClickPesa base URL, so "live" always means real money.
+- **The simulated provider approves everything** without a phone-side step. The mock ClickPesa replaces it for realistic tests.
+- **Untested at scale:** amount mismatch, late webhooks after expiry, duplicate webhooks and refunds were covered by unit tests only.
+- **Exec-composed modules:** `07_payments.py` (732 lines) lives inside the runtime (D11). Move it into a normal module when convenient.
+
+## Should it be rewritten in Next.js?
+
+**No.**
+- **The hard part can't move to Next.js.** The value is in the backend: the 32-bit NetSDK camera host (Python ctypes, Windows only), FastALPR/ONNX recognition, the lane engine, the ledger and gate control. That would stay Python whatever the UI is.
+- **A rewrite resets the hardening.** It would throw away the last two weeks of measured work (staleness, latency, revenue rules) and add a second runtime to every lane PC.
+- **The UIs aren't the risk.** They are the PySide6 desktop (operators, on the lane PC) and a small vanilla-JS web UI (kiosk, public receipt and pay page, back office). The go-live gaps above are hardware, payments and operations, not UI.
+
+Where Next.js could make sense later: as a separate frontend for the public pay page and a remote back-office or reporting portal, calling the existing FastAPI API. Do that only after go-live, if you need a richer web experience. Never for the lane runtime.
+
+## Recommended order
+
+1. Ubuntu simulation: multi-PC, mock payments and alerts (gaps 4a, 6, 8; part of 7).
+2. Printer + receipt-taken decision (1, 2), and the reboot test (9).
+3. Public HTTPS endpoint (5), then one real ClickPesa payment (4b).
+4. Supervised pilot on one lane, with ParkWatch cut-over for that lane only (12).
+5. Loop or boom signals (3, 10), security hardening (7), then FastALPR fine-tuning (11).
