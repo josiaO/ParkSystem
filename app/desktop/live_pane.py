@@ -77,6 +77,8 @@ class CameraLivePane(QFrame):
         self.zoom.setValue(int(round(max(1.0, min(4.0, zoom))*10)))
         self.zoom.blockSignals(False)
         self.zoom_label.setText(f"Zoom {self.zoom.value()/10:.1f}")
+        if hasattr(self, "capture_width"):
+            self.capture_width.setValue(int(framing.get("capture_plate_width") or 0))
     def _norm_at(self, pos):
         return self.video.normalized_point(pos)
     def _zone_press(self, pos):
@@ -115,7 +117,10 @@ class CameraLivePane(QFrame):
         roi=f"{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}"
         zoom=self.zoom.value()/10
         try:
-            data=self._runtime_api().put(f"/cameras/{cid}/framing", {"detect_roi": roi, "detect_zoom": zoom})
+            body={"detect_roi": roi, "detect_zoom": zoom}
+            if hasattr(self, "capture_width"):
+                body["capture_plate_width"]=int(self.capture_width.value())
+            data=self._runtime_api().put(f"/cameras/{cid}/framing", body)
         except Exception as exc:
             self.status.setText(str(exc))
             return

@@ -123,6 +123,9 @@ class CameraFramingUpdate(BaseModel):
     detect_roi: str = ""
     detect_zoom: float = Field(default=1.0, ge=1.0, le=4.0)
     detect_width: int | None = None  # recognition decode width; None keeps the current one
+    # Capture distance: minimum plate width in pixels before the car is read
+    # (bigger = closer to the camera). 0 = site default; None keeps the current one.
+    capture_plate_width: int | None = Field(default=None, ge=0, le=600)
 
 
 class GateCreate(BaseModel):

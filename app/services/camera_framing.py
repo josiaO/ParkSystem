@@ -56,7 +56,29 @@ def framing_from_profiles(profiles: dict | None) -> dict:
         "detect_roi": str(roi or "").strip(),
         "detect_zoom": parse_detect_zoom(zoom_raw),
         "detect_width": parse_detect_width(row.get("detect_width")),
+        "capture_plate_width": parse_capture_plate_width(row.get("capture_plate_width")),
     }
+
+
+# The capture distance: a plate box at least this many pixels wide (at the
+# detector's input width) means the car is close enough to read. 0 = the site
+# default (SMARTPARK_ALPR_MIN_CAPTURE_PLATE_WIDTH_PX).
+CAPTURE_PLATE_WIDTH_RANGE = (0, 600)
+
+
+def parse_capture_plate_width(value) -> int:
+    try:
+        width = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    low, high = CAPTURE_PLATE_WIDTH_RANGE
+    return width if low <= width <= high else 0
+
+
+def effective_capture_plate_width(framing: dict) -> int:
+    from app.config import settings
+
+    return int(framing.get("capture_plate_width") or 0) or int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 0)
 
 
 # Width the recognition worker decodes the DETECT stream to. The display
@@ -75,7 +97,8 @@ def parse_detect_width(value) -> int:
     return width if width in DETECT_WIDTHS else default
 
 
-def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float, detect_width: int | None = None) -> dict:
+def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float, detect_width: int | None = None,
+                  capture_plate_width: int | None = None) -> dict:
     from app.services.alpr import parse_detect_roi
 
     raw = str(detect_roi or "").strip()
@@ -103,6 +126,13 @@ def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float,
         framing["detect_width"] = int(detect_width)
     elif previous.get("detect_width"):
         framing["detect_width"] = previous["detect_width"]
+    if capture_plate_width is not None:
+        low, high = CAPTURE_PLATE_WIDTH_RANGE
+        if not low <= int(capture_plate_width) <= high:
+            raise ValueError(f"Capture distance (plate width) must be {low}-{high} pixels; 0 uses the site default.")
+        framing["capture_plate_width"] = int(capture_plate_width)
+    elif previous.get("capture_plate_width"):
+        framing["capture_plate_width"] = previous["capture_plate_width"]
     out[FRAMING_KEY] = framing
     return out
 

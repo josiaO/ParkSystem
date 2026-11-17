@@ -271,7 +271,8 @@ async def _drain_camera_events(
                 "image_height": int(box.get("image_height") or 0),
             }
             from app.services.captures import _crop_from_bbox
-            crop = _crop_from_bbox(jpeg, box) or b""
+            # Full-size snapshot decode/crop/encode: keep it off the event loop.
+            crop = await asyncio.to_thread(_crop_from_bbox, jpeg, box) or b""
         plate_overlay = choose_overlay_box(native)
         if plate_overlay:
             remember_plate_box(camera_id, plate_overlay)
@@ -280,14 +281,14 @@ async def _drain_camera_events(
         # lower-resolution/blurrier image, especially under headlight glare;
         # using it first was the main source of unreadable persisted crops.
         if plate_overlay and jpeg[:2] == b"\xff\xd8":
-            fitted = fit_plate_box(
-                plate_overlay, jpeg,
+            fitted = await asyncio.to_thread(
+                fit_plate_box, plate_overlay, jpeg,
                 src_w=int(native.get("image_width") or 0),
                 src_h=int(native.get("image_height") or 0),
             )
             if fitted:
                 from app.services.captures import _crop_from_bbox
-                recrop = _crop_from_bbox(jpeg, fitted)
+                recrop = await asyncio.to_thread(_crop_from_bbox, jpeg, fitted)
                 if recrop[:2] == b"\xff\xd8":
                     crop = recrop
         # A camera plate rectangle is a vehicle even when the plate text is empty.
@@ -514,6 +515,10 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         detect_zoom=framing["detect_zoom"],
     )
     gate = gate_for(int(camera.id))
+    from app.services.camera_framing import effective_capture_plate_width
+
+    # Per-camera capture distance set in the zone editor (plate width).
+    gate.min_plate_width_px = effective_capture_plate_width(framing)
     if not located.get("available"):
         runtime.lane(int(camera.id)).last_error = str(located.get("detail") or located.get("reason") or "Plate detector unavailable")
         return False

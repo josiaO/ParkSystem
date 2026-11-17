@@ -25,6 +25,13 @@ class MjpegStream(QThread):
             except Exception:
                 pass
     def run(self):
+        # On the lane PC, read QY/HVX frames straight from the local SDK host:
+        # the Site Service relay drops frames whenever its event loop is busy
+        # with a car (measured 8 fps with 0.4-0.7 s gaps vs 9.8 fps / 0.2 s
+        # direct). Anything else, or any failure, uses the MJPEG relay.
+        direct = getattr(self, "_run_from_local_host", None)
+        if callable(direct) and direct():
+            return
         client=httpx.Client(timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0))
         self._client=client
         try:
@@ -73,6 +80,76 @@ class MjpegStream(QThread):
                 client.close()
             except Exception:
                 pass
+
+
+LOCAL_HOST_URL = "http://127.0.0.1:8765"
+
+
+def _camera_ip(camera_id) -> str:
+    try:
+        row = api.get(f"/cameras/{camera_id}", timeout=5)
+    except Exception:
+        return ""
+    return str((row or {}).get("ip_address") or "") if isinstance(row, dict) else ""
+
+
+def local_host_handle(client: httpx.Client, ip: str) -> int | None:
+    """This PC's SDK host handle for a camera IP, or None if not connected here."""
+    if not ip:
+        return None
+    try:
+        info = client.get(f"{LOCAL_HOST_URL}/info", timeout=1.5).json()
+    except Exception:
+        return None
+    for row in (info or {}).get("connections") or []:
+        if str(row.get("ip") or "") == ip and row.get("handle") is not None:
+            return int(row["handle"])
+    return None
+
+
+def _mjpeg_stream_run_from_local_host(self) -> bool:
+    """Long-poll the local host for each new frame. False means: use the relay."""
+    ip = _camera_ip(self.camera_id)
+    client = httpx.Client(timeout=httpx.Timeout(connect=1.0, read=3.0, write=2.0, pool=2.0), trust_env=False)
+    self._client = client
+    try:
+        handle = local_host_handle(client, ip)
+        if handle is None:
+            return False
+        seq, last_frame, misses = 0, time.monotonic(), 0
+        while not self._stop:
+            try:
+                response = client.get(f"{LOCAL_HOST_URL}/live-jpeg/{handle}", params={"after": seq, "wait_ms": 1000})
+            except Exception:
+                if self._stop:
+                    return True
+                misses += 1
+                handle = local_host_handle(client, ip) if misses >= 2 else handle
+                if handle is None:
+                    return False          # host gone or camera moved: fall back to the relay
+                time.sleep(0.2)
+                continue
+            new_seq = int(response.headers.get("x-frame-seq") or 0)
+            if response.status_code == 200 and response.content[:2] == b"\xff\xd8" and new_seq > seq:
+                seq, last_frame, misses = new_seq, time.monotonic(), 0
+                if self.mailbox.offer(response.content):
+                    self.frame.emit()
+            elif response.status_code == 404:
+                handle = local_host_handle(client, ip)   # handles change after a host restart
+                if handle is None:
+                    return False
+            if time.monotonic() - last_frame > 8.0:
+                return False
+        return True
+    finally:
+        self._client = None
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+MjpegStream._run_from_local_host = _mjpeg_stream_run_from_local_host
 
 
 def pop_latest_mjpeg(buf: bytes) -> tuple[bytes | None, bytes]:
