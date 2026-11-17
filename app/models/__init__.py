@@ -13,3 +13,4 @@ from .topology import *  # noqa: F401,F403
 from .audit_billing import *  # noqa: F401,F403
 from .parking import *  # noqa: F401,F403
 from .access_capture import *  # noqa: F401,F403
+from .alerts import *  # noqa: F401,F403
