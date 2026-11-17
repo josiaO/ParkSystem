@@ -397,12 +397,23 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
     active = int(getattr(settings, "coil_active_value", 1) or 1)
     rising = False
     last_edge = None
-    pins = await hvx.scan_gpio(handle, _coil_indexes(camera_id))
+    from app.services.manual_open import boom_indexes_cached
+
+    boom_indexes = boom_indexes_cached(camera_id)
+    pins = await hvx.scan_gpio(handle, sorted(set(_coil_indexes(camera_id)) | boom_indexes))
     learned = coil_watch.learned_index(camera_id)
+    if boom_indexes:
+        # A wired "boom up" input is not a vehicle loop: watch it for openings
+        # Zirp did not command, and never let the loop learner pick it.
+        for state in pins:
+            if state.get("ok") and int(state.get("index") or 0) in boom_indexes:
+                await _observe_boom_input(camera_id, int(state.get("value") or 0))
     for state in pins:
         if not state.get("ok"):
             continue
         index = int(state.get("index") or 0)
+        if index in boom_indexes:
+            continue
         if learned is not None and index != learned:
             continue
         occupied = int(state.get("value") or 0) == active
@@ -434,6 +445,19 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
         task.add_done_callback(_consume_background_task)
     else:
         await _read_presence_now(camera_id, handle, background=False)
+
+
+async def _observe_boom_input(camera_id: int, value: int) -> None:
+    """Record an UNCOMMANDED manual open when the boom rises without a Zirp command."""
+    from app.services.manual_open import observe_boom_input
+
+    try:
+        with short_session() as db:
+            camera = db.get(Camera, int(camera_id))
+            if camera is not None:
+                observe_boom_input(db, camera, value)
+    except Exception as exc:
+        log.warning("boom input check failed camera=%s: %s", camera_id, redact_text(repr(exc)))
 
 
 async def _complete_passage_from_sensor(camera_id: int) -> None:

@@ -45,6 +45,7 @@ class MainWindow(DesktopShell):
         self.statusBar().showMessage("Choose a workspace page")
         self._install_shortcuts()
         self._install_link_banner()
+        self._install_manual_open_banner()
         # Do not setGeometry() to the full screen rect. On Windows the frame is
         # taller than the client area, Qt retries, and the window grows forever.
     def _install_link_banner(self):
@@ -81,10 +82,85 @@ class MainWindow(DesktopShell):
         self.link_banner.setStyleSheet(f"background:{colour};color:white;font-weight:700;padding:8px 14px")
         if text:
             self.statusBar().showMessage(text)
+    def _install_manual_open_banner(self):
+        """Red banner for barrier openings the parking engine did not authorize."""
+        self.manual_open_bar=None
+        self._manual_open_rows=[]
+        self._manual_open_seen=set()
+        self._manual_open_worker=None
+        self._manual_open_timer=None
+        if not api.can("alerts.view"):
+            return
+        bar=QWidget()
+        bar.setObjectName("manualOpenBanner")
+        row=QHBoxLayout(bar)
+        row.setContentsMargins(14,6,8,6)
+        self.manual_open_label=QLabel("")
+        self.manual_open_label.setWordWrap(True)
+        self.manual_open_label.setAccessibleName("Manual barrier openings")
+        row.addWidget(self.manual_open_label, 1)
+        self.manual_open_ack=QPushButton("Acknowledge")
+        self.manual_open_ack.setToolTip("Record that you checked this manual opening")
+        self.manual_open_ack.clicked.connect(self._acknowledge_manual_open)
+        self.manual_open_ack.setVisible(api.can("alerts.acknowledge"))
+        row.addWidget(self.manual_open_ack)
+        bar.setStyleSheet("#manualOpenBanner{background:#B42318;} #manualOpenBanner QLabel{color:white;font-weight:700;}")
+        bar.setVisible(False)
+        self.workspace_root.layout().insertWidget(1, bar)
+        self.manual_open_bar=bar
+        self._manual_open_timer=QTimer(self)
+        self._manual_open_timer.setInterval(10000)
+        self._manual_open_timer.timeout.connect(self._poll_manual_opens)
+        self._manual_open_timer.start()
+        QTimer.singleShot(0, self._poll_manual_opens)
+    def _poll_manual_opens(self):
+        if self.manual_open_bar is None or not hasattr(api, "base_url"):
+            return
+        running=getattr(self._manual_open_worker, "isRunning", None)
+        if callable(running) and running():
+            return
+        worker=Worker(lambda: api.get("/manual-opens?unacknowledged=true&limit=20", timeout=5))
+        worker.done.connect(self._show_manual_opens)
+        worker.failed.connect(lambda error: None)  # the link banner already reports outages
+        self._manual_open_worker=worker
+        worker.start()
+    def _show_manual_opens(self, rows):
+        rows=rows if isinstance(rows, list) else []
+        self._manual_open_rows=rows
+        text=manual_open_banner(rows)
+        self.manual_open_bar.setVisible(bool(text))
+        self.manual_open_label.setText(text)
+        fresh={row.get("id") for row in rows} - self._manual_open_seen
+        if fresh and text:
+            QApplication.beep()
+            self.statusBar().showMessage(text)
+        self._manual_open_seen |= fresh
+    def _acknowledge_manual_open(self):
+        if not self._manual_open_rows:
+            return
+        newest=self._manual_open_rows[0]
+        note,ok=QInputDialog.getText(
+            self, "Acknowledge manual open",
+            f"{manual_open_banner([newest])}\n\nWhat did you check? (e.g. cash collected, gate fault, emergency)",
+        )
+        if not ok:
+            return
+        try:
+            api.post(f"/manual-opens/{newest['id']}/acknowledge", {"note": note}, timeout=10)
+        except Exception as e:
+            QMessageBox.critical(self, "Acknowledge manual open", str(e))
+            return
+        self._poll_manual_opens()
     def closeEvent(self, event):
         timer=getattr(self, "_link_timer", None)
         if timer is not None:
             timer.stop()
+        manual_timer=getattr(self, "_manual_open_timer", None)
+        if manual_timer is not None:
+            manual_timer.stop()
+        manual_wait=getattr(getattr(self, "_manual_open_worker", None), "wait", None)
+        if callable(manual_wait):
+            manual_wait(4000)
         wait=getattr(getattr(self, "_link_worker", None), "wait", None)
         if callable(wait):
             wait(4000)

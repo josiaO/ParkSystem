@@ -49,6 +49,32 @@ def link_banner(live: dict | None, error: str | None = None) -> tuple[str, str]:
     return ("", "")
 
 
+def manual_open_banner(rows: list[dict] | None) -> str:
+    """Text for the red manual-open banner: "" when nothing is waiting.
+
+    Shows the newest unacknowledged opening in full (lane, plate, what it
+    owed, who opened it) and a count of the rest.
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict) and not row.get("acknowledged")]
+    if not rows:
+        return ""
+    newest = rows[0]
+    plate = newest.get("plate") or "UNIDENTIFIED car"
+    owed = float(newest.get("amount_owed") or 0)
+    currency = newest.get("currency") or ""
+    money = f"owed {currency} {owed:,.0f}" if owed > 0 else ("no fee owed" if newest.get("session_id") else "no parking visit found")
+    who = newest.get("operator") or ("nobody in Zirp" if newest.get("source") == "UNCOMMANDED" else "unknown")
+    lead = "Barrier rose without a Zirp command" if newest.get("source") == "UNCOMMANDED" else "Manual barrier open"
+    if not newest.get("command_ok", True):
+        lead = "Manual open attempted (barrier command FAILED)"
+    text = f"{lead}: {newest.get('lane') or 'lane'} · {plate} · {money} · by {who}"
+    if newest.get("reason"):
+        text += f' · "{newest["reason"]}"'
+    if len(rows) > 1:
+        text += f"   (+{len(rows) - 1} more waiting)"
+    return text
+
+
 def clock_summary(server_clock: dict | None, workstation_clock: dict | None) -> str:
     """One line for System Health: is every clock within the 2 s budget?"""
     parts = []

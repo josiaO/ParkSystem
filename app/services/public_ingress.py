@@ -107,6 +107,11 @@ def public_route_category(path: str, method: str | None = None) -> str | None:
         return "provider-webhook"
     if path in PUBLIC_EXACT_PATHS and (not verb or verb in {"GET", "HEAD"}):
         return "health"
+    # Manual-open alert photo: the handler accepts only an unexpired HMAC
+    # signature, so a supervisor can open the SMS link from outside the site.
+    if len(parts) == 3 and parts[0] == "manual-opens" and parts[1].isdigit() and parts[2] == "photo.jpg" \
+            and (not verb or verb in {"GET", "HEAD"}):
+        return "alert-photo"
     return None
 
 
@@ -175,6 +180,7 @@ PUBLIC_RATE_LIMITS: dict[str, tuple[int, float]] = {
     "payment-intent": (10, 60.0),
     "provider-webhook": (120, 60.0),
     "payment-status": (120, 60.0),
+    "alert-photo": (30, 60.0),
 }
 DEFAULT_PUBLIC_RATE_LIMIT: tuple[int, float] = (180, 60.0)
 

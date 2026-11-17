@@ -27,7 +27,7 @@ MJPEG_HEARTBEAT_SECONDS = 1.0
 # waits for a current frame before the stream asks for recovery and closes.
 MJPEG_POLL_SECONDS = 0.05
 MJPEG_FIRST_FRAME_TIMEOUT_SECONDS = 5.0
-MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots", "receipts"}
+MEDIA_KINDS = {"crops", "alpr", "annotated", "snapshots", "receipts", "manual"}
 
 # Re-export for callers/tests that import from preview.
 __all__ = [

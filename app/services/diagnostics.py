@@ -21,7 +21,7 @@ from app.services.redaction import redact_obj
 _SECRET_SETTINGS = (
     "flutterwave_secret_key", "flutterwave_secret_hash", "clickpesa_client_id", "clickpesa_api_key",
     "clickpesa_checksum_key", "mobile_money_webhook_secret", "gemini_api_key", "bootstrap_password",
-    "default_camera_password",
+    "default_camera_password", "alerts_smtp_password", "alerts_africastalking_api_key", "alerts_webhook_secret",
 )
 
 
