@@ -56,6 +56,9 @@ async def _infer_camera(
     from app.services.camera_framing import best_arrival_box, gate_for
 
     arrival = gate_for(camera_id)
+    from app.services.camera_framing import effective_capture_plate_width
+
+    arrival.min_plate_width_px = effective_capture_plate_width(camera)
     track = PlateTrack(
         window_seconds=rec_policy.consensus_window_seconds,
         hold_seconds=rec_policy.hold_seconds,

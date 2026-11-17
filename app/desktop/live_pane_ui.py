@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
-    QSizePolicy, QSlider, QToolButton, QVBoxLayout,
+    QSizePolicy, QSlider, QSpinBox, QToolButton, QVBoxLayout,
 )
 from .presentation import label_for
 from .video import VideoCanvas
@@ -147,6 +147,17 @@ def build_live_pane(self, slot_title):
     self.zoom.setAccessibleName(f"{slot_title} detection zone zoom")
     zone_layout.addWidget(self.zoom_label)
     zone_layout.addWidget(self.zoom)
+    # Capture distance: the plate must look at least this wide before the car
+    # is read. Larger = the car is read closer to the camera.
+    self.capture_width = QSpinBox()
+    self.capture_width.setRange(0, 600)
+    self.capture_width.setSuffix(" px plate width")
+    self.capture_width.setSpecialValueText("Site default")
+    self.capture_width.setAccessibleName(f"{slot_title} capture distance")
+    self.capture_width.setToolTip("Read the plate only once it is at least this wide on screen "
+                                  "(bigger = closer to the camera). 0 uses the site default.")
+    zone_layout.addWidget(label_for("Capture distance", self.capture_width))
+    zone_layout.addWidget(self.capture_width)
     self.zone_save = QPushButton("Save zone")
     self.zone_save.clicked.connect(self._save_zone)
     zone_layout.addWidget(self.zone_save)
