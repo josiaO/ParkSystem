@@ -124,18 +124,22 @@ try {
 
         if ($WaitForPlate) {
             Note "Drive a car past the camera now (waiting up to $PlateWaitSeconds s)..."
-            $plate = ""
+            # What Zirp needs is the camera's vehicle event (trigger + snapshot).
+            # Many sites run the camera's own recognition off and read plates
+            # with FastALPR from that snapshot, so plate text is optional.
+            $plate = ""; $eventCount = 0
             $end = (Get-Date).AddSeconds($PlateWaitSeconds)
-            while ((Get-Date) -lt $end -and -not $plate) {
+            while ((Get-Date) -lt $end -and $eventCount -eq 0) {
                 try {
                     $events = Invoke-RestMethod -Uri "$Base/events/$handle" -TimeoutSec 4
                     foreach ($event in @($events.events)) {
-                        if ($event -and $event.plate) { $plate = [string]$event.plate; break }
+                        if ($event) { $eventCount++; if ($event.plate) { $plate = [string]$event.plate } }
                     }
                 } catch {}
-                if (-not $plate) { Start-Sleep -Seconds 1 }
+                if ($eventCount -eq 0) { Start-Sleep -Seconds 1 }
             }
-            Check "native-plate-read" ([bool]$plate) ("plate=" + $plate)
+            Check "camera-vehicle-event" ($eventCount -gt 0) ("$eventCount event(s) from the camera")
+            Note ("INFO  native plate text: " + $(if ($plate) { $plate } else { "none (camera recognition off; FastALPR reads the snapshot)" }))
         }
         try { Invoke-RestMethod -Method Post -Uri "$Base/disconnect/$handle" -Body "{}" -ContentType "application/json" -TimeoutSec 10 | Out-Null } catch {}
     }
