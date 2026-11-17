@@ -40,3 +40,39 @@ def test_pruned_photos_are_not_offered(tmp_path):
         assert kiosk_lookup._media_exists("snapshots/pruned.jpg") is False
         assert kiosk_lookup._media_exists("") is False
         assert kiosk_lookup._media_exists("snapshots/../../etc/passwd") is False
+
+
+def test_cleanup_never_removes_a_photo_a_visit_still_uses(tmp_path):
+    """A car parked longer than media_retention_days keeps its entry photo.
+
+    Only files no capture points to are pruned after the retention period.
+    """
+    import os
+    import time
+    from unittest.mock import patch
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.db import Base
+    from app.models import VehicleCapture
+    from app.services.captures import prune_unreferenced_media
+
+    (tmp_path / "snapshots").mkdir()
+    old = time.time() - 40 * 86400
+    for name in ("parked.jpg", "orphan.jpg", "fresh-orphan.jpg"):
+        path = tmp_path / "snapshots" / name
+        path.write_bytes(b"\xff\xd8\xff\xd9")
+        if name != "fresh-orphan.jpg":
+            os.utime(path, (old, old))
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as db, patch("app.config.Settings.media_dir", new=property(lambda self: tmp_path)):
+        db.add(VehicleCapture(camera_id=1, plate="T399BCR", snapshot_path="snapshots/parked.jpg"))
+        db.commit()
+        result = prune_unreferenced_media(db, retention_days=14)
+    assert result["removed"] == 1
+    assert (tmp_path / "snapshots" / "parked.jpg").exists()          # 40 days old, still referenced: kept
+    assert not (tmp_path / "snapshots" / "orphan.jpg").exists()      # old and unreferenced: removed
+    assert (tmp_path / "snapshots" / "fresh-orphan.jpg").exists()    # unreferenced but recent: kept
