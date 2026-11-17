@@ -466,8 +466,15 @@ async def lifespan(app: FastAPI):
             _supervise_background_loop("manual-open-alerts", manual_open_alerts.delivery_loop),
             name="manual-open-alerts",
         )
+        from app.services import lane_sweeper
+
+        sweeper_task = asyncio.create_task(
+            _supervise_background_loop("lane-sweeper", lane_sweeper.sweeper_loop),
+            name="lane-sweeper",
+        )
     else:
         alerts_task = asyncio.create_task(asyncio.sleep(0), name="manual-open-alerts-disabled")
+        sweeper_task = asyncio.create_task(asyncio.sleep(0), name="lane-sweeper-disabled")
     watchdog_seconds = float(getattr(settings, "pipeline_watchdog_seconds", 30.0) or 0.0)
     if watchdog_seconds > 0:
         from app.services import pipeline_watchdog
@@ -481,7 +488,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task, sweeper_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
