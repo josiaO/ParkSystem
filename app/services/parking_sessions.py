@@ -567,6 +567,10 @@ def start_exit(
         return None, ""
     if row.exit_event_id and event_id and row.exit_event_id == event_id:
         return row, _current(row)
+    if _current(row) in {GATE_OPEN_REQUESTED, VEHICLE_PASSED}:
+        # The car is at an exit, so it went through the entry barrier: complete
+        # the entry that was waiting for a passage sensor instead of failing.
+        row = mark_vehicle_passed(db, row, policy=policy, side="ENTRY")
     current = _current(row)
     # An authorized exit whose barrier command failed (the claim was released)
     # is not in flight: the next camera read or the QR fallback must be able

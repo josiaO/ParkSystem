@@ -262,6 +262,9 @@ class ParkingSettingsUpdate(BaseModel):
     pay_prompt: str | None = None
     printer_adapter: str | None = None
     printer_name: str | None = None
+    payment_exit_grace_seconds: int | None = Field(default=None, ge=0, le=7200)
+    passage_timeout_seconds: int | None = Field(default=None, ge=0, le=3600)
+    stranded_entry_minutes: int | None = Field(default=None, ge=0, le=1440)
 
 
 class SitePolicyUpdate(BaseModel):
