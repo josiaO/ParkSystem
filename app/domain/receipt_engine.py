@@ -136,6 +136,11 @@ def plate_line(plate: str, *, plate_status: str = "") -> str:
     return text
 
 
+def ticket_header_lines(raw: str | None) -> list[str]:
+    """Operator lines from settings ("www.example.com|info@example.com")."""
+    return [part.strip() for part in str(raw or "").split("|") if part.strip()][:3]
+
+
 def render_entry_receipt(
     *,
     site_name: str,
@@ -146,12 +151,15 @@ def render_entry_receipt(
     qr_payload: str,
     tariff_rules: dict[str, Any] | None = None,
     plate_status: str = "",
+    header_lines: list[str] | None = None,
 ) -> "ReceiptContent":
     shown_plate = plate_line(plate, plate_status=plate_status)
     free = free_period_line(tariff_rules)
+    header = [line for line in (header_lines or []) if line.strip()]
     lines = [
         "SmartPark",
         site_name or "Parking Site",
+        *header,
         "PARKING ENTRY",
         "",
         f"Plate: {shown_plate}",
@@ -173,6 +181,7 @@ def render_entry_receipt(
         free_period=free,
         body_text="\n".join(lines) + "\n",
         lines=lines,
+        header_lines=header,
     )
 
 
@@ -187,6 +196,7 @@ class ReceiptContent:
     free_period: str
     body_text: str
     lines: list[str] = field(default_factory=list)
+    header_lines: list[str] = field(default_factory=list)
 
 
 @dataclass

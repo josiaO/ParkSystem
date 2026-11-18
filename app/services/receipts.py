@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.domain.receipt_engine import render_entry_receipt, session_qr_payload
+from app.domain.receipt_engine import render_entry_receipt, session_qr_payload, ticket_header_lines
 from app.infrastructure.hardware.printers import ReceiptDocument, printer_adapter, qr_png_bytes
 from app.models import Gate, ParkingSession, Receipt, utcnow
 
@@ -95,6 +95,7 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         qr_payload=qr_payload,
         tariff_rules=row.tariff_rules if isinstance(row.tariff_rules, dict) else None,
         plate_status=row.plate_status,
+        header_lines=ticket_header_lines(settings.ticket_header_lines),
     )
     return ReceiptDocument(
         site_name=content.site_name,
@@ -108,6 +109,8 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         qr_payload=content.qr_payload,
         qr_png=_qr_png(content.qr_payload),
         lines=content.lines,
+        header_lines=content.header_lines,
+        barcode=(content.human_reference if settings.ticket_barcode else ""),
     )
 
 

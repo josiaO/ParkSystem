@@ -29,6 +29,7 @@ from app.domain.receipt_engine import (
     apply_job_transition,
     new_print_job_id,
     render_entry_receipt,
+    ticket_header_lines,
     session_qr_payload,
 )
 from app.infrastructure.hardware.printers import ReceiptDocument, qr_png_bytes
@@ -76,6 +77,7 @@ def _document_for(db: Session, row: ParkingSession) -> ReceiptDocument:
         qr_payload=qr_payload,
         tariff_rules=row.tariff_rules if isinstance(row.tariff_rules, dict) else None,
         plate_status=row.plate_status,
+        header_lines=ticket_header_lines(settings.ticket_header_lines),
     )
     qr_png = qr_png_bytes(content.qr_payload)
     return ReceiptDocument(
@@ -90,6 +92,8 @@ def _document_for(db: Session, row: ParkingSession) -> ReceiptDocument:
         qr_payload=content.qr_payload,
         qr_png=qr_png,
         lines=content.lines,
+        header_lines=content.header_lines,
+        barcode=(content.human_reference if settings.ticket_barcode else ""),
     )
 
 
