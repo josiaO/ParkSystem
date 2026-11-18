@@ -173,6 +173,10 @@ GPIO_OPEN_CIRCUIT = 0
 GPIO_SHORT = 1
 
 REPORT_LPRINFO_EXT = 20
+# Ground loop wired to the camera's vehicle-detector input. The message is
+# T_IOStateRsp {ucIndex, ucLState (1 = rising: car arrived, 0 = falling:
+# car left), 2 reserved} (Net_Interface.h E_ReportMess / E_IOAppIndex).
+REPORT_MESS_LOOP_DETECTOR = 7
 
 IMAGE_USER_INFO_BYTES = 0x44
 

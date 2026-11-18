@@ -320,6 +320,7 @@ async def _drain_camera_events(
         from app.services.recognition_runtime import runtime
         lane = runtime.lane(camera_id)
         lane.note_native_event()
+        _last_native_event_at[int(camera_id)] = time.monotonic()
         if presence:
             capture_token = str(capture.get("capture_token") or "")
             capture_key = capture_token
@@ -343,6 +344,7 @@ async def _drain_camera_events(
             capture_token=str(capture.get("capture_token") or "") or None, image_id=image_id,
             plate=native_plate or None, presence=presence, visit_id=capture.get("visit_id"),
             age_at_drain_ms=drained_age_ms, age_after_media_ms=ingest_age_ms, media_ms=media_ms,
+            snap_type=capture.get("snap_type"),
             batch=processed,
             stale=bool(ingest_age_ms is not None and ingest_age_ms > latency_trace.event_age_limit_ms()),
         )
@@ -449,7 +451,34 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
         if edge.rising:
             rising = True
             break
-    await hvx.drain_reports(handle)
+    loop_rising = False
+    for report in await hvx.drain_reports(handle) or []:
+        # The site's ground loops are wired to the cameras' vehicle-detector
+        # input, which the camera reports as REPORT_MESS_LOOP_DETECTOR (7).
+        # (Polling GPIO indexes 0-7 never saw them.)
+        if int(report.get("msg_type", -1)) != 7 or report.get("loop_state") is None:
+            continue
+        occupied = int(report["loop_state"]) == 1
+        edge = coil_watch.reported_edge(
+            camera_id, occupied, source="loop-report",
+            index=int(report.get("loop_index") or 0), value=int(report["loop_state"]),
+        )
+        from app.core import latency_trace
+
+        latency_trace.emit("lane.loop_edge", camera=camera_id, occupied=occupied,
+                           rising=bool(edge.rising), falling=bool(edge.falling))
+        last_edge = edge
+        if edge.rising:
+            loop_rising = True
+        if edge.falling:
+            await _complete_passage_from_sensor(camera_id)
+            last_edge = None              # passage already completed for this edge
+    if loop_rising:
+        # Most cameras snap by themselves when their loop trips; command a
+        # snapshot only if this camera's own capture does not follow.
+        task = asyncio.create_task(_snapshot_if_camera_silent(camera_id, handle),
+                                   name=f"loop-snapshot-{camera_id}")
+        task.add_done_callback(_consume_background_task)
     if last_edge is not None:
         from app.services.health import note_camera
         note_camera(
@@ -470,6 +499,22 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
         task.add_done_callback(_consume_background_task)
     else:
         await _read_presence_now(camera_id, handle, background=False)
+
+
+LOOP_CAPTURE_WAIT_SECONDS = 1.5
+_last_native_event_at: dict[int, float] = {}
+
+
+async def _snapshot_if_camera_silent(camera_id: int, handle: int) -> None:
+    """After a loop rising edge: wait for the camera's own capture, else command one."""
+    tripped = time.monotonic()
+    await asyncio.sleep(LOOP_CAPTURE_WAIT_SECONDS)
+    if _last_native_event_at.get(int(camera_id), 0.0) >= tripped:
+        return
+    from app.core import latency_trace
+
+    latency_trace.emit("lane.loop_snapshot_commanded", camera=int(camera_id))
+    await _read_presence_now(camera_id, handle, background=True)
 
 
 async def _observe_boom_input(camera_id: int, value: int) -> None:
