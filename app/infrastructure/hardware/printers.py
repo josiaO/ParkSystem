@@ -29,6 +29,7 @@ class ReceiptDocument:
     qr_png: bytes = b""
     lines: list[str] = field(default_factory=list)
     rate: str = ""                     # short tariff, e.g. "45m free · TZS 1,000/hr"
+    language: str = "en"               # "en", "sw" or "both"
 
 
 @dataclass
@@ -274,7 +275,16 @@ def _row(label: str, value: str, width: int = TICKET_COLUMNS) -> bytes:
 
 
 def escpos_bytes(document: ReceiptDocument) -> bytes:
-    """80 mm entry ticket: big plate, entry facts, pay QR and the reference."""
+    """80 mm entry ticket: big plate, entry facts, pay QR and the reference.
+
+    ``document.language``: "en", "sw" or "both" (labels side by side, each
+    instruction in English then Swahili).
+    """
+    import textwrap
+
+    from app.domain.receipt_engine import ticket_label, ticket_phrases
+
+    lang = document.language or "en"
     init = b"\x1b@"
     center, left = b"\x1ba\x01", b"\x1ba\x00"
     bold_on, bold_off = b"\x1bE\x01", b"\x1bE\x00"
@@ -283,29 +293,34 @@ def escpos_bytes(document: ReceiptDocument) -> bytes:
     cut = b"\x1dV\x00"
     # Thermal code pages have no "·" or "—": print plain ASCII separators.
     enc = lambda text: str(text or "").replace("·", "-").replace("—", "-").encode("utf-8", "replace")  # noqa: E731
-    plate = " ".join(document.plate.split()) if document.plate else "—"
+
+    def para(key: str) -> bytes:
+        return b"".join(enc(line) + b"\n" for phrase in ticket_phrases(key, lang)
+                        for line in textwrap.wrap(phrase, TICKET_COLUMNS))
+
+    plate = " ".join(document.plate.split()) if document.plate else "-"
     parts = [
         init, center, bold_on, wide, enc(document.site_name or "Parking"), b"\n", normal,
-        b"PARKING ENTRY TICKET\n", bold_off, b"KEEP THIS TICKET\n",
+        b"".join(enc(t) + b"\n" for t in ticket_phrases("title", lang)), bold_off,
+        enc(" / ".join(ticket_phrases("keep", lang))) + b"\n",
         left, rule, center, bold_on, big, enc(_spaced_plate(plate)), b"\n", normal, bold_off, left, rule,
-        _row("Entry", document.entry_time),
-        _row("Gate", document.entry_gate),
+        _row(ticket_label("entry", lang), document.entry_time),
+        _row(ticket_label("gate", lang), document.entry_gate),
     ]
     if document.rate:
-        parts.append(_row("Rate", document.rate))
+        parts.append(_row(ticket_label("rate", lang), document.rate))
     parts.append(dashes)
     qr = escpos_qr_block(document, caption=b"")
-    parts += [center, bold_on, b"HOW TO PAY\n", bold_off,
-              b"Scan the QR with your phone,\nor pay at the kiosk before you exit.\n"]
+    parts += [center, bold_on, enc(ticket_label("how", lang).upper()) + b"\n", bold_off, para("pay")]
     if qr:
         parts.append(qr)
     elif document.public_url:
         parts.append(b"URL: " + enc(document.public_url) + b"\n\n")
     if document.public_reference:
-        parts += [center, bold_on, wide, b"REF " + enc(document.public_reference) + b"\n", normal, bold_off]
-    parts += [left, dashes, center,
-              b"Valid at any exit. If the camera cannot\nread your plate, scan the QR at the exit.\n\n\n",
-              left, cut]
+        parts += [center, bold_on, wide,
+                  enc(ticket_label("ref", lang).upper()) + b" " + enc(document.public_reference) + b"\n",
+                  normal, bold_off]
+    parts += [left, dashes, center, para("valid"), b"\n\n", left, cut]
     return b"".join(parts)
 
 

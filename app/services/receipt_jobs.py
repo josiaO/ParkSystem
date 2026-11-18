@@ -76,6 +76,7 @@ def _document_for(db: Session, row: ParkingSession) -> ReceiptDocument:
         qr_payload=qr_payload,
         tariff_rules=row.tariff_rules if isinstance(row.tariff_rules, dict) else None,
         plate_status=row.plate_status,
+        language=settings.ticket_language,
     )
     qr_png = qr_png_bytes(content.qr_payload)
     return ReceiptDocument(
@@ -91,6 +92,7 @@ def _document_for(db: Session, row: ParkingSession) -> ReceiptDocument:
         qr_png=qr_png,
         lines=content.lines,
         rate=content.rate,
+        language=content.language,
     )
 
 
