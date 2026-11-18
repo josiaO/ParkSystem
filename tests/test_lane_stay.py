@@ -103,3 +103,21 @@ def test_exit_ignores_repeats_once_the_barrier_opened_for_the_stay():
     out = asyncio.run(ExitLaneController().submit_plate(
         None, plate="T125EJT", event_id="x", site_id=1, camera=_Camera(), confidence=0.9))
     assert out["reason"] == "same_stay" and out["barrier_opened"] is False and stay.repeats == 1
+
+
+def test_exit_reports_no_session_once_per_waiting_car(Session):  # noqa: F811
+    with Session() as db:
+        exit_lane = ExitLaneController(opener=Opener())
+
+        def leave(n):
+            return asyncio.run(exit_lane.submit_plate(
+                db, plate="T777EXT", event_id=f"x{n}", site_id=1, gate=db.get(Gate, 2),
+                camera=db.get(Camera, 200), policy=POLICY, confidence=0.9))
+
+        results = [leave(n) for n in range(5)]
+        assert results[0]["reason"] == "no_session"
+        assert {r["reason"] for r in results[1:]} == {"same_stay_no_session"}
+        denied = db.scalars(select(AccessDecision).where(AccessDecision.outcome == "DENIED_NO_SESSION")).all()
+        assert len(denied) == 1                                    # one alert, not five
+        lane_stay.reset()
+        assert leave(9)["reason"] == "no_session"                  # a new stay alerts again
