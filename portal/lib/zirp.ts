@@ -143,6 +143,9 @@ export type Receipt = {
   free_label?: string;
   chargeable_label?: string;
   rate_label?: string;
+  paid_at?: string | null;
+  exit_grace_until?: string | null;
+  server_time?: string;
   mobile_provider?: string;
   payment_mode?: "MOCK" | "LIVE" | "LIVE_DISABLED" | "UNCONFIGURED" | "SIMULATED" | string;
   pay_endpoint?: string;

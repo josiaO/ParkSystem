@@ -100,7 +100,7 @@ class TokenAndQrUnitTests(unittest.TestCase):
             qr_payload="/s/opaque-token",
             plate_status="UNRESOLVED",
         )
-        self.assertEqual(pending.lines[0], "SmartPark")
+        self.assertEqual(pending.lines[0], "Harbour Park")
         self.assertIn("Plate pending", pending.body_text)
         self.assertIn("North Entry", pending.body_text)
         self.assertIn("8Q7K-4M2P", pending.body_text)
@@ -117,7 +117,8 @@ class TokenAndQrUnitTests(unittest.TestCase):
         )
         self.assertIn("T123ABC", configured.body_text)
         self.assertIn("first 45 minutes", configured.free_period)
-        self.assertEqual(configured.lines.count("SmartPark"), 1)
+        self.assertEqual(configured.lines.count("Harbour Park"), 1)
+        self.assertIn("Rate: 45m free", configured.body_text)
 
 
 class HardwareCapabilityTests(unittest.TestCase):

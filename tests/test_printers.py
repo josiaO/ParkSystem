@@ -65,9 +65,9 @@ class PrinterTests(unittest.TestCase):
     def test_escpos_bytes_has_ticket_markers(self):
         payload = escpos_bytes(_doc())
         self.assertIn(b"PARKING ENTRY", payload)
-        self.assertIn(b"T000TST", payload)
+        self.assertIn(b"T 000 TST", payload)
         self.assertTrue(payload.startswith(b"\x1b@"))
-        self.assertIn(b"Scan QR", payload)
+        self.assertIn(b"HOW TO PAY", payload)
         self.assertTrue(b"\x1d(\x6b" in payload or b"\x1d\x76\x30" in payload or b"\x1b*" in payload)
 
     def test_escpos_qr_column_from_png(self):
