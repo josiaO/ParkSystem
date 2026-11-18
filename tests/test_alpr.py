@@ -229,6 +229,32 @@ class PlateFusionTests(unittest.TestCase):
         hits = _hits_from_detections(engine, frame, [ghost, zc, real])
         self.assertEqual([hit.plate_normalized for hit in hits], ["T277ECR"])
 
+    def test_a_bad_perspective_warp_falls_back_to_the_plain_crop(self):
+        """SERVER01: the warp turned clear plates (T710EMG, STL7509) into an
+        empty OCR view while the plain padded crop read them at 0.999."""
+        import numpy as np
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from app.services import alpr
+
+        frame = np.full((480, 640, 3), 40, dtype=np.uint8)
+        frame[220:265, 300:460] = 230                       # the plate: bright, so the plain crop is bright
+        real = SimpleNamespace(bounding_box=SimpleNamespace(x1=300, y1=220, x2=460, y2=265), confidence=0.9)
+        warped = np.zeros((80, 320, 3), dtype=np.uint8)     # the bad warp: a dark, empty view
+        calls = []
+
+        class FakeOcr:
+            def predict(self, view):
+                calls.append(float(view.mean()))
+                bright = float(view.mean()) > 60
+                return SimpleNamespace(text="T710EMG" if bright else "", confidence=0.999)
+
+        engine = SimpleNamespace(ocr=FakeOcr())
+        with patch.dict(vars(alpr), {"_rectify_plate_crop": lambda crop: (warped, True)}):
+            hits = alpr._hits_from_detections(engine, frame, [real])
+        self.assertEqual([hit.plate_normalized for hit in hits], ["T710EMG"])
+        self.assertGreaterEqual(len(calls), 2)              # the warped view first, then the plain crop
+
     def test_departure_presence_uses_the_same_detector_confidence_floor(self):
         import numpy as np
         from types import SimpleNamespace
