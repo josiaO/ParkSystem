@@ -143,7 +143,10 @@ def _mark_local_alpr(camera_id: int) -> None:
 
 def _detect_due(camera_id: int) -> bool:
     """Detector cadence while a live picture is open. OCR stays on the still crop."""
-    return time.monotonic() - _detect_at.get(int(camera_id), 0.0) >= 0.5
+    # 0.25 s by default (virtual_loop_detect_seconds): at 0.5 s a car rolling
+    # past the camera could cross the capture distance between two samples.
+    interval = float(getattr(settings, "virtual_loop_detect_seconds", 0.25) or 0.25)
+    return time.monotonic() - _detect_at.get(int(camera_id), 0.0) >= max(0.1, interval)
 
 
 def _mark_detect(camera_id: int) -> None:

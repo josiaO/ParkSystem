@@ -181,11 +181,15 @@ def test_bundled_models_crop_and_read_real_vehicle_stills(tmp_path, monkeypatch)
             yield SimpleNamespace(get=lambda model, key: camera if model is Camera else None)
         runtime.reset()
         gate_for(camera.id).reset()
+        # Legacy live-read mode: an external system triggers the cameras and
+        # Zirp reads a still live frame (the virtual loop is tested separately).
+        gate_for(camera.id).fire_on_width = False
         api._detect_at.pop(camera.id, None)
         api._alpr_fp.pop(camera.id, None)
         ocr_shapes.clear()
         try:
-            with patch("app.recognition_worker.worker_owns_software_reads", return_value=False), \
+            with patch.object(settings, "capture_trigger", "external"), \
+                 patch("app.recognition_worker.worker_owns_software_reads", return_value=False), \
                  patch("app.api_main.short_session", session), \
                  patch("app.services.media_gateway.gateway.peek_detect", return_value=SimpleNamespace(jpeg=jpeg, seq=1, received_at=api.time.monotonic())), \
                  patch("app.services.node_scope.camera_in_recognition_scope", return_value=True), \
@@ -206,6 +210,7 @@ def test_bundled_models_crop_and_read_real_vehicle_stills(tmp_path, monkeypatch)
         finally:
             runtime.reset()
             gate_for(camera.id).reset()
+            gate_for(camera.id).fire_on_width = bool(settings.virtual_loop_enabled)
             for cache in (api._detect_at, api._alpr_fp, api._local_alpr_at):
                 cache.pop(camera.id, None)
     asyncio.run(route_stopped_vehicle())
