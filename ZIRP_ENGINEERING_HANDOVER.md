@@ -894,3 +894,38 @@ This does not fix misreads inside a slot class (T189EKP/T188EKP, T926DHY/T926DHV
   | No read of that car within 20 s | 7 | 0 |
 
 - **Open:** the late triggers come from ParkWatch's snapshot timing. A short pre-event buffer of live frames could add another chance to read a car, but the data does not need it yet.
+
+### 17.6 Independence from ParkWatch (2026-11-18)
+
+ParkWatch is the legacy system that was studied while building Zirp; it must not be part of Zirp.
+
+**What was found.**
+- **Code:** no code reads ParkWatch's database, settings or program.
+- **Build (fixed in `a99e4d3`):** the kit build and the SDK lookup took the camera manufacturer's NetSDK files from ParkWatch's folder. They now use only Zirp's copy (`tools/hvx_sdk_host/vendor`, not committed).
+- **Runtime:** the ground loops are wired to ParkWatch's I/O boards. ParkWatch commands each camera snapshot, and in 24 h 3,017 of 3,093 Zirp captures (97.5%) started from those events.
+
+**Zirp's own trigger (virtual loop, `758f01f` and the lingering-car fix):**
+- **Fires on distance:** once per car, when the plate reaches the camera's capture width (zone editor), moving or not. The old trigger waited for a still plate and caught 6 of 44 cars.
+- **Waiting cars:** a car waiting short of that distance fires after 1.5 s in view.
+- **Far cars:** a car that never gets close is read from its widest frame when it leaves.
+- **Sampling:** the detector runs every 0.25 s (was 0.5 s).
+- **Junk filter:** boxes wider than 40% of the frame are ignored. A bollard row was being read as `11111`/`HH111`.
+- **`SMARTPARK_CAPTURE_TRIGGER`:**
+  - `zirp` (default): Zirp commands the camera's full-resolution snapshot when the loop fires and reads it through the normal event path.
+  - `external`: another system triggers the cameras and Zirp only reads.
+  - `both`.
+- **Bench setting:** SITE-PC01 runs `external` while ParkWatch still runs the lanes, so Zirp never sends snapshot events into ParkWatch.
+
+**Measured (shadow runs, cars triggered by ParkWatch versus whether Zirp's own loop fired for the same car within 20 s):**
+
+| | Cars Zirp's loop fired for |
+|---|---|
+| Still-plate trigger | 6/44 |
+| Virtual loop | 31/39 |
+| + bollard filter | 38/43 |
+| + lingering cars | see below |
+
+- **Snapshot command tested:** one Zirp-commanded snapshot on an empty lane 2# entry returned the camera's full 1920×1080 image to Zirp in 0.91 s.
+- **Reading:** low-resolution live reads match only ~30% of plates, which is why `zirp` mode reads the commanded full-resolution snapshot. That's the same image and reader that read 100% of seen cars in 17.5.
+
+**Cut-over:** when ParkWatch is retired on a lane, set `SMARTPARK_CAPTURE_TRIGGER=zirp` (`SmartPark-Settings.bat set CAPTURE_TRIGGER=zirp --restart`). Set each camera's capture distance in the zone editor to where cars stop.
