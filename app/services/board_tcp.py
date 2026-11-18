@@ -66,6 +66,38 @@ def frame_name_for(action: str, style: str | None = None) -> str:
     return {"open": "stx_open", "close": "stx_close", "stop": "stx_stop"}.get(action, "stx_open")
 
 
+async def _send_loop_board(ip: str, *, action: str, port: int | None, dry_run: bool) -> BoardResult:
+    """The site's loop boards take "0901" (open) over UDP; they have no close command."""
+    from app.services import loop_board
+
+    if action != "open":
+        return BoardResult(True, ip, int(port or settings.loop_board_port), "udp7e_open", "",
+                           f"loop board has no {action} command; the boom closes by itself", dry_run)
+    direction = await _board_direction(ip)
+    result = await loop_board.send_command(ip, loop_board.COMMAND_OPEN_GATE, direction=direction,
+                                           port=port, dry_run=dry_run)
+    return BoardResult(bool(result["ok"]), ip, int(result["port"]), "udp7e_open", result["sent_hex"],
+                       str(result.get("message") or ""), dry_run)
+
+
+async def _board_direction(ip: str) -> int:
+    from sqlalchemy import select
+
+    from app.db import short_session
+    from app.models import Camera
+    from app.services import loop_board
+
+    def _lookup() -> int:
+        with short_session() as db:
+            camera = db.scalars(select(Camera).where(Camera.controller_ip == ip).limit(1)).first()
+            return loop_board.direction_for(camera.lane_direction if camera else "ENTRY")
+
+    try:
+        return await asyncio.to_thread(_lookup)
+    except Exception:
+        return loop_board.DIRECTION_ENTRY
+
+
 async def send_board_command(
     ip: str,
     *,
@@ -76,6 +108,8 @@ async def send_board_command(
 ) -> BoardResult:
     if not ip:
         return BoardResult(False, "", 0, "", "", "No Board* IP on this side", dry_run)
+    if (settings.board_tcp_frame or "").strip().startswith("udp7e"):
+        return await _send_loop_board(ip, action=action, port=port, dry_run=dry_run)
     name = frame_name_for(action)
     payload = FRAMES[name]
     dest_port = int(port or settings.board_tcp_port or BOARD_TCP_PORT)

@@ -142,6 +142,10 @@ def write_config(paths: dict[int, dict[str, Any]] | None = None) -> Path:
         # slow recognition decoder from replaying seconds of stale video.
         "writeQueueSize: 256",
         "rtspAddress: 127.0.0.1:8554",
+        # MediaMTX's default RTP/RTCP ports are UDP 8000/8001; 8000 is where
+        # the site's loop boards send car-come/car-go. Readers use TCP.
+        "rtpAddress: :8050",
+        "rtcpAddress: :8051",
         # Web browsers run on operator PCs, not necessarily on the Site Server.
         # Keep RTSP local, but expose WHEP signaling + the static ICE/UDP port
         # on the LAN. MediaMTX gathers interface IPs into ICE candidates.

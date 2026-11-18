@@ -451,34 +451,16 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
         if edge.rising:
             rising = True
             break
-    loop_rising = False
     for report in await hvx.drain_reports(handle) or []:
-        # The site's ground loops are wired to the cameras' vehicle-detector
-        # input, which the camera reports as REPORT_MESS_LOOP_DETECTOR (7).
-        # (Polling GPIO indexes 0-7 never saw them.)
+        # A ground loop wired to the camera's vehicle-detector input arrives as
+        # REPORT_MESS_LOOP_DETECTOR (7). (Polling GPIO indexes 0-7 never saw it.)
         if int(report.get("msg_type", -1)) != 7 or report.get("loop_state") is None:
             continue
-        occupied = int(report["loop_state"]) == 1
-        edge = coil_watch.reported_edge(
-            camera_id, occupied, source="loop-report",
+        edge = await _apply_loop_edge(
+            camera_id, handle, int(report["loop_state"]) == 1, source="loop-report",
             index=int(report.get("loop_index") or 0), value=int(report["loop_state"]),
         )
-        from app.core import latency_trace
-
-        latency_trace.emit("lane.loop_edge", camera=camera_id, occupied=occupied,
-                           rising=bool(edge.rising), falling=bool(edge.falling))
-        last_edge = edge
-        if edge.rising:
-            loop_rising = True
-        if edge.falling:
-            await _complete_passage_from_sensor(camera_id)
-            last_edge = None              # passage already completed for this edge
-    if loop_rising:
-        # Most cameras snap by themselves when their loop trips; command a
-        # snapshot only if this camera's own capture does not follow.
-        task = asyncio.create_task(_snapshot_if_camera_silent(camera_id, handle),
-                                   name=f"loop-snapshot-{camera_id}")
-        task.add_done_callback(_consume_background_task)
+        last_edge = None if edge.falling else edge   # a falling edge already completed the passage
     if last_edge is not None:
         from app.services.health import note_camera
         note_camera(
@@ -503,6 +485,75 @@ async def _poll_coil_and_read(camera_id: int, handle: int, *, background: bool =
 
 LOOP_CAPTURE_WAIT_SECONDS = 1.5
 _last_native_event_at: dict[int, float] = {}
+
+
+async def _apply_loop_edge(camera_id: int, handle: int | None, occupied: bool, *, source: str,
+                           index: int | None = None, value: int | None = None):
+    """One debounced loop edge from the device (camera loop report or loop board).
+
+    Rising: the camera usually captures by itself; command a snapshot only if
+    it stays silent. Falling: the car left the loop, so complete its passage.
+    """
+    from app.core import latency_trace
+    from app.services.health import note_camera
+
+    edge = coil_watch.reported_edge(camera_id, occupied, source=source, index=index, value=value)
+    latency_trace.emit("lane.loop_edge", camera=camera_id, occupied=occupied, source=source,
+                       rising=bool(edge.rising), falling=bool(edge.falling))
+    note_camera(camera_id, coil_occupied=edge.occupied, coil_source=source, coil_index=index)
+    if edge.rising and handle is not None:
+        task = asyncio.create_task(_snapshot_if_camera_silent(camera_id, int(handle)),
+                                   name=f"loop-snapshot-{camera_id}")
+        task.add_done_callback(_consume_background_task)
+    if edge.falling:
+        await _complete_passage_from_sensor(camera_id)
+    return edge
+
+
+_board_cameras: dict[str, tuple[int, int | None]] = {}
+_board_cameras_at = 0.0
+
+
+def _camera_for_board(board_ip: str) -> tuple[int, int | None] | None:
+    """Map a loop board's IP to (camera id, SDK handle) by the camera's controller IP."""
+    global _board_cameras, _board_cameras_at
+    now = time.monotonic()
+    if now - _board_cameras_at > 30.0 or board_ip not in _board_cameras:
+        rows: dict[str, tuple[int, int | None]] = {}
+        with short_session() as db:
+            for camera in db.scalars(select(Camera).where(Camera.enabled.is_(True))).all():
+                ip = (camera.controller_ip or "").strip()
+                if ip:
+                    rows[ip] = (int(camera.id), camera.sdk_handle)
+        _board_cameras, _board_cameras_at = rows, now
+    return _board_cameras.get(board_ip)
+
+
+async def _on_board_event(event) -> None:
+    """A datagram from a ground-loop board (see app/services/loop_board.py)."""
+    from app.core import latency_trace
+
+    target = await asyncio.to_thread(_camera_for_board, event.board_ip)
+    if target is None:
+        latency_trace.emit("board.unmapped", board=event.board_ip, kind=event.kind)
+        return
+    camera_id, handle = target
+    if event.occupied is None:
+        # Ticket button, card and reset are not vehicle signals for Zirp.
+        latency_trace.emit("board.event", camera=camera_id, board=event.board_ip, kind=event.kind)
+        return
+    await _apply_loop_edge(camera_id, handle, bool(event.occupied), source="loop-board",
+                           index=int(event.direction), value=int(event.event))
+
+
+async def _loop_board_service() -> None:
+    from app.services import loop_board
+
+    await loop_board.serve(
+        _on_board_event,
+        host=str(getattr(settings, "loop_board_bind", "0.0.0.0") or "0.0.0.0"),
+        port=int(getattr(settings, "loop_board_port", loop_board.BOARD_UDP_PORT) or loop_board.BOARD_UDP_PORT),
+    )
 
 
 async def _snapshot_if_camera_silent(camera_id: int, handle: int) -> None:
