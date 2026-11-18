@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     app_name: str = PRODUCT_NAME
     app_version: str = "0.3.0"
     site_name: str = "Parking Site"
+    # Language printed on the entry ticket: "en", "sw", or "both" (labels side
+    # by side, e.g. "ENTRY / KUINGIA", and each instruction in both languages).
+    ticket_language: Literal["en", "sw", "both"] = "both"
     api_host: str = "127.0.0.1"
     api_port: int = 8760
     database_url: str | None = None

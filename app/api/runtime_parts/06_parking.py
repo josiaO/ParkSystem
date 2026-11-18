@@ -271,10 +271,68 @@ def close_session(
 
 
 @app.get("/sessions")
-def list_sessions(db: Session = Depends(get_db), _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use"))):
-    rows = db.scalars(select(ParkingSession).order_by(ParkingSession.id.desc()).limit(100)).all()
+def list_sessions(
+    limit: int = 100,
+    before_id: int | None = None,
+    q: str = "",
+    status: str = "",
+    open_only: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use")),
+):
+    """Newest sessions first, filtered and paged on the server.
+
+    Filtering used to happen in the browser over the newest 100 rows only, so
+    on a busy lane older visits (and everything still owing money) fell off the
+    list within an hour. ``before_id`` pages further back.
+    """
+    query = select(ParkingSession)
+    needle = "".join(ch for ch in (q or "").upper() if ch.isalnum())
+    if needle:
+        query = query.where(ParkingSession.plate.contains(needle))
+    if status:
+        query = query.where(ParkingSession.status == status)
+    if open_only:
+        query = query.where(ParkingSession.exit_time.is_(None), ParkingSession.status.not_in(("PAID", "CLOSED", "REVOKED")))
+    if before_id:
+        query = query.where(ParkingSession.id < int(before_id))
+    rows = db.scalars(query.order_by(ParkingSession.id.desc()).limit(max(1, min(int(limit or 100), 1000)))).all()
     captures = captures_for_sessions(db, rows)
-    return [sim_session_dict(row, captures.get(int(row.id)), lookup_capture=False) for row in rows]
+    out = [sim_session_dict(row, captures.get(int(row.id)), lookup_capture=False) for row in rows]
+    _add_live_due(db, rows, out)
+    return out
+
+
+def _add_live_due(db: Session, rows, out: list[dict]) -> None:
+    """Amount owed right now for visits still inside (read-only: nothing is saved).
+
+    The stored ``amount_due`` is only written when a fee is quoted (exit, pay
+    page), so an open visit otherwise shows TZS 0 however long it has stayed.
+    """
+    from app.services.fee_engine import calculate_car1_fee, load_active_rules, normalize_tariff_rules
+
+    now = datetime.now(timezone.utc)
+    rules_cache: dict = {}
+    for row, body in zip(rows, out):
+        body["due_now"] = None
+        if row.exit_time is not None or (row.status or "").upper() in {"PAID", "CLOSED", "REVOKED"}:
+            continue
+        if (getattr(row, "parker_kind", "") or "CASUAL").upper() != "CASUAL" or not row.entry_time:
+            continue
+        try:
+            if row.tariff_rules:
+                rules = normalize_tariff_rules(row.tariff_rules, car_type=row.car_type or "Car1")
+            else:
+                key = (row.car_type or "Car1", int(row.site_id or DEFAULT_SITE_ID))
+                if key not in rules_cache:
+                    rules_cache[key] = load_active_rules(db, key[0], site_id=key[1])
+                rules = rules_cache[key]
+            fee = calculate_car1_fee(row.entry_time, now, rules)
+        except Exception:
+            continue
+        paid = float(row.amount_paid or 0)
+        body["due_now"] = max(0.0, float(fee.due) - paid)
+        body["amount_due"] = max(float(body.get("amount_due") or 0), float(fee.due))
 
 
 @app.get("/sessions/{session_id}/receipt")
