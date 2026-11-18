@@ -248,7 +248,12 @@ class Settings(BaseSettings):
     gate_physical_control_enabled: bool = True
     board_tcp_port: int = 5000
     board_tcp_timeout_seconds: float = 1.5
-    board_tcp_frame: str = "stx_open"
+    board_tcp_frame: str = "stx_open"   # "udp7e_open": the site's loop boards (UDP 8000)
+    # Ground-loop boards (BoardIn/BoardOut, the camera's controller_ip) push
+    # car-come / car-go datagrams to this PC. See app/services/loop_board.py.
+    loop_board_enabled: bool = True
+    loop_board_bind: str = "0.0.0.0"
+    loop_board_port: int = 8000
     led_udp_port: int = 6666
     led_udp_local_port: int = 8881
     gpio_index: int = 0
