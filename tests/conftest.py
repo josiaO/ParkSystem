@@ -12,6 +12,16 @@ os.environ.setdefault("SMARTPARK_LOOP_BOARD_ENABLED", "false")  # never bind the
 
 
 @pytest.fixture(autouse=True)
+def _reset_lane_stays():
+    """Repeated-capture stays live in memory per camera; never leak between tests."""
+    from app.services import lane_stay
+
+    lane_stay.reset()
+    yield
+    lane_stay.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     """Sign-in failures in one test must not lock accounts in the next."""
     from app.services import login_throttle
