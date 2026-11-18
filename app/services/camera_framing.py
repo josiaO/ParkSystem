@@ -383,6 +383,16 @@ class ArrivalGate:
         self.best_width = max(self.best_width, width)
         if self.fire_on_width and self.min_plate_width_px > 0:
             self._last = center
+            if self._episode_fired and self.best_width > 0 and width < self.best_width * 0.6:
+                # Queued cars: the fired car pulled away and the next, farther
+                # plate took its place without an empty frame in between.
+                # Without this the second car never fired (SERVER01: a
+                # 173 px plate missed behind the car ahead).
+                self._fired = self._episode_fired = self._announced = False
+                self._ocr_count = 0
+                self.best_width = width
+                self._seen_since = now
+                return "new_vehicle"
             if width < self.min_plate_width_px:
                 # A car waiting short of the capture distance (queued at the
                 # barrier) still fires once it has been in view this long;

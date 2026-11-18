@@ -328,6 +328,14 @@ class _HVXConnectionMixin:
         key = int(handle)
         if int(msg_type) == REPORT_LPRINFO_EXT and message:
             self._note_plate_report(key, message)
+        if int(msg_type) == REPORT_MESS_LOOP_DETECTOR and message:
+            try:
+                raw = ctypes.string_at(message, 4)
+                row["loop_index"], row["loop_state"] = int(raw[0]), int(raw[1])
+            except Exception:
+                pass
+            _trace("host.loop.edge", camera=key, loop_index=row.get("loop_index"),
+                   loop_state=row.get("loop_state"))
         with self._lock:
             queue = self._pending_reports.setdefault(key, deque(maxlen=64))
             queue.append(dict(row))
