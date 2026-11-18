@@ -291,6 +291,7 @@ async def _diagnostic_heartbeat_loop() -> None:
             snapshot = {
                 "event": "runtime-heartbeat",
                 "event_loop": _lm.stats(),
+                "event_outcomes": __import__("app.services.event_outcomes", fromlist=["stats"]).stats(),
                 "cameras": cameras,
                 "camera_count": len(cameras),
                 "degraded_camera_ids": [row["camera_id"] for row in degraded],
