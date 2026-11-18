@@ -62,12 +62,6 @@ class Settings(BaseSettings):
     app_name: str = PRODUCT_NAME
     app_version: str = "0.3.0"
     site_name: str = "Parking Site"
-    # Operator lines printed under the site name on the entry ticket, separated
-    # by "|" (the old gate ticket carried the operator's website and e-mail).
-    ticket_header_lines: str = ""
-    # Print the ticket reference as a CODE128 barcode, so a scanner at the
-    # exit or kiosk finds the session like the old ticket-number barcode.
-    ticket_barcode: bool = True
     api_host: str = "127.0.0.1"
     api_port: int = 8760
     database_url: str | None = None

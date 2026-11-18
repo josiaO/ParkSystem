@@ -28,8 +28,7 @@ class ReceiptDocument:
     qr_payload: str
     qr_png: bytes = b""
     lines: list[str] = field(default_factory=list)
-    header_lines: list[str] = field(default_factory=list)
-    barcode: str = ""                  # ticket reference as CODE128 ("" = none)
+    rate: str = ""                     # short tariff, e.g. "45m free · TZS 1,000/hr"
 
 
 @dataclass
@@ -95,7 +94,7 @@ def receipt_html(document: ReceiptDocument) -> str:
         ".tip{text-align:center;color:#545E6C;font-size:12px}"
         "</style></head><body>"
         f"<pre>{safe_body}</pre>{qr_img}"
-        "<p class='tip'>Scan this QR at the kiosk if the camera cannot read the plate.</p>"
+        "<p class='tip'>Scan the QR with your phone to pay, or at the exit if the camera cannot read the plate.</p>"
         "</body></html>"
     )
 
@@ -230,7 +229,7 @@ def escpos_qr_column(png_bytes: bytes, *, max_width: int | None = None) -> bytes
     return b"".join(parts)
 
 
-def escpos_qr_block(document: ReceiptDocument) -> bytes:
+def escpos_qr_block(document: ReceiptDocument, *, caption: bytes = b"Scan QR") -> bytes:
     """Printable QR block for thermal ESC/POS printers."""
     payload = (document.qr_payload or document.public_url or "").strip()
     png = _document_qr_png(document)
@@ -259,58 +258,63 @@ def escpos_qr_block(document: ReceiptDocument) -> bytes:
             block = escpos_qr_native(payload)
     if not block:
         return b""
-    return b"\x1ba\x01\nScan QR\n\n" + block + b"\n\n\x1ba\x00"
+    head = b"\n" + caption + b"\n\n" if caption else b"\n"
+    return b"\x1ba\x01" + head + block + b"\n\n\x1ba\x00"
 
 
-def escpos_code128(data: str, *, height: int = 80, width: int = 2) -> bytes:
-    """GS k CODE128 (code set B) with the human-readable text printed below."""
-    text = "".join(ch for ch in str(data or "") if 32 <= ord(ch) < 127)[:40]
-    if not text:
-        return b""
-    payload = b"{B" + text.encode("ascii")
-    return (
-        b"\x1ba\x01"                                   # centre
-        + b"\x1dh" + bytes([max(24, min(255, height))])
-        + b"\x1dw" + bytes([max(2, min(6, width))])
-        + b"\x1dH\x02"                                 # HRI text below
-        + b"\x1dk\x49" + bytes([len(payload)]) + payload
-        + b"\n\x1ba\x00"
-    )
+TICKET_COLUMNS = 48                    # 80 mm paper, font A
+
+
+def _row(label: str, value: str, width: int = TICKET_COLUMNS) -> bytes:
+    """``LABEL ........ value`` on one line (value wraps under it if too long)."""
+    label, value = label.upper(), str(value or "-").replace("·", "-").replace("—", "-")
+    gap = width - len(label) - len(value)
+    text = f"{label}{' ' * gap}{value}" if gap >= 1 else f"{label}\n{value.rjust(width)}"
+    return text.encode("utf-8", "replace") + b"\n"
 
 
 def escpos_bytes(document: ReceiptDocument) -> bytes:
-    """Thermal receipt ticket with text fields and a scannable QR code."""
+    """80 mm entry ticket: big plate, entry facts, pay QR and the reference."""
     init = b"\x1b@"
-    center = b"\x1ba\x01"
-    left = b"\x1ba\x00"
-    wide = b"\x1d!\x11"
-    normal = b"\x1d!\x00"
+    center, left = b"\x1ba\x01", b"\x1ba\x00"
+    bold_on, bold_off = b"\x1bE\x01", b"\x1bE\x00"
+    big, wide, normal = b"\x1d!\x11", b"\x1d!\x10", b"\x1d!\x00"
+    rule, dashes = b"=" * TICKET_COLUMNS + b"\n", b"- " * (TICKET_COLUMNS // 2) + b"\n"
     cut = b"\x1dV\x00"
-    qr = escpos_qr_block(document)
-    lines = [
-        init,
-        center,
-        wide,
-        (document.site_name or "SmartPark").encode("utf-8", "replace") + b"\n",
-        normal,
-        *[line.encode("utf-8", "replace") + b"\n" for line in document.header_lines],
-        b"PARKING ENTRY\n",
-        left,
-        f"Plate: {document.plate}\n".encode("utf-8", "replace"),
-        f"Entry: {document.entry_time}\n".encode("utf-8", "replace"),
-        f"Gate: {document.entry_gate}\n".encode("utf-8", "replace"),
-        f"Ref: {document.public_reference}\n\n".encode("utf-8", "replace"),
-        (document.payment_instructions or "").encode("utf-8", "replace") + b"\n\n",
+    # Thermal code pages have no "·" or "—": print plain ASCII separators.
+    enc = lambda text: str(text or "").replace("·", "-").replace("—", "-").encode("utf-8", "replace")  # noqa: E731
+    plate = " ".join(document.plate.split()) if document.plate else "—"
+    parts = [
+        init, center, bold_on, wide, enc(document.site_name or "Parking"), b"\n", normal,
+        b"PARKING ENTRY TICKET\n", bold_off, b"KEEP THIS TICKET\n",
+        left, rule, center, bold_on, big, enc(_spaced_plate(plate)), b"\n", normal, bold_off, left, rule,
+        _row("Entry", document.entry_time),
+        _row("Gate", document.entry_gate),
     ]
-    if document.barcode:
-        lines.append(escpos_code128(document.barcode) + b"\n")
+    if document.rate:
+        parts.append(_row("Rate", document.rate))
+    parts.append(dashes)
+    qr = escpos_qr_block(document, caption=b"")
+    parts += [center, bold_on, b"HOW TO PAY\n", bold_off,
+              b"Scan the QR with your phone,\nor pay at the kiosk before you exit.\n"]
     if qr:
-        lines.append(qr)
+        parts.append(qr)
     elif document.public_url:
-        lines.append(b"URL: " + document.public_url.encode("utf-8", "replace") + b"\n\n")
-    lines.append(cut)
-    return b"".join(lines)
+        parts.append(b"URL: " + enc(document.public_url) + b"\n\n")
+    if document.public_reference:
+        parts += [center, bold_on, wide, b"REF " + enc(document.public_reference) + b"\n", normal, bold_off]
+    parts += [left, dashes, center,
+              b"Valid at any exit. If the camera cannot\nread your plate, scan the QR at the exit.\n\n\n",
+              left, cut]
+    return b"".join(parts)
 
+
+def _spaced_plate(plate: str) -> str:
+    """T482ABC -> T 482 ABC (Tanzanian layout); anything else unchanged."""
+    import re
+
+    m = re.fullmatch(r"(T)(\d{3})([A-Z]{2,4})", plate.replace(" ", ""))
+    return f"{m[1]} {m[2]} {m[3]}" if m else plate
 
 def render_a4_png(document: ReceiptDocument) -> bytes:
     """A4 page at 150 dpi so a normal USB office printer can print it."""

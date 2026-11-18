@@ -128,17 +128,37 @@ def free_period_line(rules: dict[str, Any] | None) -> str:
     return f"Free period: first {minutes} minutes. Keep this receipt."
 
 
+def _span(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return "hr" if hours == 1 else f"{hours}h"
+    return f"{max(1, seconds // 60)}m"
+
+
+def rate_line(rules: dict[str, Any] | None) -> str:
+    """Short tariff for the ticket, e.g. "45m free · TZS 1,000/hr"."""
+    rules = rules or {}
+    parts = []
+    free = int(rules.get("free_day_seconds") or rules.get("grace_seconds") or 0)
+    if free > 0:
+        parts.append(f"{_span(free)} free")
+    try:
+        fee, block = float(rules.get("day_block_fee") or 0), float(rules.get("day_block_seconds") or 0)
+    except (TypeError, ValueError):
+        fee, block = 0.0, 0.0
+    if fee > 0 and block > 0:
+        currency = str(rules.get("currency") or "TZS")
+        parts.append(f"{currency} {fee:,.0f}/{_span(block)}")
+    return " · ".join(parts)
+
+
 def plate_line(plate: str, *, plate_status: str = "") -> str:
     text = (plate or "").strip()
     status = (plate_status or "").upper()
     if not text or status in {"UNRESOLVED", "PENDING", "UNKNOWN"}:
         return "Plate pending"
     return text
-
-
-def ticket_header_lines(raw: str | None) -> list[str]:
-    """Operator lines from settings ("www.example.com|info@example.com")."""
-    return [part.strip() for part in str(raw or "").split("|") if part.strip()][:3]
 
 
 def render_entry_receipt(
@@ -151,25 +171,25 @@ def render_entry_receipt(
     qr_payload: str,
     tariff_rules: dict[str, Any] | None = None,
     plate_status: str = "",
-    header_lines: list[str] | None = None,
 ) -> "ReceiptContent":
     shown_plate = plate_line(plate, plate_status=plate_status)
     free = free_period_line(tariff_rules)
-    header = [line for line in (header_lines or []) if line.strip()]
+    rate = rate_line(tariff_rules)
     lines = [
-        "SmartPark",
         site_name or "Parking Site",
-        *header,
-        "PARKING ENTRY",
+        "PARKING ENTRY TICKET · KEEP THIS TICKET",
         "",
-        f"Plate: {shown_plate}",
+        shown_plate,
+        "",
         f"Entry: {entry_time}",
-        f"Lane: {entry_lane or '—'}",
+        f"Gate: {entry_lane or '—'}",
+        *([f"Rate: {rate}"] if rate else []),
+        "",
+        "HOW TO PAY",
+        "Scan the QR with your phone, or pay at the kiosk before you exit.",
         f"Ref: {human_reference}",
         "",
-        free,
-        "Scan the QR at the kiosk if the camera cannot read the plate.",
-        "Keep this receipt until you leave.",
+        "Valid at any exit. If the camera cannot read your plate, scan the QR at the exit.",
     ]
     return ReceiptContent(
         site_name=site_name or "SmartPark",
@@ -181,7 +201,7 @@ def render_entry_receipt(
         free_period=free,
         body_text="\n".join(lines) + "\n",
         lines=lines,
-        header_lines=header,
+        rate=rate,
     )
 
 
@@ -196,7 +216,7 @@ class ReceiptContent:
     free_period: str
     body_text: str
     lines: list[str] = field(default_factory=list)
-    header_lines: list[str] = field(default_factory=list)
+    rate: str = ""
 
 
 @dataclass
