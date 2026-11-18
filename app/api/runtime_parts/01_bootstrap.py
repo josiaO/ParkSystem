@@ -486,6 +486,13 @@ async def lifespan(app: FastAPI):
             _supervise_background_loop("node-heartbeat", node_heartbeat_loop),
             name="node-heartbeat",
         )
+    if bool(getattr(settings, "loop_board_enabled", True)):
+        board_task = asyncio.create_task(
+            _supervise_background_loop("loop-boards", _loop_board_service, restart_delay=30.0),
+            name="loop-boards",
+        )
+    else:
+        board_task = asyncio.create_task(asyncio.sleep(0), name="loop-boards-disabled")
     from app.services import loop_monitor
 
     loop_task = asyncio.create_task(
@@ -505,7 +512,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task, sweeper_task, loop_task)
+        tasks = (ingest, outbox, hvx_watch, fusion_flush, payments_reconcile, onvif_events, diagnostics, watchdog_task, link_probe, alerts_task, sweeper_task, loop_task, board_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

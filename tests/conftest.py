@@ -8,6 +8,7 @@ import pytest
 # their own TraceWriter in a temporary folder; everything else must not write
 # trace files into the developer's log folders.
 os.environ.setdefault("SMARTPARK_LATENCY_TRACE", "0")
+os.environ.setdefault("SMARTPARK_LOOP_BOARD_ENABLED", "false")  # never bind the live board port (UDP 8000)
 
 
 @pytest.fixture(autouse=True)
