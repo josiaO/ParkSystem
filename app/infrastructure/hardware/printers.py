@@ -28,6 +28,8 @@ class ReceiptDocument:
     qr_payload: str
     qr_png: bytes = b""
     lines: list[str] = field(default_factory=list)
+    header_lines: list[str] = field(default_factory=list)
+    barcode: str = ""                  # ticket reference as CODE128 ("" = none)
 
 
 @dataclass
@@ -260,6 +262,22 @@ def escpos_qr_block(document: ReceiptDocument) -> bytes:
     return b"\x1ba\x01\nScan QR\n\n" + block + b"\n\n\x1ba\x00"
 
 
+def escpos_code128(data: str, *, height: int = 80, width: int = 2) -> bytes:
+    """GS k CODE128 (code set B) with the human-readable text printed below."""
+    text = "".join(ch for ch in str(data or "") if 32 <= ord(ch) < 127)[:40]
+    if not text:
+        return b""
+    payload = b"{B" + text.encode("ascii")
+    return (
+        b"\x1ba\x01"                                   # centre
+        + b"\x1dh" + bytes([max(24, min(255, height))])
+        + b"\x1dw" + bytes([max(2, min(6, width))])
+        + b"\x1dH\x02"                                 # HRI text below
+        + b"\x1dk\x49" + bytes([len(payload)]) + payload
+        + b"\n\x1ba\x00"
+    )
+
+
 def escpos_bytes(document: ReceiptDocument) -> bytes:
     """Thermal receipt ticket with text fields and a scannable QR code."""
     init = b"\x1b@"
@@ -275,6 +293,7 @@ def escpos_bytes(document: ReceiptDocument) -> bytes:
         wide,
         (document.site_name or "SmartPark").encode("utf-8", "replace") + b"\n",
         normal,
+        *[line.encode("utf-8", "replace") + b"\n" for line in document.header_lines],
         b"PARKING ENTRY\n",
         left,
         f"Plate: {document.plate}\n".encode("utf-8", "replace"),
@@ -283,6 +302,8 @@ def escpos_bytes(document: ReceiptDocument) -> bytes:
         f"Ref: {document.public_reference}\n\n".encode("utf-8", "replace"),
         (document.payment_instructions or "").encode("utf-8", "replace") + b"\n\n",
     ]
+    if document.barcode:
+        lines.append(escpos_code128(document.barcode) + b"\n")
     if qr:
         lines.append(qr)
     elif document.public_url:
