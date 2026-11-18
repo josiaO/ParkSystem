@@ -163,8 +163,8 @@ def resolve_vendor_dir() -> Path:
     ocx = here.parent.parent / "OcxConfig"
     local = here / "vendor"
     installed = here.parent.parent / "vendor"
-    supplied = here.parent.parent / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
-    for candidate in (installed, ocx, local, supplied):
+    # Only Zirp's own folders; never the legacy ParkWatch package.
+    for candidate in (installed, ocx, local):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else local

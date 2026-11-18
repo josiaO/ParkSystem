@@ -54,20 +54,15 @@ cp "$ROOT/tools/latency_capture.py" "$OUT/payload/tools/"
 mkdir -p "$OUT/payload/tools/windows"
 cp "$ROOT/tools/windows/Run-LatencyCapture.ps1" "$OUT/payload/tools/windows/"
 cp "$ROOT/tools/Test-RebootRecovery.ps1" "$OUT/payload/tools/"
-if [[ -f "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" ]]; then
-  cp "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
-elif [[ -f "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/hvx_bindings.json" ]]; then
-  cp "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
-fi
+cp "$ROOT/tools/hvx_sdk_host/hvx_bindings.json" "$OUT/payload/tools/hvx_sdk_host/"
 cp "$ROOT/packaging/windows/requirements-windows.txt" "$OUT/payload/"
 
 HVX_VENDOR_SOURCE="${SMARTPARK_HVX_VENDOR_DIR:-}"
 if [[ -z "$HVX_VENDOR_SOURCE" ]]; then
-  # Prefer the current field package over stale copied vendor folders. The
-  # QY DLL family must remain matched; mixing NetSDK and PlaySdk generations
-  # is a common source of stacking and loader failures.
-  for candidate in "$ROOT/Current_ParkSystem_configs/Camera_config/OcxConfig" \
-                  "$ROOT/OcxConfig" "$ROOT/tools/hvx_sdk_host/vendor" "$ROOT/vendor"; do
+  # Zirp's own copies of the camera manufacturer's SDK only; the legacy
+  # ParkWatch package is never a source. The QY DLL family must remain
+  # matched: mixing NetSDK and PlaySdk generations breaks loading.
+  for candidate in "$ROOT/tools/hvx_sdk_host/vendor" "$ROOT/OcxConfig" "$ROOT/vendor"; do
     if [[ -f "$candidate/NetSDK.dll" ]]; then
       HVX_VENDOR_SOURCE="$candidate"
       break
