@@ -239,6 +239,9 @@ def gate_for(camera_id: int) -> "ArrivalGate":
         gate = ArrivalGate(
             min_plate_width_px=int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 0),
             far_fallback_seconds=float(getattr(settings, "alpr_capture_far_fallback_seconds", 1.5) or 0),
+            # Zirp's own vehicle trigger (virtual loop): fire at the capture
+            # distance even while the car rolls. SMARTPARK_VIRTUAL_LOOP_ENABLED.
+            fire_on_width=bool(getattr(settings, "virtual_loop_enabled", True)),
         )
         _gates[camera_id] = gate
     return gate
@@ -251,6 +254,13 @@ class ArrivalGate:
     raised once per settle. ``held`` means this visit was already read, so
     the same stopped car cannot open another session. An empty zone for
     ``absence_seconds`` starts the next visit.
+
+    Virtual loop (``fire_on_width``; on for the per-camera lane gates from
+    ``gate_for``): fire once when the plate reaches the capture width, moving or not.
+    Cars at a lane roll past the camera; waiting for a still plate caught 6
+    of 44 cars on SERVER01, while every one reached a readable width. A car
+    whose plate never reaches the capture width returns ``departed`` when
+    it leaves, so the caller can read the widest frame it kept.
     """
 
     def __init__(
@@ -263,6 +273,8 @@ class ArrivalGate:
         min_plate_width_px: int = 0,
         far_fallback_seconds: float = 0.0,
         new_vehicle_ratio: float = 0.20,
+        fire_on_width: bool = False,
+        departure_min_width_px: int = 24,
     ) -> None:
         self.stable_seconds = float(stable_seconds)
         self.move_ratio = float(move_ratio)
@@ -271,6 +283,8 @@ class ArrivalGate:
         self.min_plate_width_px = max(0, int(min_plate_width_px or 0))
         self.far_fallback_seconds = max(0.0, float(far_fallback_seconds or 0.0))
         self.new_vehicle_ratio = max(0.10, float(new_vehicle_ratio or 0.20))
+        self.fire_on_width = bool(fire_on_width)
+        self.departure_min_width_px = max(0, int(departure_min_width_px or 0))
         self.reset()
 
     def reset(self) -> None:
@@ -283,6 +297,9 @@ class ArrivalGate:
         self._ocr_count = 0
         self._retry_at = None
         self.prepared = None
+        self.best_width = 0          # widest plate in this episode (departure fallback)
+        self._fired = False          # fired and not re-armed for a retry
+        self._episode_fired = False  # fired at least once for this car
 
     def observe(self, box: dict | None, now: float) -> str:
         now = float(now)
@@ -328,12 +345,16 @@ class ArrivalGate:
                     self._absent_since = now
                 if now - self._absent_since < self.absence_seconds:
                     return "missing"
+            departed = self._departure_due()
             self._last = None
             self._seen_since = None
             self._stable_since = None
             self._absent_since = None
             self._announced = False
-            return "absent"
+            self.best_width = 0
+            self._fired = False
+            self._episode_fired = False
+            return "departed" if departed else "absent"
         if self._retry_at is not None:
             if now < self._retry_at:
                 return "cooldown"
@@ -358,6 +379,21 @@ class ArrivalGate:
         self._absent_since = None
         if self._seen_since is None:
             self._seen_since = now
+        width = _plate_width(box)
+        self.best_width = max(self.best_width, width)
+        if self.fire_on_width and self.min_plate_width_px > 0:
+            self._last = center
+            if width < self.min_plate_width_px:
+                return "far"
+            if self._announced or self._fired:
+                return "moving"
+            if self._ocr_count >= self.max_ocr:
+                self._held = True
+                return "held"
+            self._announced = True
+            self._fired = True
+            self._episode_fired = True
+            return "ready"
         moved = self._last is None or _moved(self._last, center, self.move_ratio)
         if moved:
             had_previous = self._last is not None
@@ -392,6 +428,13 @@ class ArrivalGate:
         self._announced = True
         return "ready"
 
+    def _departure_due(self) -> bool:
+        """An episode that never fired but saw a credible plate deserves one read."""
+        return (
+            self.fire_on_width and not self._episode_fired and not self._held
+            and self.best_width >= self.departure_min_width_px > 0
+        )
+
     def _near_enough(self, box: dict) -> bool:
         if self.min_plate_width_px <= 0:
             return False
@@ -409,11 +452,20 @@ class ArrivalGate:
         if self._ocr_count >= self.max_ocr:
             self._retry_at = getattr(self, "_observed_at", 0) + 1.0
         self._announced = False
+        self._fired = False          # an unpublished read may try again (up to max_ocr)
 
     def rearm(self) -> None:
         """The ready frame was not read. Allow the next check to try again."""
         if not self._held:
             self._announced = False
+            self._fired = False
+
+
+def _plate_width(box: dict | None) -> float:
+    try:
+        return float(box["x2"]) - float(box["x1"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0
 
 
 def _box_center(box: dict) -> tuple[float, ...] | None:

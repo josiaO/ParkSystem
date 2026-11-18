@@ -516,6 +516,10 @@ async def _complete_passage_from_sensor(camera_id: int) -> None:
             db.commit()
 
 
+_widest_frames: dict[int, bytes] = {}
+_departed_frames: dict[int, bytes] = {}
+
+
 async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     """True when this video frame should be cropped and read.
 
@@ -547,8 +551,29 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         runtime.lane(int(camera.id)).last_error = str(located.get("detail") or located.get("reason") or "Plate detector unavailable")
         return False
     runtime.lane(int(camera.id)).last_error = ""
+    # A lane camera never sees a plate wider than ~20% of its frame. Boxes
+    # far wider are scene patterns (a bollard row read as "11111"/"HH111" on
+    # SERVER01): they fired the trigger with no car and, being permanent,
+    # kept the gate busy so real cars on that camera never fired.
+    max_fraction = float(getattr(settings, "virtual_loop_max_plate_fraction", 0.40) or 0.40)
+    frame_width = float(located.get("image_width") or 0)
+    if frame_width > 0:
+        boxes = [b for b in boxes if (float(b.get("x2", 0)) - float(b.get("x1", 0))) <= max_fraction * frame_width]
     gate.prepared = (hash(jpeg), boxes, float(framing["detect_zoom"] or 1.0))
-    phase = gate.observe(best_arrival_box(boxes, detect_roi=framing["detect_roi"]), time.monotonic())
+    arrival_box = best_arrival_box(boxes, detect_roi=framing["detect_roi"])
+    previous_best = gate.best_width
+    phase = gate.observe(arrival_box, time.monotonic())
+    from app.services import zirp_trigger
+
+    zirp_trigger.observe(int(camera.id), arrival_box, phase, frame_width=int(located.get("image_width") or 0))
+    if arrival_box is not None and gate.best_width > previous_best:
+        _widest_frames[int(camera.id)] = jpeg           # the sharpest view of this car so far
+    if phase == "departed":
+        # The car left without reaching the capture distance: one read of the
+        # widest frame it showed, so a car is never lost for being far.
+        _departed_frames[int(camera.id)] = _widest_frames.pop(int(camera.id), b"")
+    elif phase == "absent":
+        _widest_frames.pop(int(camera.id), None)
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
         return True
@@ -565,6 +590,14 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     else:
         lane.visit.observe(presence=True, plate="")
     return False
+
+
+async def _read_departed_vehicle(db, camera, jpeg: bytes, native: dict) -> None:
+    """Read the widest live frame of a car that never reached the capture distance."""
+    from app.services import zirp_trigger
+
+    alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True, force=False)
+    zirp_trigger.ready(int(camera.id), alpr, departed=True)
 
 
 def _note_arrival_result(camera_id: int, alpr: dict | None) -> bool:
@@ -648,10 +681,34 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         )
         if not await _video_arrival_ready(camera, jpeg):
             gateway.note_ai_sample(camera_id, dropped=True)
+            departed = _departed_frames.pop(int(camera_id), b"")
+            if departed[:2] == b"\xff\xd8":
+                await _read_departed_vehicle(db, camera, departed, native)
+            return
+        if str(getattr(settings, "capture_trigger", "zirp")) in {"zirp", "both"} and handle is not None:
+            # Zirp's own trigger: command the camera's full-resolution
+            # snapshot now (the image a loop-triggered camera would send) and
+            # read it through the normal event path, falling back to this
+            # live frame if no snapshot arrives.
+            from app.services import zirp_trigger
+
+            zirp_trigger.fired(camera_id, mode="snapshot")
+            task = asyncio.create_task(
+                _read_presence_now(camera_id, int(handle), background=True),
+                name=f"zirp-trigger-{camera_id}",
+            )
+            task.add_done_callback(_consume_background_task)
             return
         # The zone already saw a still plate. Read that crop even if the coil
         # has not pulsed; a moving frame never reaches this call.
         alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True)
+        from app.services import zirp_trigger
+        from app.services.camera_framing import best_arrival_box, gate_for
+
+        prepared = gate_for(int(camera_id)).prepared
+        arrival = best_arrival_box(prepared[1]) if prepared else None
+        zirp_trigger.ready(camera_id, alpr, width=zirp_trigger.box_width(arrival),
+                           frame_width=int((arrival or {}).get("image_width") or 0))
         if _note_arrival_result(camera.id, alpr):
             _alpr_fp[camera_id] = fp
 

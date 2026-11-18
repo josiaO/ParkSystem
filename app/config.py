@@ -176,6 +176,17 @@ class Settings(BaseSettings):
     # for configuration compatibility, but arrival admission never OCRs a far
     # plate merely because a timer elapsed.
     alpr_min_capture_plate_width_px: int = 64
+    # Zirp's own vehicle trigger. virtual_loop_enabled: fire at the capture
+    # width while the car moves (not only when it stops). capture_trigger:
+    #   zirp      Zirp commands the camera snapshot when the virtual loop fires
+    #   external  another system triggers the cameras; Zirp only reads (and
+    #             measures its own trigger in shadow) - for a site still run by
+    #             a legacy system
+    #   both      Zirp commands snapshots and also reads external events
+    virtual_loop_enabled: bool = True
+    capture_trigger: Literal["zirp", "external", "both"] = "zirp"
+    virtual_loop_detect_seconds: float = 0.25
+    virtual_loop_max_plate_fraction: float = 0.40
     alpr_capture_far_fallback_seconds: float = 0.0
     # SmartPark recognition zone (车牌识别区): skip sky / far field.
     # Normalized x1,y1,x2,y2. "off" uses the full frame.
