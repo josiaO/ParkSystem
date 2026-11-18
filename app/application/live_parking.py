@@ -119,4 +119,5 @@ async def handle_live_exit(
         policy=policy,
         occupied=True,
         source=source,
+        confidence=float(getattr(capture, "confidence", 0) or 0),
     )

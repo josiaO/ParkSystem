@@ -84,6 +84,36 @@ def recent_lookalike_session(db: Session, plate: str, gate_id: int | None) -> Pa
     return None
 
 
+def _correct_stay_plate(db: Session, row: ParkingSession, stay, *, gate, parker_kind: str) -> str:
+    """Move the visit to the stay's best-supported plate; returns the old plate if changed.
+
+    Only an unpaid casual visit is corrected, and never onto a plate that
+    already has its own open visit on this site.
+    """
+    from app.services.parking_sessions import active_for_plate
+
+    best = stay.best_plate()
+    old = str(row.plate or "")
+    scores = stay.scores()
+    if not best or best == old or scores.get(best, 0.0) <= scores.get(old, 0.0):
+        return ""                          # a tie never moves the plate
+    if float(row.amount_paid or 0) > 0 or (row.parker_kind or "CASUAL").upper() != "CASUAL":
+        return ""
+    other = active_for_plate(db, best, site_id=int(row.site_id or 1))
+    if other is not None and other.id != row.id:
+        return ""
+    row.plate = best
+    db.commit()
+    db.refresh(row)
+    scores = {p: round(v, 2) for p, v in scores.items()}
+    record_access_decision(
+        db, session=row, plate=best, gate=gate, lane_direction="ENTRY",
+        outcome="PLATE_CORRECTED", reason=f"{old} -> {best} by {stay.repeats + 1} reads {scores}",
+        parker_kind=parker_kind, barrier_opened=False,
+    )
+    return old
+
+
 def policy_from_parking_settings(cfg: dict[str, Any] | None) -> LanePolicy:
     cfg = cfg or {}
     resolved = resolve_receipt_policy(cfg)
@@ -172,8 +202,25 @@ class EntryLaneController:
         parker_kind = entitlement.kind if entitlement.registered else "CASUAL"
         subscriber = _is_subscriber(parker_kind) and policy.subscriber_skip_receipt
 
+        # Repeated captures of a car still waiting at this entry: one visit,
+        # and its plate follows the best-supported read (app/services/lane_stay).
+        stay = None
+        if camera is not None and not entitlement.registered:
+            from app.services import lane_stay
+
+            stay = lane_stay.observe(int(camera.id), plate, rec.confidence)
+            if stay.repeats and stay.session_id:
+                same = db.get(ParkingSession, int(stay.session_id))
+                if same is not None and same.exit_time is None and same.closed_at is None:
+                    return self._same_stay(db, same, stay, gate=gate, plate=plate, parker_kind=parker_kind,
+                                           entitlement=entitlement, source=source)
+
         lookalike = None if entitlement.registered else recent_lookalike_session(db, plate, gate.id if gate else None)
         if lookalike is not None:
+            if stay is not None:
+                from app.services import lane_stay
+
+                lane_stay.attach_session(int(camera.id), lookalike.id)
             record_access_decision(
                 db, session=lookalike, plate=plate, gate=gate, lane_direction="ENTRY",
                 outcome="DUPLICATE", reason=f"lookalike of {lookalike.plate} read moments ago",
@@ -211,6 +258,10 @@ class EntryLaneController:
                 "session": None,
                 "message": "No parking candidate from recognition.",
             }
+        if stay is not None:
+            from app.services import lane_stay
+
+            lane_stay.attach_session(int(camera.id), row.id)
         if entitlement.registered:
             row.access_plan_id = entitlement.plan_id
             row.vehicle_id = entitlement.vehicle_id
@@ -326,6 +377,36 @@ class EntryLaneController:
             db, row, gate=gate, camera=camera, policy=policy,
             entitlement=entitlement, source=source, created=True,
         )
+
+    def _same_stay(self, db: Session, row: ParkingSession, stay, *, gate, plate: str, parker_kind: str,
+                   entitlement, source: str) -> dict[str, Any]:
+        """Another capture of the car this stay already opened a visit for."""
+        corrected_from = _correct_stay_plate(db, row, stay, gate=gate, parker_kind=parker_kind)
+        record_access_decision(
+            db, session=row, plate=plate, gate=gate, lane_direction="ENTRY",
+            outcome="DUPLICATE", reason=f"same car still at the entry (read {stay.repeats + 1}: {plate})",
+            parker_kind=parker_kind, barrier_opened=False,
+        )
+        message = f"{plate}: the same car is still at the entry; visit {row.plate} kept."
+        if corrected_from:
+            message = f"Plate corrected {corrected_from} -> {row.plate} after {stay.repeats + 1} reads of the same car."
+        return {
+            "ok": True,
+            "action": "ENTRY",
+            "reason": "plate_corrected" if corrected_from else "same_stay",
+            "created_session": False,
+            "duplicate": True,
+            "barrier_opened": False,
+            "existing_lifecycle": row.lifecycle,
+            "assistance_required": False,
+            "stale_visit": False,
+            "plate_corrected_from": corrected_from or None,
+            "stay_reads": stay.repeats + 1,
+            "session": snapshot(row),
+            "entitlement": entitlement.__dict__,
+            "source": source,
+            "message": message,
+        }
 
     async def confirm_receipt_taken(
         self,

@@ -157,6 +157,7 @@ class ExitLaneController:
         occupied: bool | None = True,
         at: datetime | None = None,
         source: str = "camera",
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         if occupied is False:
             return {
@@ -171,6 +172,22 @@ class ExitLaneController:
                 "barrier_opened": False, "session": None,
                 "message": "No plate was resolved.",
             }
+        stay = None
+        if camera is not None:
+            # Repeated captures of one car at this exit (app/services/lane_stay):
+            # act on the best-supported read, and only once the barrier opened.
+            from app.services import lane_stay
+
+            stay = lane_stay.observe(int(camera.id), plate, confidence)
+            if stay.repeats and stay.barrier_opened:
+                return {
+                    "ok": True, "action": "EXIT", "reason": "same_stay", "duplicate": True,
+                    "barrier_opened": False, "session": None, "stay_reads": stay.repeats + 1,
+                    "message": f"{plate}: the same car is still at the exit; the barrier already opened for it.",
+                }
+            best = stay.best_plate()
+            if best and best != plate:
+                plate = best
         from app.services.parking_sessions import active_for_plate
         if event_id:
             previous = db.scalar(select(ParkingSession).where(
@@ -202,10 +219,15 @@ class ExitLaneController:
                 "suggestions": suggestions,
                 "message": message,
             }
-        return await self._submit_session(
+        result = await self._submit_session(
             db, row=row, event_id=event_id, gate=gate, camera=camera,
             lane_id=lane_id, policy=policy, at=at, source=source,
         )
+        if stay is not None and result.get("barrier_opened"):
+            from app.services import lane_stay
+
+            lane_stay.mark_opened(int(camera.id))
+        return result
 
     async def submit_qr(
         self,

@@ -167,7 +167,8 @@ def test_one_car_read_twice_with_an_ocr_slip_opens_one_session(Session):
         again = asyncio.run(lane.submit(db, _event("T188EKP", "a2"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
         other = asyncio.run(lane.submit(db, _event("T231EQS", "a3"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
         assert first["created_session"] is True
-        assert again["reason"] == "duplicate_lookalike" and again["barrier_opened"] is False
+        # one read each: a tie keeps the first plate (lane_stay); no second visit
+        assert again["reason"] in {"same_stay", "duplicate_lookalike"} and again["barrier_opened"] is False
         assert again["session"]["plate"] == "T189EKP"
         assert other["created_session"] is True          # a different car right behind is still admitted
         plates = sorted(db.scalars(select(ParkingSession.plate)).all())
@@ -182,5 +183,8 @@ def test_lookalike_rule_expires_after_the_window(Session):
         row = db.scalar(select(ParkingSession).where(ParkingSession.plate == "T189EKP"))
         row.created_at = datetime.now(timezone.utc) - timedelta(seconds=30)
         db.commit()
+        from app.services import lane_stay
+
+        lane_stay.reset()                    # the car left; the next one is a new stay
         later = asyncio.run(lane.submit(db, _event("T188EKP", "b2"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
         assert later["created_session"] is True
