@@ -384,7 +384,16 @@ class ArrivalGate:
         if self.fire_on_width and self.min_plate_width_px > 0:
             self._last = center
             if width < self.min_plate_width_px:
-                return "far"
+                # A car waiting short of the capture distance (queued at the
+                # barrier) still fires once it has been in view this long;
+                # the departure read alone came too late for an entry.
+                lingering = (
+                    self.far_fallback_seconds > 0
+                    and now - self._seen_since >= self.far_fallback_seconds
+                    and width >= self.departure_min_width_px
+                )
+                if not lingering:
+                    return "far"
             if self._announced or self._fired:
                 return "moving"
             if self._ocr_count >= self.max_ocr:
