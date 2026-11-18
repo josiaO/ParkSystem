@@ -129,3 +129,11 @@ def test_a_frame_wide_pattern_is_not_a_plate():
         assert gate_for(9904).best_width == 0
     finally:
         gate_for(9904).reset()
+
+
+def test_a_car_waiting_short_of_the_capture_distance_fires_after_lingering():
+    gate = ArrivalGate(min_plate_width_px=64, fire_on_width=True, far_fallback_seconds=1.5)
+    phases = [gate.observe(box(150, 52), 0.25 * i) for i in range(8)]   # 52 px, stays put
+    assert phases[:6] == ["far"] * 6
+    assert phases[6] == "ready"                                         # at 1.5 s in view
+    assert phases.count("ready") == 1
