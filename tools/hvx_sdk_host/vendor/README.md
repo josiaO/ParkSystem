@@ -1,6 +1,6 @@
 Optional extra copies of the vendor SDK on a Windows test PC.
 
-SmartPark loads `OcxConfig/` at the repo root first (`NetSDK.dll` and its x86 dependencies). This folder is only a fallback.
+The camera manufacturer's SDK (QY NetSDK, `NetSDK.dll` and its matched x86 DLLs) lives here for kit builds and developer runs. It is never taken from the legacy ParkWatch package. Installed kits load it from `<install>\vendor` (`SMARTPARK_HVX_VENDOR_DIR`).
 
 Expected main file if you use this fallback: `NetSDK.dll`.
 

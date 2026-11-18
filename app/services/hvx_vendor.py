@@ -39,8 +39,9 @@ def resolve_vendor_dir() -> Path:
     ocx = repo_root() / "OcxConfig"
     copied = repo_root() / "tools" / "hvx_sdk_host" / "vendor"
     installed = repo_root() / "vendor"
-    supplied = repo_root() / "Current_ParkSystem_configs" / "Camera_config" / "OcxConfig"
-    for candidate in (installed, ocx, copied, supplied):
+    # Only Zirp's own folders. ParkWatch (the legacy system studied while
+    # building Zirp) is never a source of files or behaviour.
+    for candidate in (installed, ocx, copied):
         if (candidate / "NetSDK.dll").exists():
             return candidate
     return ocx if ocx.exists() else copied
