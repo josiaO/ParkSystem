@@ -57,6 +57,14 @@ class _HVXVideoMixin:
         ready.wait(1.5)
         return self._hwnds.get(handle)
 
+    def _wait_for_frame(self, handle: int, ready: threading.Event, timeout: float) -> None:
+        """Wake on the next draw-data callback; the current-JPEG API has none, so sleep."""
+        if int(handle) in getattr(self, "_draw_callbacks", {}):
+            ready.wait(timeout=timeout)
+            ready.clear()
+        else:
+            time.sleep(timeout)
+
     def _draw_ready_event(self, handle: int) -> threading.Event:
         """Set by the draw-data callback when a new frame is stored for ``handle``."""
         events = self.__dict__.setdefault("_draw_ready", {})
@@ -752,8 +760,7 @@ class _HVXVideoMixin:
                 if time.monotonic() - last_progress_at < 5.0:
                     # Between camera frames: wait for the next draw callback
                     # (or the same timeout as before), not a blind timer.
-                    ready.wait(timeout=max(0.05, interval))
-                    ready.clear()
+                    self._wait_for_frame(handle, ready, max(0.05, interval))
                     continue
                 if time.monotonic() >= retry_at:
                     retry_at = time.monotonic() + 30.0
@@ -770,8 +777,7 @@ class _HVXVideoMixin:
             # frame and skipped a frame whenever two callbacks fell between
             # ticks (a visible hitch every ~1.5 s). With no callback the wait
             # times out as before, so the empty-decoder checks are unchanged.
-            ready.wait(timeout=max(0.002, interval - (time.monotonic() - started)))
-            ready.clear()
+            self._wait_for_frame(handle, ready, max(0.002, interval - (time.monotonic() - started)))
         with self._lock:
             if self._video_threads.get(handle) is threading.current_thread():
                 self._video_threads.pop(handle, None)

@@ -137,3 +137,12 @@ def test_a_car_waiting_short_of_the_capture_distance_fires_after_lingering():
     assert phases[:6] == ["far"] * 6
     assert phases[6] == "ready"                                         # at 1.5 s in view
     assert phases.count("ready") == 1
+
+
+def test_a_queued_car_behind_the_fired_one_also_fires():
+    gate = ArrivalGate(min_plate_width_px=64, fire_on_width=True)
+    assert gate.observe(box(200, 120), 0.0) == "ready"          # first car close
+    assert gate.observe(box(210, 130), 0.25) == "moving"
+    assert gate.observe(box(300, 50), 0.5) == "new_vehicle"     # next car, farther, no gap
+    phases = [gate.observe(box(300, w), 0.75 + 0.25 * i) for i, w in enumerate((60, 80, 95))]
+    assert phases.count("ready") == 1

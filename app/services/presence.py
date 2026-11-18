@@ -112,6 +112,26 @@ class PresenceWatch:
             at=now,
         )
 
+    def reported_edge(self, camera_id: int, occupied: bool, *, source: str = "loop-report",
+                      index: int | None = None, value: int | None = None) -> CoilEdge:
+        """An edge the device already debounced (the camera's loop-detector report).
+
+        ``observe`` debounces polled input levels across repeated samples; a
+        reported edge arrives once, so it takes effect immediately.
+        """
+        now = time.monotonic()
+        camera_id = int(camera_id)
+        previous = bool(self._occupied.get(camera_id, False))
+        current = bool(occupied)
+        self._occupied[camera_id] = current
+        self._raw[camera_id] = current
+        self._raw_at[camera_id] = now
+        rising, falling = current and not previous, previous and not current
+        if rising:
+            self._fired_at[camera_id] = now
+        return CoilEdge(camera_id=camera_id, occupied=current, rising=rising, falling=falling,
+                        source=source, index=index, value=value, at=now)
+
     def occupied(self, camera_id: int) -> bool:
         return bool(self._occupied.get(camera_id, False))
 
