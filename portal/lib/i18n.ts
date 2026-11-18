@@ -74,6 +74,17 @@ const en = {
   offline: "The parking server is not reachable. Please try again in a moment.",
   footer: "Keep your parking ticket until you have exited. Never share your mobile-money PIN.",
   help: "Need help? Call",
+  graceTitle: "Time left to exit",
+  graceBody: "Drive to the exit before the timer ends. The camera reads your plate and the barrier opens.",
+  graceOver: "Exit time is over",
+  graceOverBody: "Extra time may be charged. Refresh to see if anything is due.",
+  passTitle: "Exit pass",
+  passBody: "If the camera cannot read your plate, show this QR to the exit scanner. No paper needed.",
+  payWith: "Pay with",
+  orCash: "Or pay cash at the exit kiosk",
+  breakdown: "Fee details",
+  paidBadge: "PAID",
+  refresh: "Refresh",
 } as const;
 
 export type Strings = { [K in keyof typeof en]: string };
@@ -152,6 +163,17 @@ const sw: Strings = {
   offline: "Seva ya maegesho haipatikani. Jaribu tena baada ya muda mfupi.",
   footer: "Weka tiketi yako hadi utakapotoka. Usimpe mtu yeyote PIN yako ya pesa kwa simu.",
   help: "Unahitaji msaada? Piga",
+  graceTitle: "Muda uliobaki wa kutoka",
+  graceBody: "Endesha hadi geti la kutokea kabla muda haujaisha. Kamera itasoma namba ya gari na kizuizi kitafunguka.",
+  graceOver: "Muda wa kutoka umeisha",
+  graceOverBody: "Huenda ukatozwa muda wa ziada. Onyesha upya kuona kama kuna cha kulipa.",
+  passTitle: "Pasi ya kutoka",
+  passBody: "Kamera isiposoma namba ya gari, onyesha QR hii kwenye skana ya kutokea. Hakuna haja ya karatasi.",
+  payWith: "Lipa kwa",
+  orCash: "Au lipa fedha taslimu kwenye kioski",
+  breakdown: "Maelezo ya ada",
+  paidBadge: "IMELIPWA",
+  refresh: "Onyesha upya",
 };
 
 export const STRINGS: Record<Lang, Strings> = { en, sw };

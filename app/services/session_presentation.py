@@ -160,6 +160,14 @@ def session_presentation(db: Session, row: ParkingSession, *, audience: str = "d
         "crop_url": images.get("crop_url"),
         # Printed on the ticket; lets a driver quote the visit to an attendant.
         "reference": getattr(row, "human_reference", "") or "",
+        # After payment the driver has until exit_grace_until to leave without
+        # a new charge; the phone page counts it down.
+        "paid_at": as_site_local(row.paid_at, site_policy(db)).isoformat() if getattr(row, "paid_at", None) else None,
+        "exit_grace_until": (
+            as_site_local(row.payment_exit_grace_until, site_policy(db)).isoformat()
+            if getattr(row, "payment_exit_grace_until", None) else None
+        ),
+        "server_time": as_site_local(datetime.now(timezone.utc), site_policy(db)).isoformat(),
         **tariff_summary(row, _rules_for(db, row)),
         **stay,
     }
