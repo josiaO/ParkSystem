@@ -95,6 +95,7 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         qr_payload=qr_payload,
         tariff_rules=row.tariff_rules if isinstance(row.tariff_rules, dict) else None,
         plate_status=row.plate_status,
+        language=settings.ticket_language,
     )
     return ReceiptDocument(
         site_name=content.site_name,
@@ -109,6 +110,7 @@ def build_document(row: ParkingSession, *, gate: Gate | None, public_url: str) -
         qr_png=_qr_png(content.qr_payload),
         lines=content.lines,
         rate=content.rate,
+        language=content.language,
     )
 
 

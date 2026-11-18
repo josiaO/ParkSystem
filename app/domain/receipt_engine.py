@@ -136,21 +136,67 @@ def _span(seconds: float) -> str:
     return f"{max(1, seconds // 60)}m"
 
 
-def rate_line(rules: dict[str, Any] | None) -> str:
-    """Short tariff for the ticket, e.g. "45m free · TZS 1,000/hr"."""
+TICKET_LANGUAGES = ("en", "sw", "both")
+
+# key: (English, Swahili)
+TICKET_TEXT = {
+    "title": ("PARKING ENTRY TICKET", "TIKETI YA KUINGIA MAEGESHO"),
+    "keep": ("KEEP THIS TICKET", "HIFADHI TIKETI HII"),
+    "entry": ("Entry", "Kuingia"),
+    "gate": ("Gate", "Geti"),
+    "rate": ("Rate", "Ada"),
+    "ref": ("Ref", "Kumb"),
+    "how": ("HOW TO PAY", "JINSI YA KULIPA"),
+    "pay": ("Scan the QR with your phone, or pay at the kiosk before you exit.",
+            "Changanua QR kwa simu yako, au lipia kwenye kioski kabla ya kutoka."),
+    "valid": ("Valid at any exit. If the camera cannot read your plate, scan the QR at the exit.",
+              "Inatumika geti lolote la kutoka. Kamera isiposoma namba ya gari, changanua QR getini."),
+    "plate_pending": ("Plate pending", "Namba haijasomwa"),
+}
+
+
+def ticket_language(value: str | None) -> str:
+    value = str(value or "").strip().lower()
+    return value if value in TICKET_LANGUAGES else "en"
+
+
+def ticket_label(key: str, language: str) -> str:
+    """Short label: one language, or both side by side ("Entry / Kuingia")."""
+    en, sw = TICKET_TEXT[key]
+    return {"en": en, "sw": sw}.get(ticket_language(language), f"{en} / {sw}")
+
+
+def ticket_phrases(key: str, language: str) -> list[str]:
+    """A sentence in the ticket language(s): one line each, English first."""
+    en, sw = TICKET_TEXT[key]
+    return {"en": [en], "sw": [sw]}.get(ticket_language(language), [en, sw])
+
+
+def rate_line(rules: dict[str, Any] | None, language: str = "en") -> str:
+    """Short tariff for the ticket, e.g. "45m free · TZS 1,000/hr" (sw: "dk 45 bure · TZS 1,000/saa")."""
     rules = rules or {}
+    swahili = ticket_language(language) == "sw"
     parts = []
     free = int(rules.get("free_day_seconds") or rules.get("grace_seconds") or 0)
     if free > 0:
-        parts.append(f"{_span(free)} free")
+        parts.append(f"{_span_sw(free)} bure" if swahili else f"{_span(free)} free")
     try:
         fee, block = float(rules.get("day_block_fee") or 0), float(rules.get("day_block_seconds") or 0)
     except (TypeError, ValueError):
         fee, block = 0.0, 0.0
     if fee > 0 and block > 0:
         currency = str(rules.get("currency") or "TZS")
-        parts.append(f"{currency} {fee:,.0f}/{_span(block)}")
+        unit = _span_sw(block, per=True) if swahili else _span(block)
+        parts.append(f"{currency} {fee:,.0f}/{unit}")
     return " · ".join(parts)
+
+
+def _span_sw(seconds: float, *, per: bool = False) -> str:
+    seconds = int(seconds)
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return "saa" if per and hours == 1 else f"saa {hours}"
+    return f"dk {max(1, seconds // 60)}"
 
 
 def plate_line(plate: str, *, plate_status: str = "") -> str:
@@ -171,25 +217,30 @@ def render_entry_receipt(
     qr_payload: str,
     tariff_rules: dict[str, Any] | None = None,
     plate_status: str = "",
+    language: str = "en",
 ) -> "ReceiptContent":
+    language = ticket_language(language)
     shown_plate = plate_line(plate, plate_status=plate_status)
+    if shown_plate == "Plate pending" and language == "sw":
+        shown_plate = TICKET_TEXT["plate_pending"][1]
     free = free_period_line(tariff_rules)
-    rate = rate_line(tariff_rules)
+    rate = rate_line(tariff_rules, language)
     lines = [
         site_name or "Parking Site",
-        "PARKING ENTRY TICKET · KEEP THIS TICKET",
+        " · ".join(ticket_phrases("title", language)),
+        " · ".join(ticket_phrases("keep", language)),
         "",
         shown_plate,
         "",
-        f"Entry: {entry_time}",
-        f"Gate: {entry_lane or '—'}",
-        *([f"Rate: {rate}"] if rate else []),
+        f"{ticket_label('entry', language)}: {entry_time}",
+        f"{ticket_label('gate', language)}: {entry_lane or '—'}",
+        *([f"{ticket_label('rate', language)}: {rate}"] if rate else []),
         "",
-        "HOW TO PAY",
-        "Scan the QR with your phone, or pay at the kiosk before you exit.",
-        f"Ref: {human_reference}",
+        ticket_label("how", language),
+        *ticket_phrases("pay", language),
+        f"{ticket_label('ref', language)}: {human_reference}",
         "",
-        "Valid at any exit. If the camera cannot read your plate, scan the QR at the exit.",
+        *ticket_phrases("valid", language),
     ]
     return ReceiptContent(
         site_name=site_name or "SmartPark",
@@ -202,6 +253,7 @@ def render_entry_receipt(
         body_text="\n".join(lines) + "\n",
         lines=lines,
         rate=rate,
+        language=language,
     )
 
 
@@ -217,6 +269,7 @@ class ReceiptContent:
     body_text: str
     lines: list[str] = field(default_factory=list)
     rate: str = ""
+    language: str = "en"
 
 
 @dataclass

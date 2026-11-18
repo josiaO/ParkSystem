@@ -182,6 +182,7 @@ export type SessionRow = {
   currency: string;
   amount_due: number;
   amount_paid: number;
+  due_now?: number | null;
   snapshot_url?: string | null;
   plate_confidence?: number | null;
 };
