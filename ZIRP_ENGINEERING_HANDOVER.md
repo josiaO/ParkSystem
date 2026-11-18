@@ -862,3 +862,35 @@ This does not fix misreads inside a slot class (T186EEP/T188EEP, T697DHY/T697DHV
   - `-Force` without a choice is refused. `-DryRun` shows the plan without changing anything.
   - The stop list now includes the Recognition Worker, portal and mock services.
   - Verified on SERVER01 with `-DryRun` across all paths; services and data were untouched.
+
+### 17.5 Live video smoothness and missed cars (2026-11-18)
+
+**Video.**
+- **Cameras:** the QY SDK delivers a steady ~10 fps per camera (95–99 ms per frame).
+- **The defect:** the host's JPEG encoder ticked on its own 15/s timer, beating against the camera clock:
+  - frames waited 0–70 ms (37 ms median) before they could be served;
+  - whenever two camera frames fell between ticks, the older one was skipped, a hitch roughly every 1.5 s;
+  - a second fixed sleep in the "between frames" branch kept the delay even after the first fix.
+- **The fix (`c781a2a`):** the draw-data callback now wakes the encoder through a per-camera event.
+- **Measured on 4 cameras:**
+  - frame age at serve p50 40 ms → 8 ms (p95 70 → 14 ms);
+  - encoded fps equals delivered fps (no skips), 10.3–11 fps;
+  - no frozen or duplicate frames.
+- **Remaining:** gaps are still uneven (p50 67 ms, p95 ~185 ms) because the camera's decoder hands frames over in bursts; smoothing that needs a display buffer, which adds delay. The fps diagnostics are now a 60 s rolling rate; the lifetime average had read 3.6 fps.
+
+**Missed cars.**
+- **Visibility:** every camera event now records an outcome (`495ad4d`; `event_outcomes` in the runtime heartbeat), and unread event images are kept in `media/misses`.
+- **What review showed:**
+  - Most unread events had no readable plate in view: empty lanes (guard or pedestrian), a goods tricycle, and cars caught side-on after a late trigger.
+  - The real misses were clear plates lost by the plate-crop perspective warp (`T710EMG` two-line plate, government `STL7509`); the plain crop reads them at 0.999.
+- **Fix (`0d15ed9`):** OCR the unwarped crop when the warped view is not accepted. Zooming or a lower detector threshold recovered nothing more.
+- **Live, before → after:**
+
+  | | Before | After |
+  |---|---|---|
+  | Events | 99 | 66 |
+  | Read | 71 | 57 |
+  | Unread | 9 | 0 |
+  | No read of that car within 20 s | 7 | 0 |
+
+- **Open:** the late triggers come from ParkWatch's snapshot timing. A short pre-event buffer of live frames could add another chance to read a car, but the data does not need it yet.
