@@ -68,6 +68,18 @@ def _show_camera_read(
     })
 
 
+def _note_event_result(camera_id: int, capture: dict, jpeg: bytes, result: dict | None, used_native: bool) -> None:
+    """One outcome per camera event (see app/services/event_outcomes.py)."""
+    from app.services import event_outcomes
+
+    outcome = "native" if used_native else event_outcomes.classify(result)
+    plate = str(((result or {}).get("best") or {}).get("plate") or "")
+    event_outcomes.note(
+        camera_id, outcome, visit_id=str((capture or {}).get("visit_id") or ""), jpeg=jpeg,
+        detail=plate or str((result or {}).get("detail") or (result or {}).get("error") or ""),
+    )
+
+
 async def _native_fallback_if_unread(
     db: Session,
     camera: Camera,
@@ -152,7 +164,8 @@ async def _process_native_capture(
                 result = await _run_event_alpr(
                     db, row, frame, native=native, image_id=image_id, plate_crop=crop,
                 )
-                await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
+                used_native = await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
+                _note_event_result(camera_id, capture, jpeg, result, used_native)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -261,6 +274,12 @@ async def _drain_camera_events(
             boxes, located = await run_inference(locate_plate_boxes, jpeg)
             found = boxes if located.get("available") else []
             if not found:
+                from app.services import event_outcomes
+
+                event_outcomes.note(
+                    camera_id, "no_plate_box" if located.get("available") else "not_run",
+                    jpeg=jpeg, detail=str(located.get("detail") or located.get("reason") or ""),
+                )
                 continue
             box = found[0]
             # The event read below would run the detector on this same still
@@ -392,7 +411,8 @@ async def _drain_camera_events(
                     result = await _run_event_alpr(
                         db, row, frame, native=native, image_id=image_id, plate_crop=crop,
                     )
-                    await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
+                    used_native = await _native_fallback_if_unread(db, row, capture, jpeg, crop, native, result)
+                    _note_event_result(camera_id, capture, jpeg, result, used_native)
     return processed
 
 
