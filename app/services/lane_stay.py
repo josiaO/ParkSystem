@@ -65,6 +65,7 @@ class Stay:
     reads: list[tuple[str, float]] = field(default_factory=list)
     session_id: int | None = None
     barrier_opened: bool = False
+    reported_no_session: set[str] = field(default_factory=set)   # exit: alerted once per plate
 
     @property
     def repeats(self) -> int:

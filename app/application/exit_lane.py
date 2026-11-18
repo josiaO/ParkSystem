@@ -198,6 +198,15 @@ class ExitLaneController:
                         "barrier_opened": bool(previous.exit_open_command_uuid), "session": snapshot(previous),
                         "message": "This exit event already belongs to its original session."}
         row = active_for_plate(db, plate, site_id=site_id)
+        if row is None and stay is not None and plate in stay.reported_no_session:
+            # The same car, still waiting, already raised "no session" for this
+            # plate: check again (done above) but do not alert again.
+            return {
+                "ok": False, "action": "EXIT", "reason": "same_stay_no_session", "duplicate": True,
+                "barrier_opened": False, "pay_required": False, "session": None,
+                "stay_reads": stay.repeats + 1,
+                "message": f"{plate}: still no active session (already reported for this car).",
+            }
         if row is None:
             from app.services.kiosk_lookup import near_matches
 
@@ -210,6 +219,8 @@ class ExitLaneController:
                 barrier_opened=False,
                 extra={"suggestions": suggestions} if suggestions else None,
             )
+            if stay is not None:
+                stay.reported_no_session.add(plate)
             message = f"No active parking session for {plate}. Scan the receipt QR or call an operator."
             if suggestions:
                 message += " Did you mean " + " or ".join(item["plate"] for item in suggestions) + "? Check with the receipt."
