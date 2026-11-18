@@ -246,3 +246,44 @@ def test_gate_controller_traces_each_actuator_in_order(host, monkeypatch):
     actuators = next(row for row in rows if row["stage"] == "gate.actuators")
     assert actuators["gpio_ms"] >= 120  # includes the relay hold
     assert next(row for row in rows if row["stage"] == "gate.open_result")["ok"] is True
+
+
+@pytest.fixture
+def host10(tmp_path, monkeypatch):
+    """Same host, camera at 10 fps like the QY sub-streams on SERVER01."""
+    monkeypatch.setenv("SMARTPARK_LATENCY_TRACE_FRAME_EVERY", "1")
+    tracer = latency_trace.configure("hvx-host", tmp_path, enabled=True)
+    sdk, dll = fake_hvx_sdk.make_sdk_and_dll(hvx_sdk.HVXSDK, tmp_path, fps=10, width=320, height=180)
+    monkeypatch.setattr(hvx_host, "sdk", sdk)
+    server = hvx_host.BoundedHTTPServer(("127.0.0.1", 0), hvx_host.Handler, max_workers=4, max_pending=8)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    handle = sdk.add_and_connect("10.0.0.6", 30000, 3, "", "")["handle"]
+    yield SimpleNamespace(sdk=sdk, port=server.server_address[1], handle=handle, tracer=tracer, trace_dir=tmp_path)
+    server.shutdown()
+    server.server_close()
+    sdk.close()
+    tracer.close()
+    monkeypatch.setattr(latency_trace, "_tracer", None)
+
+
+def test_each_camera_frame_is_encoded_on_arrival_and_none_is_skipped(host10):
+    """The encoder used to tick on its own 15/s timer: 0-70 ms added per frame
+    and a skipped frame whenever two callbacks fell between ticks."""
+    after, seqs = 0, []
+    status, headers, _ = _get(host10.port, f"/live-jpeg/{host10.handle}?after=0&wait_ms=2000")
+    after = int(headers["X-Frame-Seq"])
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        status, headers, body = _get(host10.port, f"/live-jpeg/{host10.handle}?after={after}&wait_ms=1500")
+        assert status == 200 and body[:2] == b"\xff\xd8"
+        after = int(headers["X-Frame-Seq"])
+        seqs.append(after)
+    steps = [b - a for a, b in zip(seqs, seqs[1:])]
+    assert len(seqs) >= 20                                  # ~10 fps for 3 s
+    assert sum(1 for step in steps if step > 1) <= 1, steps  # no frame dropped between camera and viewer
+    host10.tracer.flush()
+    stored = sorted(row["callback_to_stored_ms"] for row in _rows(host10.trace_dir)
+                    if row.get("stage") == "host.frame.stored")
+    print("callback->stored ms p50", stored[len(stored) // 2], "max", stored[-1], "skips", sum(1 for s in steps if s > 1))
+    assert stored and stored[len(stored) // 2] < 25, stored  # encoded on arrival (was ~37 ms median)

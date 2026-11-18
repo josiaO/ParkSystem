@@ -43,6 +43,8 @@ class _NullMetrics:
 
 
 HOST_METRICS = _latency.MetricsRegistry() if _latency is not None else _NullMetrics()
+# Window for the callback / JPEG frame-rate diagnostics (a rolling rate, not lifetime).
+FPS_WINDOW_SECONDS = 60.0
 
 
 def _trace(stage: str, **fields):
