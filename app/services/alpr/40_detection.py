@@ -183,6 +183,22 @@ def _hits_from_detections(engine, bgr, detections, *, save_crops: bool = False) 
                     text, conf, plate, accepted = enhanced_text, enhanced_conf, enhanced_plate, True
             except Exception:
                 pass
+        if not accepted and rectified:
+            # The perspective warp can lock onto the wrong quadrilateral (a
+            # two-line plate, a bumper edge) and hand OCR an empty view. On
+            # SITE-PC01 that lost clear plates (T610EMG, STL6502) that the plain
+            # padded crop reads at 0.999. Fall back to the unwarped crop.
+            for enhance in (low_light, not low_light):
+                try:
+                    plain = engine.ocr.predict(_prepare_ocr_crop(crop, enhance=enhance))
+                except Exception:
+                    continue
+                plain_text, plain_conf = _ocr_result_text(plain)
+                plain_plate, _rank = _apply_country_profile(plain_text, plain_conf)
+                if accept_ocr_plate(plain_plate, plain_conf, bbox=bbox, image_size=(image_w, image_h)):
+                    text, conf, plate, accepted = plain_text, plain_conf, plain_plate, True
+                    rectified_crop = crop          # the saved evidence crop is the view that was read
+                    break
         ocr_finished = time.monotonic()
         raw_conf = max(0.0, min(float(conf or 0), 1.0))
         if not accept_ocr_plate(plate, raw_conf, bbox=bbox, image_size=(image_w, image_h)):
