@@ -57,6 +57,14 @@ class _HVXVideoMixin:
         ready.wait(1.5)
         return self._hwnds.get(handle)
 
+    def _draw_ready_event(self, handle: int) -> threading.Event:
+        """Set by the draw-data callback when a new frame is stored for ``handle``."""
+        events = self.__dict__.setdefault("_draw_ready", {})
+        event = events.get(int(handle))
+        if event is None:
+            event = events.setdefault(int(handle), threading.Event())
+        return event
+
     def _draw_data_jpeg(self, handle: int) -> bytes:
         handle = int(handle)
         with self._lock:
@@ -112,6 +120,8 @@ class _HVXVideoMixin:
                 frames_received = int(diagnostics.get("frames_received") or 0) + 1
                 first = float(diagnostics.get("jpeg_window_at") or now)
                 count = int(diagnostics.get("jpeg_window_frames") or 0) + 1
+                if now - first > FPS_WINDOW_SECONDS:
+                    first, count = now, 1
                 diagnostics.update(
                     jpeg_encode_ms=encode_ms,
                     jpeg_source_width=source_width,
@@ -585,6 +595,7 @@ class _HVXVideoMixin:
         last_progress_at = time.monotonic()
         previous_jpeg = b""
         previous_seq = 0
+        ready = self._draw_ready_event(handle)
         def publish(jpeg):
             with self._lock:
                 if handle in self._video_handles:
@@ -739,7 +750,10 @@ class _HVXVideoMixin:
                     time.sleep(max(0.05, interval))
                     continue
                 if time.monotonic() - last_progress_at < 5.0:
-                    time.sleep(max(0.05, interval))
+                    # Between camera frames: wait for the next draw callback
+                    # (or the same timeout as before), not a blind timer.
+                    ready.wait(timeout=max(0.05, interval))
+                    ready.clear()
                     continue
                 if time.monotonic() >= retry_at:
                     retry_at = time.monotonic() + 30.0
@@ -751,7 +765,13 @@ class _HVXVideoMixin:
                     except Exception as exc:
                         self._note_video(handle, control_error=str(exc))
                         logging.getLogger("smartpark.hvx").warning("Video recovery failed: handle=%s error=%s", handle, exc)
-            time.sleep(max(0.002, interval - (time.monotonic() - started)))
+            # Wake on the camera callback instead of a fixed timer. A timer at
+            # 15/s sampling a 10/s camera added 0-70 ms (37 ms median) to every
+            # frame and skipped a frame whenever two callbacks fell between
+            # ticks (a visible hitch every ~1.5 s). With no callback the wait
+            # times out as before, so the empty-decoder checks are unchanged.
+            ready.wait(timeout=max(0.002, interval - (time.monotonic() - started)))
+            ready.clear()
         with self._lock:
             if self._video_threads.get(handle) is threading.current_thread():
                 self._video_threads.pop(handle, None)
@@ -1306,6 +1326,10 @@ class _HVXVideoMixin:
             diagnostics = getattr(self, "_video_diagnostics", {}).setdefault(handle, {})
             callback_first = float(diagnostics.get("callback_window_at") or callback_now)
             callback_count = int(diagnostics.get("callback_window_frames") or 0) + 1
+            if callback_now - callback_first > FPS_WINDOW_SECONDS:
+                # A rolling rate, not a lifetime average: the lifetime figure
+                # hid the current rate (3.6 "fps" while the camera ran at 10).
+                callback_first, callback_count = callback_now, 1
             diagnostics.update(
                 callback_last_at=callback_now,
                 callback_frames=seq,
@@ -1313,6 +1337,7 @@ class _HVXVideoMixin:
                 callback_window_frames=callback_count,
                 callback_fps=round(callback_count / max(callback_now - callback_first, 0.001), 1),
             )
+        self._draw_ready_event(handle).set()
         self._note_video(
             handle,
             capture_mode="sdk_draw_data",
