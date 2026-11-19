@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, run_db
 from app.domain.site import DEFAULT_SITE_ID
 from app.models import Receipt, User
 from app.schemas import ExitQrScanRequest, PaymentConfirm, PublicPaymentIntentRequest, SimExitRequest
@@ -85,10 +85,14 @@ async def mobile_money_webhook(request: Request, db: Session = Depends(get_db)):
 @router.post("/sim/exit")
 async def sim_exit_ep(payload: SimExitRequest, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
     _rt._require_development_simulation()
-    gate = _rt.get_gate_or_404(db, payload.gate_id)
+    gate = await run_db(_rt.get_gate_or_404, db, payload.gate_id)
     result = await _rt.handle_exit(db, plate=payload.plate, gate=gate, side=payload.side)
-    _rt.write_audit(db, user, "sim.exit", "gate", str(gate.id), payload.plate)
-    db.commit()
+
+    def _finish():
+        _rt.write_audit(db, user, "sim.exit", "gate", str(gate.id), payload.plate)
+        db.commit()
+
+    await run_db(_finish)
     if not result.get("ok") and not result.get("pay_required"):
         raise HTTPException(409, result.get("message") or "Exit failed")
     return result
@@ -483,7 +487,7 @@ async def public_receipt_pay(token: str, payload: PaymentConfirm = PaymentConfir
     from app.services.public_pay import pay_public_session, session_by_public_token
     from app.services.public_ingress import privacy_headers
 
-    row = session_by_public_token(db, token)
+    row = await run_db(session_by_public_token, db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
     method = (payload.method or "MOBILE_SIMULATED").strip().upper()
@@ -521,7 +525,7 @@ async def public_payment_intent(payload: PublicPaymentIntentRequest, db: Session
     from app.services.public_pay import session_by_public_token
     from app.services.public_ingress import privacy_headers
 
-    row = session_by_public_token(db, payload.token)
+    row = await run_db(session_by_public_token, db, payload.token)
     if not row:
         raise HTTPException(404, "Receipt not found")
     provider_id = (payload.provider or "").strip().lower() or mobile_payments.active_mobile_provider_id()
@@ -603,9 +607,11 @@ async def kiosk_receipt_pay(
     """Operator confirms cash after scanning the receipt QR at the kiosk."""
     from app.services.public_pay import pay_public_session, session_by_public_token
 
-    _rt._refuse_cash_on_unattended_kiosk(db, user)
+    def _prepare():
+        _rt._refuse_cash_on_unattended_kiosk(db, user)
+        return session_by_public_token(db, token)
 
-    row = session_by_public_token(db, token)
+    row = await run_db(_prepare)
     if not row:
         raise HTTPException(404, "Receipt not found")
     try:
@@ -617,7 +623,7 @@ async def kiosk_receipt_pay(
         raise HTTPException(403, str(exc))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    _rt.write_audit(db, user, "payments.create", "parking_session", str(row.id), f"kiosk QR {row.plate}")
+    await run_db(_rt.write_audit, db, user, "payments.create", "parking_session", str(row.id), f"kiosk QR {row.plate}")
     return result
 
 
@@ -639,16 +645,19 @@ async def exit_qr_scan(
     from app.application.exit_lane import ExitLaneController
     from app.application.entry_lane import policy_from_parking_settings
 
-    gate = _rt._gate_for_node(db, int(payload.gate_id), action="exit-qr-scan")
-    if not gate.enabled:
-        raise HTTPException(404, "Exit gate not found or disabled")
-    camera = _rt._camera_for_node(db, int(payload.camera_id), action="exit-qr-scan") if payload.camera_id else None
-    if camera is not None and camera.gate_id not in {None, gate.id}:
-        raise HTTPException(409, "Camera is assigned to a different gate")
-    site_id = int(payload.site_id or gate.site_id or DEFAULT_SITE_ID)
-    if int(gate.site_id or DEFAULT_SITE_ID) != site_id:
-        raise HTTPException(409, "Gate does not belong to the requested site")
+    def _prepare():
+        gate = _rt._gate_for_node(db, int(payload.gate_id), action="exit-qr-scan")
+        if not gate.enabled:
+            raise HTTPException(404, "Exit gate not found or disabled")
+        camera = _rt._camera_for_node(db, int(payload.camera_id), action="exit-qr-scan") if payload.camera_id else None
+        if camera is not None and camera.gate_id not in {None, gate.id}:
+            raise HTTPException(409, "Camera is assigned to a different gate")
+        site_id = int(payload.site_id or gate.site_id or DEFAULT_SITE_ID)
+        if int(gate.site_id or DEFAULT_SITE_ID) != site_id:
+            raise HTTPException(409, "Gate does not belong to the requested site")
+        return gate, camera, site_id, policy_from_parking_settings(_rt.parking_settings(db))
 
+    gate, camera, site_id, policy = await run_db(_prepare)
     out = await ExitLaneController().submit_qr(
         db,
         raw_scan=payload.raw_scan,
@@ -657,10 +666,11 @@ async def exit_qr_scan(
         gate=gate,
         camera=camera,
         lane_id=payload.lane_id or (camera.lane_id if camera else None),
-        policy=policy_from_parking_settings(_rt.parking_settings(db)),
+        policy=policy,
         source="operator-qr",
     )
-    _rt.write_audit(
+    await run_db(
+        _rt.write_audit,
         db, user, "exit.qr_scan", "parking_session",
         str((out.get("session") or {}).get("id") or ""),
         f"gate={gate.id} result={out.get('reason')}",
