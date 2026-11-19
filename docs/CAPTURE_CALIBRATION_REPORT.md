@@ -201,3 +201,36 @@ camera-snapshot-to-decision median 925 → 725 ms, p90 1.74 → 1.06 s,
 p99 4.4 → 2.3 s. Caveat: 4.7 h before (1,484 cars) vs 15 min after
 (64 cars, lighter evening traffic). OCR still has rare multi-second spikes
 (worst 5.4 s after the change).
+
+## Update: lane 2# stored no sessions; stuck snapshot/crop (19 Nov, night)
+
+**What happened.** 2# Entry (camera 3, calibration v5) had *Brightness to* saved as
+2 on the 0–255 scale. Every plate is brighter than 2, so every read was refused as
+"too bright" (273 refusals in the log, no capture stored, so no entry session). The
+Live Gates pane kept showing the plate text of each new read, but the snapshot and
+crop came from the last *stored* capture, so they looked frozen on an old car.
+
+**Guard rails.** Settings that would refuse most or all cars can no longer be saved
+(Site Server and the calibration window's spin boxes both enforce it):
+brightness to ≥ 150, brightness from ≤ 100, glare/black allowed ≥ 0.20, detector and
+recognition confidence ≤ 0.90, minimum plate ≤ 160 × 40 px on the live picture,
+and at least 8 % of the picture between the start and end lines. Values saved before
+these limits are not applied (defaults are used) and are listed as ignored in the
+calibration window and the Settings → Camera calibration tab, until saved again.
+
+**Warnings.** When a calibrated camera refuses 3 or more cars within 10 minutes and
+stores none since, the lane shows a plain warning with the top reasons (Live Gates
+pane, calibration window, Settings tab; also `warning` in
+`GET /cameras/{id}/calibration` and `calibration_warning` in `/cameras/{id}/plates`).
+
+**Refused car shown, not the old one.** A refused read keeps its picture. For two
+minutes, or until a car is stored, the Live Gates pane shows that car's snapshot and
+plate crop marked **NOT STORED** with the reason
+(`GET /cameras/{id}/calibration/rejected.jpg[?part=crop]`). The kiosk still shows
+stored evidence only, because only stored captures create sessions.
+
+**Tests.** `test_settings_that_would_refuse_every_car_cannot_be_saved`,
+`test_unsafe_value_saved_before_the_limits_is_ignored_and_reported`,
+`test_refused_reads_warn_the_lane_and_show_the_refused_car` (persist_event through to
+the warning, refused images and plates payload), and
+`test_refused_read_replaces_the_old_stored_car_marked_not_stored` (desktop pane).

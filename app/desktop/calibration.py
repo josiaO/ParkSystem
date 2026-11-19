@@ -262,14 +262,18 @@ class CalibrationWindow(QDialog):
         self.enabled = QCheckBox("Use the capture zone and limits below")
         self.enabled.setToolTip("Off = uncalibrated: the whole picture, no size or quality limits.")
         form.addRow(self.enabled)
-        self.min_w = QSpinBox(); self.min_w.setRange(0, 1000); self.min_w.setSuffix(" px")
-        self.min_h = QSpinBox(); self.min_h.setRange(0, 600); self.min_h.setSuffix(" px")
-        self.min_det = QDoubleSpinBox(); self.min_det.setRange(0, 1); self.min_det.setSingleStep(0.05); self.min_det.setDecimals(2)
-        self.min_ocr = QDoubleSpinBox(); self.min_ocr.setRange(0, 1); self.min_ocr.setSingleStep(0.05); self.min_ocr.setDecimals(2)
+        # Ranges stop at values that would refuse most cars (the Site Server
+        # refuses them too, and ignores any saved before these limits).
+        self.min_w = QSpinBox(); self.min_w.setRange(0, 160); self.min_w.setSuffix(" px")
+        self.min_h = QSpinBox(); self.min_h.setRange(0, 40); self.min_h.setSuffix(" px")
+        self.min_det = QDoubleSpinBox(); self.min_det.setRange(0, 0.9); self.min_det.setSingleStep(0.05); self.min_det.setDecimals(2)
+        self.min_ocr = QDoubleSpinBox(); self.min_ocr.setRange(0, 0.9); self.min_ocr.setSingleStep(0.05); self.min_ocr.setDecimals(2)
         self.min_sharp = QDoubleSpinBox(); self.min_sharp.setRange(0, 5000); self.min_sharp.setSingleStep(10); self.min_sharp.setDecimals(0)
-        self.min_bright = QSpinBox(); self.min_bright.setRange(0, 255)
-        self.max_bright = QSpinBox(); self.max_bright.setRange(0, 255)
-        self.max_clip = QDoubleSpinBox(); self.max_clip.setRange(0, 1); self.max_clip.setSingleStep(0.05); self.max_clip.setDecimals(2)
+        self.min_bright = QSpinBox(); self.min_bright.setRange(0, 100)
+        self.min_bright.setToolTip("0-255 scale. 0 = no lower limit.")
+        self.max_bright = QSpinBox(); self.max_bright.setRange(150, 255)
+        self.max_bright.setToolTip("0-255 scale. 255 = no upper limit. Headlights make plates bright at night.")
+        self.max_clip = QDoubleSpinBox(); self.max_clip.setRange(0.2, 1); self.max_clip.setSingleStep(0.05); self.max_clip.setDecimals(2)
         self.frames = QSpinBox(); self.frames.setRange(1, 10)
         self.window_s = QDoubleSpinBox(); self.window_s.setRange(0.1, 5.0); self.window_s.setSingleStep(0.1); self.window_s.setSuffix(" s")
         form.addRow("Minimum plate width", self.min_w)
@@ -277,8 +281,8 @@ class CalibrationWindow(QDialog):
         form.addRow("Minimum detector confidence", self.min_det)
         form.addRow("Minimum recognition confidence", self.min_ocr)
         form.addRow("Minimum sharpness", self.min_sharp)
-        form.addRow("Brightness from", self.min_bright)
-        form.addRow("Brightness to", self.max_bright)
+        form.addRow("Brightness from (0-255)", self.min_bright)
+        form.addRow("Brightness to (255 = no limit)", self.max_bright)
         form.addRow("Most glare / black allowed", self.max_clip)
         form.addRow("Best of up to", self.frames)
         form.addRow("…within", self.window_s)
@@ -426,7 +430,12 @@ class CalibrationWindow(QDialog):
         self.canvas.update()
         self._dirty = False
         self._show_header(data.get("test_mode") or {})
-        self.status.setText("")
+        notes = list(cfg.get("ignored") or [])
+        if data.get("warning"):
+            notes.insert(0, str(data["warning"]))
+        if cfg.get("ignored"):
+            notes.append("These saved values are not applied; save again to store safe values.")
+        self.status.setText("\n".join(notes))
 
     def _show_header(self, test_mode):
         cfg = self.config

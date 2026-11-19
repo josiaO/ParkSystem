@@ -456,6 +456,20 @@ class CameraLivePane(QFrame):
         error=(payload.get("recognition") or {}).get("last_error")
         if error:
             self.details.setText(f"Recognition: {error}")
+        refused=payload.get("refused") or {}
+        warning=str(payload.get("calibration_warning") or "")
+        if refused:
+            # The newest car was read but refused by this camera's calibration:
+            # show that car, clearly marked, instead of an older stored car.
+            reason=", ".join(refused.get("reasons") or []) or "outside calibration"
+            self.decision.setText("NOT STORED")
+            self.details.setText(f"{refused.get('plate') or 'Plate'} not stored: {reason}")
+            self.hold_label.setText(warning)
+            self._load_evidence(self.last_snap, refused.get("snapshot_url"))
+            self._load_evidence(self.crop, refused.get("crop_url"))
+            return
+        if warning:
+            self.hold_label.setText(warning)
         evidence=payload.get("evidence") or shown
         self._load_evidence(self.last_snap, evidence.get("snapshot_url"))
         self._load_evidence(self.crop, evidence.get("crop_url"))

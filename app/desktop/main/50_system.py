@@ -672,17 +672,28 @@ class SettingsPage(QWidget):
         self._cal_cameras=[cam for cam, _ in rows]
         self.cal_table.setRowCount(len(rows))
         uncalibrated=0
+        problems=[]
         for r, (cam, data) in enumerate(rows):
             cfg=data.get("calibration") or {}
             test=data.get("test_mode") or {}
             state=f"Calibrated · version {cfg.get('version')}" if cfg.get("enabled") else "Not calibrated (reads the whole picture)"
             uncalibrated += 0 if cfg.get("enabled") else 1
+            name=cam.get("name") or f"Camera {cam.get('id')}"
+            notes=list(cfg.get("ignored") or [])
+            if data.get("warning"):
+                notes.insert(0, str(data["warning"]))
+            if notes:
+                state += " · CHECK"
+                problems.append(f"{name}: " + " ".join(notes))
             values=[cam.get("name") or f"Camera {cam.get('id')}", str(cam.get("lane_direction") or "").title(),
                     cam.get("gate_name") or "—", state,
                     f"On until {str(test.get('until') or '')[11:16]} UTC" if test.get("enabled") else "Off"]
             for c, value in enumerate(values):
                 self.cal_table.setItem(r, c, QTableWidgetItem(str(value)))
-        self.cal_status.setText(f"{uncalibrated} camera(s) not calibrated yet." if uncalibrated else "All cameras calibrated.")
+        summary=f"{uncalibrated} camera(s) not calibrated yet." if uncalibrated else "All cameras calibrated."
+        if problems:
+            summary += "\n" + "\n".join(problems)
+        self.cal_status.setText(summary)
 
     def open_calibration(self):
         row=self.cal_table.currentRow()

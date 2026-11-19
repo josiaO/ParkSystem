@@ -420,3 +420,60 @@ def test_end_line_must_be_after_the_start_line():
     with pytest.raises(ValueError):
         cc.validate({"trigger_line": {"y": 0.6, "side": "below"}, "end_line": {"y": 0.5}})
     assert cc.validate({"trigger_line": {"y": 0.6, "side": "below"}, "end_line": {"y": 0.9}})["end_line"] == {"y": 0.9}
+
+
+def test_settings_that_would_refuse_every_car_cannot_be_saved():
+    for bad in ({"max_brightness": 2}, {"min_brightness": 180}, {"min_ocr_confidence": 0.97},
+                {"max_clipped_fraction": 0.05}, {"min_plate_width_px": 400},
+                {"trigger_line": {"y": 0.50, "side": "below"}, "end_line": {"y": 0.53}}):
+        with pytest.raises(ValueError):
+            cc.validate(bad)
+
+
+def test_unsafe_value_saved_before_the_limits_is_ignored_and_reported(db):
+    """2# Entry had 'brightness to' 2 saved: every car was refused as too bright."""
+    from app.models import SiteSetting
+
+    camera = _camera(db, 21)
+    cc.save(db, camera, {"enabled": True, "zone": [[0, 0], [1, 0], [1, 1], [0, 1]]}, user="tech")
+    row = db.get(SiteSetting, "capture_calibration:21")
+    row.value = {**dict(row.value), "max_brightness": 2.0}
+    db.commit()
+    config = cc.load(db, camera)
+    assert config["max_brightness"] == 255
+    assert any("Brightness to" in note for note in config["ignored"])
+
+
+def test_refused_reads_warn_the_lane_and_show_the_refused_car(db, monkeypatch):
+    from app.services.captures import persist_event
+
+    camera = _camera(db, 22)
+    cc.save(db, camera, {"enabled": True, "zone": [[0.4, 0.5], [1.0, 0.5], [1.0, 1.0], [0.4, 1.0]],
+                         "reference_width": 704})
+    cc.invalidate(22)
+    monkeypatch.setattr(cc, "in_test_mode", lambda camera_id: False)
+    monkeypatch.setattr(cc, "for_camera", lambda camera_id, camera=None: cc.load(db, camera or db.get(Camera, camera_id)))
+    outside = {"x1": 100, "y1": 700, "x2": 300, "y2": 760}
+    good = {"x1": 1100, "y1": 800, "x2": 1300, "y2": 860}
+
+    def capture(image_id, box):
+        return {"plate": f"T{image_id:03d}ABC", "confidence": 0.95, "image_id": image_id, "have_vehicle": True,
+                "bbox": {**box, "image_width": 1920, "image_height": 1080}}
+
+    for image_id in (1, 2, 3):
+        assert persist_event(db, camera, jpeg=_big_snapshot(outside), crop=b"", capture=capture(image_id, outside)) is None
+    state = cc.live_state(22)
+    assert "3 cars not stored" in state["warning"] and "outside capture zone" in state["warning"]
+    assert cc.rejected_image(22)[:2] == b"\xff\xd8"
+    assert cc.rejected_image(22, "crop")[:2] == b"\xff\xd8"
+
+    from app.api.runtime import _refused_read
+
+    refused = _refused_read(22)
+    assert refused["refused"]["plate"] == "T003ABC"
+    assert refused["refused"]["snapshot_url"].startswith("/cameras/22/calibration/rejected.jpg")
+    assert refused["calibration_warning"]
+
+    assert persist_event(db, camera, jpeg=_big_snapshot(good), crop=b"", capture=capture(4, good)) is not None
+    assert cc.live_state(22)["warning"] == ""
+    assert "refused" not in _refused_read(22)
