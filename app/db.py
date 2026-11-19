@@ -114,6 +114,22 @@ def release_connection(session) -> None:
             pass
 
 
+async def run_db(fn, /, *args, **kwargs):
+    """Run blocking Session work off the event loop, in the request threadpool.
+
+    ``async def`` routes share one event loop with live MJPEG streams, kiosk
+    payments and gate decisions. A slow query, a lock wait (PostgreSQL's
+    ``statement_timeout`` is 15 s) or a busy disk inside such a route would
+    freeze all of them. Route code awaits this for its database steps instead.
+
+    A Session is not thread-safe: the caller must not touch the same Session
+    on the loop while the call is in flight (awaiting it guarantees that).
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(fn, *args, **kwargs)
+
+
 @event.listens_for(engine, "before_cursor_execute")
 def _before_cursor(conn, cursor, statement, parameters, context, executemany):
     conn.info["smartpark_query_started"] = time.perf_counter()

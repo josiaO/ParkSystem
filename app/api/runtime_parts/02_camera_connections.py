@@ -84,7 +84,13 @@ async def _manual_alpr_read(jpeg: bytes, *, camera_label: str) -> dict:
 
 async def _discover_cameras(db: Session, *, scan_lan: bool = False) -> dict:
     defaults = site_camera_defaults()
-    existing = {c.ip_address: camera_dict(c) for c in db.scalars(select(Camera)).all()}
+
+    def _existing():
+        rows = {c.ip_address: camera_dict(c) for c in db.scalars(select(Camera)).all()}
+        release_connection(db)
+        return rows
+
+    existing = await run_db(_existing)
     ips = list(existing)
     if settings.deployment_profile == "DEVELOPMENT":
         ips.extend(row["ip_address"] for row in KNOWN_SITE_CAMERAS if row["ip_address"] not in ips)

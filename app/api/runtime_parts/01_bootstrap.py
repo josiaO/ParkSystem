@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.config import settings
-from app.db import Base, engine, ensure_schema, get_db, short_session, SessionLocal, release_connection
+from app.db import Base, engine, ensure_schema, get_db, run_db, short_session, SessionLocal, release_connection
 from app.domain.site import DEFAULT_SITE_ID
 from app.models import AccessPlan, AccessDecision, AuditLog, Camera, CameraStatus, Gate, GateCommandRecord, GateMode, Node, NodeGateAssignment, ParkingEntryClaim, ParkingSession, PaymentIntent, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
 from app.schemas import (
@@ -744,9 +744,12 @@ async def health_realtime(request: Request, db: Session = Depends(get_db), _: Us
     from app.services.health import camera_stats
     from app.services.lane_timing import timeline_metrics
 
-    cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
-    from app.services.node_scope import camera_active_on_this_installation
-    cameras = [camera for camera in cameras if camera_active_on_this_installation(camera, db=db)]
+    def _cameras():
+        cameras = list(db.scalars(select(Camera).order_by(Camera.id)).all())
+        from app.services.node_scope import camera_active_on_this_installation
+        return [camera for camera in cameras if camera_active_on_this_installation(camera, db=db)]
+
+    cameras = await run_db(_cameras)
     rows = []
     for camera in cameras:
         endpoint = await get_live_endpoint(int(camera.id), db)

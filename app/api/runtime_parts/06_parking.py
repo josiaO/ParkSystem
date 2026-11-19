@@ -11,7 +11,7 @@ def list_lanes(db: Session = Depends(get_db), _: User = Depends(require("cameras
 
 
 @app.get("/lanes/overview")
-async def lanes_overview(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+def lanes_overview(db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     gates = db.scalars(
         select(Gate).options(selectinload(Gate.cameras)).order_by(Gate.id)
     ).all()
@@ -21,15 +21,15 @@ async def lanes_overview(db: Session = Depends(get_db), _: User = Depends(requir
         gates = [g for g in gates if node_gate_id is not None and int(g.id) == int(node_gate_id)]
     camera_ids = [camera.id for gate in gates for camera in (gate.cameras or [])]
     latest_by_camera = latest_for_cameras(db, camera_ids)
-    lanes = [await _lane_view_dict(db, gate, latest_by_camera) for gate in gates]
+    lanes = [_lane_view_dict(db, gate, latest_by_camera) for gate in gates]
     return {"lanes": lanes}
 
 
 @app.get("/lanes/{gate_id}/view")
-async def lane_view(gate_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
+def lane_view(gate_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
     gate = _gate_for_node(db, gate_id, action="lane-view")
     latest_by_camera = latest_for_cameras(db, [camera.id for camera in (gate.cameras or [])])
-    return await _lane_view_dict(db, gate, latest_by_camera)
+    return _lane_view_dict(db, gate, latest_by_camera)
 
 
 @app.get("/captures")
@@ -93,21 +93,30 @@ def delete_gate(gate_id: int, db: Session = Depends(get_db), user: User = Depend
 
 @app.post("/gates/{gate_id}/open")
 async def gate_open(gate_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    g = _gate_for_node(db, gate_id, action="gate-open")
-    _require_manual_reason(payload)
-    from app.services.developer import gate_opening_enabled
-    if not gate_opening_enabled(db):
-        raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
-    cameras = list(g.cameras or [])
+    def _prepare():
+        g = _gate_for_node(db, gate_id, action="gate-open")
+        _require_manual_reason(payload)
+        from app.services.developer import gate_opening_enabled
+        if not gate_opening_enabled(db):
+            raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
+        cameras = list(g.cameras or [])
+        release_connection(db)
+        return g, cameras
+
+    g, cameras = await run_db(_prepare)
     result = await controller().open(
         g, cameras, payload.reason,
         side=payload.side, dry_run=payload.dry_run, led_text=payload.led_text, action=payload.action or "open",
     )
-    if result.ok and not result.simulated and not payload.dry_run:
-        g.physical_control_verified = True
-    write_audit(db, user, "gate.open", "gate", str(g.id), result.message)
-    db.commit()
-    _record_manual_open_from_command(db, payload, result, user=user, gate=g, side=payload.side or "")
+
+    def _finish():
+        if result.ok and not result.simulated and not payload.dry_run:
+            g.physical_control_verified = True
+        write_audit(db, user, "gate.open", "gate", str(g.id), result.message)
+        db.commit()
+        _record_manual_open_from_command(db, payload, result, user=user, gate=g, side=payload.side or "")
+
+    await run_db(_finish)
     if not result.ok:
         raise HTTPException(409, result.message)
     return result.__dict__
@@ -143,10 +152,19 @@ def _record_manual_open_from_command(db: Session, payload: ManualGateCommand, re
 
 @app.post("/cameras/{camera_id}/led")
 async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    camera = _camera_for_node(db, camera_id, action="led-write")
+    def _prepare():
+        camera = _camera_for_node(db, camera_id, action="led-write")
+        release_connection(db)
+        return camera
+
+    camera = await run_db(_prepare)
     result = await send_led_text(camera.display_ip or "", payload.text, dry_run=payload.dry_run)
-    write_audit(db, user, "led.write", "camera", str(camera.id), result.message)
-    db.commit()
+
+    def _finish():
+        write_audit(db, user, "led.write", "camera", str(camera.id), result.message)
+        db.commit()
+
+    await run_db(_finish)
     if not result.ok:
         raise HTTPException(409, result.message)
     return result.__dict__
@@ -154,19 +172,28 @@ async def camera_led(camera_id: int, payload: LedWrite, db: Session = Depends(ge
 
 @app.post("/cameras/{camera_id}/barrier/open")
 async def camera_barrier_open(camera_id: int, payload: ManualGateCommand, db: Session = Depends(get_db), user: User = Depends(require("gates.open"))):
-    camera = _camera_for_node(db, camera_id, action="barrier-open")
-    _require_manual_reason(payload)
-    from app.services.developer import gate_opening_enabled
-    if not gate_opening_enabled(db):
-        raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
-    gate = camera.gate or Gate(id=0, name=camera.name)
+    def _prepare():
+        camera = _camera_for_node(db, camera_id, action="barrier-open")
+        _require_manual_reason(payload)
+        from app.services.developer import gate_opening_enabled
+        if not gate_opening_enabled(db):
+            raise HTTPException(409, "Developer mode has gate opening disabled. No actuator was called.")
+        gate = camera.gate or Gate(id=0, name=camera.name)
+        release_connection(db)
+        return camera, gate
+
+    camera, gate = await run_db(_prepare)
     result = await controller().open(
         gate, [camera], payload.reason,
         dry_run=payload.dry_run, led_text=payload.led_text, action=payload.action or "open",
     )
-    write_audit(db, user, "barrier.open", "camera", str(camera.id), result.message)
-    db.commit()
-    _record_manual_open_from_command(db, payload, result, user=user, camera=camera, side=camera.lane_direction or "")
+
+    def _finish():
+        write_audit(db, user, "barrier.open", "camera", str(camera.id), result.message)
+        db.commit()
+        _record_manual_open_from_command(db, payload, result, user=user, camera=camera, side=camera.lane_direction or "")
+
+    await run_db(_finish)
     if not result.ok:
         raise HTTPException(409, result.message)
     return result.__dict__
@@ -370,18 +397,25 @@ async def reprint_session_receipt(
     db: Session = Depends(get_db),
     user: User = Depends(require_any("sessions.view", "payments.create", "kiosk.use", "simulation.run")),
 ):
-    row = db.get(ParkingSession, session_id)
-    if not row:
-        raise HTTPException(404, "Session not found")
-    gate = db.get(Gate, row.gate_id) if row.gate_id else None
-    cfg = parking_settings(db)
+    def _prepare():
+        row = db.get(ParkingSession, session_id)
+        if not row:
+            raise HTTPException(404, "Session not found")
+        gate = db.get(Gate, row.gate_id) if row.gate_id else None
+        return row, gate, parking_settings(db)
+
+    row, gate, cfg = await run_db(_prepare)
     issued = await issue_receipt(
         db, row, gate=gate,
         adapter_id=cfg.get("printer_adapter"),
         printer_name=cfg.get("printer_name") or "",
     )
-    write_audit(db, user, "receipt.print", "parking_session", str(row.id), row.plate)
-    db.commit()
+
+    def _finish():
+        write_audit(db, user, "receipt.print", "parking_session", str(row.id), row.plate)
+        db.commit()
+
+    await run_db(_finish)
     return issued
 
 
@@ -633,15 +667,19 @@ async def cameras_onboard_test(payload: CameraOnboardTest, _: User = Depends(req
 @app.post("/sim/entry")
 async def sim_entry(payload: SimEntryRequest, db: Session = Depends(get_db), user: User = Depends(require("simulation.run"))):
     _require_development_simulation()
-    gate = get_gate_or_404(db, payload.gate_id)
+    gate = await run_db(get_gate_or_404, db, payload.gate_id)
     try:
         result = await handle_plate_event(
             db, plate=payload.plate, gate=gate, side=payload.side, simulated=True, source="simulation",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    write_audit(db, user, "sim.entry", "parking_session", str((result.get("session") or {}).get("id") or ""), payload.plate)
-    db.commit()
+
+    def _finish():
+        write_audit(db, user, "sim.entry", "parking_session", str((result.get("session") or {}).get("id") or ""), payload.plate)
+        db.commit()
+
+    await run_db(_finish)
     return result
 
 
@@ -676,30 +714,34 @@ async def sim_capture(
             409,
             f"{reason}. Simulation does not use the cameras — FastALPR reads the plate from the uploaded photo on this PC.",
         )
-    gate = get_gate_or_404(db, gate_id)
-    camera = None
-    want = (side or "ENTRY").upper()
-    for row in gate.cameras or []:
-        if (row.lane_direction or "").upper() == want:
-            camera = row
-            break
-    stored = None
-    if camera is not None:
-        box = best.get("bbox") if isinstance(best.get("bbox"), dict) else None
-        stored = persist_event(
-            db, camera, jpeg=jpeg, crop=_crop_from_alpr(alpr),
-            capture={
-                "plate": plate,
-                "plate_raw": str(best.get("plate_raw") or plate),
-                "score": float(best.get("confidence") or 0),
-                "bbox": box,
-                "source": "fastalpr",
-                "plate_crop_path": best.get("plate_crop_path"),
-                "image_id": int(time.time() * 1000) % 2_000_000_000,
-            },
-        )
-        if stored is not None:
-            remember_last_car(camera.id, capture_dict(stored))
+    def _store():
+        gate = get_gate_or_404(db, gate_id)
+        camera = None
+        want = (side or "ENTRY").upper()
+        for row in gate.cameras or []:
+            if (row.lane_direction or "").upper() == want:
+                camera = row
+                break
+        stored = None
+        if camera is not None:
+            box = best.get("bbox") if isinstance(best.get("bbox"), dict) else None
+            stored = persist_event(
+                db, camera, jpeg=jpeg, crop=_crop_from_alpr(alpr),
+                capture={
+                    "plate": plate,
+                    "plate_raw": str(best.get("plate_raw") or plate),
+                    "score": float(best.get("confidence") or 0),
+                    "bbox": box,
+                    "source": "fastalpr",
+                    "plate_crop_path": best.get("plate_crop_path"),
+                    "image_id": int(time.time() * 1000) % 2_000_000_000,
+                },
+            )
+            if stored is not None:
+                remember_last_car(camera.id, capture_dict(stored))
+        return gate, camera, stored
+
+    gate, camera, stored = await run_db(_store)
     try:
         result = await handle_plate_event(
             db, plate=plate, gate=gate, side=side, simulated=True, alpr=alpr,
@@ -707,10 +749,13 @@ async def sim_capture(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    write_audit(db, user, "sim.capture", "parking_session", str((result.get("session") or {}).get("id") or ""), f"{plate} {side}")
-    db.commit()
+    def _finish():
+        write_audit(db, user, "sim.capture", "parking_session", str((result.get("session") or {}).get("id") or ""), f"{plate} {side}")
+        db.commit()
+        return capture_dict(stored) if stored is not None else None
+
+    info = await run_db(_finish)
     if stored is not None:
-        info = capture_dict(stored)
         session = dict(result.get("session") or {})
         session["snapshot_url"] = session.get("snapshot_url") or info.get("snapshot_url")
         session["crop_url"] = session.get("crop_url") or info.get("crop_url")
@@ -726,12 +771,16 @@ async def sim_capture(
 @app.post("/sim/sessions/{session_id}/receipt-taken")
 async def sim_receipt_taken(session_id: int, db: Session = Depends(get_db), user: User = Depends(require_any("simulation.run", "gates.open"))):
     _require_development_simulation()
-    row = db.get(ParkingSession, session_id)
+    row = await run_db(db.get, ParkingSession, session_id)
     if not row:
         raise HTTPException(404, "Session not found")
     taken = await take_receipt(db, row, reason=f"receipt taken {row.plate}")
-    write_audit(db, user, "sim.receipt_taken", "parking_session", str(row.id), row.plate)
-    db.commit()
+
+    def _finish():
+        write_audit(db, user, "sim.receipt_taken", "parking_session", str(row.id), row.plate)
+        db.commit()
+
+    await run_db(_finish)
     return taken
 
 
@@ -750,18 +799,22 @@ async def session_receipt_taken(
     from app.domain.receipt_engine import InvalidPrintJob
     from app.infrastructure.hardware.receipt_printers import receipt_printer_for
 
-    row = db.get(ParkingSession, session_id)
-    if row is None:
-        raise HTTPException(404, "Session not found")
-    cfg = parking_settings(db)
+    def _prepare():
+        row = db.get(ParkingSession, session_id)
+        if row is None:
+            raise HTTPException(404, "Session not found")
+        cfg = parking_settings(db)
+        gate = db.get(Gate, row.gate_id) if row.gate_id else None
+        camera = db.get(Camera, row.camera_id) if row.camera_id else None
+        return row, cfg, gate, camera
+
+    row, cfg, gate, camera = await run_db(_prepare)
     controller = EntryLaneController(
         printer=receipt_printer_for(
             str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
             str(cfg.get("printer_name") or settings.printer_name or ""),
         )
     )
-    gate = db.get(Gate, row.gate_id) if row.gate_id else None
-    camera = db.get(Camera, row.camera_id) if row.camera_id else None
     try:
         result = await controller.confirm_receipt_taken(
             db,
@@ -773,7 +826,7 @@ async def session_receipt_taken(
         )
     except InvalidPrintJob as exc:
         raise HTTPException(409, str(exc)) from exc
-    write_audit(db, user, "receipt.taken", "parking_session", str(row.id), "sensor-confirmed path")
+    await run_db(write_audit, db, user, "receipt.taken", "parking_session", str(row.id), "sensor-confirmed path")
     return result
 
 
@@ -796,50 +849,58 @@ async def session_admit_without_receipt(
     reason = str((payload or {}).get("reason") or "").strip()
     if len(reason) < 3:
         raise HTTPException(400, "A reason is required to admit a vehicle without a receipt.")
-    row = db.get(ParkingSession, session_id)
-    if row is None:
-        raise HTTPException(404, "Session not found")
-    gate = db.get(Gate, row.gate_id) if row.gate_id else None
-    if gate is not None:
-        _gate_for_node(db, gate.id, action="admit-without-receipt")
-    cfg = parking_settings(db)
+    def _prepare():
+        row = db.get(ParkingSession, session_id)
+        if row is None:
+            raise HTTPException(404, "Session not found")
+        gate = db.get(Gate, row.gate_id) if row.gate_id else None
+        if gate is not None:
+            _gate_for_node(db, gate.id, action="admit-without-receipt")
+        cfg = parking_settings(db)
+        camera = db.get(Camera, row.camera_id) if row.camera_id else None
+        return row, gate, cfg, camera
+
+    row, gate, cfg, camera = await run_db(_prepare)
     controller = EntryLaneController(
         printer=receipt_printer_for(
             str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated"),
             str(cfg.get("printer_name") or settings.printer_name or ""),
         )
     )
-    camera = db.get(Camera, row.camera_id) if row.camera_id else None
     result = await controller.operator_admit_without_receipt(
         db, row, reason=reason, user_id=user.id,
         policy=policy_from_parking_settings(cfg), gate=gate, camera=camera,
     )
-    write_audit(db, user, "receipt.override", "parking_session", str(row.id), f"{row.plate}: {reason}"[:240])
-    db.commit()
-    # Only when a barrier command was actually issued (accepted or failed);
-    # "already open", "in progress" and developer holds open nothing.
-    if isinstance(result, dict) and result.get("reason") in {"active", "gate_unavailable"} and gate is not None:
-        from app.models import MANUAL_SOURCE_ADMIT
-        from app.services.manual_open import safe_record_manual_open
 
-        barrier = result.get("barrier") if isinstance(result.get("barrier"), dict) else {}
-        safe_record_manual_open(
-            db,
-            source=MANUAL_SOURCE_ADMIT,
-            gate=gate,
-            camera=camera,
-            side="ENTRY",
-            user=user,
-            reason=reason,
-            session=db.get(ParkingSession, row.id),
-            command_ok=bool(result.get("barrier_command_accepted") or result.get("barrier_opened")),
-            command_message=str(barrier.get("message") or result.get("message") or ""),
-        )
+    def _finish():
+        write_audit(db, user, "receipt.override", "parking_session", str(row.id), f"{row.plate}: {reason}"[:240])
+        db.commit()
+        # Only when a barrier command was actually issued (accepted or failed);
+        # "already open", "in progress" and developer holds open nothing.
+        if isinstance(result, dict) and result.get("reason") in {"active", "gate_unavailable"} and gate is not None:
+            from app.models import MANUAL_SOURCE_ADMIT
+            from app.services.manual_open import safe_record_manual_open
+
+            barrier = result.get("barrier") if isinstance(result.get("barrier"), dict) else {}
+            safe_record_manual_open(
+                db,
+                source=MANUAL_SOURCE_ADMIT,
+                gate=gate,
+                camera=camera,
+                side="ENTRY",
+                user=user,
+                reason=reason,
+                session=db.get(ParkingSession, row.id),
+                command_ok=bool(result.get("barrier_command_accepted") or result.get("barrier_opened")),
+                command_message=str(barrier.get("message") or result.get("message") or ""),
+            )
+
+    await run_db(_finish)
     return result
 
 
 @app.post("/sessions/{session_id}/correct-plate")
-async def correct_session_plate(
+def correct_session_plate(
     session_id: int,
     payload: PlateCorrection,
     db: Session = Depends(get_db),
