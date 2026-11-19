@@ -78,24 +78,28 @@ class HvxLiveIsolationTests(unittest.TestCase):
         self.assertEqual(cfg["detect_uri"], "")
 
     def test_live_http_pool_can_serve_four_cameras(self):
+        """Four cameras fetch at the same time, each on its own connection (live-frame threads)."""
         import asyncio
+        import threading
         import httpx
         from app.services import hvx_client
 
         async def run():
-            real_client=httpx.AsyncClient
+            real_client=httpx.Client
             active=set()
-            ready=asyncio.Event()
-            async def reply(request):
-                active.add(request.url.path)
-                if len(active) == 4:
-                    ready.set()
-                await asyncio.wait_for(ready.wait(), 1)
+            lock=threading.Lock()
+            ready=threading.Event()
+            def reply(request):
+                with lock:
+                    active.add(request.url.path)
+                    if len(active) == 4:
+                        ready.set()
+                ready.wait(1)
                 return httpx.Response(200, content=b"\xff\xd8" + request.url.path.encode())
             def factory(**kwargs):
                 return real_client(**kwargs, transport=httpx.MockTransport(reply))
             try:
-                with patch.object(hvx_client.httpx, "AsyncClient", side_effect=factory) as construct:
+                with patch.object(hvx_client.httpx, "Client", side_effect=factory) as construct:
                     host=hvx_client.HVXHostClient("http://host.test:8765")
                     frames=await asyncio.gather(*(host.live_jpeg(handle) for handle in range(1,5)))
                     self.assertEqual(len(active), 4)
@@ -105,7 +109,6 @@ class HvxLiveIsolationTests(unittest.TestCase):
             finally:
                 await hvx_client.close_host_clients()
         asyncio.run(run())
-
 
 if __name__ == "__main__":
     unittest.main()
