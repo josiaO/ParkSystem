@@ -281,16 +281,20 @@ class CameraLivePane(QFrame):
             painter.setPen(QPen(QColor(255, 196, 0), pen_w))
             painter.drawPolygon(QPolygonF([QPointF(x * width, y * height) for x, y in zone]))
             painter.setBrush(QColor(0, 0, 0, 0))
+        rules=config.get("enforce") or {}
+        painter.setFont(QFont("Sans Serif", max(8, width // 90)))
         line=config.get("trigger_line") if config.get("enabled") else None
         if line:
             y=int(float(line.get("y") or 0) * height)
             painter.setPen(QPen(QColor(0, 200, 255), pen_w, Qt.PenStyle.DashLine))
             painter.drawLine(0, y, width, y)
+            painter.drawText(6, max(12, y - 4), "Start" + ("" if rules.get("start_line") else " (does not refuse)"))
         end=config.get("end_line") if config.get("enabled") else None
         if end:
             y=int(float(end.get("y") or 0) * height)
             painter.setPen(QPen(QColor(235, 70, 60), pen_w, Qt.PenStyle.DashLine))
             painter.drawLine(0, y, width, y)
+            painter.drawText(6, max(12, y - 4), "End" + ("" if rules.get("end_line") else " (does not refuse)"))
         painter.setFont(QFont("Sans Serif", max(9, width // 70), QFont.Weight.Bold))
         for plate in calib.get("plates") or []:
             box=plate.get("box") or {}

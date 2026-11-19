@@ -56,6 +56,39 @@ DEFAULTS: dict[str, Any] = {
     "reference_width": 0,             # width of the picture the sizes were set on (0 = any)
 }
 
+# Each rule can refuse a read (on) or only help choose the best picture (off).
+# A rule that is off still shows on screen and still ranks frames, but a car
+# is never left unstored because of it.
+RULES: dict[str, str] = {
+    "zone": "Capture zone",
+    "start_line": "Start line",
+    "end_line": "End line",
+    "plate_size": "Minimum plate size",
+    "detector": "Detector confidence",
+    "picture_quality": "Sharpness, brightness and glare",
+    "recognition": "Recognition confidence",
+}
+DEFAULT_ENFORCE: dict[str, bool] = {
+    "zone": True,
+    "start_line": False,
+    "end_line": False,
+    "plate_size": True,
+    "detector": True,
+    "picture_quality": True,
+    "recognition": True,
+}
+DEFAULTS["enforce"] = dict(DEFAULT_ENFORCE)
+
+
+def enforce_of(config: dict[str, Any]) -> dict[str, bool]:
+    """Which rules refuse a read for this configuration (missing = default)."""
+    stored = config.get("enforce") if isinstance(config.get("enforce"), dict) else {}
+    return {name: bool(stored.get(name, default)) for name, default in DEFAULT_ENFORCE.items()}
+
+
+def enforced(config: dict[str, Any], rule: str) -> bool:
+    return enforce_of(config).get(rule, True)
+
 LIMITS = {
     "min_plate_width_px": (0, 1000),
     "min_plate_height_px": (0, 600),
@@ -166,6 +199,11 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         out[name] = int(value) if isinstance(DEFAULTS[name], int) and not isinstance(DEFAULTS[name], bool) else value
     if out["min_brightness"] > out["max_brightness"]:
         raise ValueError("Minimum brightness cannot be above maximum brightness.")
+    rules = data.get("enforce")
+    if rules not in (None, ""):
+        if not isinstance(rules, dict) or any(name not in RULES for name in rules):
+            raise ValueError("Rules must be a list of on/off switches: " + ", ".join(RULES) + ".")
+    out["enforce"] = enforce_of({"enforce": rules or {}})
     for name, (low, high, message) in SAFE.items():
         if not low <= float(out[name]) <= high:
             raise ValueError(message)
@@ -202,6 +240,7 @@ def load(db, camera) -> dict[str, Any]:
             config[name] = DEFAULTS[name]
             ignored.append(message)
     config["ignored"] = ignored
+    config["enforce"] = enforce_of(config)
     config.update(identity(camera))
     return config
 
@@ -451,12 +490,14 @@ class Candidate:
     confidence: float
     quality: dict[str, float] = field(default_factory=dict)
     score: float = 0.0
+    advisory: list[str] = field(default_factory=list)   # failed rules that are switched off
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "box": {k: self.box.get(k) for k in ("x1", "y1", "x2", "y2", "image_width", "image_height")},
             "eligible": self.eligible,
             "reasons": list(self.reasons),
+            "advisory": list(self.advisory),
             "plate_width_px": round(self.width_px, 1),
             "plate_height_px": round(self.height_px, 1),
             "plate_area_px": round(self.area_px, 1),
@@ -493,33 +534,39 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
         scale = reference / fw if reference > 0 else 1.0
         width, height = (x2 - x1) * scale, (y2 - y1) * scale
         cx, cy = (x1 + x2) / 2.0 / fw, (y1 + y2) / 2.0 / fh
+        rules = enforce_of(config)
         reasons: list[str] = []
+        advisory: list[str] = []
+
+        def fail(rule: str, text: str) -> None:
+            (reasons if rules.get(rule, True) else advisory).append(text)
+
         in_zone = True if not (calibrated and zone) else point_in_polygon(cx, cy, zone)
         if not in_zone:
-            reasons.append("outside capture zone")
+            fail("zone", "outside capture zone")
         past_line = True
         if line:
             past_line = cy >= float(line["y"]) if line.get("side", "below") == "below" else cy <= float(line["y"])
             if not past_line:
-                reasons.append("not past trigger line")
+                fail("start_line", "not past trigger line")
         end = config.get("end_line") if calibrated else None
         if end:
             # Reading ends here: a car moving out past the end line is not read again.
             travel_down = (line or {}).get("side", "below") == "below"
             beyond = cy > float(end["y"]) if travel_down else cy < float(end["y"])
             if beyond:
-                reasons.append("past end line")
+                fail("end_line", "past end line")
         if calibrated:
             if width < float(config.get("min_plate_width_px") or 0):
-                reasons.append(f"plate {width:.0f}px wide < {float(config['min_plate_width_px']):.0f}px")
+                fail("plate_size", f"plate {width:.0f}px wide < {float(config['min_plate_width_px']):.0f}px")
             if height < float(config.get("min_plate_height_px") or 0):
-                reasons.append(f"plate {height:.0f}px tall < {float(config['min_plate_height_px']):.0f}px")
+                fail("plate_size", f"plate {height:.0f}px tall < {float(config['min_plate_height_px']):.0f}px")
         try:
             confidence = float(box.get("confidence") or box.get("detection_confidence") or 0.0)
         except (TypeError, ValueError):
             confidence = 0.0
         if calibrated and confidence < float(config.get("min_detection_confidence") or 0.0):
-            reasons.append(f"detector {confidence:.2f} < {float(config['min_detection_confidence']):.2f}")
+            fail("detector", f"detector {confidence:.2f} < {float(config['min_detection_confidence']):.2f}")
         quality: dict[str, float] = {}
         if not reasons and jpeg[:2] == b"\xff\xd8":
             try:
@@ -534,17 +581,17 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
                 quality = {}
             if calibrated and quality:
                 if quality["sharpness"] < float(config.get("min_sharpness") or 0):
-                    reasons.append(f"blurred (sharpness {quality['sharpness']:.0f} < {float(config['min_sharpness']):.0f})")
+                    fail("picture_quality", f"blurred (sharpness {quality['sharpness']:.0f} < {float(config['min_sharpness']):.0f})")
                 if quality["brightness"] < float(config.get("min_brightness") or 0):
-                    reasons.append("too dark")
+                    fail("picture_quality", "too dark")
                 if quality["brightness"] > float(config.get("max_brightness") or 255):
-                    reasons.append("too bright")
+                    fail("picture_quality", "too bright")
                 if quality["clipped"] > float(config.get("max_clipped_fraction") or 1.0):
-                    reasons.append("glare or crushed shadows")
+                    fail("picture_quality", "glare or crushed shadows")
         candidate = Candidate(
             box=box, eligible=not reasons, reasons=reasons,
             width_px=width, height_px=height, area_px=width * height, relative_width=(x2 - x1) / fw,
-            in_zone=in_zone, past_line=past_line, confidence=confidence, quality=quality,
+            in_zone=in_zone, past_line=past_line, confidence=confidence, quality=quality, advisory=advisory,
         )
         candidate.score = frame_score(candidate)
         out.append(candidate)
@@ -572,8 +619,13 @@ def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"", *, plate:
     if not config.get("enabled"):
         return None
     box = dict(box or {})
+    rules = enforce_of(config)
     if not all(k in box for k in ("x1", "y1", "x2", "y2")):
-        return Candidate(box=box, eligible=False, reasons=["no plate box to check against the calibration"],
+        # Nothing to place on the picture: refuse only if a position or size rule is on.
+        place_rules = any(rules[name] for name in ("zone", "start_line", "end_line", "plate_size"))
+        return Candidate(box=box, eligible=not place_rules,
+                         reasons=["no plate box to check against the calibration"] if place_rules else [],
+                         advisory=[] if place_rules else ["no plate box to check against the calibration"],
                          width_px=0, height_px=0, area_px=0, relative_width=0, in_zone=False, past_line=False,
                          confidence=0)
     if not box.get("image_width") or not box.get("image_height"):
@@ -594,8 +646,12 @@ def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"", *, plate:
                          confidence=0)
     verdict = candidates[0]
     if plate_confidence is not None and plate and float(plate_confidence) < float(config.get("min_ocr_confidence") or 0.0):
-        verdict.reasons.append(f"recognition {float(plate_confidence):.2f} < {float(config['min_ocr_confidence']):.2f}")
-        verdict.eligible = False
+        text = f"recognition {float(plate_confidence):.2f} < {float(config['min_ocr_confidence']):.2f}"
+        if rules["recognition"]:
+            verdict.reasons.append(text)
+            verdict.eligible = False
+        else:
+            verdict.advisory.append(text)
     if verdict.eligible and quality_required(config) and not verdict.quality and jpeg[:2] == b"\xff\xd8":
         verdict.reasons.append("picture could not be checked for sharpness/brightness")
         verdict.eligible = False
@@ -603,7 +659,7 @@ def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"", *, plate:
 
 
 def quality_required(config: dict[str, Any]) -> bool:
-    return bool(float(config.get("min_sharpness") or 0) > 0 or float(config.get("min_brightness") or 0) > 0
+    return enforced(config, "picture_quality") and bool(float(config.get("min_sharpness") or 0) > 0 or float(config.get("min_brightness") or 0) > 0
                 or float(config.get("max_brightness") if config.get("max_brightness") is not None else 255) < 255
                 or float(config.get("max_clipped_fraction") if config.get("max_clipped_fraction") is not None else 1) < 1)
 
@@ -629,7 +685,10 @@ def frame_score(candidate: Candidate) -> float:
     sharp = min(1.0, float(q.get("sharpness") or 0.0) / 400.0) if q else 0.5
     exposure = max(0.0, 1.0 - float(q.get("clipped") or 0.0)) if q else 0.5
     confidence = max(0.05, candidate.confidence or 0.05)
-    return round((0.15 + size) * (0.25 + sharp) * (0.5 + exposure) * confidence, 6)
+    # A frame that breaks a rule which is switched off is still usable, but a
+    # frame that keeps every rule is preferred.
+    penalty = 0.5 ** len(candidate.advisory or [])
+    return round((0.15 + size) * (0.25 + sharp) * (0.5 + exposure) * confidence * penalty, 6)
 
 
 # ------------------------------------------------------------------- gate --
@@ -905,4 +964,7 @@ def selected_snapshot(camera_id: int) -> bytes:
 
 
 def ocr_confidence_ok(camera_id: int, confidence: float) -> bool:
-    return float(confidence or 0.0) >= float(for_camera(camera_id).get("min_ocr_confidence") or 0.0)
+    config = for_camera(camera_id)
+    if not enforced(config, "recognition"):
+        return True
+    return float(confidence or 0.0) >= float(config.get("min_ocr_confidence") or 0.0)
