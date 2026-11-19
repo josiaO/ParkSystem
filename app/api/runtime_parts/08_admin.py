@@ -196,7 +196,12 @@ async def printer_status(
     db: Session = Depends(get_db),
     _: User = Depends(require_any("hardware.view", "sessions.view", "fees.view", "simulation.run")),
 ):
-    cfg = parking_settings(db)
+    def _settings():
+        cfg = parking_settings(db)
+        release_connection(db)
+        return cfg
+
+    cfg = await run_db(_settings)
     adapter = printer_adapter(cfg.get("printer_adapter"), printer_name=cfg.get("printer_name") or "")
     health = await adapter.health()
     printers = health.get("printers")
@@ -218,9 +223,15 @@ async def printer_test(
 ):
     from app.infrastructure.hardware.printers import ReceiptDocument
     from app.services.receipts import _qr_png, public_receipt_url, resolve_public_base_url
-    cfg = parking_settings(db)
+    def _settings():
+        cfg = parking_settings(db)
+        base_url = resolve_public_base_url(db)
+        release_connection(db)
+        return cfg, base_url
+
+    cfg, base_url = await run_db(_settings)
     token = "TEST"
-    public_url = public_receipt_url(token, base_url=resolve_public_base_url(db))
+    public_url = public_receipt_url(token, base_url=base_url)
     document = ReceiptDocument(
         site_name=settings.site_name or settings.app_name,
         plate="T000TST",
@@ -236,8 +247,12 @@ async def printer_test(
     )
     adapter = printer_adapter(cfg.get("printer_adapter"), printer_name=cfg.get("printer_name") or "")
     printed = await adapter.print_receipt(document)
-    write_audit(db, user, "printer.test", "printer", adapter.id, printed.message)
-    db.commit()
+
+    def _finish():
+        write_audit(db, user, "printer.test", "printer", adapter.id, printed.message)
+        db.commit()
+
+    await run_db(_finish)
     return printed.__dict__
 
 

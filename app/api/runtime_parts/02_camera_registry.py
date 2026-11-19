@@ -43,7 +43,7 @@ async def import_discovered_cameras(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
-    node_gate_ids = _processing_node_gate_ids(db)
+    node_gate_ids = await run_db(_processing_node_gate_ids, db)
     payload = payload or CameraImport()
     username = (payload.username or "admin").strip() or "admin"
     password = payload.password if payload.password is not None else "admin"
@@ -88,7 +88,7 @@ async def import_discovered_cameras(
                     raise HTTPException(409, "Select an assigned gate when importing cameras on a multi-gate node.")
                 requested_gate = next(iter(node_gate_ids))
             spec["gate_id"] = int(requested_gate)
-    created, skipped = _import_camera_specs(db, user, specs)
+    created, skipped = await run_db(_import_camera_specs, db, user, specs)
     connected = []
     if payload.connect:
         ids = [c.id for c in created]
@@ -100,28 +100,37 @@ async def import_discovered_cameras(
             if camera_id in seen:
                 continue
             seen.add(camera_id)
-            camera = db.get(Camera, camera_id)
+            camera = await run_db(db.get, Camera, camera_id)
             if camera is None:
                 continue
             connected.append(await apply_camera_connect(camera, db, user, raise_on_host_error=False))
-    return {
-        "created": [camera_dict(c) for c in created],
-        "skipped": skipped,
-        "connected": connected,
-        "cameras": [camera_dict(c, db=db) for c in db.scalars(
-            select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
-        ).all()],
-    }
+
+    def _listing():
+        return {
+            "created": [camera_dict(c) for c in created],
+            "skipped": skipped,
+            "connected": connected,
+            "cameras": [camera_dict(c, db=db) for c in db.scalars(
+                select(Camera).options(joinedload(Camera.gate)).order_by(Camera.id)
+            ).all()],
+        }
+
+    return await run_db(_listing)
 
 
 @app.post("/cameras/sdk/connect-all")
 async def sdk_connect_all(db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    from app.services.developer import camera_connections_enabled
-    if not camera_connections_enabled(db):
+    def _prepare():
+        from app.services.developer import camera_connections_enabled
+        if not camera_connections_enabled(db):
+            return None
+        rows = db.scalars(select(Camera).where(Camera.enabled == True).order_by(Camera.id)).all()
+        from app.services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope
+        return [camera for camera in rows if camera_active_on_this_installation(camera, db=db)]
+
+    rows = await run_db(_prepare)
+    if rows is None:
         return {"connected": 0, "attempted": 0, "skipped": 0, "results": [], "note": "Developer mode has camera connections disabled."}
-    rows = db.scalars(select(Camera).where(Camera.enabled == True).order_by(Camera.id)).all()
-    from app.services.node_scope import camera_active_on_this_installation, camera_in_recognition_scope
-    rows = [camera for camera in rows if camera_active_on_this_installation(camera, db=db)]
     results = []
     connected = 0
     skipped = 0
