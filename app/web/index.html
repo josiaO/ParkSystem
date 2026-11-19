@@ -142,13 +142,13 @@
                 </div>
                 <p class="muted" data-role="status">Choose a camera to start live video.</p>
                 <div class="framing-bar" data-role="framing">
-                  <button class="secondary" type="button" data-role="zone-edit">Set detection zone</button>
-                  <label>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
-                  <span data-role="zoom-label">1.0×</span>
+                  <button class="secondary" type="button" data-role="zone-edit" hidden>Set detection zone</button>
+                  <label hidden>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
+                  <span data-role="zoom-label" hidden>1.0×</span>
                   <label>View zoom <input data-role="view-zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="View zoom"></label>
                   <span data-role="view-zoom-label">1.0×</span>
-                  <button class="secondary" type="button" data-role="zone-save">Save zone</button>
-                  <p class="muted" data-role="zone-hint">Drag a box where the car should stop. Detection focus narrows the reading area. View zoom magnifies the picture only. Digital zoom does not add camera detail.</p>
+                  <button class="secondary" type="button" data-role="zone-save" hidden>Save zone</button>
+                  <p class="muted" data-role="zone-hint">View zoom magnifies the picture only. Each camera's capture zone and plate size are set in the desktop app: Live cameras → ⋯ → Calibrate capture.</p>
                 </div>
                 <div class="car-meta">
                   <div class="conf-line">
@@ -198,13 +198,13 @@
                 </div>
                 <p class="muted" data-role="status">Choose a camera to start live video.</p>
                 <div class="framing-bar" data-role="framing">
-                  <button class="secondary" type="button" data-role="zone-edit">Set detection zone</button>
-                  <label>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
-                  <span data-role="zoom-label">1.0×</span>
+                  <button class="secondary" type="button" data-role="zone-edit" hidden>Set detection zone</button>
+                  <label hidden>Detection focus <input data-role="zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="Detection zoom"></label>
+                  <span data-role="zoom-label" hidden>1.0×</span>
                   <label>View zoom <input data-role="view-zoom" type="range" min="1" max="4" step="0.1" value="1" aria-label="View zoom"></label>
                   <span data-role="view-zoom-label">1.0×</span>
-                  <button class="secondary" type="button" data-role="zone-save">Save zone</button>
-                  <p class="muted" data-role="zone-hint">Drag a box where the car should stop. Detection focus narrows the reading area. View zoom magnifies the picture only. Digital zoom does not add camera detail.</p>
+                  <button class="secondary" type="button" data-role="zone-save" hidden>Save zone</button>
+                  <p class="muted" data-role="zone-hint">View zoom magnifies the picture only. Each camera's capture zone and plate size are set in the desktop app: Live cameras → ⋯ → Calibrate capture.</p>
                 </div>
                 <div class="car-meta">
                   <div class="conf-line">
@@ -595,7 +595,7 @@
             <button type="button" id="commission-refresh">Refresh diagnostics</button>
             <button class="secondary" type="button" id="commission-read">Run one software read</button>
           </div>
-          <p class="muted">Diagnostic only. It does not create a parking session, print a receipt, or open a barrier. Live lanes use the same crop-then-read path: the plate is read once after it stops inside the detection zone on the Live page.</p>
+          <p class="muted">Diagnostic only. It does not create a parking session, print a receipt, or open a barrier. Live lanes use the same crop-then-read path: the plate is read once the car meets the camera's capture calibration (desktop: Calibrate capture).</p>
           <div id="commission-summary" class="muted">Choose a camera to inspect recognition quality.</div>
           <div id="commission-evidence" class="biz-grid" style="margin-top:12px"></div>
           <div id="commission-recommendations" style="margin-top:12px"></div>

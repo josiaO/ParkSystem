@@ -413,9 +413,9 @@ function applyModuleNavigation() {
         sim: "simulation.run",
       };
       const perm = permMap[navId];
-      if (navId === "dashboard") visible = true;
+      if (navId === "dashboard") visible = can("dashboard.view") || can("cameras.view");
       else if (navId === "sessions") visible = can("sessions.view") || can("fees.view") || can("kiosk.use");
-      else if (navId === "payments") visible = can("payments.view") || can("fees.view") || can("kiosk.use");
+      else if (navId === "payments") visible = can("payments.view") || can("fees.view");
       else if (navId === "health" || navId === "hardware") visible = can("hardware.view");
       else if (navId === "watchlists" || navId === "alerts" || navId === "incidents" || navId === "onboarding") visible = false;
       else if (navId === "plates") visible = can("cameras.view") && !can("sessions.view");

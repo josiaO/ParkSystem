@@ -1,7 +1,15 @@
 let selectedSessionId = null;
+// A kiosk looks up one visit; only staff browse visits and payment history.
+function canBrowseSessions() { return can("sessions.view") || can("fees.view"); }
+function canBrowsePayments() { return can("payments.view") || can("fees.view"); }
+
 async function loadSessions() {
   const err = document.getElementById("session-error");
   err.textContent = "";
+  const table = document.getElementById("session-rows");
+  const wrap = table && table.closest("table");
+  if (wrap) wrap.hidden = !canBrowseSessions();
+  if (!canBrowseSessions()) return;
   try {
     const rows = await api("/sessions");
     document.getElementById("session-rows").innerHTML = rows.map((s) => {
@@ -24,6 +32,7 @@ async function loadSessions() {
 
 async function loadPayments() {
   const err = document.getElementById("payment-error");
+  if (!canBrowsePayments()) return;
   err.textContent = "";
   try {
     const rows = await api("/payments");

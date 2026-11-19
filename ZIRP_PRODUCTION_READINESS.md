@@ -18,7 +18,7 @@ The camera, recognition and lane software is now in good shape. What is missing 
 | Plate accuracy | Strict TZ slot correction (leading 1/7/I→T; digit and letter slot swaps, including J→3 and G→6), with special plates protected. A one-character misread within 10 s on the same gate no longer opens a second session. |
 | Both lanes | Node heartbeat and failover: the Site Server serves the gates of an Edge Node that stops heartbeating. Measured live: lane 1# was served by SERVER01. |
 | Capture zone | Per-camera capture distance (plate width), set in the desktop zone editor. The ground loop is not wired to camera inputs, so this is the "virtual loop". |
-| Lane flow | Passage time-out (60 s), stranded entries expire (15 min), an exit read completes an entry still waiting for passage, and an incomplete visit at exit gets an operator message. |
+| Lane flow | Passage time-out (60 s). An exit read completes an entry still waiting for passage, and also an entry Zirp never opened the barrier for (`ENTRY_COMPLETED_AT_EXIT`, billed from entry). Entry attempts are no longer cancelled by a 15-min timer (it closed every casual visit on SERVER01 and their exits found no session); a plate read entering again supersedes its abandoned attempt (`ENTRY_SUPERSEDED`). |
 | Revenue | Cash top-up after grace is recorded. Manual entry and supervised close go through the engine with permissions. Duplicates never claim the barrier opened. |
 | Manual-open alerts | Plate, amount owed and photo link go to SMS (Africa's Talking), email and a signed webhook. Verified end to end via webhook. |
 | Services | Stop in 2–5 s without admin. NSSM online rotation is off. The Site Service waits up to 90 s for the database. |

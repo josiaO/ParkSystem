@@ -278,7 +278,9 @@ def list_sessions(
     status: str = "",
     open_only: bool = False,
     db: Session = Depends(get_db),
-    _: User = Depends(require_any("sessions.view", "fees.view", "kiosk.use")),
+    # Not kiosk.use: a kiosk looks up one visit (/sessions/lookup), it does
+    # not browse other drivers' visits.
+    _: User = Depends(require_any("sessions.view", "fees.view")),
 ):
     """Newest sessions first, filtered and paged on the server.
 
@@ -841,7 +843,7 @@ async def correct_session_plate(
     session_id: int,
     payload: PlateCorrection,
     db: Session = Depends(get_db),
-    user: User = Depends(require_any("gates.open", "sessions.view", "simulation.run")),
+    user: User = Depends(require_any("gates.open", "sessions.view", "kiosk.use", "simulation.run")),
 ):
     from app.core.plate import normalize_plate
     from app.services.captures import apply_operator_plate_correction

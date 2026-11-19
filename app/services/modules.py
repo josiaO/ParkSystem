@@ -263,7 +263,8 @@ def navigation_items(
     for item in NAVIGATION:
         if item.module_id not in active:
             continue
-        if item.permission and "*" not in permissions and item.permission not in permissions:
+        needed = (item.permission,) if isinstance(item.permission, str) else tuple(item.permission or ())
+        if needed and "*" not in permissions and not any(p in permissions for p in needed):
             continue
         # Hide setup wizard once onboarding is done (still reachable via API).
         if item.id == "onboarding" and cfg.get("onboarding_completed", True):
@@ -274,7 +275,8 @@ def navigation_items(
             "page": item.page,
             "group": item.group,
             "module_id": item.module_id,
-            "permission": item.permission,
+            "permission": item.permission if isinstance(item.permission, str) or item.permission is None
+            else list(item.permission),
         })
     return rows
 

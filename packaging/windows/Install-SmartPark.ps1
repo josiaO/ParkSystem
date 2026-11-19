@@ -707,8 +707,8 @@ if (Test-Path `$services) {
 }
 `$start = Join-Path `$root 'Start-SmartPark.bat'
 Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c start `"Zirp`" `"' + `$start + '`"') -WorkingDirectory `$root
-Start-Sleep -Seconds 3
-Start-Process '$WebUrl'
+# The desktop app is the operator console. The browser UI is opened only on
+# request, from the "Zirp Web" shortcut.
 "@
 Set-Content -Path $AdminStart -Value $AdminBody -Encoding ASCII
 
@@ -718,14 +718,12 @@ function Test-SmartParkAdmin {
 }
 
 function Start-SmartParkFromInstaller {
-    Write-Host "Opening the desktop and the browser..."
+    Write-Host "Opening the desktop..."
     $startArgs = '/c start "Zirp" "' + $StartBat + '"'
     if (Test-SmartParkAdmin) {
         Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -WorkingDirectory $InstallDir
-        Start-Sleep -Seconds 3
-        if (-not $setupRequired -and $configuredRole -ne "OPERATOR_CLIENT") {
-            Start-Process $WebUrl
-        }
+        # No browser window: the desktop is the operator console. Use the
+        # "Zirp Web" shortcut for browser administration or remote access.
         return
     }
     Write-Host ""

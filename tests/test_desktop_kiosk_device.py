@@ -115,11 +115,15 @@ def test_admin_kiosk_section_lists_creates_and_revokes():
     shown = []
     # Plain functions, not MagicMocks: a mock keeps the widget in call_args,
     # and freeing a QWidget tree through Python's cyclic GC crashes PySide.
-    with patch.object(desktop, "api", FakeApi()), \
+    import app.desktop.common as desktop_common
+    # The kiosk list loads when the Users page is first shown, on a worker
+    # thread; the test drives it directly and inline.
+    with patch.object(desktop, "api", FakeApi()), patch.object(desktop_common, "TASKS_INLINE", True), \
          patch.object(desktop.QInputDialog, "getText", new=lambda *_a, **_k: ("Exit B", True)), \
          patch.object(desktop.KioskDevicesBox, "show_credential", new=lambda _self, created: shown.append(created["credential"])), \
          patch.object(desktop.QMessageBox, "question", new=lambda *_a, **_k: QMessageBox.Yes):
         box = desktop.KioskDevicesBox()
+        box.refresh()
         assert box.table.rowCount() == 1 and box.table.item(0, 0).text() == "kiosk-1"
         box.create_device()
         assert shown == ["shown-once"]

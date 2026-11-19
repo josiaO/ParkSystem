@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.services.live_pair import camera_label, lane_options, pair_lane_cameras
 
-from app.desktop.api import api, stream_http_error
+from app.desktop.api import api, stream_http_error, friendly_error, ApiError, SiteServerUnreachable
 
 from app.desktop.desk import ReportsPage, clock_summary, health_sentences, link_banner, manual_open_banner
 
@@ -36,7 +36,7 @@ from app.desktop.presentation import configure_table, label_for, page_viewport, 
 
 from app.desktop.shell import DesktopShell
 
-from app.desktop.common import (Worker, _stop_thread, action_label, available_screen, fit_window_to_screen,
+from app.desktop.common import (Worker, run_task, show_status, _stop_thread, action_label, available_screen, fit_window_to_screen,
                      is_technician, deployment_kind, source_label, money_label, method_label)
 
 from app.branding import PRODUCT_NAME, PRODUCT_TAGLINE

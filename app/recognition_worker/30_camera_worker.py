@@ -48,17 +48,17 @@ async def _infer_camera(
     rec_policy = policy_from_settings()
     sample_fps = float(getattr(settings, "recognition_sample_fps", 3.0) or 3.0)
     departure_every = float(getattr(settings, "recognition_departure_check_seconds", 1.0) or 1.0)
-    detect_roi = str(camera.get("detect_roi") or "") or None
-    detect_zoom = camera.get("detect_zoom")
+    # Whole picture: plates are detected from far away; the camera's own
+    # capture calibration decides when one is close enough to read.
+    detect_roi = "off"
+    detect_zoom = 1.0
     # Per-camera decode width for recognition only (Phase 4.2); see
     # `camera_lab_replay measure` for the plate size it gives at the OCR input.
     detect_width = int(camera.get("detect_width") or getattr(settings, "recognition_detect_width", 960) or 960)
-    from app.services.camera_framing import best_arrival_box, gate_for
+    from app.services import capture_calibration as calibration
 
-    arrival = gate_for(camera_id)
-    from app.services.camera_framing import effective_capture_plate_width
-
-    arrival.min_plate_width_px = effective_capture_plate_width(camera)
+    arrival = calibration.gate_for(camera_id)
+    arrival.configure(calibration.for_camera(camera_id))
     track = PlateTrack(
         window_seconds=rec_policy.consensus_window_seconds,
         hold_seconds=rec_policy.hold_seconds,
@@ -328,8 +328,13 @@ async def _infer_camera(
                     stats["timeline"] = {"visit_id": lane.visit.visit_id, "camera_id": camera_id,
                                          "direction": camera.get("lane_direction", "ENTRY")}
                     mark("vehicle_seen", stats["timeline"], at=ticket.captured_at)
-            phase = arrival.observe(best_arrival_box(boxes, detect_roi=detect_roi), time.monotonic())
+            config = calibration.for_camera(camera_id)
+            arrival.configure(config)
+            candidates = await run_inference(calibration.evaluate_frame, ticket.jpeg, boxes, config)
+            phase = arrival.observe(candidates, boxes, ticket.jpeg, time.monotonic())
+            calibration.note_frame(camera_id, candidates, phase, config)
             stats["arrival"] = phase
+            stats["calibration"] = calibration.live_state(camera_id)
             if phase == "new_vehicle":
                 # The previous car was published but no empty detector frame
                 # arrived before this car entered. Reset both temporal tracks
@@ -365,6 +370,14 @@ async def _infer_camera(
                 stats["last_inference_at"] = time.time()
                 await asyncio.sleep(interval)
                 continue
+            selected = arrival.selected
+            calibration.note_selected(camera_id, selected)
+            stats["calibration"] = calibration.live_state(camera_id)
+            # OCR the best eligible frame of this passage, not merely the
+            # frame that closed the selection window.
+            ocr_jpeg = selected.jpeg if selected is not None and selected.jpeg[:2] == b"\xff\xd8" else ticket.jpeg
+            ocr_boxes = selected.boxes if selected is not None else boxes
+            same_frame = ocr_jpeg is ticket.jpeg
             started = time.monotonic()
             timeline = stats.get("timeline", {})
             mark("frame_decoded", timeline, at=ticket.captured_at)
@@ -372,7 +385,7 @@ async def _infer_camera(
             mark("detector_started", timeline, at=located.get("detector_started_at", ticket.recognition_started_at))
             mark("detector_complete", timeline, at=located.get("detector_finished_at"))
             provider_task = asyncio.create_task(_with_limiter(provider.process({
-                "jpeg": ticket.jpeg,
+                "jpeg": ocr_jpeg,
                 "camera_id": camera_id,
                 "site_id": camera.get("site_id"),
                 "camera_label": f"worker-{camera_id}",
@@ -380,8 +393,8 @@ async def _infer_camera(
                 "plate_policy": camera.get("plate_policy") or {},
                 "detect_roi": detect_roi,
                 "detect_zoom": detect_zoom,
-                "plate_boxes": boxes if located.get("available") else None,
-                "decoded_bgr": located.get("_decoded_bgr"),
+                "plate_boxes": ocr_boxes if located.get("available") else None,
+                "decoded_bgr": located.get("_decoded_bgr") if same_frame else None,
             }), ticket.captured_at))
             try:
                 # Shield is intentional: timeout must not cancel the provider,
@@ -410,6 +423,13 @@ async def _infer_camera(
                 await asyncio.sleep(interval)
                 continue
             plate = str(event.get("normalized_plate") or "")
+            calibration.note_read(camera_id, plate=plate, confidence=float(event.get("confidence") or 0.0),
+                                  source="fastalpr", test_mode=calibration.in_test_mode(camera_id), accepted=None)
+            stats["calibration"] = calibration.live_state(camera_id)
+            if plate and config.get("enabled") and not calibration.ocr_confidence_ok(camera_id, float(event.get("confidence") or 0.0)):
+                # Below this camera's minimum recognition confidence.
+                plate = ""
+                event["normalized_plate"] = ""
             accepted = runtime.finish(ticket, plate=plate, stale_frame_ms=rec_policy.stale_frame_ms)
             stats.update(state="READY", last_inference_at=time.time(), recognition_inflight=False)
             stats["infer_ms"] = round((time.monotonic() - started) * 1000.0, 1)
@@ -477,7 +497,7 @@ async def _infer_camera(
                 event["generation"] = ticket.generation
                 event["detect_roi"] = detect_roi
                 event["detect_zoom"] = detect_zoom
-                await run_inference(_publish_frame, event, ticket.jpeg)
+                await run_inference(_publish_frame, event, ocr_jpeg)
                 mark("event_persisted", timeline)
                 stats["published"] = int(stats.get("published") or 0) + 1
                 lane.note_published()

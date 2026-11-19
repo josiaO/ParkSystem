@@ -134,6 +134,7 @@ def test_desktop_settings_page_round_trips_the_site_timezone(qapp):
 
     from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit
 
+    import app.desktop.common as desktop_common
     import app.desktop.main as desktop
 
     sent = {}
@@ -153,7 +154,8 @@ def test_desktop_settings_page_round_trips_the_site_timezone(qapp):
     plates.addItems(["NONE", "TZ"])
     page = SimpleNamespace(timezone=QLineEdit(), currency=QLineEdit(), public_base_url=QLineEdit(),
                            language=language, plate_validation=plates, site_status=QLabel())
-    with patch.object(desktop, "api", FakeApi()):
+    # Settings load/save run on a worker thread in the app; inline here.
+    with patch.object(desktop, "api", FakeApi()), patch.object(desktop_common, "TASKS_INLINE", True):
         desktop.SettingsPage.load_site(page)
         assert page.timezone.text() == "Africa/Dar_es_Salaam"  # server sent none: site default
         page.timezone.setText("")

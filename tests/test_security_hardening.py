@@ -652,6 +652,42 @@ def test_kiosk_device_credential_signs_in_as_a_kiosk_operator(api_client):
     assert client.get("/users", headers=kiosk_headers).status_code == 403
 
 
+def test_kiosk_device_sees_only_the_visit_it_looks_up(api_client):
+    """Spec 8B: payment history by permission. A kiosk may be driver-facing."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import ParkingSession
+
+    client, token, Session = api_client
+    with Session() as db:
+        for plate, tok in (("T111AAA", "tok-mine"), ("T222BBB", "tok-other")):
+            db.add(ParkingSession(plate=plate, status="CLOSED", currency="TZS", amount_due=1000, amount_paid=0,
+                                  public_token=tok, entry_time=datetime.now(timezone.utc) - timedelta(hours=1)))
+        db.commit()
+    device = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "Pay station"}).json()
+    signed = client.post("/kiosk/auth", json={"device_id": device["device_id"], "credential": device["credential"]})
+    kiosk = {"Authorization": f"Bearer {signed.json()['token']}"}
+    assert set(signed.json()["permissions"]) == {"kiosk.use", "payments.create"}
+
+    # No browsing other drivers' visits, payments or the day's revenue.
+    for path in ("/sessions", "/payments", "/dashboard"):
+        assert client.get(path, headers=kiosk).status_code == 403, path
+    # The visit on the receipt in front of the kiosk is still found and payable.
+    found = client.get("/sessions/lookup?q=tok-mine", headers=kiosk)
+    assert found.status_code == 200, found.text
+    assert found.json()["plate"] == "T111AAA"
+    paid = client.post("/p/tok-mine/kiosk-pay", headers=kiosk, json={"method": "KIOSK_CASH"})
+    assert paid.status_code == 200, paid.text
+    nav = client.get("/modules/navigation", headers=kiosk).json()["navigation"]
+    pages = {row["page"] for row in nav}
+    assert "payments" not in pages and "dashboard" not in pages
+
+    # Staff keep their history views.
+    admin = _admin_headers(client, token)
+    assert client.get("/sessions", headers=admin).status_code == 200
+    assert client.get("/payments", headers=admin).status_code == 200
+
+
 def test_kiosk_service_account_cannot_sign_in_with_a_password(api_client):
     client, token, Session = api_client
     device = client.post("/kiosk-devices", headers=_admin_headers(client, token), json={"name": "K"}).json()

@@ -420,7 +420,9 @@ def recent_zirp_open(db: Session, camera: Camera, *, at: datetime, window_second
         select(GateCommandRecord.id).where(
             GateCommandRecord.gate_id == camera.gate_id,
             GateCommandRecord.created_at >= since,
-            GateCommandRecord.ok == True,  # noqa: E712
+            # A command is written REQUESTED before it is sent; the boom can
+            # rise before its answer is recorded, so in-flight counts too.
+            (GateCommandRecord.ok == True) | (GateCommandRecord.state == "REQUESTED"),  # noqa: E712
         ).limit(1)
     ) is not None:
         return True

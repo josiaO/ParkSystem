@@ -45,7 +45,7 @@ log = logging.getLogger("smartpark")
 router = APIRouter()
 
 
-def list_payments(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view", "kiosk.use"))):
+def list_payments(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view"))):
     return [_rt.transaction_dict(row) for row in _rt.list_transactions(db)]
 
 

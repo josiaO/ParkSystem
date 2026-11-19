@@ -91,13 +91,13 @@ class Dashboard(QWidget):
             ("Subscribers inside", data.get("subscribers_inside", 0)),
         ]
     def _load_backup(self):
-        try:
-            status=api.get("/backup")
-        except Exception:
+        def failed(_message, _exc):
             self.backup.setText("")
             self.open_reports.setVisible(False)
             self.snooze_backup.setVisible(False)
-            return
+        run_task(self, lambda: api.get("/backup"), self._show_backup, on_error=failed)
+    def _show_backup(self, status):
+        status=status or {}
         due=bool(status.get("offline_due") or status.get("cloud_due"))
         bits=[]
         if status.get("offline_due"):
@@ -117,9 +117,5 @@ class Dashboard(QWidget):
                 nav.setCurrentRow(i)
                 return
     def _snooze_backup(self):
-        try:
-            api.post("/backup/snooze", {})
-        except Exception as exc:
-            QMessageBox.warning(self, "Backup", str(exc))
-            return
-        self._load_backup()
+        run_task(self, lambda: api.post("/backup/snooze", {}), lambda _r: self._load_backup(),
+                 buttons=self.snooze_backup, busy_text="Snoozing…", title="Backup")

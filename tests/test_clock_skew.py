@@ -80,7 +80,10 @@ def test_desktop_system_health_shows_both_clocks():
 
     page = SimpleNamespace(state=QLabel(), summary=QLabel(), clock=QLabel(), info=QPlainTextEdit())
     page._workstation_clock = MethodType(desktop.SystemHealth._workstation_clock, page)
-    with patch.object(desktop, "api", Api()):
+    page._show = MethodType(desktop.SystemHealth._show, page)
+    import app.desktop.common as desktop_common
+    # The page loads on a worker thread in the app; run it inline here.
+    with patch.object(desktop, "api", Api()), patch.object(desktop_common, "TASKS_INLINE", True):
         desktop.SystemHealth.refresh(page)
     assert "Gate PC vs database: +0.4 s (OK)" in page.clock.text()
     assert "This computer vs Site Server: -4" in page.clock.text() and "CHECK" in page.clock.text()

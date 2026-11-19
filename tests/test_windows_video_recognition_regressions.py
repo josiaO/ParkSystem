@@ -10,7 +10,7 @@ import httpx
 from app import api_main as api
 from app.models import Camera
 from app.services import hvx_client
-from app.services.camera_framing import ArrivalGate
+from app.services.capture_calibration import CaptureGate, evaluate_frame, validate
 from app.services.recognition_runtime import runtime
 
 
@@ -92,19 +92,22 @@ def test_rejected_ocr_does_not_hold_arrival_or_publish_evidence():
     async def run():
         camera = Camera(id=903, name="Entry", ip_address="10.0.0.5", stream_profiles={})
         result = {"ok": True, "best": {"plate": "T123ABC", "confidence": .95}}
-        gate = ArrivalGate(stable_seconds=0)
+        gate = CaptureGate()
+        gate.configure(validate({"candidate_frames": 1}))
         box = {"x1": 20, "y1": 30, "x2": 100, "y2": 55, "image_width": 200, "image_height": 100}
-        gate.observe(box, 1)
-        assert gate.observe(box, 2) == "ready"
+
+        def seen(t):
+            return gate.observe(evaluate_frame(b"", [box], gate.config), [box], JPEG, t)
+        assert seen(1) == "ready"
         with patch("app.services.media_gateway.gateway.peek_detect", return_value=None), \
              patch("app.services.alpr.recognize_arrival_bytes", return_value=result), \
              patch.object(runtime, "finish", return_value=False), \
              patch("app.api_main._persist_capture_event", new=AsyncMock()) as persist, \
-             patch("app.services.camera_framing.gate_for", return_value=gate):
+             patch("app.services.capture_calibration.gate_for", return_value=gate):
             output = await api._run_local_alpr_locked(None, camera, JPEG, ticket=object())
             assert output["persist_skipped"] == "stale recognition result"
             assert not api._note_arrival_result(camera.id, output)
-            assert gate.observe(box, 3) == "ready"
+            assert seen(3) == "ready"            # a rejected read may be retried on a later frame
             persist.assert_not_awaited()
     asyncio.run(run())
 
@@ -124,7 +127,8 @@ def test_software_hvx_without_sdk_handle_recognizes_existing_video_and_retries_r
                  patch("app.services.media_gateway.gateway.peek_detect", return_value=SimpleNamespace(jpeg=JPEG, received_at=api.time.monotonic())), \
                  patch("app.api_main._video_arrival_ready", new=AsyncMock(return_value=True)), \
                  patch("app.api_main._run_local_alpr", new=AsyncMock(return_value=rejected)) as recognize, \
-                 patch("app.services.camera_framing.gate_for", return_value=Mock()), \
+                 patch("app.services.capture_calibration.gate_for", return_value=Mock(selected=None)), \
+                 patch("app.services.capture_calibration.in_test_mode", return_value=False), \
                  patch("app.infrastructure.media.registry.mediamtx_detect_active", return_value=False):
                 await api._maybe_local_ipcam_alpr(camera.id)
                 await api._maybe_local_ipcam_alpr(camera.id)
@@ -195,14 +199,14 @@ def test_event_read_reuses_boxes_found_on_the_same_still_at_the_same_zoom():
     """The drain's detector pass must not be repeated by the event read."""
     async def run():
         camera = Camera(id=905, name="Entry", ip_address="10.0.0.7", stream_profiles={})
-        gate = ArrivalGate(stable_seconds=0)
+        gate = CaptureGate()
         found = [{"x1": 20, "y1": 30, "x2": 100, "y2": 55, "confidence": 0.9}]
         result = {"ok": True, "best": None}
         for zoom, reused in ((1.0, True), (2.0, False)):
             gate.prepared = (hash(JPEG), found, zoom)
             with patch("app.services.media_gateway.gateway.peek_detect", return_value=None), \
                  patch("app.services.alpr.recognize_arrival_bytes", return_value=result) as read, \
-                 patch("app.services.camera_framing.gate_for", return_value=gate):
+                 patch("app.services.capture_calibration.gate_for", return_value=gate):
                 await api._run_local_alpr_locked(None, camera, JPEG, ticket=None)
             assert (read.call_args.kwargs.get("detected_boxes") == found) is reused
     asyncio.run(run())

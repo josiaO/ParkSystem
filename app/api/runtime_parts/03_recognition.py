@@ -169,7 +169,10 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
     if not grabbed.get("ok"):
         write_audit(db, user, "camera.alpr", "camera", str(c.id), grabbed.get("error") or "no frame")
         raise HTTPException(409, grabbed.get("error") or "Could not grab a live frame")
-    remember_frame(c.id, grabbed["jpeg"], url=grabbed.get("url") or "", url_redacted=grabbed.get("url_redacted") or "")
+    # live_snapshot already admitted this frame through the media gateway
+    # (or returned the gateway's current frame). Writing it into the preview
+    # cache again bypassed the gateway's ordering guard and could put a
+    # one-shot frame between two stream frames: the live clock jumped back.
     persist_video(db, c, grabbed.get("url"))
     result = await _manual_alpr_read(
         grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
