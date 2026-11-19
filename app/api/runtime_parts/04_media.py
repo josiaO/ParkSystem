@@ -556,6 +556,13 @@ async def _run_presence_alpr_background(camera_id: int, jpeg: bytes) -> None:
 def serve_media(kind: str, name: str, _: User = Depends(require_media_file("cameras.view")), v: str | None = None):
     path = media_path(kind, name)
     if path is None:
+        # A car's photo is written just after its access decision
+        # (app.services.evidence); a screen may ask for it a moment earlier.
+        from app.services import evidence
+
+        if evidence.wait_for(f"{kind}/{name}", 2.0):
+            path = media_path(kind, name)
+    if path is None:
         raise HTTPException(404, "Media not found")
     try:
         content = path.read_bytes()

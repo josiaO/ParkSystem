@@ -474,6 +474,45 @@ def mark_receipt_taken(db: Session, row: ParkingSession, *, policy: LanePolicy |
     return advance(db, row, RECEIPT_TAKEN, policy=policy)
 
 
+# Entry states in which Zirp never sent the entry barrier command: the receipt
+# was not confirmed taken, the printer was unavailable, a developer switch held
+# the gate, or the barrier command failed. The car may still have been let in
+# (operator, another system, the barrier's own button).
+UNCONFIRMED_ENTRY_STATES = frozenset({
+    SESSION_CREATED, RECEIPT_PRINTING, RECEIPT_PRESENTED, RECEIPT_TAKEN, ENTRY_AUTHORIZED,
+})
+
+# A plain policy for completing an entry that physically happened without
+# Zirp's barrier command: no receipt gate, explicit passage steps.
+_ADMITTED_ELSEWHERE = LanePolicy(receipt_required_before_open=False)
+
+
+def complete_entry_seen_at_exit(db: Session, row: ParkingSession) -> ParkingSession:
+    """The car is at an exit, so it is inside: finish its unconfirmed entry.
+
+    Its stay is billed from the original entry time. Refusing it ("visit
+    incomplete") or having cancelled it earlier by a timer left the car at a
+    closed exit barrier with nothing to pay against. Recorded as
+    ``ENTRY_COMPLETED_AT_EXIT`` so the gap in the entry is visible.
+    """
+    from app.services.decisions import record_access_decision
+
+    before = _current(row)
+    if before not in UNCONFIRMED_ENTRY_STATES:
+        return row
+    for step in (ENTRY_AUTHORIZED, GATE_OPEN_REQUESTED, VEHICLE_PASSED, ACTIVE):
+        if _current(row) != step:
+            row = advance(db, row, step, policy=_ADMITTED_ELSEWHERE)
+    record_access_decision(
+        db, session=row, plate=row.plate, gate=None, lane_direction="ENTRY",
+        outcome="ENTRY_COMPLETED_AT_EXIT",
+        reason=f"seen at an exit while its entry was {before}; Zirp did not open the entry barrier",
+        parker_kind=row.parker_kind or "CASUAL", automatic=True, barrier_opened=False,
+        extra={"entry_state": before},
+    )
+    return row
+
+
 def cancel_entry_attempt(db: Session, row: ParkingSession, *, policy: LanePolicy | None = None) -> ParkingSession:
     """Vehicle left before the receipt was taken. Releases the open-plate lock."""
     policy = policy or LanePolicy(receipt_required_before_open=True)
@@ -571,6 +610,8 @@ def start_exit(
         # The car is at an exit, so it went through the entry barrier: complete
         # the entry that was waiting for a passage sensor instead of failing.
         row = mark_vehicle_passed(db, row, policy=policy, side="ENTRY")
+    elif _current(row) in UNCONFIRMED_ENTRY_STATES:
+        row = complete_entry_seen_at_exit(db, row)
     current = _current(row)
     # An authorized exit whose barrier command failed (the claim was released)
     # is not in flight: the next camera read or the QR fallback must be able

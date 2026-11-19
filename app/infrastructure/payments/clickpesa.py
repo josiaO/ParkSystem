@@ -43,6 +43,8 @@ from typing import Any
 
 from app.config import settings
 from app.infrastructure.payments.common import (
+    initiate_outcome_unknown,
+    outcome_unknown,
     ProviderError,
     ProviderHTTP,
     amount_string,
@@ -241,13 +243,24 @@ class ClickPesaPaymentProvider:
                 message = scrub_text(str((preview or {}).get("message") or f"preview HTTP {code}"), self.api_key)
                 return {"status": "FAILED", "provider_id": self.id, "error": message, "tx_ref": intent["tx_ref"],
                         "raw": redact(preview)}
+        except ProviderError as exc:
+            # Token or preview failed: the push request was never sent.
+            return {"status": "FAILED", "provider_id": self.id, "error": str(exc), "retryable": exc.retryable,
+                    "tx_ref": intent["tx_ref"]}
+        try:
             code, res = await self.http.request(
                 "POST", f"{self.base_url}/payments/initiate-ussd-push-request", headers=headers, json=body
             )
         except ProviderError as exc:
+            if outcome_unknown(exc):
+                return initiate_outcome_unknown(self.id, intent["tx_ref"], str(exc))
             return {"status": "FAILED", "provider_id": self.id, "error": str(exc), "retryable": exc.retryable,
                     "tx_ref": intent["tx_ref"]}
         res = res if isinstance(res, dict) else {}
+        if code >= 500:
+            # A server error after the push request arrived does not prove
+            # the prompt was not sent to the phone.
+            return initiate_outcome_unknown(self.id, intent["tx_ref"], f"initiate HTTP {code}")
         if code >= 400:
             message = scrub_text(str(res.get("message") or f"HTTP {code}"), self.api_key)
             return {"status": "FAILED", "provider_id": self.id, "error": message, "tx_ref": intent["tx_ref"],

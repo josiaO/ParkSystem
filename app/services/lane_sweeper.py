@@ -4,9 +4,17 @@
   after ``passage_timeout_seconds`` the passage is assumed (entry → ACTIVE,
   exit → CLOSED) and recorded as ``PASSAGE_ASSUMED``. Without this, a lane
   with no loop wired keeps every visit half-open forever.
-* An entry attempt never authorized (printer failed, receipt never taken,
-  driver reversed away): after ``stranded_entry_minutes`` it is cancelled and
-  recorded as ``ENTRY_EXPIRED``, so the plate can enter again.
+* Optional, off by default (``stranded_entry_minutes`` = 0): an entry
+  attempt never authorized is cancelled after that many minutes and recorded
+  as ``ENTRY_EXPIRED``. It is off because the car may have been let in by
+  other means; on SITE-PC01 this cancelled every casual visit after 15 min and
+  their exits found no session. Abandoned attempts are superseded when the
+  plate enters again, and an unconfirmed entry seen at an exit is completed.
+
+* A barrier command committed as REQUESTED that never got an answer (the
+  process died between the Authorization Commit and the hardware answer) is
+  marked INTERRUPTED with a ``GATE_COMMAND_INTERRUPTED`` decision for an
+  operator. Nothing is re-sent automatically.
 
 Runs on the Site Server only. Each row is handled in its own transaction.
 """
@@ -35,7 +43,7 @@ from app.models import ParkingSession
 log = logging.getLogger("smartpark")
 
 DEFAULT_PASSAGE_TIMEOUT_SECONDS = 60
-DEFAULT_STRANDED_ENTRY_MINUTES = 15
+DEFAULT_STRANDED_ENTRY_MINUTES = 0
 BATCH = 200
 STRANDED_STATES = (SESSION_CREATED, RECEIPT_PRINTING, RECEIPT_PRESENTED)
 
@@ -64,7 +72,7 @@ def sweep_once(db: Session, *, now: datetime | None = None, cfg: dict[str, Any] 
 
     now = _aware(now) or datetime.now(timezone.utc)
     cfg = cfg if cfg is not None else parking_settings(db)
-    counts = {"entry_passage_assumed": 0, "exit_passage_assumed": 0, "entry_expired": 0}
+    counts = {"entry_passage_assumed": 0, "exit_passage_assumed": 0, "entry_expired": 0, "gate_interrupted": 0}
     policy = LanePolicy(receipt_required_before_open=True)
 
     passage_timeout = _setting(cfg, "passage_timeout_seconds", DEFAULT_PASSAGE_TIMEOUT_SECONDS)
@@ -117,6 +125,26 @@ def sweep_once(db: Session, *, now: datetime | None = None, cfg: dict[str, Any] 
                     reason=f"entry not authorized within {int(stranded_minutes)} min (receipt/printer/driver left)",
                     parker_kind=row.parker_kind or "CASUAL", automatic=True, barrier_opened=False,
                 )
+    from app.services.decisions import interrupt_stale_gate_requests
+
+    try:
+        interrupted = interrupt_stale_gate_requests(db, now=now)
+    except Exception as exc:
+        db.rollback()
+        interrupted = []
+        log.warning("interrupted gate command sweep failed: %s", exc)
+    counts["gate_interrupted"] = len(interrupted)
+    from app.services import evidence
+
+    try:
+        counts["evidence_missing"] = evidence.mark_stale_pending(db, now=now)
+    except Exception as exc:
+        db.rollback()
+        counts["evidence_missing"] = 0
+        log.warning("evidence sweep failed: %s", exc)
+    for row in interrupted:
+        log.warning("GATE COMMAND INTERRUPTED command=%s gate=%s session=%s side=%s",
+                    row.command_uuid, row.gate_id, row.session_id, row.side)
     if any(counts.values()):
         log.info("LANE SWEEP %s", counts)
     return counts

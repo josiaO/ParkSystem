@@ -1,9 +1,14 @@
-"""Per-camera detection zone and digital zoom.
+"""Per-camera recognition decode width, and the camera's own plate region.
 
-Works for the site's HVX/OcxConfig cameras and for any other adapter
-(RTSP, ONVIF, Hikvision, Dahua). The zone says where the car should be.
-Zoom tightens the search on the center of that zone. Recognition watches
-the zone with the detector, and OCRs only after the plate holds still.
+The old ZIRP detection zone, detection zoom and site-wide capture distance
+(plate width) were removed: they cropped the picture before the detector and
+used one capture distance for every camera, which did not work across
+cameras mounted at different heights, angles and focal lengths. Per-camera
+capture conditions now live in ``app.services.capture_calibration``.
+
+``framing_from_profiles`` keeps its shape for callers, but always reports the
+whole picture (``detect_roi='off'``, zoom 1). Stored zone values are ignored
+here and cleared by migration ``0020_clear_legacy_capture_zones``.
 """
 
 from __future__ import annotations
@@ -14,10 +19,13 @@ FRAMING_KEY = "FRAMING"
 MIN_ZOOM = 1.0
 MAX_ZOOM = 4.0
 
-_gates: dict[int, "ArrivalGate"] = {}
+# Width the recognition worker decodes the DETECT stream to. The display
+# stream is never affected. 960 is the measured default; wider costs CPU.
+DETECT_WIDTHS = (960, 1280, 1600, 1920)
 
 
 def parse_detect_zoom(value) -> float:
+    """Kept for the detector's argument parsing; zoom is no longer configurable."""
     if value in (None, ""):
         return MIN_ZOOM
     try:
@@ -26,64 +34,7 @@ def parse_detect_zoom(value) -> float:
         return MIN_ZOOM
     if not math.isfinite(zoom):
         return MIN_ZOOM
-    if zoom < MIN_ZOOM:
-        return MIN_ZOOM
-    if zoom > MAX_ZOOM:
-        return MAX_ZOOM
-    return zoom
-
-
-def framing_from_profiles(profiles: dict | None) -> dict:
-    profiles = profiles or {}
-    row = profiles.get(FRAMING_KEY) or profiles.get("framing") or {}
-    if not isinstance(row, dict):
-        row = {}
-    roi = row.get("detect_roi")
-    if not isinstance(roi, str) or not roi.strip():
-        legacy = profiles.get("detect_roi") or profiles.get("alpr_detect_roi") or ""
-        roi = legacy if isinstance(legacy, str) else ""
-    # An empty FRAMING value means "use the site default", not "search the
-    # whole picture". Keep the effective zone consistent in the API/UI,
-    # worker, and legacy recognition paths.
-    if not str(roi or "").strip():
-        from app.config import settings
-
-        roi = str(getattr(settings, "alpr_detect_roi", "off") or "off").strip()
-    zoom_raw = row.get("detect_zoom")
-    if zoom_raw in (None, ""):
-        zoom_raw = profiles.get("detect_zoom")
-    return {
-        "detect_roi": str(roi or "").strip(),
-        "detect_zoom": parse_detect_zoom(zoom_raw),
-        "detect_width": parse_detect_width(row.get("detect_width")),
-        "capture_plate_width": parse_capture_plate_width(row.get("capture_plate_width")),
-    }
-
-
-# The capture distance: a plate box at least this many pixels wide (at the
-# detector's input width) means the car is close enough to read. 0 = the site
-# default (SMARTPARK_ALPR_MIN_CAPTURE_PLATE_WIDTH_PX).
-CAPTURE_PLATE_WIDTH_RANGE = (0, 600)
-
-
-def parse_capture_plate_width(value) -> int:
-    try:
-        width = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    low, high = CAPTURE_PLATE_WIDTH_RANGE
-    return width if low <= width <= high else 0
-
-
-def effective_capture_plate_width(framing: dict) -> int:
-    from app.config import settings
-
-    return int(framing.get("capture_plate_width") or 0) or int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 0)
-
-
-# Width the recognition worker decodes the DETECT stream to. The display
-# stream is never affected. 960 is the measured default; wider costs CPU.
-DETECT_WIDTHS = (960, 1280, 1600, 1920)
+    return max(MIN_ZOOM, min(MAX_ZOOM, zoom))
 
 
 def parse_detect_width(value) -> int:
@@ -97,44 +48,25 @@ def parse_detect_width(value) -> int:
     return width if width in DETECT_WIDTHS else default
 
 
-def apply_framing(profiles: dict | None, *, detect_roi: str, detect_zoom: float, detect_width: int | None = None,
-                  capture_plate_width: int | None = None) -> dict:
-    from app.services.alpr import parse_detect_roi
-
-    raw = str(detect_roi or "").strip()
-    if raw.lower() in {"off", "none", "full"}:
-        stored = "off"
-    elif raw.lower() in {"", "site"}:
-        stored = ""
-    else:
-        parsed = parse_detect_roi(raw)
-        if parsed is None:
-            raise ValueError(
-                "Detection zone must be x1,y1,x2,y2 between 0 and 1, "
-                "and at least 8% of the picture wide and tall."
-            )
-        stored = ",".join(f"{part:.4f}" for part in parsed)
+def apply_detect_width(profiles: dict | None, detect_width: int) -> dict:
+    """Store the recognition decode width; the only per-camera value left here."""
+    if int(detect_width) not in DETECT_WIDTHS:
+        raise ValueError(f"Recognition decode width must be one of {', '.join(map(str, DETECT_WIDTHS))} pixels.")
     out = dict(profiles or {})
-    previous = (profiles or {}).get(FRAMING_KEY) if isinstance((profiles or {}).get(FRAMING_KEY), dict) else {}
-    framing = {
-        "detect_roi": stored,
-        "detect_zoom": round(parse_detect_zoom(detect_zoom), 3),
-    }
-    if detect_width is not None:
-        if int(detect_width) not in DETECT_WIDTHS:
-            raise ValueError(f"Recognition decode width must be one of {', '.join(map(str, DETECT_WIDTHS))} pixels.")
-        framing["detect_width"] = int(detect_width)
-    elif previous.get("detect_width"):
-        framing["detect_width"] = previous["detect_width"]
-    if capture_plate_width is not None:
-        low, high = CAPTURE_PLATE_WIDTH_RANGE
-        if not low <= int(capture_plate_width) <= high:
-            raise ValueError(f"Capture distance (plate width) must be {low}-{high} pixels; 0 uses the site default.")
-        framing["capture_plate_width"] = int(capture_plate_width)
-    elif previous.get("capture_plate_width"):
-        framing["capture_plate_width"] = previous["capture_plate_width"]
-    out[FRAMING_KEY] = framing
+    out[FRAMING_KEY] = {"detect_width": int(detect_width)}
     return out
+
+
+def framing_from_profiles(profiles: dict | None) -> dict:
+    profiles = profiles or {}
+    row = profiles.get(FRAMING_KEY) or {}
+    if not isinstance(row, dict):
+        row = {}
+    return {
+        "detect_roi": "off",
+        "detect_zoom": MIN_ZOOM,
+        "detect_width": parse_detect_width(row.get("detect_width")),
+    }
 
 
 def native_plate_region_to_roi(
@@ -146,10 +78,8 @@ def native_plate_region_to_roi(
 ) -> str:
     """Convert OcxConfig's camera polygon into FastALPR's normalized ROI.
 
-    OcxConfig/ParkWatch stores the plate detection zone as four pixel points.
-    FastALPR accepts a normalized rectangle.  The conversion is deliberately
-    read-only and conservative: an invalid or missing native zone returns an
-    empty string, allowing the configured/site-wide ROI to remain in control.
+    This is the camera's own (vendor-side) plate region, read-only. It is not
+    a ZIRP setting.
     """
     try:
         width = int(image_width or 0)
@@ -181,13 +111,19 @@ def native_plate_region_to_roi(
 
 
 def box_in_detection_zone(box: dict | None, detect_roi: str | None = None) -> bool:
-    """Return whether a detector box's center is inside the admission zone."""
+    """Whether a detector box's centre is inside an explicit ROI string.
+
+    Used only for the camera's own native region or an explicit per-call ROI;
+    ``None``/``off`` means the whole picture.
+    """
     if not isinstance(box, dict):
         return False
     from app.services.alpr import parse_detect_roi
 
-    roi = parse_detect_roi(detect_roi) if detect_roi is not None else parse_detect_roi()
-    if roi is None:  # explicit "off" / full-frame mode
+    if detect_roi is None or str(detect_roi).strip().lower() in {"", "off", "none", "full"}:
+        return True
+    roi = parse_detect_roi(detect_roi)
+    if roi is None:
         return True
     try:
         width = float(box.get("image_width") or 0)
@@ -201,304 +137,3 @@ def box_in_detection_zone(box: dict | None, detect_roi: str | None = None) -> bo
     cx = ((x1 + x2) / 2.0) / width
     cy = ((y1 + y2) / 2.0) / height
     return roi[0] <= cx <= roi[2] and roi[1] <= cy <= roi[3]
-
-
-def best_arrival_box(boxes: list[dict] | None, detect_roi: str | None = None) -> dict | None:
-    """Choose the closest credible plate for the lane gate.
-
-    Detector confidence order can change between frames when a second car or
-    a reflection is present. Area-first selection keeps the gate attached to
-    the nearest plate, which is also the plate with the most readable pixels.
-    """
-    candidates = [
-        item for item in (boxes or [])
-        if isinstance(item, dict) and box_in_detection_zone(item, detect_roi)
-    ]
-    if not candidates:
-        return None
-
-    def key(item: dict) -> tuple[float, float]:
-        try:
-            area = max(0.0, float(item.get("x2", 0)) - float(item.get("x1", 0))) * max(
-                0.0, float(item.get("y2", 0)) - float(item.get("y1", 0))
-            )
-            confidence = float(item.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0, 0.0
-        return area, confidence
-
-    return max(candidates, key=key)
-
-
-def gate_for(camera_id: int) -> "ArrivalGate":
-    camera_id = int(camera_id)
-    gate = _gates.get(camera_id)
-    if gate is None:
-        from app.config import settings
-
-        gate = ArrivalGate(
-            min_plate_width_px=int(getattr(settings, "alpr_min_capture_plate_width_px", 64) or 0),
-            far_fallback_seconds=float(getattr(settings, "alpr_capture_far_fallback_seconds", 1.5) or 0),
-            # Zirp's own vehicle trigger (virtual loop): fire at the capture
-            # distance even while the car rolls. SMARTPARK_VIRTUAL_LOOP_ENABLED.
-            fire_on_width=bool(getattr(settings, "virtual_loop_enabled", True)),
-        )
-        _gates[camera_id] = gate
-    return gate
-
-
-class ArrivalGate:
-    """Detector watches the zone. OCR runs once the plate box holds still.
-
-    A moving plate returns ``moving`` and must not be read. ``ready`` is
-    raised once per settle. ``held`` means this visit was already read, so
-    the same stopped car cannot open another session. An empty zone for
-    ``absence_seconds`` starts the next visit.
-
-    Virtual loop (``fire_on_width``; on for the per-camera lane gates from
-    ``gate_for``): fire once when the plate reaches the capture width, moving or not.
-    Cars at a lane roll past the camera; waiting for a still plate caught 6
-    of 44 cars on SITE-PC01, while every one reached a readable width. A car
-    whose plate never reaches the capture width returns ``departed`` when
-    it leaves, so the caller can read the widest frame it kept.
-    """
-
-    def __init__(
-        self,
-        *,
-        stable_seconds: float = 0.25,
-        move_ratio: float = 0.05,
-        absence_seconds: float = 0.6,
-        max_ocr: int = 2,
-        min_plate_width_px: int = 0,
-        far_fallback_seconds: float = 0.0,
-        new_vehicle_ratio: float = 0.20,
-        fire_on_width: bool = False,
-        departure_min_width_px: int = 24,
-    ) -> None:
-        self.stable_seconds = float(stable_seconds)
-        self.move_ratio = float(move_ratio)
-        self.absence_seconds = float(absence_seconds)
-        self.max_ocr = int(max_ocr)
-        self.min_plate_width_px = max(0, int(min_plate_width_px or 0))
-        self.far_fallback_seconds = max(0.0, float(far_fallback_seconds or 0.0))
-        self.new_vehicle_ratio = max(0.10, float(new_vehicle_ratio or 0.20))
-        self.fire_on_width = bool(fire_on_width)
-        self.departure_min_width_px = max(0, int(departure_min_width_px or 0))
-        self.reset()
-
-    def reset(self) -> None:
-        self._last: tuple[float, ...] | None = None
-        self._seen_since: float | None = None
-        self._stable_since: float | None = None
-        self._absent_since: float | None = None
-        self._announced = False
-        self._held = False
-        self._ocr_count = 0
-        self._retry_at = None
-        self.prepared = None
-        self.best_width = 0          # widest plate in this episode (departure fallback)
-        self._fired = False          # fired and not re-armed for a retry
-        self._episode_fired = False  # fired at least once for this car
-
-    def observe(self, box: dict | None, now: float) -> str:
-        now = float(now)
-        if self._held:
-            if box is None:
-                if self._absent_since is None or now < self._absent_since:
-                    self._absent_since = now
-                if now - self._absent_since >= self.absence_seconds:
-                    self.reset()
-                    return "absent"
-                return "held"
-            self._absent_since = None
-            center = _box_center(box)
-            previous = self._last
-            # A following car can enter before the detector produces an empty
-            # frame. Break the hold when its plate has moved materially in the
-            # arrival zone instead of treating it as the previous car.
-            if center is not None and previous is not None and max(
-                abs(center[0] - previous[0]), abs(center[1] - previous[1]),
-            ) >= self.new_vehicle_ratio:
-                self.reset()
-                self._last = center
-                self._seen_since = now
-                self._stable_since = now
-                self._observed_at = now
-                return "new_vehicle"
-            # Advance the held reference after evaluating the handoff. Without
-            # this, a single vehicle moving gradually through the frame is
-            # compared with its original position forever and eventually
-            # looks like a following vehicle on every lane crossing.
-            if center is not None:
-                self._last = center
-            return "held"
-        if not box:
-            # Detector output is not guaranteed on every decoded frame.  A
-            # single night-time glare/compression miss must not erase the
-            # arrival state, otherwise the next box starts a fresh settle
-            # window and a stopped car can remain permanently unread.  Keep
-            # the last valid box only for the same short absence window used
-            # for departure detection; a genuinely empty lane still resets.
-            if self._last is not None:
-                if self._absent_since is None or now < self._absent_since:
-                    self._absent_since = now
-                if now - self._absent_since < self.absence_seconds:
-                    return "missing"
-            departed = self._departure_due()
-            self._last = None
-            self._seen_since = None
-            self._stable_since = None
-            self._absent_since = None
-            self._announced = False
-            self.best_width = 0
-            self._fired = False
-            self._episode_fired = False
-            return "departed" if departed else "absent"
-        if self._retry_at is not None:
-            if now < self._retry_at:
-                return "cooldown"
-            self._retry_at = None
-            self._ocr_count = 0
-            self._announced = False
-            self._stable_since = None
-        self._observed_at = now
-        center = _box_center(box)
-        if center is None:
-            if self._last is not None:
-                if self._absent_since is None or now < self._absent_since:
-                    self._absent_since = now
-                if now - self._absent_since < self.absence_seconds:
-                    return "missing"
-            self._last = None
-            self._seen_since = None
-            self._stable_since = None
-            self._absent_since = None
-            self._announced = False
-            return "absent"
-        self._absent_since = None
-        if self._seen_since is None:
-            self._seen_since = now
-        width = _plate_width(box)
-        self.best_width = max(self.best_width, width)
-        if self.fire_on_width and self.min_plate_width_px > 0:
-            self._last = center
-            if self._episode_fired and self.best_width > 0 and width < self.best_width * 0.6:
-                # Queued cars: the fired car pulled away and the next, farther
-                # plate took its place without an empty frame in between.
-                # Without this the second car never fired (SITE-PC01: a
-                # 173 px plate missed behind the car ahead).
-                self._fired = self._episode_fired = self._announced = False
-                self._ocr_count = 0
-                self.best_width = width
-                self._seen_since = now
-                return "new_vehicle"
-            if width < self.min_plate_width_px:
-                # A car waiting short of the capture distance (queued at the
-                # barrier) still fires once it has been in view this long;
-                # the departure read alone came too late for an entry.
-                lingering = (
-                    self.far_fallback_seconds > 0
-                    and now - self._seen_since >= self.far_fallback_seconds
-                    and width >= self.departure_min_width_px
-                )
-                if not lingering:
-                    return "far"
-            if self._announced or self._fired:
-                return "moving"
-            if self._ocr_count >= self.max_ocr:
-                self._held = True
-                return "held"
-            self._announced = True
-            self._fired = True
-            self._episode_fired = True
-            return "ready"
-        moved = self._last is None or _moved(self._last, center, self.move_ratio)
-        if moved:
-            had_previous = self._last is not None
-            self._last = center
-            self._stable_since = now
-            self._announced = False
-            # A moving box is detector-only. OCR admission requires the plate
-            # to hold still inside the zone, preventing a distant or passing
-            # car from being read before it reaches the stop point.
-            return "moving"
-        if self._stable_since is None:
-            self._stable_since = now
-            self._announced = False
-            return "moving"
-        if now - self._stable_since < self.stable_seconds:
-            return "moving"
-        # Plate pixel width is a useful distance proxy. Upscaling cannot
-        # recover characters that were not sampled by the camera. A far plate
-        # remains detector-only until it reaches the readable part of the zone.
-        if self.min_plate_width_px > 0:
-            try:
-                plate_width = float(box["x2"]) - float(box["x1"])
-            except (KeyError, TypeError, ValueError):
-                plate_width = 0.0
-            if plate_width < self.min_plate_width_px:
-                return "far"
-        if self._announced:
-            return "moving"
-        if self._ocr_count >= self.max_ocr:
-            self._held = True
-            return "held"
-        self._announced = True
-        return "ready"
-
-    def _departure_due(self) -> bool:
-        """An episode that never fired but saw a credible plate deserves one read."""
-        return (
-            self.fire_on_width and not self._episode_fired and not self._held
-            and self.best_width >= self.departure_min_width_px > 0
-        )
-
-    def _near_enough(self, box: dict) -> bool:
-        if self.min_plate_width_px <= 0:
-            return False
-        try:
-            return float(box["x2"]) - float(box["x1"]) >= self.min_plate_width_px
-        except (KeyError, TypeError, ValueError):
-            return False
-
-    def note_ocr(self, *, published: bool) -> None:
-        self._ocr_count += 1
-        if published:
-            self._held = True
-            self._absent_since = None
-            return
-        if self._ocr_count >= self.max_ocr:
-            self._retry_at = getattr(self, "_observed_at", 0) + 1.0
-        self._announced = False
-        self._fired = False          # an unpublished read may try again (up to max_ocr)
-
-    def rearm(self) -> None:
-        """The ready frame was not read. Allow the next check to try again."""
-        if not self._held:
-            self._announced = False
-            self._fired = False
-
-
-def _plate_width(box: dict | None) -> float:
-    try:
-        return float(box["x2"]) - float(box["x1"])
-    except (KeyError, TypeError, ValueError):
-        return 0.0
-
-
-def _box_center(box: dict) -> tuple[float, ...] | None:
-    try:
-        width = float(box.get("image_width") or 0)
-        height = float(box.get("image_height") or 0)
-        x1, y1 = float(box["x1"]), float(box["y1"])
-        x2, y2 = float(box["x2"]), float(box["y2"])
-    except (TypeError, ValueError, KeyError):
-        return None
-    if width <= 0 or height <= 0 or x2 <= x1 or y2 <= y1:
-        return None
-    return ((x1 + x2) / 2.0) / width, ((y1 + y2) / 2.0) / height, (x2-x1)/width, (y2-y1)/height
-
-
-def _moved(previous: tuple[float, float], current: tuple[float, float], ratio: float) -> bool:
-    return any(abs(a-b) > ratio for a,b in zip(previous, current))

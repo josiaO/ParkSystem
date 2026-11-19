@@ -85,7 +85,7 @@ def application():
 
 def test_example_camera_import_requires_admin_and_confirmation(fixture_ui, monkeypatch):
     page = live_cameras.Cameras()
-    assert page.seed_button.isHidden()
+    assert not hasattr(page, "seed_button")      # no button on a live site; the action needs admin + confirmation
     page.seed_site()
     monkeypatch.setattr(live_cameras.api, "can", lambda permission: True)
     calls = []
@@ -308,7 +308,10 @@ def test_camera_evidence_positions_and_compact_manual_controls(application, fixt
     assert pane.crop_panel.geometry().right() >= pane.video.width()-10
     assert pane.crop_panel.geometry().bottom() >= pane.video.height()-10
     assert pane.video.height() > pane.height()*0.65
-    assert pane.zoom.accessibleName() == "Entry detection zone zoom"
+    # The old detection-zone editor (zone, zoom, capture distance) was replaced
+    # by the per-camera calibration window, opened from the pane's menu.
+    assert not hasattr(pane, "zoom")
+    assert pane.overlays_toggle.text() == "Show capture calibration" and pane.overlays_toggle.isChecked()
     assert not pane._snap_timer.isActive()
     assert not pane._alpr_timer.isActive()
     assert not fixture_ui[0].requests

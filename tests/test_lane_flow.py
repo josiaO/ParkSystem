@@ -97,15 +97,72 @@ def test_exit_read_completes_an_entry_still_waiting_for_passage(Session):
         assert row.lifecycle == EXIT_GATE_OPEN_REQUESTED
 
 
-def test_incomplete_visit_at_exit_asks_an_operator_instead_of_raising(Session):
+def test_unconfirmed_entry_seen_at_exit_is_completed_and_billed(Session):
+    """SITE-PC01: entries held at "printer is simulated" reached the exit and were
+    refused ("visit incomplete"). The car is inside: bill it from its entry."""
     policy = LanePolicy(receipt_required_before_open=True, print_receipt_on_entry=True, passage_sensing=PASSAGE_WAIT)
     with Session() as db, patch("app.application.entry_lane.settings", SimpleNamespace(deployment_profile="PRODUCTION")):
         asyncio.run(EntryLaneController(printer=SimulatedKioskPrinter(), opener=Opener()).submit(
             db, _event("T501CAS", "e1"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        row = db.scalar(select(ParkingSession).where(ParkingSession.plate == "T501CAS"))
+        assert row.lifecycle == SESSION_CREATED
+        row.entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        db.commit()
         out = asyncio.run(ExitLaneController(opener=Opener()).submit_plate(
             db, plate="T501CAS", event_id="x1", site_id=1, gate=db.get(Gate, 2), camera=db.get(Camera, 200),
             lane_id=20, policy=policy))
-        assert out["reason"] == "visit_incomplete" and out["assistance_required"] and out["barrier_opened"] is False
+        assert out["reason"] == "payment_required" and out["barrier_opened"] is False
+        assert out["financial"]["due"] > 0
+        db.refresh(row)
+        assert row.id == out["session"]["id"] and row.closed_at is None
+        assert db.scalar(select(AccessDecision).where(AccessDecision.outcome == "ENTRY_COMPLETED_AT_EXIT")) is not None
+
+
+def test_unconfirmed_entry_is_not_cancelled_by_default(Session):
+    """Sessions held at the entry stayed open past 45 min only if nothing closed them."""
+    policy = LanePolicy(receipt_required_before_open=True, print_receipt_on_entry=True, passage_sensing=PASSAGE_WAIT)
+    with Session() as db, patch("app.application.entry_lane.settings", SimpleNamespace(deployment_profile="PRODUCTION")):
+        asyncio.run(EntryLaneController(printer=SimulatedKioskPrinter(), opener=Opener()).submit(
+            db, _event("T503OPN", "e1"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        row = db.scalar(select(ParkingSession).where(ParkingSession.plate == "T503OPN"))
+        _age(db, row, 3 * 3600)
+        from app.services.simulation import DEFAULT_PARKING_SETTINGS
+        assert lane_sweeper.sweep_once(db, cfg=dict(DEFAULT_PARKING_SETTINGS))["entry_expired"] == 0
+        db.refresh(row)
+        assert row.closed_at is None and row.lifecycle == SESSION_CREATED
+
+
+def test_plate_entering_again_supersedes_its_abandoned_attempt(Session):
+    policy = LanePolicy(receipt_required_before_open=True, print_receipt_on_entry=True, passage_sensing=PASSAGE_WAIT)
+    with Session() as db, patch("app.application.entry_lane.settings", SimpleNamespace(deployment_profile="PRODUCTION")):
+        ctrl = EntryLaneController(printer=SimulatedKioskPrinter(), opener=Opener())
+        asyncio.run(ctrl.submit(db, _event("T504AGN", "e1"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        first = db.scalar(select(ParkingSession).where(ParkingSession.plate == "T504AGN"))
+        from app.services import lane_stay
+
+        lane_stay.reset()
+        soon = asyncio.run(ctrl.submit(db, _event("T504AGN", "e2"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        assert soon["created_session"] is False          # minutes later: still the same attempt
+        first.created_at = datetime.now(timezone.utc) - timedelta(minutes=40)
+        db.commit()
+        lane_stay.reset()
+        later = asyncio.run(ctrl.submit(db, _event("T504AGN", "e3"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=policy))
+        assert later["created_session"] is True
+        db.refresh(first)
+        assert first.lifecycle == ENTRY_CANCELLED
+        assert db.scalar(select(AccessDecision).where(AccessDecision.outcome == "ENTRY_SUPERSEDED")) is not None
+
+
+def test_admitted_visit_is_never_superseded(Session):
+    with Session() as db:
+        row = _entered_waiting_for_passage(db)
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.commit()
+        from app.application.entry_lane import supersede_abandoned_entry
+
+        assert supersede_abandoned_entry(db, "T500REG", site_id=1, gate=db.get(Gate, 1)) is None
+        db.refresh(row)
+        assert row.lifecycle == GATE_OPEN_REQUESTED
 
 
 def test_sweeper_assumes_passage_after_the_timeout_only(Session):
@@ -155,7 +212,8 @@ def test_zero_disables_the_timeouts(Session):
         row = _entered_waiting_for_passage(db)
         _age(db, row, 10_000)
         assert lane_sweeper.sweep_once(db, cfg={"passage_timeout_seconds": 0, "stranded_entry_minutes": 0}) == {
-            "entry_passage_assumed": 0, "exit_passage_assumed": 0, "entry_expired": 0}
+            "entry_passage_assumed": 0, "exit_passage_assumed": 0, "entry_expired": 0, "gate_interrupted": 0,
+            "evidence_missing": 0}
 
 
 def test_one_car_read_twice_with_an_ocr_slip_opens_one_session(Session):

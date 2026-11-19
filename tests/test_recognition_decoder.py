@@ -191,10 +191,11 @@ def _still_plate(*_args, **_kwargs):
 
 
 def _ready_gate(camera_id):
-    from app.services.camera_framing import gate_for
-    gate = gate_for(camera_id)
+    # Read on the first eligible frame (no best-of-N wait) for these lane tests.
+    from app.services import capture_calibration as cc
+    cc.override(camera_id, {"candidate_frames": 1})
+    gate = cc.gate_for(camera_id)
     gate.reset()
-    gate.stable_seconds = 0
     return gate
 
 

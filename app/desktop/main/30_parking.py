@@ -31,12 +31,26 @@ class Gates(QWidget):
         edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_gate); edit.setVisible(api.can("gates.manage")); edit.setToolTip("Edit (Ctrl+E)")
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_gate); delete.setVisible(api.can("gates.manage")); delete.setToolTip("Delete (Del)")
         led=QPushButton("LED text"); led.clicked.connect(self.write_led); led.setVisible(api.can("gates.open"))
-        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(led); row.addStretch(); l.addLayout(row); self.rows=[]; self.refresh()
+        self.refresh_btn=QPushButton(action_label("Refresh", "F5")); self.refresh_btn.clicked.connect(self.refresh)
+        self.status=QLabel(""); self.status.setWordWrap(True)
+        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(led); row.addWidget(self.refresh_btn); row.addStretch(); l.addLayout(row); l.addWidget(self.status); self.rows=[]
+        self._loaded=False
         sc1=QShortcut(QKeySequence("1"), self); sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc1.activated.connect(lambda: self.arm_side("ENTRY"))
         sc2=QShortcut(QKeySequence("2"), self); sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc2.activated.connect(lambda: self.arm_side("EXIT"))
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.refresh()
     def refresh(self):
-        try: rows=api.runtime_client().get("/gates")
-        except Exception: rows=[]
+        self.status.setText("Loading lanes…")
+        def failed(message, _exc):
+            self.status.setText(message)
+        run_task(self, lambda: api.runtime_client().get("/gates"), self._fill,
+                 buttons=getattr(self, "refresh_btn", None), busy_text="Loading…", on_error=failed)
+    def _fill(self, rows):
+        rows=rows or []
+        self.status.setText("" if rows else "No lanes yet. Add a gate to start.")
         self.rows=rows
         self.table.setRowCount(len(rows))
         for r,g in enumerate(rows):
@@ -92,21 +106,24 @@ class Gates(QWidget):
     def add_gate(self):
         d=GateDialog()
         if d.exec():
-            try: api.runtime_client().post("/gates",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Gate",str(e))
+            payload=d.payload()
+            run_task(self, lambda: api.runtime_client().post("/gates",payload),
+                     lambda _r: (show_status(self, "Gate added."), self.refresh()), title="Add gate", status="Adding gate…")
     def edit_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Edit gate","Select a gate first."); return
         d=GateDialog(gate)
         if d.exec():
-            try: api.runtime_client().patch(f"/gates/{gate['id']}",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Edit gate",str(e))
+            payload=d.payload(); gid=gate['id']
+            run_task(self, lambda: api.runtime_client().patch(f"/gates/{gid}",payload),
+                     lambda _r: (show_status(self, "Gate saved."), self.refresh()), title="Edit gate", status="Saving gate…")
     def delete_gate(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"Delete gate","Select a gate first."); return
         if QMessageBox.question(self,"Delete gate",f"Delete {gate['name']}?")!=QMessageBox.Yes: return
-        try: api.runtime_client().delete(f"/gates/{gate['id']}"); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete gate",str(e))
+        gid=gate['id']
+        run_task(self, lambda: api.runtime_client().delete(f"/gates/{gid}"),
+                 lambda _r: (show_status(self, "Gate deleted."), self.refresh()), title="Delete gate", status="Deleting gate…")
     def open_gate(self,gid,side):
         self.command_gate(gid, side, "open")
     def command_gate(self,gid,side,action="open"):
@@ -117,8 +134,17 @@ class Gates(QWidget):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(api.runtime_client().post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20)))
-            except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
+            self.status.setText(f"Sending {verb} to the {label} barrier…")
+            def done(result):
+                result=result or {}
+                text=str(result.get("message") or result.get("reason") or (f"Barrier {verb} sent." if result.get("ok", True) else "Barrier did not respond."))
+                self.status.setText(text)
+                QMessageBox.information(self,"Barrier",text)
+            def failed(message, _exc):
+                self.status.setText(message)
+                QMessageBox.warning(self,"Barrier",message)
+            run_task(self, lambda: api.runtime_client().post(f"/gates/{gid}/open",{"reason":reason,"side":side,"action":verb}, timeout=20),
+                     done, on_error=failed)
     def write_led(self):
         gate=self.selected_gate()
         if not gate: QMessageBox.information(self,"LED","Select a lane first."); return
@@ -126,10 +152,11 @@ class Gates(QWidget):
         if not cams: QMessageBox.information(self,"LED","No cameras on this lane."); return
         text,ok=QInputDialog.getText(self,"LED text","Message", text="WELCOME")
         if not ok or not text: return
-        try:
-            first=cams[0]
-            QMessageBox.information(self,"LED",str(api.runtime_client().post(f"/cameras/{first['id']}/led",{"text":text})))
-        except Exception as e: QMessageBox.critical(self,"LED",str(e))
+        cam_id=cams[0]['id']
+        def done(result):
+            result=result or {}
+            QMessageBox.information(self,"LED",str(result.get("message") or ("Text sent to the display." if result.get("ok", True) else "The display did not accept the text.")))
+        run_task(self, lambda: api.runtime_client().post(f"/cameras/{cam_id}/led",{"text":text}), done, title="LED", status="Sending text to the display…")
 
 class VehicleDialog(QDialog):
     def __init__(self, vehicle=None, plans=None):
@@ -174,6 +201,16 @@ class VehicleDialog(QDialog):
             "valid_until": _iso_date(self.valid_until.date().toString("yyyy-MM-dd"), end=True) if self.use_until.isChecked() else None,
         }
 
+def mobile_unconfirmed_message(state: str) -> str:
+    """What to tell the cashier when mobile money is neither paid nor refused."""
+    if state == "MISMATCH":
+        return ("ClickPesa reported a different amount for this payment. Do not take cash: "
+                "ask a supervisor to check the payment before the driver pays again.")
+    return ("No confirmation from ClickPesa yet. Do not take cash now: the driver may still be "
+            "charged, and a late approval is credited automatically. Look this visit up again "
+            "in a few minutes; it shows as paid once ClickPesa confirms.")
+
+
 class Sessions(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
@@ -183,8 +220,8 @@ class Sessions(QWidget):
         find=QHBoxLayout()
         self.query=QLineEdit(); self.query.setPlaceholderText("Scan QR, paste the receipt link, or type the plate")
         self.query.returnPressed.connect(self.lookup)
-        find_btn=QPushButton("Find visit"); find_btn.clicked.connect(self.lookup)
-        find.addWidget(label_for("&Find visit", self.query)); find.addWidget(self.query, 1); find.addWidget(find_btn); l.addLayout(find)
+        self.find_btn=QPushButton("Find visit"); self.find_btn.clicked.connect(self.lookup)
+        find.addWidget(label_for("&Find visit", self.query)); find.addWidget(self.query, 1); find.addWidget(self.find_btn); l.addLayout(find)
         card=QFrame(); card.setObjectName("card"); card_l=QHBoxLayout(card)
         photos=QVBoxLayout()
         self.photo=QLabel("No entry photo stored."); self.photo.setMinimumSize(200, 140); self.photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -200,7 +237,7 @@ class Sessions(QWidget):
         self.kiosk_note=QLabel(""); self.kiosk_note.setWordWrap(True)
         self.correct=QLineEdit(); self.correct.setPlaceholderText("Correct plate")
         actions=QVBoxLayout()
-        save_plate=QPushButton("Save corrected plate"); save_plate.clicked.connect(self.correct_plate)
+        save_plate=QPushButton("Save corrected plate"); save_plate.clicked.connect(self.correct_plate); self.save_plate_btn=save_plate
         self.pay_btn=QPushButton("Record payment"); self.pay_btn.clicked.connect(self.pay_visit); self.pay_btn.setEnabled(False)
         self.mobile_btn=QPushButton("Pay with mobile on this computer"); self.mobile_btn.clicked.connect(self.pay_mobile); self.mobile_btn.setEnabled(False)
         can_pay=api.can("payments.create") or api.can("kiosk.use")
@@ -216,18 +253,26 @@ class Sessions(QWidget):
         detail.addWidget(label_for("&Correct plate", self.correct)); detail.addWidget(self.correct); detail.addLayout(actions)
         card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
         l.addWidget(card)
+        # Staff browse visits; a kiosk only sees the visit it looked up.
+        self.can_browse=api.can("sessions.view") or api.can("fees.view")
         self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Kind","Status","Receipt","Entry","Due","Paid","Gate"])
         configure_table(self.table); l.addWidget(self.table, 1)
+        self.table.setVisible(self.can_browse)
         self.table.itemSelectionChanged.connect(self._on_row)
         row=QHBoxLayout()
-        pay=QPushButton("Record kiosk payment"); pay.clicked.connect(self.pay); pay.setVisible(can_pay)
-        receipt=QPushButton("Show / print receipt"); receipt.clicked.connect(self.print_receipt)
-        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        receipt=QPushButton("Show / print receipt"); receipt.clicked.connect(self.print_receipt); self.receipt_btn=receipt
+        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh); refresh.setVisible(self.can_browse); self.refresh_btn=refresh
         admit=QPushButton("Admit without receipt…"); admit.clicked.connect(self.admit_without_receipt)
         admit.setVisible(api.can("gates.open"))
         admit.setToolTip("Open the entry barrier for a visit waiting on a receipt. Requires a reason; recorded in the audit log.")
-        row.addWidget(pay); row.addWidget(receipt); row.addWidget(admit); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
-        self.rows=[]; self.visit=None; self.refresh()
+        self.admit_btn=admit
+        row.addWidget(receipt); row.addWidget(admit); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        self.rows=[]; self.visit=None; self._loaded=False
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.refresh()
     def admit_without_receipt(self):
         s=self.selected()
         if not s: QMessageBox.information(self,"Admit without receipt","Select a session first."); return
@@ -238,24 +283,30 @@ class Sessions(QWidget):
         reason=(reason or "").strip()
         if len(reason)<3:
             QMessageBox.warning(self,"Admit without receipt","Enter a reason (at least 3 characters)."); return
-        try:
-            result=api.post(f"/sessions/{s['id']}/admit-without-receipt", {"reason": reason}, timeout=20)
-        except Exception as exc:
-            QMessageBox.warning(self,"Admit without receipt",str(exc)); return
-        QMessageBox.information(self,"Admit without receipt",str((result or {}).get("message") or (result or {}).get("reason") or "Done."))
-        self.refresh()
+        sid=s['id']
+        def done(result):
+            QMessageBox.information(self,"Admit without receipt",str((result or {}).get("message") or (result or {}).get("reason") or "Done."))
+            self.refresh()
+        run_task(self, lambda: api.post(f"/sessions/{sid}/admit-without-receipt", {"reason": reason}, timeout=20),
+                 done, buttons=getattr(self, "admit_btn", None), busy_text="Opening…", title="Admit without receipt")
     def _pixmap(self, label, path, empty):
+        label.setPixmap(QPixmap())
+        # Photos load in the background; a reply for a visit that is no
+        # longer shown is dropped so a slow photo cannot land on a new visit.
+        token=object(); label._photo_request=token
         if not path:
-            label.setPixmap(QPixmap()); label.setText(empty); return
-        try:
-            data=api.get_bytes(path, timeout=12)
-            pix=QPixmap(); pix.loadFromData(data)
+            label.setText(empty); return
+        label.setText("Loading photo…")
+        def done(data):
+            if getattr(label, "_photo_request", None) is not token:
+                return
+            pix=QPixmap(); pix.loadFromData(data or b"")
             if pix.isNull():
                 label.setText(empty); return
             label.setText("")
             label.setPixmap(pix.scaled(320, 180, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        except Exception:
-            label.setPixmap(QPixmap()); label.setText(empty)
+        run_task(self, lambda: api.get_bytes(path, timeout=12), done,
+                 on_error=lambda _m, _e: label.setText(empty or "Photo not available.") if getattr(label, "_photo_request", None) is token else None)
     def _show_visit(self, data):
         self.visit=data or None
         if not data:
@@ -301,22 +352,20 @@ class Sessions(QWidget):
         token=visit.get("token")
         if not token:
             QMessageBox.information(self,"Exit with receipt","Scan the receipt QR first."); return
-        try:
-            lanes=self._exit_lanes()
-        except Exception as exc:
-            QMessageBox.warning(self,"Exit with receipt",str(exc)); return
-        if not lanes:
-            QMessageBox.information(self,"Exit with receipt","No exit lane with an exit camera is configured."); return
-        labels=[label for label,_,_ in lanes]
-        choice,ok=QInputDialog.getItem(self,"Exit with receipt",f"Which exit is {visit.get('plate') or 'this car'} at?",labels,0,False)
-        if not ok: return
-        _,gate_id,camera_id=lanes[labels.index(choice)]
-        try:
-            result=api.post("/exit/qr-scan",{"gate_id":gate_id,"camera_id":camera_id,"raw_scan":token},timeout=20)
-        except Exception as exc:
-            QMessageBox.warning(self,"Exit with receipt",str(exc)); return
-        self._report_exit(result or {})
-        self.refresh()
+        button=getattr(self, "exit_btn", None)
+        def lanes_loaded(lanes):
+            if not lanes:
+                QMessageBox.information(self,"Exit with receipt","No exit lane with an exit camera is configured."); return
+            labels=[label for label,_,_ in lanes]
+            choice,ok=QInputDialog.getItem(self,"Exit with receipt",f"Which exit is {visit.get('plate') or 'this car'} at?",labels,0,False)
+            if not ok: return
+            _,gate_id,camera_id=lanes[labels.index(choice)]
+            def opened(result):
+                self._report_exit(result or {})
+                self.refresh()
+            run_task(self, lambda: api.post("/exit/qr-scan",{"gate_id":gate_id,"camera_id":camera_id,"raw_scan":token},timeout=20),
+                     opened, buttons=button, busy_text="Checking exit…", title="Exit with receipt")
+        run_task(self, self._exit_lanes, lanes_loaded, buttons=button, busy_text="Loading exits…", title="Exit with receipt")
     def _report_exit(self, result):
         message=str(result.get("message") or result.get("reason") or "Done.")
         mismatch=result.get("plate_mismatch")
@@ -334,44 +383,50 @@ class Sessions(QWidget):
         q=self.query.text().strip()
         if not q:
             QMessageBox.information(self, "Find visit", "Scan a QR code or type a plate."); return
-        try:
-            data=api.get(f"/sessions/lookup?q={quote(q, safe='')}", timeout=15)
-        except Exception as exc:
-            if getattr(exc, "status_code", None)==404 and self._offer_near_match(q):
+        self.kiosk_stay.setText("Looking up the visit…")
+        def failed(message, exc):
+            def not_found():
+                self._show_visit(None)
+                self.kiosk_stay.setText(message)
+            if getattr(exc, "status_code", None)==404 and self._offer_near_match(q, not_found):
                 return
-            self._show_visit(None)
-            self.kiosk_stay.setText(str(exc))
-            return
-        self._show_visit(data)
-    def _offer_near_match(self, typed):
+            not_found()
+        run_task(self, lambda: api.get(f"/sessions/lookup?q={quote(q, safe='')}", timeout=15), self._show_visit,
+                 buttons=getattr(self, "find_btn", None), busy_text="Finding…", on_error=failed)
+    def _offer_near_match(self, typed, not_found=None):
         """No exact visit: offer open visits with a close plate (OCR 8/B, 0/O…).
 
         Choosing one only shows that visit. The operator still checks the car
-        and the receipt; nothing opens a barrier from a fuzzy match.
+        and the receipt; nothing opens a barrier from a fuzzy match. Returns
+        False when ``typed`` is not a plate; otherwise the near-match search
+        runs in the background and ``not_found`` is called if nothing fits.
         """
         from urllib.parse import quote
         if "/" in typed or len(typed) > 16:
             return False  # a receipt link or token, not a typed plate
-        try:
-            matches=api.get(f"/sessions/near-matches?plate={quote(typed, safe='')}", timeout=10) or []
-        except Exception:
-            return False
+        not_found = not_found or (lambda: None)
+        run_task(self, lambda: api.get(f"/sessions/near-matches?plate={quote(typed, safe='')}", timeout=10) or [],
+                 lambda matches: self._choose_near_match(typed, matches, not_found),
+                 on_error=lambda _m, _e: not_found())
+        return True
+    def _choose_near_match(self, typed, matches, not_found):
+        from urllib.parse import quote
         if not matches:
-            return False
+            not_found(); return
         labels=[f"{m.get('plate')}  (entered {(m.get('entry_time') or '').replace('T',' ')[:16]})" for m in matches]
         choice,ok=QInputDialog.getItem(self,"Did you mean…",
             f"No visit for {typed.upper()}. Did you mean one of these? Check the car and the receipt before acting.",
             labels,0,False)
         if not ok:
-            return False
+            not_found(); return
         picked=matches[labels.index(choice)]
-        try:
-            data=api.get(f"/sessions/lookup?q={quote(str(picked.get('token') or picked.get('plate')), safe='')}", timeout=15)
-        except Exception as exc:
-            self._show_visit(None); self.kiosk_stay.setText(str(exc)); return True
-        self._show_visit(data)
-        self.kiosk_note.setText(f"Shown because you typed {typed.upper()}. Confirm the plate on the car matches {data.get('plate')}.")
-        return True
+        def shown(data):
+            self._show_visit(data)
+            self.kiosk_note.setText(f"Shown because you typed {typed.upper()}. Confirm the plate on the car matches {(data or {}).get('plate')}.")
+        def failed(message, _exc):
+            self._show_visit(None); self.kiosk_stay.setText(message)
+        run_task(self, lambda: api.get(f"/sessions/lookup?q={quote(str(picked.get('token') or picked.get('plate')), safe='')}", timeout=15),
+                 shown, on_error=failed)
     def _on_row(self):
         if getattr(self, "_filling", False):
             return
@@ -384,8 +439,14 @@ class Sessions(QWidget):
         self.query.setText(text)
         self.lookup()
     def refresh(self):
-        try: self.rows=api.get("/sessions")
-        except Exception as e: QMessageBox.warning(self,"Sessions",str(e)); return
+        if not getattr(self, "can_browse", True):
+            return
+        def failed(message, _exc):
+            self.statusBar_message(f"Visit list not refreshed: {message}")
+        run_task(self, lambda: api.get("/sessions"), self._fill_rows,
+                 buttons=getattr(self, "refresh_btn", None), busy_text="Refreshing…", on_error=failed)
+    def _fill_rows(self, rows):
+        self.rows=rows or []
         self._filling=True
         self.table.setRowCount(len(self.rows))
         for r,s in enumerate(self.rows):
@@ -407,11 +468,23 @@ class Sessions(QWidget):
         return self.rows[row]
     def print_receipt(self):
         s=self.selected()
-        if not s: QMessageBox.information(self,"Receipt","Select a session first."); return
-        try:
-            issued=api.post(f"/sessions/{s['id']}/receipt", {}, timeout=15)
-        except Exception as e:
-            QMessageBox.critical(self,"Receipt",str(e)); return
+        if not s and (self.visit or {}).get("session_id"):
+            s={"id": self.visit["session_id"]}
+        if not s: QMessageBox.information(self,"Receipt","Find a visit first."); return
+        sid=s['id']
+        def load():
+            issued=api.post(f"/sessions/{sid}/receipt", {}, timeout=15)
+            slip=None
+            if not (issued or {}).get("receipt"):
+                try:
+                    slip=api.get(f"/sessions/{sid}/receipt")
+                except Exception:
+                    slip=None
+            return issued, slip
+        run_task(self, load, self._show_receipt, buttons=getattr(self, "receipt_btn", None),
+                 busy_text="Preparing receipt…", title="Receipt")
+    def _show_receipt(self, loaded):
+        issued, slip = loaded
         body=(issued or {}).get("receipt") or ""
         printed=(issued or {}).get("print") or {}
         record=(issued or {}).get("receipt_record") or {}
@@ -420,16 +493,12 @@ class Sessions(QWidget):
         if not qr_url and (issued or {}).get("public_token"):
             qr_url=f"/p/{issued['public_token']}/qr.png"
         qr_payload=(issued or {}).get("qr_payload") or (issued or {}).get("public_url") or ""
-        if not body:
-            try:
-                slip=api.get(f"/sessions/{s['id']}/receipt")
-                body=slip.get("body_text") or ""
-                path=(slip.get("payload") or {}).get("path") or path
-                qr_payload=qr_payload or slip.get("qr_payload") or ""
-                if not qr_url and slip.get("qr_url"):
-                    qr_url=slip.get("qr_url")
-            except Exception:
-                pass
+        if not body and slip:
+            body=slip.get("body_text") or ""
+            path=(slip.get("payload") or {}).get("path") or path
+            qr_payload=qr_payload or slip.get("qr_payload") or ""
+            if not qr_url and slip.get("qr_url"):
+                qr_url=slip.get("qr_url")
         show_printable_receipt(self, body, path, qr_url=qr_url, qr_payload=qr_payload)
         self.refresh()
     def correct_plate(self):
@@ -438,13 +507,13 @@ class Sessions(QWidget):
         plate=self.correct.text().strip()
         if not session_id or not plate:
             QMessageBox.information(self, "Correct plate", "Find the visit and type the plate you can see."); return
-        try:
-            api.post(f"/sessions/{session_id}/correct-plate", {"plate": plate})
-        except Exception as exc:
-            QMessageBox.critical(self, "Correct plate", str(exc)); return
-        self.query.setText(plate)
-        self.lookup()
-        self.refresh()
+        def done(_result):
+            self.statusBar_message(f"Plate corrected to {plate}.")
+            self.query.setText(plate)
+            self.lookup()
+            self.refresh()
+        run_task(self, lambda: api.post(f"/sessions/{session_id}/correct-plate", {"plate": plate}), done,
+                 buttons=getattr(self, "save_plate_btn", None), busy_text="Saving…", title="Correct plate")
     def _settle(self, method):
         visit=self.visit or {}
         if not visit.get("payable"):
@@ -455,24 +524,30 @@ class Sessions(QWidget):
         plate=visit.get("plate") or ""
         if QMessageBox.question(self, "Record payment", f"Take payment for {plate}?") != QMessageBox.Yes:
             return
-        try:
+        def send():
             if method == "KIOSK_CASH" and token:
-                result=api.post(f"/p/{token}/kiosk-pay", {"method": "KIOSK_CASH"})
-            elif method == "KIOSK_CASH" and session_id:
-                result=api.post(f"/sessions/{session_id}/pay", {"method": "KIOSK_CASH"})
-            elif token:
-                result=api.post(f"/p/{token}/pay", {"method": "MOBILE_SIMULATED"})
+                return api.post(f"/p/{token}/kiosk-pay", {"method": "KIOSK_CASH"})
+            if method == "KIOSK_CASH" and session_id:
+                return api.post(f"/sessions/{session_id}/pay", {"method": "KIOSK_CASH"})
+            if token:
+                return api.post(f"/p/{token}/pay", {"method": "MOBILE_SIMULATED"})
+            raise RuntimeError("This visit has no receipt code for phone payment.")
+        def done(result):
+            result=result or {}
+            if result.get("already_paid"):
+                QMessageBox.information(self, "Payment", "Already settled.")
             else:
-                raise RuntimeError("This visit has no receipt code for phone payment.")
-        except Exception as exc:
-            QMessageBox.critical(self, "Payment", str(exc)); return
-        if result.get("already_paid"):
-            QMessageBox.information(self, "Payment", "Already settled.")
-        else:
-            QMessageBox.information(self, "Payment", "Payment recorded.")
-        if "payable" in (result or {}):
-            self._show_visit(result)
-        self.refresh()
+                QMessageBox.information(self, "Payment", "Payment recorded.")
+            if "payable" in result:
+                self._show_visit(result)
+            self.refresh()
+        def failed(message, exc):
+            # A timeout is not a refusal: the payment may have been recorded.
+            # Say so, so nobody takes the money twice.
+            if isinstance(exc, SiteServerUnreachable) and exc.timed_out:
+                message += "\n\nLook this visit up again before taking money a second time."
+            QMessageBox.critical(self, "Payment", message)
+        run_task(self, send, done, buttons=getattr(self, "pay_btn", None), busy_text="Recording payment…", on_error=failed)
     def pay_visit(self):
         self._settle("KIOSK_CASH")
     def pay_mobile(self):
@@ -488,10 +563,11 @@ class Sessions(QWidget):
         phone,ok=QInputDialog.getText(self, "Mobile money", f"Driver's mobile number for {visit.get('plate') or 'this visit'}:")
         if not ok or not phone.strip():
             return
-        try:
-            api.post("/api/public/payment-intents", {"token": token, "phone": phone.strip()}, timeout=30)
-        except Exception as exc:
-            QMessageBox.critical(self, "Mobile money", str(exc)); return
+        number=phone.strip()
+        run_task(self, lambda: api.post("/api/public/payment-intents", {"token": token, "phone": number}, timeout=30),
+                 lambda _r: self._start_mobile_wait(token), buttons=getattr(self, "mobile_btn", None),
+                 busy_text="Sending prompt…", title="Mobile money")
+    def _start_mobile_wait(self, token):
         self._mobile_token=token
         self._mobile_deadline=time.monotonic() + 180
         self.statusBar_message("Payment prompt sent. Ask the driver to approve it on their phone…")
@@ -504,19 +580,35 @@ class Sessions(QWidget):
         token=getattr(self, "_mobile_token", None)
         if not token:
             self._mobile_timer.stop(); return
-        try:
-            status=api.get(f"/api/public/payment-status/{token}", timeout=5)
-        except Exception:
-            return  # transient; keep waiting until the deadline
+        if getattr(self, "_mobile_polling", False):
+            return
+        self._mobile_polling=True
+        def done(status):
+            self._mobile_polling=False
+            if getattr(self, "_mobile_token", None) == token:
+                self._mobile_status(status or {})
+        def failed(_message, _exc):
+            self._mobile_polling=False  # transient; keep waiting until the deadline
+            if getattr(self, "_mobile_token", None) == token and time.monotonic() > getattr(self, "_mobile_deadline", 0):
+                self._mobile_status({})
+        run_task(self, lambda: api.get(f"/api/public/payment-status/{token}", timeout=5), done, on_error=failed)
+    def _mobile_status(self, status):
         intent=(status or {}).get("intent") or {}
         state=str(intent.get("status") or "").upper()
         if not status.get("payable") and str(status.get("status") or "").upper() in {"PAID", "CLOSED"} or state == "SUCCEEDED":
             self._mobile_timer.stop(); self._mobile_token=None
             QMessageBox.information(self, "Mobile money", "Payment confirmed by the provider.")
             self.lookup(); self.refresh(); return
-        if state in {"FAILED", "EXPIRED", "MISMATCH", "BLOCKED"} or time.monotonic() > self._mobile_deadline:
+        if state in {"FAILED", "BLOCKED"}:
+            # The provider refused or never sent the prompt: nothing was taken.
             self._mobile_timer.stop(); self._mobile_token=None
-            QMessageBox.warning(self, "Mobile money", f"Payment not completed ({state or 'no answer'}). Try again or take cash.")
+            QMessageBox.warning(self, "Mobile money", f"Payment not completed ({state}). Try again or take cash.")
+            return
+        if state in {"MISMATCH", "EXPIRED"} or time.monotonic() > self._mobile_deadline:
+            # The driver may still be charged: a late approval is credited
+            # automatically. Taking cash now risks charging them twice.
+            self._mobile_timer.stop(); self._mobile_token=None
+            QMessageBox.warning(self, "Mobile money", mobile_unconfirmed_message(state))
     def statusBar_message(self, text):
         window=self.window()
         bar=getattr(window, "statusBar", None)
@@ -524,12 +616,21 @@ class Sessions(QWidget):
             bar().showMessage(text, 10000)
     def pay(self):
         s=self.selected()
-        if s:
-            self.query.setText(s.get("public_token") or s.get("plate") or "")
-            self.lookup()
-        if not (self.visit or {}).get("session_id") and s:
+        if not s:
+            self.pay_visit(); return
+        q=s.get("public_token") or s.get("plate") or ""
+        self.query.setText(q)
+        from urllib.parse import quote
+        def fallback():
             self.visit={"session_id": s.get("id"), "plate": s.get("plate"), "token": s.get("public_token"), "payable": float(s.get("amount_due") or 0) > float(s.get("amount_paid") or 0)}
-        self.pay_visit()
+            self.pay_visit()
+        def found(data):
+            self._show_visit(data)
+            if not (self.visit or {}).get("session_id"):
+                fallback(); return
+            self.pay_visit()
+        run_task(self, lambda: api.get(f"/sessions/lookup?q={quote(q, safe='')}", timeout=15), found,
+                 on_error=lambda _m, _e: fallback())
 
 class Payments(QWidget):
     def __init__(self):
@@ -539,12 +640,22 @@ class Payments(QWidget):
         note.setWordWrap(True); l.addWidget(note)
         self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["When","Session","Method","Amount","Status","Provider"])
         configure_table(self.table); l.addWidget(self.table, 1)
-        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
-        row=QHBoxLayout(); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
-        self.refresh()
+        self.refresh_btn=QPushButton("Refresh"); self.refresh_btn.clicked.connect(self.refresh)
+        self.status=QLabel(""); self.status.setWordWrap(True)
+        row=QHBoxLayout(); row.addWidget(self.refresh_btn); row.addWidget(self.status, 1); l.addLayout(row)
+        self._loaded=False
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.refresh()
     def refresh(self):
-        try: rows=api.get("/payments")
-        except Exception as e: QMessageBox.warning(self,"Payments",str(e)); return
+        self.status.setText("Loading payments…")
+        run_task(self, lambda: api.get("/payments"), self._fill, buttons=self.refresh_btn, busy_text="Refreshing…",
+                 on_error=lambda message, _e: self.status.setText(message))
+    def _fill(self, rows):
+        rows=rows or []
+        self.status.setText(f"{len(rows)} payments." if rows else "No payments yet.")
         self.table.setRowCount(len(rows))
         for r,p in enumerate(rows):
             vals=[
@@ -579,11 +690,23 @@ class Vehicles(QWidget):
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete); delete.setVisible(manage); delete.setToolTip("Delete (Del)")
         delete_many=QPushButton(action_label("Delete selected", "Del")); delete_many.clicked.connect(self.delete_selected); delete_many.setVisible(manage); delete_many.setToolTip("Delete selected (Del)")
         refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
+        self.refresh_btn=refresh; self.add_btn=add; self.bulk_btn=bulk; self.edit_btn=edit
+        self.status=QLabel(""); self.status.setWordWrap(True)
         row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
-        self.rows=[]; self.refresh()
+        l.addWidget(self.status)
+        self.rows=[]; self._loaded=False
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.refresh()
     def refresh(self):
-        try: self.rows=api.get("/vehicles")
-        except Exception as e: QMessageBox.warning(self,"Vehicles",str(e)); return
+        self.status.setText("Loading registered vehicles…")
+        run_task(self, lambda: api.get("/vehicles"), self._fill, buttons=self.refresh_btn, busy_text="Refreshing…",
+                 on_error=lambda message, _e: self.status.setText(message))
+    def _fill(self, rows):
+        self.rows=rows or []
+        self.status.setText(f"{len(self.rows)} registered vehicles." if self.rows else "No registered vehicles yet.")
         self.table.setRowCount(len(self.rows))
         for r,v in enumerate(self.rows):
             vals=[
@@ -603,11 +726,18 @@ class Vehicles(QWidget):
             if 0<=row<len(self.rows):
                 ids.append(self.rows[row]["id"])
         return ids
+    def _saved(self, text):
+        show_status(self, text)
+        self.status.setText(text)
+        self.refresh()
     def add(self):
-        d=VehicleDialog(plans=api.get("/access-plans"))
-        if d.exec():
-            try: api.post("/vehicles", d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Register plate",str(e))
+        def with_plans(plans):
+            d=VehicleDialog(plans=plans)
+            if d.exec():
+                payload=d.payload()
+                run_task(self, lambda: api.post("/vehicles", payload), lambda _r: self._saved(f"Registered {payload.get('plate')}."),
+                         buttons=self.add_btn, busy_text="Saving…", title="Register plate")
+        run_task(self, lambda: api.get("/access-plans"), with_plans, buttons=self.add_btn, busy_text="Opening…", title="Register plate")
     def add_bulk(self):
         lines=[line.strip() for line in self.bulk.toPlainText().splitlines() if line.strip()]
         if not lines:
@@ -625,40 +755,41 @@ class Vehicles(QWidget):
                 "valid_from": _iso_date(start) if start else None,
                 "valid_until": _iso_date(finish, end=True) if finish else None,
             })
-        try:
-            result=api.post("/vehicles/bulk", {"vehicles": vehicles})
-        except Exception as exc:
-            QMessageBox.critical(self, "Register plates", str(exc)); return
-        failed="; ".join(item.get("error") or "" for item in (result.get("errors") or []) if item.get("error"))
-        created=len(result.get("created") or [])
-        self.bulk.clear()
-        self.refresh()
-        QMessageBox.information(self, "Register plates", f"Registered {created} plates. {failed}".strip())
+        def done(result):
+            result=result or {}
+            failed="; ".join(item.get("error") or "" for item in (result.get("errors") or []) if item.get("error"))
+            created=len(result.get("created") or [])
+            self.bulk.clear()
+            self.refresh()
+            QMessageBox.information(self, "Register plates", f"Registered {created} plates. {failed}".strip())
+        run_task(self, lambda: api.post("/vehicles/bulk", {"vehicles": vehicles}), done,
+                 buttons=self.bulk_btn, busy_text="Registering…", title="Register plates")
     def edit(self):
         v=self.selected()
         if not v: QMessageBox.information(self,"Edit","Select a plate first."); return
-        d=VehicleDialog(v, plans=api.get("/access-plans"))
-        if d.exec():
-            try: api.patch(f"/vehicles/{v['id']}", d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Edit",str(e))
+        def with_plans(plans):
+            d=VehicleDialog(v, plans=plans)
+            if d.exec():
+                payload=d.payload(); vid=v['id']
+                run_task(self, lambda: api.patch(f"/vehicles/{vid}", payload), lambda _r: self._saved(f"Saved {payload.get('plate')}."),
+                         buttons=self.edit_btn, busy_text="Saving…", title="Edit")
+        run_task(self, lambda: api.get("/access-plans"), with_plans, buttons=self.edit_btn, busy_text="Opening…", title="Edit")
     def delete(self):
         v=self.selected()
         if not v: return
         if QMessageBox.question(self,"Delete",f"Remove {v['plate']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/vehicles/{v['id']}"); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete",str(e))
+        vid=v['id']; plate=v['plate']
+        run_task(self, lambda: api.delete(f"/vehicles/{vid}"), lambda _r: self._saved(f"Removed {plate}."), title="Delete")
     def delete_selected(self):
         ids=self.selected_ids()
         if not ids:
             QMessageBox.information(self, "Delete", "Select at least one plate."); return
         if QMessageBox.question(self, "Delete", f"Remove {len(ids)} registered plate(s)?")!=QMessageBox.Yes: return
-        try: api.post("/vehicles/bulk-delete", {"ids": ids}); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete",str(e))
+        run_task(self, lambda: api.post("/vehicles/bulk-delete", {"ids": ids}), lambda _r: self._saved(f"Removed {len(ids)} plate(s)."), title="Delete")
 
 class Fees(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
-        title=QLabel("Tariffs & Schedules"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
         note=QLabel("Day and night rates for this site. Times and amounts are normal fields — save them here.")
         note.setWordWrap(True); l.addWidget(note)
         form=QFormLayout()
@@ -685,26 +816,26 @@ class Fees(QWidget):
         save=QPushButton("Save tariff"); save.clicked.connect(self.save)
         save.setVisible(api.can("fees.manage") or api.can("settings.manage"))
         reload_btn=QPushButton("Reload"); reload_btn.clicked.connect(self.load_tariff)
+        self.save_btn=save; self.reload_btn=reload_btn
         actions.addWidget(save); actions.addWidget(reload_btn); actions.addStretch(); l.addLayout(actions)
-        quote_form=QFormLayout()
-        self.entry=QLineEdit(); self.exit=QLineEdit()
-        from datetime import datetime, timedelta
-        now=datetime.now()
-        self.entry.setText((now-timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S"))
-        self.exit.setText(now.strftime("%Y-%m-%dT%H:%M:%S"))
-        quote_form.addRow("Entry (site time)", self.entry); quote_form.addRow("Exit (site time)", self.exit)
-        l.addLayout(quote_form)
-        quote=QPushButton("Quote Car1 fee"); quote.clicked.connect(self.quote); l.addWidget(quote)
         self.out=QLabel(""); self.out.setWordWrap(True); l.addWidget(self.out)
         l.addStretch()
-        self.load_tariff()
+        self._loaded=False
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.load_tariff()
     def _set_time(self, edit, value):
         parsed=QTime.fromString(str(value or "")[:5], "HH:mm")
         if parsed.isValid():
             edit.setTime(parsed)
     def load_tariff(self):
-        try: data=api.get("/fees/tariff")
-        except Exception as e: self.out.setText(str(e)); return
+        self.out.setText("Loading tariff…")
+        run_task(self, lambda: api.get("/fees/tariff"), self._show_tariff, buttons=self.reload_btn, busy_text="Loading…",
+                 on_error=lambda message, _e: self.out.setText(message))
+    def _show_tariff(self, data):
+        data=data or {}
         editor=(data or {}).get("editor") or {}
         self.currency.setText(editor.get("currency") or data.get("currency") or "")
         self._set_time(self.day_start, editor.get("day_start"))
@@ -735,21 +866,11 @@ class Fees(QWidget):
             "night_max": self.night_max.value(),
             "daily_wrap_fee": self.daily.value(),
         }
-        try:
-            api.patch("/fees/tariff", payload)
-        except Exception as exc:
-            QMessageBox.critical(self, "Tariff", str(exc)); return
-        self.load_tariff()
-        QMessageBox.information(self, "Tariff", "Tariff saved.")
-    def quote(self):
-        try:
-            data=api.post("/fees/quote",{"entry_time":self.entry.text().strip(),"exit_time":self.exit.text().strip(),"car_type":"Car1"})
-        except Exception as e:
-            QMessageBox.critical(self,"Fee",str(e)); return
-        minutes=max(0, int(int(data.get("duration_seconds") or 0) / 60))
-        due=int(data.get("due") or 0)
-        currency=data.get("currency") or self.currency.text() or "TZS"
-        self.out.setText(f"{currency} {due:,} for {minutes} min.")
+        def done(_r):
+            self.load_tariff()
+            show_status(self, "Tariff saved.")
+            QMessageBox.information(self, "Tariff", "Tariff saved.")
+        run_task(self, lambda: api.patch("/fees/tariff", payload), done, buttons=self.save_btn, busy_text="Saving…", title="Tariff")
 
 class SimPage(QWidget):
     def __init__(self):
@@ -786,11 +907,13 @@ class SimPage(QWidget):
         worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
     def reload(self):
         self.gate.clear()
-        try:
-            for g in api.get("/lanes"):
+        self.out.setPlainText("Loading lanes…")
+        def fill(lanes):
+            self.gate.clear()
+            for g in lanes or []:
                 self.gate.addItem(g["name"], g["id"])
-        except Exception as e:
-            self.out.setPlainText(str(e))
+            self.out.setPlainText("" if lanes else "No lanes yet. Add site cameras so a lane exists.")
+        run_task(self, lambda: api.get("/lanes"), fill, on_error=lambda message, _e: self.out.setPlainText(message))
     def pick_file(self):
         path,_=QFileDialog.getOpenFileName(self,"Car photo","","Images (*.jpg *.jpeg *.png)")
         if not path: return

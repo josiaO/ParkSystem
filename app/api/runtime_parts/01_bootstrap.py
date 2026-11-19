@@ -235,9 +235,12 @@ DEFAULT_ROLES = {
         "payments.view", "payments.create", "settings.view", "settings.manage",
         "users.view", "alerts.view", "sessions.create", "sessions.close",
     ]),
+    # A kiosk may be driver-facing and unattended: it finds the visit on the
+    # receipt (or plate) in front of it and takes payment for that visit only.
+    # No session list, payment history or revenue dashboard (spec 8B:
+    # "payment history lookup according to permissions").
     "Kiosk Operator": ",".join([
-        "kiosk.use", "sessions.view", "payments.view", "payments.create",
-        "dashboard.view",
+        "kiosk.use", "payments.create",
     ]),
     # Use this role for the local node login. The installation-level guard in
     # app.security remains authoritative even if somebody accidentally uses a

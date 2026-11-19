@@ -44,10 +44,20 @@ class ASGIProviderHTTP:
 
         self.breaker = _Breaker()
 
+        # "lost": the push reaches the provider, the answer never comes back.
+        # "refused": the connection fails before the push is sent.
+        self.initiate_fault: str | None = None
+
     async def request(self, method, url, *, headers=None, json=None):
+        from app.infrastructure.payments.common import ProviderError
+
+        if self.initiate_fault == "refused" and "initiate-ussd-push-request" in url:
+            raise ProviderError("clickpesa unreachable: ConnectError", code="connect_failed", retryable=True)
         transport = httpx.ASGITransport(app=self.asgi_app)
         async with httpx.AsyncClient(transport=transport) as client:
             res = await client.request(method, url, headers=headers, json=json)
+        if self.initiate_fault == "lost" and "initiate-ussd-push-request" in url:
+            raise ProviderError("clickpesa unreachable: ReadTimeout", code="unreachable", retryable=True)
         try:
             return res.status_code, res.json()
         except ValueError:
@@ -244,6 +254,56 @@ class MockClickPesaFlowTests(unittest.TestCase):
         self.assertEqual((len(txns), paid, intent.status), (1, 1500.0, "SUCCEEDED"))
         self.assertTrue(intent.extra.get("late_success"))
         self.assertEqual(mobile_payments.stats()["late_credited"], 1)
+
+    # -- push request whose answer never came back --------------------------
+    def test_lost_push_response_stays_pending_and_approval_is_credited(self):
+        self.provider.http.initiate_fault = "lost"
+        res = self.start()
+        self.assertEqual(res.status_code, 200, res.text)
+        _, paid, intent = self.ledger()
+        self.assertEqual((paid, intent.status), (0.0, "PENDING"))       # not FAILED: the prompt may be on the phone
+        self.assertTrue(intent.extra.get("outcome_unknown"))
+        self.phone("approve")
+        txns, paid, intent = self.ledger()
+        self.assertEqual((len(txns), paid, intent.status), (1, 1500.0, "SUCCEEDED"))
+
+    def test_lost_push_response_with_dropped_webhook_is_settled_by_reconciliation(self):
+        self.provider.http.initiate_fault = "lost"
+        self.start()
+        self.mock.faults.drop_webhook = True
+        self.phone("approve")
+        self.age_intent(minutes=1)
+        self.assertEqual(self.reconcile()["credited"], 1)
+        txns, paid, intent = self.ledger()
+        self.assertEqual((len(txns), paid, intent.status), (1, 1500.0, "SUCCEEDED"))
+
+    def test_lost_push_the_provider_never_recorded_expires_without_payment(self):
+        self.provider.http.initiate_fault = "lost"
+        self.start()
+        self.mock.payments.pop(self.ref())                          # the provider has no record of the push
+        self.age_intent(minutes=int(settings.payments_intent_expiry_minutes) + 1)
+        self.assertEqual(self.reconcile()["expired"], 1)
+        txns, paid, intent = self.ledger()
+        self.assertEqual((txns, paid, intent.status), ([], 0.0, "EXPIRED"))
+
+    def test_refused_connection_fails_at_once(self):
+        self.provider.http.initiate_fault = "refused"
+        res = self.start()
+        self.assertFalse(res.json()["ok"])
+        txns, paid, intent = self.ledger()
+        self.assertEqual((txns, paid, intent.status), ([], 0.0, "FAILED"))
+        self.assertFalse(intent.extra.get("outcome_unknown"))
+
+    def test_success_webhook_after_local_failure_is_credited(self):
+        self.start()
+        with self.Session() as db:                                  # e.g. recorded FAILED by an older build
+            intent = db.scalar(select(PaymentIntent).order_by(PaymentIntent.id.desc()))
+            intent.status = "FAILED"
+            db.commit()
+        self.phone("approve")                                       # the driver approved; money is taken
+        txns, paid, intent = self.ledger()
+        self.assertEqual((len(txns), paid, intent.status), (1, 1500.0, "SUCCEEDED"))
+        self.assertEqual(intent.extra.get("late_success_after"), "FAILED")
 
     def test_reversal_after_success_is_flagged_not_hidden(self):
         self.start()

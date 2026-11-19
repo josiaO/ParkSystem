@@ -618,7 +618,7 @@ async def mjpeg_from_cache(camera_id: int):
                 last_seq = row.seq
                 last_sent_at = time.monotonic()
                 gateway.note_displayed(camera_id)
-                yield _mjpeg_part(jpeg)
+                yield _mjpeg_part(jpeg, _source_seq(camera_id))
                 event.clear()
                 continue
             try:
@@ -637,7 +637,7 @@ async def mjpeg_from_cache(camera_id: int):
                     # sequence or growing any queue.
                     last_sent_at = now
                     gateway.note_displayed(camera_id)
-                    yield _mjpeg_part(jpeg)
+                    yield _mjpeg_part(jpeg, _source_seq(camera_id))
                     event.clear()
                     continue
                 # Do not leave an operator on an apparently live but stale
@@ -669,10 +669,25 @@ async def ffmpeg_jpeg_stream(url: str):
         yield jpeg
 
 
-def _mjpeg_part(jpeg: bytes) -> bytes:
+def _source_seq(camera_id: int) -> int | None:
+    """The camera's own frame number for the picture now in LIVE.
+
+    For SDK cameras this is the HVX host's frame sequence: the same number
+    the desktop sees when it reads this PC's host directly. A pane that
+    switches between the direct path and this relay can then still refuse
+    an older picture.
+    """
+    session = gateway.session(int(camera_id))
+    value = int(getattr(session, "live_source_seq", 0) or 0) if session is not None else 0
+    return value or None
+
+
+def _mjpeg_part(jpeg: bytes, source_seq: int | None = None) -> bytes:
+    extra = f"X-Frame-Source-Seq: {int(source_seq)}\r\n" if source_seq else ""
     header = (
         f"--{MJPEG_BOUNDARY}\r\n"
         f"Content-Type: image/jpeg\r\n"
+        f"{extra}"
         f"Content-Length: {len(jpeg)}\r\n\r\n"
     ).encode("ascii")
     return header + jpeg + b"\r\n"

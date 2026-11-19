@@ -31,7 +31,13 @@ from app.db import release_connection
 from app.infrastructure.payments.ledger import SUCCEEDED, paid_total
 from app.models import Camera, Gate, ParkingSession, utcnow
 from app.services.access import lookup_entitlement
-from app.services.decisions import record_access_decision, record_gate_command
+from app.services.decisions import (
+    finalize_access_decision,
+    record_access_decision,
+    record_gate_command,
+    stage_access_decision,
+    stage_gate_request,
+)
 from app.services.fee_engine import load_active_rules, normalize_tariff_rules
 from app.services.parking_sessions import (
     complete_authorized_exit,
@@ -472,11 +478,25 @@ class ExitLaneController:
                 ParkingSession.id == row.id,
                 or_(ParkingSession.exit_open_command_uuid == "", ParkingSession.exit_open_command_uuid.is_(None)),
             ).values(exit_open_command_uuid=command_uuid))
-            db.commit()
-            db.refresh(row)
             if claimed.rowcount != 1:
+                db.rollback()
+                db.refresh(row)
                 return {"ok": True, "action": "EXIT", "reason": "gate_command_in_progress",
                         "duplicate": True, "barrier_opened": False, "session": snapshot(row), "financial": financial}
+        # Authorization Commit: the claim, the decision and the REQUESTED gate
+        # command are one transaction, durable before any barrier command.
+        decision = stage_access_decision(
+            db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
+            outcome="EXIT_AUTHORIZED", reason="authorized; barrier command pending",
+            parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+            extra={"source": source, "command_uuid": command_uuid, **financial},
+        )
+        stage_gate_request(
+            db, gate=gate, session=row, reason=f"exit {row.plate}", automatic=True,
+            command_uuid=command_uuid, side="EXIT",
+        )
+        db.commit()
+        db.refresh(row)
         cameras = _cameras(gate, camera)
         from app.services.lane_timing import mark
         mark("gate_requested", command_uuid=command_uuid)
@@ -499,7 +519,7 @@ class ExitLaneController:
                     db, gate=gate, session=row, reason=f"exit {row.plate}",
                     automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
                     ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
-                    command_uuid=command_uuid,
+                    command_uuid=command_uuid, side="EXIT",
                 )
         except BaseException:
             db.rollback()
@@ -511,11 +531,9 @@ class ExitLaneController:
             # camera's next read, the QR fallback or an operator can retry.
             # Compare-and-clear: never release a claim another attempt owns.
             self._release_exit_claim(db, row, command_uuid)
-            record_access_decision(
-                db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
-                outcome="GATE_UNAVAILABLE", reason=getattr(opened, "message", "") or "gate unavailable",
-                parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
-                extra={"source": source, **financial},
+            finalize_access_decision(
+                db, decision, outcome="GATE_UNAVAILABLE",
+                reason=getattr(opened, "message", "") or "gate unavailable", barrier_opened=False,
             )
             return {
                 "ok": False, "action": "EXIT", "reason": "gate_unavailable",
@@ -527,11 +545,8 @@ class ExitLaneController:
 
         row = complete_authorized_exit(db, row, policy=policy, command_uuid=command_uuid)
         passage_complete = row.lifecycle == CLOSED
-        record_access_decision(
-            db, session=row, plate=row.plate, gate=gate, lane_direction="EXIT",
-            outcome="EXIT_AUTHORIZED", reason=financial["reason"],
-            parker_kind=row.parker_kind or "CASUAL", barrier_opened=passage_complete,
-            extra={"source": source, **financial},
+        finalize_access_decision(
+            db, decision, outcome="EXIT_AUTHORIZED", reason=financial["reason"], barrier_opened=passage_complete,
         )
         return {
             "ok": True, "action": "EXIT",

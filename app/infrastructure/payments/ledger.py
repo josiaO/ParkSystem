@@ -66,6 +66,26 @@ def cash_settlement_key(session_id: int, paid_before: float, amount: float) -> s
     return f"session:{int(session_id)}:cash:{float(paid_before):.2f}:{float(amount):.2f}"
 
 
+def configured_exit_grace_seconds(db: Session) -> int:
+    """The site's walk/drive-to-exit grace after payment, in seconds.
+
+    0 is a valid setting (no grace: the exit re-quotes the stay). Only a
+    missing or unreadable value falls back to the default.
+    """
+    try:
+        from app.services.simulation import parking_settings
+
+        raw = parking_settings(db).get("payment_exit_grace_seconds")
+    except Exception:
+        raw = None
+    if raw is None or raw == "":
+        return DEFAULT_EXIT_GRACE_SECONDS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_EXIT_GRACE_SECONDS
+
+
 def apply_session_payment_state(
     db: Session,
     row: ParkingSession,
@@ -79,7 +99,7 @@ def apply_session_payment_state(
         row.status = "PAID"
         row.payment_status = SUCCEEDED
         row.paid_at = row.paid_at or utcnow()
-        seconds = int(grace_seconds if grace_seconds is not None else DEFAULT_EXIT_GRACE_SECONDS)
+        seconds = int(grace_seconds if grace_seconds is not None else configured_exit_grace_seconds(db))
         if seconds > 0 and row.payment_exit_grace_until is None:
             row.payment_exit_grace_until = row.paid_at + timedelta(seconds=seconds)
     elif paid > 0 and paid < due:

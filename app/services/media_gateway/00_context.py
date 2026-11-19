@@ -185,6 +185,14 @@ class StreamSession:
     frozen: bool = False
     source_fps: float = 0.0
     source_frame_seq: int = 0
+    # Ordering guard for the LIVE buffer (what every viewer paints): the
+    # source sequence of the frame now in LIVE and when a sequenced
+    # (continuous) producer last advanced it. A frame with a lower sequence,
+    # or a one-shot snapshot arriving while a stream is running, would make
+    # the on-screen camera clock jump backwards.
+    live_source_seq: int = 0
+    live_sequenced_at: float = 0.0
+    frames_out_of_order: int = 0
     frame_intervals: deque = field(default_factory=lambda: deque(maxlen=256))
     _restart_not_before: float = 0.0
     # Compatibility field retained for older runtime payloads. SDK cameras do

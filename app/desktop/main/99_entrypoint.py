@@ -1,5 +1,59 @@
 from __future__ import annotations
 
+
+def run_with_progress(text, fn):
+    """Run slow start-up work (start local services, reach the Site Server)
+    on a worker thread while a small window says what is happening.
+
+    Before this the desktop showed nothing at all for up to a minute while
+    the local Site Service started. Returns fn()'s result or re-raises.
+    """
+    from PySide6.QtCore import QEventLoop
+    from PySide6.QtWidgets import QProgressBar
+
+    box=QDialog(None)
+    box.setWindowTitle(PRODUCT_NAME)
+    box.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+    layout=QVBoxLayout(box); layout.setContentsMargins(24,20,24,20)
+    label=QLabel(text); label.setWordWrap(True); layout.addWidget(label)
+    bar=QProgressBar(); bar.setRange(0, 0); bar.setTextVisible(False); layout.addWidget(bar)
+    box.setMinimumWidth(380)
+    outcome={}
+    loop=QEventLoop()
+    worker=Worker(fn)
+    worker.done.connect(lambda value: outcome.update(value=value))
+    worker.failed.connect(lambda _message: outcome.update(error=getattr(worker, "error", None) or RuntimeError(_message)))
+    worker.finished.connect(loop.quit)
+    box.show()
+    worker.start()
+    if not worker.isFinished():
+        loop.exec()
+    worker.wait()
+    box.close()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
+def _check_operator_server(config):
+    """Operator Workstation: confirm the configured Site Server is up and is the paired one."""
+    import httpx
+    response = httpx.get(f"{api.base_url}/health/live", timeout=3, trust_env=False)
+    response.raise_for_status()
+    identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3, trust_env=False)
+    identity.raise_for_status()
+    identity_body = identity.json()
+    if config.paired_server_id:
+        if identity_body.get("server_installation_id", identity_body.get("installation_id")) != config.paired_server_id:
+            raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+    elif config.server_id and identity_body.get("server_id") != config.server_id:
+        raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
+    if config.paired_site_id and identity_body.get("site_id", identity_body.get("server_id")) != config.paired_site_id:
+        raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+    elif not config.paired_server_id and config.installation_id and identity_body.get("installation_id") != config.installation_id:
+        raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+
+
 def main():
     app=QApplication(sys.argv); app.setApplicationName(PRODUCT_NAME)
     assets = Path(__file__).resolve().parents[1] / "assets"
@@ -28,7 +82,8 @@ def main():
             try:
                 from app.desktop.launch import ensure_background_services
 
-                ensure_background_services(config=config)
+                run_with_progress(f"Starting {PRODUCT_NAME} services on this computer…",
+                                  lambda: ensure_background_services(config=config))
                 break
             except Exception as exc:
                 prompt = QMessageBox(None)
@@ -53,7 +108,8 @@ def main():
                 try:
                     from app.desktop.launch import restart_background_services
 
-                    restart_background_services(config=config)
+                    run_with_progress(f"Restarting {PRODUCT_NAME} services…",
+                                      lambda: restart_background_services(config=config))
                     break
                 except Exception as repair_exc:
                     exc = repair_exc
@@ -64,28 +120,14 @@ def main():
         disable_background_services()
         while True:
             try:
-                import httpx
-                response = httpx.get(f"{api.base_url}/health/live", timeout=3, trust_env=False)
-                response.raise_for_status()
-                identity = httpx.get(f"{api.base_url}/deployment/info", timeout=3, trust_env=False)
-                identity.raise_for_status()
-                identity_body = identity.json()
-                if config.paired_server_id:
-                    if identity_body.get("server_installation_id", identity_body.get("installation_id")) != config.paired_server_id:
-                        raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
-                elif config.server_id and identity_body.get("server_id") != config.server_id:
-                    raise RuntimeError("Server identity changed. Open deployment configuration and verify the Site Server.")
-                if config.paired_site_id and identity_body.get("site_id", identity_body.get("server_id")) != config.paired_site_id:
-                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
-                elif not config.paired_server_id and config.installation_id and identity_body.get("installation_id") != config.installation_id:
-                    raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
+                run_with_progress("Connecting to the Site Server…", lambda: _check_operator_server(config))
                 break
             except Exception as exc:
                 prompt = QMessageBox(None)
                 prompt.setIcon(QMessageBox.Icon.Warning)
                 prompt.setWindowTitle(f"{PRODUCT_NAME} Operator Workstation")
                 prompt.setText(f"{PRODUCT_NAME} Site Server unavailable")
-                prompt.setInformativeText(f"Server: {api.base_url}\n\n{exc}")
+                prompt.setInformativeText(f"Server: {api.base_url}\n\n{friendly_error(exc)}")
                 retry = prompt.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
                 change = prompt.addButton("Change Server", QMessageBox.ButtonRole.ActionRole)
                 prompt.addButton("Exit", QMessageBox.ButtonRole.RejectRole)

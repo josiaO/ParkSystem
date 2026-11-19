@@ -6,6 +6,7 @@ from app.services.live_pair import camera_label
 from .api import api
 from .common import Worker, _stop_thread, is_technician, source_label
 from .streams import MjpegStream
+from .frame_mailbox import FrameOrderGuard
 from .live_pane_ui import build_live_pane
 from .video import VideoCanvas
 
@@ -33,103 +34,23 @@ class CameraLivePane(QFrame):
         self._paint_busy=False
         self._shown_jpeg=b""
         self._pending_live=b""
+        self._order=FrameOrderGuard()
         self._held_car=None
         self._evidence_requests={}
         self._evidence_loaded={}
         self._watching=None
-        self._zone=(0.06, 0.18, 0.94, 0.92)
-        self._zone_edit=False
-        self._zone_drag=None
+        # Read-only view of this camera's capture calibration (edited in
+        # Settings): zone, trigger line, and the detector's plate boxes.
+        self._calib={"config": {}, "plates": [], "phase": ""}
+        self._calib_busy=False
+        self._calib_config_at=0.0
+        self._calib_timer=QTimer(self); self._calib_timer.setInterval(700); self._calib_timer.timeout.connect(self._tick_calibration)
 
     def _runtime_api(self):
         resolver = getattr(api, "runtime_client", None)
         return resolver() if callable(resolver) else api
     def _on_video(self):
-        if self._zone_edit:
-            return
         self.armed.emit(self)
-    def _toggle_zone(self):
-        self._zone_edit=not self._zone_edit
-        if self._zone_edit:
-            self.overlays_toggle.setChecked(True)
-        self.zone_btn.setText("Done drawing" if self._zone_edit else "Set detection zone")
-        self.video.setText("Drag a box on the picture. The plate is read from that crop." if self._zone_edit and not self._last_jpeg else self.video.text())
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _zoom_changed(self, value):
-        self.zoom_label.setText(f"Zoom {value/10:.1f}")
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _load_zone(self, camera):
-        framing=(camera or {}).get("framing") or {}
-        roi=str(framing.get("detect_roi") or "")
-        parts=[part.strip() for part in roi.split(",")]
-        self._zone=(0.06, 0.18, 0.94, 0.92)
-        if len(parts)==4:
-            try:
-                vals=tuple(float(part) for part in parts)
-            except ValueError:
-                vals=None
-            if vals and vals[2]-vals[0] >= 0.08 and vals[3]-vals[1] >= 0.08:
-                self._zone=vals
-        zoom=float(framing.get("detect_zoom") or 1)
-        self.zoom.blockSignals(True)
-        self.zoom.setValue(int(round(max(1.0, min(4.0, zoom))*10)))
-        self.zoom.blockSignals(False)
-        self.zoom_label.setText(f"Zoom {self.zoom.value()/10:.1f}")
-        if hasattr(self, "capture_width"):
-            self.capture_width.setValue(int(framing.get("capture_plate_width") or 0))
-    def _norm_at(self, pos):
-        return self.video.normalized_point(pos)
-    def _zone_press(self, pos):
-        if not self._zone_edit:
-            return
-        point=self._norm_at(pos)
-        if point is None:
-            return
-        self._zone_drag=point
-        self._zone=(point[0], point[1], point[0], point[1])
-    def _zone_move(self, pos):
-        if not self._zone_edit or self._zone_drag is None:
-            return
-        point=self._norm_at(pos)
-        if point is None:
-            return
-        x1,y1=self._zone_drag
-        x2,y2=point
-        self._zone=(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-        if self._last_jpeg:
-            self._set_pixmap(self.video, self._last_jpeg, self._last_overlay)
-    def _zone_release(self, pos):
-        if not self._zone_edit:
-            return
-        self._zone_move(pos)
-        self._zone_drag=None
-    def _save_zone(self):
-        cid=self.camera_id()
-        if cid is None:
-            self.status.setText("Choose a camera before saving the zone.")
-            return
-        x1,y1,x2,y2=self._zone
-        if (x2-x1) < 0.08 or (y2-y1) < 0.08:
-            self.status.setText("Draw a larger box. The zone needs to cover the plate.")
-            return
-        roi=f"{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}"
-        zoom=self.zoom.value()/10
-        try:
-            body={"detect_roi": roi, "detect_zoom": zoom}
-            if hasattr(self, "capture_width"):
-                body["capture_plate_width"]=int(self.capture_width.value())
-            data=self._runtime_api().put(f"/cameras/{cid}/framing", body)
-        except Exception as exc:
-            self.status.setText(str(exc))
-            return
-        framing=(data or {}).get("framing") or {}
-        if self.camera is not None:
-            self.camera["framing"]=framing
-        self._zone_edit=False
-        self.zone_btn.setText("Set detection zone")
-        self.status.setText("Zone saved. The live gate crops the plate from this box, then reads that crop.")
     def mousePressEvent(self, event):
         self.armed.emit(self)
         super().mousePressEvent(event)
@@ -176,10 +97,10 @@ class CameraLivePane(QFrame):
             self._last_jpeg=b""
             self._shown_jpeg=b""
             self._pending_live=b""
+            self._order.reset()
             self.plate.setText("—")
             self.last_snap.clear()
             self.crop.clear()
-            self._load_zone(camera)
         if not camera:
             self.status.setText("Click this view or the list to choose a camera.")
             self.details.setText("Any added camera can go on the left or the right.")
@@ -194,7 +115,7 @@ class CameraLivePane(QFrame):
         self.start_live()
     def stop_live(self):
         self._live_gen += 1
-        self._snap_timer.stop(); self._alpr_timer.stop(); self._stop_mjpeg()
+        self._snap_timer.stop(); self._alpr_timer.stop(); self._calib_timer.stop(); self._stop_mjpeg()
         self._watching=None
     def shutdown(self):
         self.stop_live()
@@ -216,6 +137,9 @@ class CameraLivePane(QFrame):
         self._mjpeg=stream
         stream.start()
         if not self._alpr_timer.isActive(): self._alpr_timer.start()
+        self._calib={"config": {}, "plates": [], "phase": ""}
+        self._calib_config_at=0.0
+        if not self._calib_timer.isActive(): self._calib_timer.start()
         self._tick_alpr()
     def _stop_mjpeg(self):
         stream=self._mjpeg
@@ -253,10 +177,10 @@ class CameraLivePane(QFrame):
         target = self._display_target(label)
         image = self._decode_live_image(jpeg, target)
         if image.isNull(): return False
-        if label is self.video and self.overlays_toggle.isChecked():
-            image=self._paint_zone(image)
         if overlay and label is self.video and self.overlays_toggle.isChecked():
             image=self._paint_overlay(image, overlay)
+        if label is self.video and self.overlays_toggle.isChecked():
+            image=self._paint_calibration(image)
         pix=QPixmap.fromImage(image)
         if isinstance(label, VideoCanvas):
             label.setPixmap(pix)
@@ -296,25 +220,77 @@ class CameraLivePane(QFrame):
             if not image.isNull():
                 return image
         return QImage.fromData(jpeg)
-    def _paint_zone(self, image):
-        zone=getattr(self, "_zone", None)
-        if not zone:
-            return image
-        x1, y1, x2, y2 = zone
+    def _tick_calibration(self):
+        """Fetch the camera's calibration (every 10 s) and live plate boxes."""
+        import time as _time
+        cid=self.camera_id()
+        if cid is None or self._calib_busy or not self.isVisible() or not self.overlays_toggle.isChecked():
+            return
+        self._calib_busy=True
+        need_config=_time.monotonic() - self._calib_config_at > 10
+        generation=self._live_gen
+        def fetch():
+            api_=self._runtime_api()
+            live=api_.get(f"/cameras/{cid}/calibration/live", timeout=4)
+            config=api_.get(f"/cameras/{cid}/calibration", timeout=4) if need_config else None
+            return live, config
+        def done(result):
+            if cid != self.camera_id() or generation != self._live_gen:
+                return
+            live, config=result
+            state=(live or {}).get("state") or {}
+            self._calib["plates"]=state.get("plates") or []
+            self._calib["phase"]=str(state.get("phase") or "")
+            self._calib["test_mode"]=bool(((live or {}).get("test_mode") or {}).get("enabled"))
+            if config is not None:
+                self._calib["config"]=(config or {}).get("calibration") or {}
+                self._calib_config_at=_time.monotonic()
+        w=Worker(fetch)
+        w.done.connect(done)
+        w.finished.connect(lambda: setattr(self, "_calib_busy", False))
+        self._keep(w); w.start()
+    def _paint_calibration(self, image):
+        """Zone (yellow), trigger line (blue), plate boxes (green = will be read, red = not)."""
+        calib=getattr(self, "_calib", None) or {}
+        config=calib.get("config") or {}
         width, height = image.width(), image.height()
-        ax1, ay1 = int(x1 * width), int(y1 * height)
-        ax2, ay2 = int(x2 * width), int(y2 * height)
         painted=image.copy()
         painter=QPainter(painted)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(255, 196, 0), max(2, width // 240)))
-        painter.drawRect(ax1, ay1, max(1, ax2 - ax1), max(1, ay2 - ay1))
-        zoom=self.zoom.value() / 10 if hasattr(self, "zoom") else 1
-        if zoom > 1.01 and ax2 > ax1 and ay2 > ay1:
-            cx, cy = (ax1 + ax2) / 2, (ay1 + ay2) / 2
-            zw, zh = max(8, (ax2 - ax1) / zoom), max(8, (ay2 - ay1) / zoom)
-            painter.setPen(QPen(QColor(255, 196, 0), 1, Qt.PenStyle.DashLine))
-            painter.drawRect(int(cx - zw / 2), int(cy - zh / 2), int(zw), int(zh))
+        pen_w=max(2, width // 320)
+        zone=config.get("zone") or []
+        if config.get("enabled") and len(zone) >= 3:
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
+            fill=QColor(255, 196, 0, 30)
+            painter.setBrush(fill)
+            painter.setPen(QPen(QColor(255, 196, 0), pen_w))
+            painter.drawPolygon(QPolygonF([QPointF(x * width, y * height) for x, y in zone]))
+            painter.setBrush(QColor(0, 0, 0, 0))
+        line=config.get("trigger_line") if config.get("enabled") else None
+        if line:
+            y=int(float(line.get("y") or 0) * height)
+            painter.setPen(QPen(QColor(0, 200, 255), pen_w, Qt.PenStyle.DashLine))
+            painter.drawLine(0, y, width, y)
+        painter.setFont(QFont("Sans Serif", max(9, width // 70), QFont.Weight.Bold))
+        for plate in calib.get("plates") or []:
+            box=plate.get("box") or {}
+            try:
+                fw=float(box["image_width"]); fh=float(box["image_height"])
+                x1=int(float(box["x1"]) / fw * width); y1=int(float(box["y1"]) / fh * height)
+                x2=int(float(box["x2"]) / fw * width); y2=int(float(box["y2"]) / fh * height)
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+            color=QColor(0, 220, 90) if plate.get("eligible") else QColor(235, 70, 60)
+            painter.setPen(QPen(color, pen_w))
+            painter.drawRect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+            painter.drawText(x1, max(12, y1 - 4), f"{float(plate.get('plate_width_px') or 0):.0f}px")
+        if config:
+            text="Calibrated v%s" % config.get("version") if config.get("enabled") else "Not calibrated"
+            if calib.get("test_mode"):
+                text += " · TEST MODE"
+            painter.setPen(QPen(QColor(255, 255, 255)))
+            painter.drawText(8, height - 8, text)
         painter.end()
         return painted
     def _paint_overlay(self, image, overlay):
@@ -347,16 +323,28 @@ class CameraLivePane(QFrame):
         # A queued signal may arrive after teardown, when both references are None.
         if stream is None or stream is not self._mjpeg:
             return
-        jpeg = stream.mailbox.take()
-        if jpeg:
+        jpeg, seq = stream.mailbox.take_with_seq()
+        if jpeg and seq is not None:
+            self._queue_live_frame(jpeg, seq)
+        elif jpeg:
             self._queue_live_frame(jpeg)
-    def _queue_live_frame(self, jpeg):
+    def _queue_live_frame(self, jpeg, seq=None):
         self._pending_live=jpeg
+        self._pending_seq=seq
         if not self._paint_busy:
             self._flush_live_frame()
     def _flush_live_frame(self):
         jpeg=self._pending_live
         if not jpeg or jpeg==self._shown_jpeg:
+            return
+        # Both paths (this PC's HVX host, and the Site Server relay) carry
+        # the camera's own frame number, so a frame older than the one on
+        # screen is refused even when it arrives through the other path.
+        if not self._order.accept(jpeg, source="camera", seq=getattr(self, "_pending_seq", None)):
+            # An older picture than the one on screen (fallback between the
+            # lane PC's SDK host and the server relay, or a late frame).
+            # Painting it makes the camera clock run backwards.
+            self._pending_live=b""
             return
         self._paint_busy=True
         try:

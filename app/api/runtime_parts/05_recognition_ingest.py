@@ -284,7 +284,7 @@ async def _drain_camera_events(
             box = found[0]
             # The event read below would run the detector on this same still
             # again (~70-120 ms on CPU); hand it these full-frame (1x) boxes.
-            from app.services.camera_framing import gate_for
+            from app.services.capture_calibration import gate_for
             gate_for(int(camera_id)).prepared = (hash(jpeg), found, 1.0)
             native = {
                 **native,
@@ -612,37 +612,32 @@ async def _complete_passage_from_sensor(camera_id: int) -> None:
             db.commit()
 
 
-_widest_frames: dict[int, bytes] = {}
-_departed_frames: dict[int, bytes] = {}
 
 
 async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
-    """True when this video frame should be cropped and read.
+    """True when the best frame of this passage should be cropped and read.
 
-    Moving frames stay on the detector. A still plate in the zone is read
-    once. HVX snaps and coil triggers do not use this gate; they already
-    mean the car has arrived.
+    The detector runs on every sampled frame (far plates included). The
+    camera's own calibration (``app.services.capture_calibration``) decides
+    when a plate is eligible; eligible frames are gathered for a short window
+    and the best one is kept in ``gate.selected`` for the existing crop + OCR.
+    HVX snaps and coil triggers do not use this gate; they already mean the
+    car has arrived.
     """
     from app.services.inference_thread import run_inference
     from app.services.alpr import locate_plate_boxes
-    from app.services.camera_framing import best_arrival_box, framing_from_profiles, gate_for
+    from app.services import capture_calibration as calibration
     from app.services.recognition_runtime import runtime
 
     if not _detect_due(int(camera.id)):
         return False
     _mark_detect(int(camera.id))
-    framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-    boxes, located = await run_inference(
-        locate_plate_boxes,
-        jpeg,
-        detect_roi=framing["detect_roi"] or None,
-        detect_zoom=framing["detect_zoom"],
-    )
-    gate = gate_for(int(camera.id))
-    from app.services.camera_framing import effective_capture_plate_width
-
-    # Per-camera capture distance set in the zone editor (plate width).
-    gate.min_plate_width_px = effective_capture_plate_width(framing)
+    config = calibration.for_camera(int(camera.id))
+    # Whole picture: a far plate is detected and tracked; the calibration,
+    # not a crop, decides when it is close enough to read.
+    boxes, located = await run_inference(locate_plate_boxes, jpeg, detect_roi="off", detect_zoom=1.0)
+    gate = calibration.gate_for(int(camera.id))
+    gate.configure(config)
     if not located.get("available"):
         runtime.lane(int(camera.id)).last_error = str(located.get("detail") or located.get("reason") or "Plate detector unavailable")
         return False
@@ -655,23 +650,19 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
     frame_width = float(located.get("image_width") or 0)
     if frame_width > 0:
         boxes = [b for b in boxes if (float(b.get("x2", 0)) - float(b.get("x1", 0))) <= max_fraction * frame_width]
-    gate.prepared = (hash(jpeg), boxes, float(framing["detect_zoom"] or 1.0))
-    arrival_box = best_arrival_box(boxes, detect_roi=framing["detect_roi"])
-    previous_best = gate.best_width
-    phase = gate.observe(arrival_box, time.monotonic())
+    gate.prepared = (hash(jpeg), boxes, 1.0)
+    candidates = await run_inference(calibration.evaluate_frame, jpeg, boxes, config)
+    phase = gate.observe(candidates, boxes, jpeg, time.monotonic())
+    calibration.note_frame(int(camera.id), candidates, phase, config)
+    # Latency/trace record keeps measuring every plate seen (early detection),
+    # whether or not it is eligible yet.
+    seen_box = max(candidates, key=lambda c: c.width_px).box if candidates else None
     from app.services import zirp_trigger
 
-    zirp_trigger.observe(int(camera.id), arrival_box, phase, frame_width=int(located.get("image_width") or 0))
-    if arrival_box is not None and gate.best_width > previous_best:
-        _widest_frames[int(camera.id)] = jpeg           # the sharpest view of this car so far
-    if phase == "departed":
-        # The car left without reaching the capture distance: one read of the
-        # widest frame it showed, so a car is never lost for being far.
-        _departed_frames[int(camera.id)] = _widest_frames.pop(int(camera.id), b"")
-    elif phase == "absent":
-        _widest_frames.pop(int(camera.id), None)
+    zirp_trigger.observe(int(camera.id), seen_box, phase, frame_width=int(located.get("image_width") or 0))
     lane = runtime.lane(int(camera.id))
     if phase == "ready":
+        calibration.note_selected(int(camera.id), gate.selected)
         return True
     if phase == "new_vehicle":
         # A following car can replace a published one before an empty detector
@@ -683,21 +674,13 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         lane.visit.observe(presence=False, plate="")
         if lane.visit.state == "IDLE":
             gate.reset()
-    else:
+    elif phase != "missing":
         lane.visit.observe(presence=True, plate="")
     return False
 
 
-async def _read_departed_vehicle(db, camera, jpeg: bytes, native: dict) -> None:
-    """Read the widest live frame of a car that never reached the capture distance."""
-    from app.services import zirp_trigger
-
-    alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True, force=False)
-    zirp_trigger.ready(int(camera.id), alpr, departed=True)
-
-
 def _note_arrival_result(camera_id: int, alpr: dict | None) -> bool:
-    from app.services.camera_framing import gate_for
+    from app.services.capture_calibration import gate_for
 
     if alpr is None:
         gate_for(int(camera_id)).rearm()
@@ -777,9 +760,25 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         )
         if not await _video_arrival_ready(camera, jpeg):
             gateway.note_ai_sample(camera_id, dropped=True)
-            departed = _departed_frames.pop(int(camera_id), b"")
-            if departed[:2] == b"\xff\xd8":
-                await _read_departed_vehicle(db, camera, departed, native)
+            return
+        from app.services import capture_calibration as calibration
+
+        gate = calibration.gate_for(int(camera_id))
+        selected = gate.selected
+        if selected is not None and selected.jpeg[:2] == b"\xff\xd8":
+            jpeg = selected.jpeg                 # the best eligible frame, not merely the latest
+            gate.prepared = (hash(jpeg), selected.boxes, 1.0)
+        if calibration.in_test_mode(camera_id):
+            # Calibration test: read the chosen frame and show the result.
+            # No capture row, no parking session, no barrier.
+            alpr = await _manual_alpr_read(jpeg, camera_label=f"calibration-{camera_id}")
+            best = (alpr or {}).get("best") or {}
+            calibration.note_read(
+                camera_id, plate=str(best.get("plate_normalized") or best.get("plate") or ""),
+                confidence=float(best.get("confidence") or 0.0), source="fastalpr", test_mode=True,
+                accepted=False, jpeg=jpeg,
+            )
+            gate.hold()
             return
         if str(getattr(settings, "capture_trigger", "zirp")) in {"zirp", "both"} and handle is not None:
             # Zirp's own trigger: command the camera's full-resolution
@@ -799,10 +798,8 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         # has not pulsed; a moving frame never reaches this call.
         alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True)
         from app.services import zirp_trigger
-        from app.services.camera_framing import best_arrival_box, gate_for
 
-        prepared = gate_for(int(camera_id)).prepared
-        arrival = best_arrival_box(prepared[1]) if prepared else None
+        arrival = selected.box if selected is not None else None
         zirp_trigger.ready(camera_id, alpr, width=zirp_trigger.box_width(arrival),
                            frame_width=int((arrival or {}).get("image_width") or 0))
         if _note_arrival_result(camera.id, alpr):

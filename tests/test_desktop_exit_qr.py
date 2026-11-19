@@ -11,6 +11,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import app.desktop.main as desktop  # noqa: E402
+import app.desktop.common as desktop_common  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _inline_tasks(monkeypatch):
+    # Page actions run their network work on a background thread; these tests
+    # call them without a Qt event loop, so run that work inline.
+    monkeypatch.setattr(desktop_common, "TASKS_INLINE", True)
 
 # Keep a reference for the whole module: a freed QApplication crashes Qt.
 _APP = QApplication.instance() or QApplication([])
@@ -86,6 +96,7 @@ def test_find_visit_offers_did_you_mean_for_a_near_plate():
     page = SimpleNamespace(query=QLineEdit("T123A8C"), kiosk_stay=QLabel(), kiosk_note=QLabel())
     page._show_visit = lambda data: shown.append(data)
     page._offer_near_match = MethodType(desktop.Sessions._offer_near_match, page)
+    page._choose_near_match = MethodType(desktop.Sessions._choose_near_match, page)
     with patch.object(desktop, "api", Api()), \
          patch.object(desktop.QInputDialog, "getItem", new=lambda *_a, **_k: ("T123ABC  (entered 2026-11-15 08:00)", True)):
         desktop.Sessions.lookup(page)

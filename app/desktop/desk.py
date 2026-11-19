@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import api
+from .common import run_task, show_status
 from .presentation import label_for
 from app.branding import PRODUCT_NAME
 
@@ -207,6 +208,7 @@ class ReportsPage(QWidget):
             row.addWidget(widget)
         layout.addLayout(row)
         report_actions = QHBoxLayout()
+        self.show_btn, self.download_btn = show, download
         for widget in (show, print_one, print_all, download):
             report_actions.addWidget(widget)
         report_actions.addStretch()
@@ -249,6 +251,7 @@ class ReportsPage(QWidget):
         snooze = QPushButton("Remind me tomorrow")
         snooze.clicked.connect(self.snooze)
         manage = api.can("settings.manage")
+        self.save_btn, self.offline_btn, self.cloud_btn, self.snooze_btn = save, offline, cloud, snooze
         for button in (save, offline, cloud):
             button.setVisible(manage)
             actions.addWidget(button)
@@ -269,11 +272,15 @@ class ReportsPage(QWidget):
         return ("?" + "&".join(bits)) if bits else ""
 
     def show_report(self):
-        try:
-            self.pack = api.get(f"/reports/summary{self._range()}", timeout=20)
-        except Exception as exc:
-            QMessageBox.critical(self, "Reports", str(exc))
-            return
+        self.body.setPlainText("Preparing the report…")
+        def failed(message, _exc):
+            self.body.setPlainText(message)
+            QMessageBox.warning(self, "Reports", message)
+        run_task(self, lambda: api.get(f"/reports/summary{self._range()}", timeout=20), self._show_pack,
+                 buttons=getattr(self, "show_btn", None), busy_text="Preparing…", on_error=failed)
+
+    def _show_pack(self, pack):
+        self.pack = pack or {}
         kind = self.kind.currentData()
         sheet = next((item for item in (self.pack.get("reports") or []) if item.get("id") == kind), None)
         self.body.setPlainText(format_sheet(sheet))
@@ -295,17 +302,15 @@ class ReportsPage(QWidget):
         kind = self.kind.currentData() or "payments"
         query = self._range()
         joiner = "&" if query else "?"
-        try:
-            data = api.get_bytes(f"/reports/export.csv{query}{joiner}kind={kind}", timeout=20)
-        except Exception as exc:
-            QMessageBox.critical(self, "Reports", str(exc))
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save report", f"smartpark-{kind}.csv", "CSV (*.csv)")
-        if not path:
-            return
-        with open(path, "wb") as handle:
-            handle.write(data)
-        QMessageBox.information(self, "Reports", f"Saved {path}")
+        def save(data):
+            path, _ = QFileDialog.getSaveFileName(self, "Save report", f"smartpark-{kind}.csv", "CSV (*.csv)")
+            if not path:
+                return
+            with open(path, "wb") as handle:
+                handle.write(data)
+            QMessageBox.information(self, "Reports", f"Saved {path}")
+        run_task(self, lambda: api.get_bytes(f"/reports/export.csv{query}{joiner}kind={kind}", timeout=20), save,
+                 buttons=getattr(self, "download_btn", None), busy_text="Downloading…", title="Reports")
 
     def _apply_backup(self, status: dict):
         status = status or {}
@@ -316,10 +321,8 @@ class ReportsPage(QWidget):
         self.enabled.setCurrentIndex(1 if status.get("cloud_enabled") else 0)
 
     def _load_backup(self):
-        try:
-            self._apply_backup(api.get("/backup"))
-        except Exception as exc:
-            self.backup_status.setText(str(exc))
+        run_task(self, lambda: api.get("/backup"), self._apply_backup,
+                 on_error=lambda message, _e: self.backup_status.setText(message))
 
     def save_backup(self):
         payload = {
@@ -330,34 +333,28 @@ class ReportsPage(QWidget):
         }
         if self.token.text():
             payload["cloud_token"] = self.token.text()
-        try:
-            self._apply_backup(api.patch("/backup", payload))
+        def done(status):
+            self._apply_backup(status)
             self.token.clear()
-        except Exception as exc:
-            QMessageBox.critical(self, "Backup", str(exc))
+            show_status(self, "Backup schedule saved.")
+        run_task(self, lambda: api.patch("/backup", payload), done, buttons=self.save_btn, busy_text="Saving…", title="Backup")
 
     def download_backup(self):
-        try:
-            data = api.get_bytes("/backup/download", timeout=60)
-        except Exception as exc:
-            QMessageBox.critical(self, "Backup", str(exc))
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save offline backup", "smartpark-backup.sql", "SQL (*.sql)")
-        if not path:
-            return
-        with open(path, "wb") as handle:
-            handle.write(data)
-        self._load_backup()
-        QMessageBox.information(self, "Backup", f"Saved {path}")
+        def save(data):
+            path, _ = QFileDialog.getSaveFileName(self, "Save offline backup", "smartpark-backup.sql", "SQL (*.sql)")
+            if not path:
+                return
+            with open(path, "wb") as handle:
+                handle.write(data)
+            self._load_backup()
+            QMessageBox.information(self, "Backup", f"Saved {path}")
+        run_task(self, lambda: api.get_bytes("/backup/download", timeout=60), save,
+                 buttons=self.offline_btn, busy_text="Preparing backup…", title="Backup")
 
     def run_cloud(self):
-        try:
-            self._apply_backup(api.post("/backup/cloud", {}, timeout=60))
-        except Exception as exc:
-            QMessageBox.critical(self, "Backup", str(exc))
+        run_task(self, lambda: api.post("/backup/cloud", {}, timeout=60), self._apply_backup,
+                 buttons=self.cloud_btn, busy_text="Uploading…", title="Backup")
 
     def snooze(self):
-        try:
-            self._apply_backup(api.post("/backup/snooze", {}))
-        except Exception as exc:
-            QMessageBox.critical(self, "Backup", str(exc))
+        run_task(self, lambda: api.post("/backup/snooze", {}), self._apply_backup,
+                 buttons=self.snooze_btn, busy_text="Snoozing…", title="Backup")

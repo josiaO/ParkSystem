@@ -140,12 +140,19 @@ document.getElementById("kiosk-mobile").addEventListener("click", async () => {
       await loadPayments();
       return;
     }
-    if (["FAILED", "EXPIRED", "MISMATCH", "BLOCKED"].includes(state)) {
+    if (["FAILED", "BLOCKED"].includes(state)) {
+      // Refused, or the prompt was never sent: nothing was taken.
       err.textContent = `Payment not completed (${state}). Try again or take cash.`;
       return;
     }
+    if (state === "MISMATCH") {
+      err.textContent = "ClickPesa reported a different amount for this payment. Do not take cash: ask a supervisor to check it before the driver pays again.";
+      return;
+    }
+    if (state === "EXPIRED") break;
   }
-  err.textContent = "No answer from the provider yet. Check Payments before retrying.";
+  // The driver may still be charged; a late approval is credited automatically.
+  err.textContent = "No confirmation from ClickPesa yet. Do not take cash now: the driver may still be charged. Look this visit up again in a few minutes; it shows as paid once ClickPesa confirms.";
 });
 document.getElementById("kiosk-save-plate").addEventListener("click", async () => {
   const err = document.getElementById("session-error");

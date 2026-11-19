@@ -74,9 +74,10 @@ def test_desktop_live_pane_has_vehicle_snapshot_and_plate_crop_panels():
 
 def test_video_presence_uses_current_detection_even_with_old_display_box():
     from app.api_main import _video_arrival_ready
-    from app.services.camera_framing import gate_for
+    from app.services.capture_calibration import gate_for, override
     from app.services import preview
     camera = SimpleNamespace(id=98765)
+    override(camera.id, {})
     preview.remember_plate_box(camera.id, dict(x1=10,y1=10,x2=80,y2=30,image_width=200,image_height=100))
     visit = SimpleNamespace(observe=Mock(), state='IDLE')
     with patch('app.api_main._detect_due', return_value=True), \
@@ -84,10 +85,12 @@ def test_video_presence_uses_current_detection_even_with_old_display_box():
          patch('app.services.alpr.locate_plate_boxes', return_value=([], {'available':True})) as locate, \
          patch('app.services.recognition_runtime.runtime.lane', return_value=SimpleNamespace(visit=visit)):
         assert not asyncio.run(_video_arrival_ready(camera, b'current-frame'))
-    locate.assert_called_once_with(b'current-frame', detect_roi='0.06,0.18,0.94,0.92', detect_zoom=1.0)
+    # Whole picture: the camera's calibration, not a crop, decides eligibility.
+    locate.assert_called_once_with(b'current-frame', detect_roi='off', detect_zoom=1.0)
     assert visit.observe.call_args.kwargs['presence'] is False
     assert preview.held_plate_box(camera.id) is None
     gate_for(camera.id).reset()
+    override(camera.id, None)
     preview._state.pop(camera.id, None)
 
 

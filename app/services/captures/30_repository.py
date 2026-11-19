@@ -239,9 +239,36 @@ def persist_event(
     capture: dict | None,
     coil_occupied: bool = False,
     force: bool = False,
+    defer_evidence: bool = False,
 ) -> VehicleCapture | None:
+    """Store one camera vehicle event.
+
+    ``defer_evidence`` (live camera events): a new capture row is committed
+    with reserved photo names and ``evidence_state='PENDING'``; the zone
+    snapshot and plate crop are produced and written afterwards by
+    ``app.services.evidence``, so the access decision does not wait for them.
+    """
     from app.services.developer import capture_enabled
     if not capture_enabled(db):
+        return None
+    # Calibration test mode: every vehicle read for this camera (camera
+    # trigger or ZIRP's own) ends here. The calibration window shows it; no
+    # capture row is written, so no parking session and no barrier command.
+    from app.services import capture_calibration as _calibration
+    _native_read = native_from_sdk_capture(capture)
+    if _calibration.in_test_mode(int(camera.id)):
+        _test_box = _native_read.get("bbox") if isinstance(_native_read.get("bbox"), dict) else (
+            bbox_from_lp_box((capture or {}).get("plate_box")) or (capture or {}).get("bbox"))
+        _verdict = _calibration.check_capture(int(camera.id), _test_box if isinstance(_test_box, dict) else None, jpeg or b"")
+        _calibration.note_read(
+            int(camera.id), plate=str(_native_read.get("plate") or (capture or {}).get("plate") or ""),
+            confidence=float(_native_read.get("confidence") or 0.0),
+            source=str((capture or {}).get("source") or _native_read.get("source") or "camera"),
+            test_mode=True, accepted=(_verdict is None or _verdict.eligible), jpeg=jpeg or b"",
+        )
+        if _verdict is not None and not _verdict.eligible:
+            _calibration.note_rejected(int(camera.id), plate=str(_native_read.get("plate") or ""),
+                                       reasons=_verdict.reasons, candidate=_verdict)
         return None
     existing = _capture_by_identity(db, camera.id, capture)
     if existing is not None:
@@ -254,16 +281,24 @@ def persist_event(
     image_id = int((capture or {}).get("image_id") or 0)
     if jpeg[:2] != b"\xff\xd8" and crop[:2] != b"\xff\xd8" and not native.get("plate"):
         return None
-    snapshot_jpeg = jpeg
+    # The zone snapshot and the plate crop are image work (about 150 ms per
+    # car on SITE-PC01): produced on first use, and for deferred evidence only
+    # after the decision.
+    zone_args = None
     if not (capture or {}).get("snapshot_zone") and jpeg[:2] == b"\xff\xd8":
         from app.services.camera_framing import framing_from_profiles
 
         framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-        snapshot_jpeg = detection_zone_jpeg(
-            jpeg,
-            detect_roi=(capture or {}).get("detect_roi") or framing["detect_roi"],
-            detect_zoom=(capture or {}).get("detect_zoom") or framing["detect_zoom"],
-        ) or jpeg
+        zone_args = {
+            "detect_roi": (capture or {}).get("detect_roi") or framing["detect_roi"],
+            "detect_zoom": (capture or {}).get("detect_zoom") or framing["detect_zoom"],
+        }
+    _made: dict[str, bytes] = {}
+
+    def make_snapshot() -> bytes:
+        if "snapshot" not in _made:
+            _made["snapshot"] = (detection_zone_jpeg(jpeg, **zone_args) or jpeg) if zone_args else jpeg
+        return _made["snapshot"]
     if not force:
         from app.services.site_policy import site_policy
         allowed, _reason = should_persist_vehicle_capture(
@@ -280,6 +315,17 @@ def persist_event(
         box = raw_box if isinstance(raw_box, dict) else {}
     else:
         box = dict(box)
+    if not force:
+        # A car is never read outside its camera's capture calibration,
+        # whatever triggered the read (camera, ZIRP video, worker). Only an
+        # explicit operator action (force) bypasses it.
+        verdict = _calibration.check_capture(int(camera.id), box, jpeg)
+        if verdict is not None and not verdict.eligible:
+            _calibration.note_rejected(
+                int(camera.id), plate=str(_native_read.get("plate") or (capture or {}).get("plate") or ""),
+                reasons=verdict.reasons, candidate=verdict,
+            )
+            return None
     if native.get("source"):
         box["source"] = native.get("source")
     # Preserve the camera's read-only OcxConfig geometry for diagnostics and
@@ -304,7 +350,11 @@ def persist_event(
     except Exception:
         pass
     box = attach_fusion_audit(box, capture)
-    plate_jpeg = _plate_jpeg(jpeg, crop, box, capture)
+
+    def make_crop() -> bytes:
+        if "crop" not in _made:
+            _made["crop"] = _plate_jpeg(jpeg, crop, box, capture)
+        return _made["crop"]
     has_identity = bool((capture or {}).get("visit_id") or (capture or {}).get("event_id"))
     if image_id and not has_identity:
         existing = db.scalar(
@@ -339,14 +389,15 @@ def persist_event(
                 updated = True
             elif not already:
                 existing.bbox = attach_fusion_audit(box or existing.bbox, capture)
+            plate_jpeg = make_crop()
             if plate_jpeg[:2] == b"\xff\xd8":
                 existing.crop_path = _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg) or _write_jpeg(
                     "crops", _plate_crop_name(camera.id, image_id, capture, incoming_plate or existing.plate), plate_jpeg,
                 )
                 updated = True
-            if snapshot_jpeg[:2] == b"\xff\xd8" and not existing.snapshot_path:
-                existing.snapshot_path = _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", snapshot_jpeg) or _write_jpeg(
-                    "snapshots", f"cam{camera.id}-img{image_id}-car.jpg", snapshot_jpeg,
+            if not existing.snapshot_path and make_snapshot()[:2] == b"\xff\xd8":
+                existing.snapshot_path = _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", make_snapshot()) or _write_jpeg(
+                    "snapshots", f"cam{camera.id}-img{image_id}-car.jpg", make_snapshot(),
                 )
                 updated = True
             if updated:
@@ -373,6 +424,7 @@ def persist_event(
                 already = bbox_from_lp_box(latest.bbox)
                 if incoming and not already:
                     latest.bbox = attach_fusion_audit({**(latest.bbox or {}), **incoming}, capture)
+                    plate_jpeg = make_crop()
                     if plate_jpeg[:2] == b"\xff\xd8":
                         latest.crop_path = _write_jpeg(
                             "crops", _plate_crop_name(camera.id, 0, capture, latest.plate), plate_jpeg,
@@ -384,14 +436,28 @@ def persist_event(
     if recent_duplicate is not None:
         return recent_duplicate
     stamp = f"cam{camera.id}-img{image_id or int(time.time() * 1000) % 1_000_000_000}"
-    snapshot_path = (
-        _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", snapshot_jpeg)
-        or _write_jpeg("snapshots", f"{stamp}-car.jpg", snapshot_jpeg)
-    ) if snapshot_jpeg[:2] == b"\xff\xd8" else ""
-    crop_path = (
-        _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg)
-        or _write_jpeg("crops", _plate_crop_name(camera.id, image_id, capture, native.get("plate")), plate_jpeg)
-    ) if plate_jpeg[:2] == b"\xff\xd8" else ""
+    crop_name = _plate_crop_name(camera.id, image_id, capture, native.get("plate"))
+    deferred = bool(
+        defer_evidence
+        and not (capture or {}).get("image_ref")
+        and not (capture or {}).get("plate_crop_ref")
+        and (jpeg[:2] == b"\xff\xd8" or crop[:2] == b"\xff\xd8")
+    )
+    if deferred:
+        # Reserve the names now; the files follow the decision.
+        snapshot_path = f"snapshots/{stamp}-car.jpg" if jpeg[:2] == b"\xff\xd8" else ""
+        crop_path = f"crops/{crop_name}"
+    else:
+        snapshot_jpeg = make_snapshot()
+        plate_jpeg = make_crop()
+        snapshot_path = (
+            _reuse_media_ref((capture or {}).get("image_ref"), "snapshots", snapshot_jpeg)
+            or _write_jpeg("snapshots", f"{stamp}-car.jpg", snapshot_jpeg)
+        ) if snapshot_jpeg[:2] == b"\xff\xd8" else ""
+        crop_path = (
+            _reuse_media_ref((capture or {}).get("plate_crop_ref"), "crops", plate_jpeg)
+            or _write_jpeg("crops", crop_name, plate_jpeg)
+        ) if plate_jpeg[:2] == b"\xff\xd8" else ""
     row = VehicleCapture(
         camera_id=camera.id,
         gate_id=camera.gate_id,
@@ -409,6 +475,7 @@ def persist_event(
         plate_country=str((capture or {}).get("plate_country") or ""),
         plate_region=str((capture or {}).get("plate_region") or ""),
         plate_type=str((capture or {}).get("plate_type") or ""),
+        evidence_state="PENDING" if deferred else "",
     )
     db.add(row)
     try:
@@ -421,9 +488,19 @@ def persist_event(
                 VehicleCapture.camera_id == camera.id,
                 VehicleCapture.image_id == image_id,
             ))
-        _discard_unreferenced_media(db, snapshot_path, crop_path)
+        if not deferred:
+            # Deferred names were only reserved: nothing was written, and the
+            # winner may own a file with the same name.
+            _discard_unreferenced_media(db, snapshot_path, crop_path)
         if existing is None:
             raise
         return existing
     db.refresh(row)
+    if deferred:
+        from app.services import evidence
+
+        evidence.submit(evidence.EvidenceJob(
+            capture_id=int(row.id), snapshot_ref=snapshot_path, crop_ref=crop_path,
+            make_snapshot=make_snapshot, make_crop=make_crop,
+        ))
     return row

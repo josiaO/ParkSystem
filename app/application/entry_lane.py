@@ -7,6 +7,7 @@ camera callback, or UI. HVX GPIO stays in gates.controller.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -20,14 +21,23 @@ from app.domain.parking_engine import (
     ENTRY_AUTHORIZED,
     GATE_OPEN_REQUESTED,
     LanePolicy,
+    RECEIPT_PRESENTED,
+    RECEIPT_PRINTING,
     RECEIPT_TAKEN,
+    SESSION_CREATED,
     VEHICLE_PASSED,
 )
 from app.domain.recognition import NormalizedRecognitionEvent
 from app.infrastructure.hardware.receipt_printers import receipt_printer_for
 from app.models import Camera, Gate, ParkingSession
 from app.services.access import lookup_entitlement
-from app.services.decisions import record_access_decision, record_gate_command
+from app.services.decisions import (
+    finalize_access_decision,
+    record_access_decision,
+    record_gate_command,
+    stage_access_decision,
+    stage_gate_request,
+)
 from app.services.parking_sessions import (
     cancel_entry_attempt,
     mark_vehicle_passed,
@@ -37,6 +47,8 @@ from app.services.parking_sessions import (
 )
 from app.services.receipt_jobs import mark_receipt_taken, print_entry_receipt
 from app.services.receipts import policy_requires_taken, policy_should_print, resolve_receipt_policy
+
+log = logging.getLogger("smartpark")
 
 
 GateOpener = Callable[..., Awaitable[Any]]
@@ -51,6 +63,47 @@ STALE_VISIT_SECONDS = 600
 # car: it is reported as a duplicate and the barrier is not opened again.
 LOOKALIKE_WINDOW_SECONDS = 10.0
 LOOKALIKE_MIN_SIMILARITY = 0.85
+
+
+def supersede_abandoned_entry(db: Session, plate: str, *, site_id: int, gate: Gate | None) -> ParkingSession | None:
+    """Close an old entry attempt for this plate that never got through.
+
+    Entry attempts are no longer cancelled by a timer (a timer cannot tell a
+    driver who reversed away from one let in by an operator). Instead, when
+    the same plate is read *entering* again more than STALE_VISIT_SECONDS
+    after an attempt Zirp never opened the barrier for, that attempt was
+    abandoned: it is closed as ENTRY_SUPERSEDED and the new arrival gets a
+    fresh visit. Visits whose barrier command was sent are never touched.
+    """
+    from datetime import datetime, timezone
+
+    from app.services.parking_sessions import active_for_plate
+
+    row = active_for_plate(db, plate, site_id=site_id)
+    if row is None or (row.open_command_uuid or ""):
+        return None
+    if row.lifecycle not in {SESSION_CREATED, RECEIPT_PRINTING, RECEIPT_PRESENTED}:
+        return None
+    created = row.created_at
+    if created is None:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - created).total_seconds()
+    if age <= STALE_VISIT_SECONDS:
+        return None
+    try:
+        cancel_entry_attempt(db, row, policy=LanePolicy(receipt_required_before_open=True))
+    except Exception:
+        db.rollback()
+        log.warning("could not supersede abandoned entry session=%s", row.id, exc_info=True)
+        return None
+    record_access_decision(
+        db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY", outcome="ENTRY_SUPERSEDED",
+        reason=f"plate entering again {int(age // 60)} min later; this attempt never passed the barrier",
+        parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+    )
+    return row
 
 
 def recent_lookalike_session(db: Session, plate: str, gate_id: int | None) -> ParkingSession | None:
@@ -241,6 +294,8 @@ class EntryLaneController:
                 "source": source,
                 "message": f"{plate} looks like {lookalike.plate} read moments ago on this gate; treated as the same car.",
             }
+
+        supersede_abandoned_entry(db, plate, site_id=event_site_id, gate=gate)
 
         payload = rec.as_dict()
         payload["plate_normalized"] = plate
@@ -597,11 +652,26 @@ class EntryLaneController:
                 ParkingSession.id == row.id,
                 or_(ParkingSession.open_command_uuid == "", ParkingSession.open_command_uuid.is_(None)),
             ).values(open_command_uuid=command_uuid))
-            db.commit()
-            db.refresh(row)
             if claimed.rowcount != 1:
+                db.rollback()
+                db.refresh(row)
                 return {"ok": True, "action": "ENTRY", "reason": "gate_command_in_progress",
                         "duplicate": True, "barrier_opened": False, "session": snapshot(row)}
+        # Authorization Commit: the claim, the decision and the REQUESTED gate
+        # command are one transaction, durable before any barrier command.
+        decision = stage_access_decision(
+            db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
+            outcome="ENTRY_AUTHORIZED", reason="authorized; barrier command pending",
+            parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+            extra={"command_uuid": command_uuid, "source": source},
+        )
+        if gate is not None:
+            stage_gate_request(
+                db, gate=gate, session=row, reason=f"entry {row.plate}", automatic=True,
+                command_uuid=command_uuid, side="ENTRY",
+            )
+        db.commit()
+        db.refresh(row)
         opened = None
         from app.services.lane_timing import mark
         if gate is not None:
@@ -617,13 +687,12 @@ class EntryLaneController:
                 db, gate=gate, session=row, reason=f"entry {row.plate}",
                 automatic=True, dry_run=bool(getattr(opened, "simulated", False)),
                 ok=bool(opened and opened.ok), message=getattr(opened, "message", "") or "",
-                command_uuid=command_uuid,
+                command_uuid=command_uuid, side="ENTRY",
             )
             if not opened or not opened.ok:
-                record_access_decision(
-                    db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
-                    outcome="GATE_UNAVAILABLE", reason=getattr(opened, "message", "") or "gate unavailable",
-                    parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+                finalize_access_decision(
+                    db, decision, outcome="GATE_UNAVAILABLE",
+                    reason=getattr(opened, "message", "") or "gate unavailable", barrier_opened=False,
                 )
                 return {
                     "ok": False,
@@ -649,10 +718,9 @@ class EntryLaneController:
                 command_uuid=command_uuid,
             )
             if opened is not None and not opened.ok:
-                record_access_decision(
-                    db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
-                    outcome="GATE_UNAVAILABLE", reason=opened.message or "gate unavailable",
-                    parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+                finalize_access_decision(
+                    db, decision, outcome="GATE_UNAVAILABLE",
+                    reason=opened.message or "gate unavailable", barrier_opened=False,
                 )
                 return {
                     "ok": False,
@@ -673,10 +741,8 @@ class EntryLaneController:
         barrier_command_accepted = bool(opened is None or (opened and opened.ok))
         passage_complete = policy.passage_fallback()
         barrier_opened = barrier_command_accepted and gate is not None and passage_complete
-        record_access_decision(
-            db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY",
-            outcome="ENTRY_AUTHORIZED", reason="entry complete",
-            parker_kind=row.parker_kind or "CASUAL", barrier_opened=barrier_opened,
+        finalize_access_decision(
+            db, decision, outcome="ENTRY_AUTHORIZED", reason="entry complete", barrier_opened=barrier_opened,
         )
         return {
             "ok": True,

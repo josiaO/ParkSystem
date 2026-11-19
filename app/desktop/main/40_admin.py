@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 class UserDialog(QDialog):
-    def __init__(self, user=None):
+    def __init__(self, user=None, roles=None):
         super().__init__(); self.user=user; self.setWindowTitle("Edit User" if user else "Add User")
         self.setMinimumWidth(360); self.setMaximumWidth(520)
         form=QFormLayout(self)
@@ -11,8 +11,7 @@ class UserDialog(QDialog):
         self.status=QComboBox(); self.status.addItems(["ACTIVE","LOCKED","DISABLED"])
         self.role_boxes=[]
         roles_box=QWidget(); roles_l=QVBoxLayout(roles_box); roles_l.setContentsMargins(0,0,0,0)
-        try: roles=api.get("/roles")
-        except Exception: roles=[{"name":"Operator"},{"name":"Admin"}]
+        roles=roles or [{"name":"Operator"},{"name":"Admin"}]
         selected=set(user["roles"] if user else ["Operator"])
         for role in roles:
             box=QCheckBox(role["name"]); box.setChecked(role["name"] in selected); self.role_boxes.append(box); roles_l.addWidget(box)
@@ -41,12 +40,26 @@ class Users(QWidget):
         edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_user); edit.setVisible(api.can("users.manage")); edit.setToolTip("Edit (Ctrl+E)")
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_user); delete.setVisible(api.can("users.manage")); delete.setToolTip("Delete (Del)")
         refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
-        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(refresh); row.addStretch(); l.addLayout(row); self.rows=[]; self.refresh()
+        self.add_btn=add; self.edit_btn=edit; self.refresh_btn=refresh
+        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(refresh); row.addStretch(); l.addLayout(row); self.rows=[]
+        self.status=QLabel(""); self.status.setWordWrap(True); l.addWidget(self.status)
+        self._loaded=False
         if api.can("users.manage"):
             self.kiosks=KioskDevicesBox(); l.addWidget(self.kiosks)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded=True
+            self.refresh()
+            if hasattr(self, "kiosks"):
+                self.kiosks.refresh()
     def refresh(self):
-        try: rows=api.get("/users")
-        except Exception as e: QMessageBox.warning(self,"Users",str(e)); return
+        self.status.setText("Loading users…")
+        run_task(self, lambda: api.get("/users"), self._fill, buttons=self.refresh_btn, busy_text="Refreshing…",
+                 on_error=lambda message, _e: self.status.setText(message))
+    def _fill(self, rows):
+        rows=rows or []
+        self.status.setText("")
         # Kiosk service accounts are managed under Kiosk devices below.
         rows=[u for u in rows if not str(u.get("username") or "").startswith("kiosk-device:")]
         self.rows=rows
@@ -58,24 +71,36 @@ class Users(QWidget):
         row=self.table.currentRow()
         if row<0 or row>=len(self.rows): return None
         return self.rows[row]
+    def _saved(self, text):
+        self.status.setText(text); show_status(self, text); self.refresh()
+    def _with_roles(self, button, then):
+        def fallback(_message, _exc):
+            then(None)
+        run_task(self, lambda: api.get("/roles"), then, buttons=button, busy_text="Opening…", on_error=fallback)
     def add_user(self):
-        d=UserDialog()
-        if d.exec():
-            try: api.post("/users",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Add user",str(e))
+        def open_dialog(roles):
+            d=UserDialog(roles=roles)
+            if d.exec():
+                payload=d.payload()
+                run_task(self, lambda: api.post("/users",payload), lambda _r: self._saved(f"User {payload.get('username')} added."),
+                         buttons=self.add_btn, busy_text="Saving…", title="Add user")
+        self._with_roles(self.add_btn, open_dialog)
     def edit_user(self):
         user=self.selected_user()
         if not user: QMessageBox.information(self,"Edit user","Select a user first."); return
-        d=UserDialog(user)
-        if d.exec():
-            try: api.patch(f"/users/{user['id']}",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Edit user",str(e))
+        def open_dialog(roles):
+            d=UserDialog(user, roles=roles)
+            if d.exec():
+                payload=d.payload(); uid=user['id']
+                run_task(self, lambda: api.patch(f"/users/{uid}",payload), lambda _r: self._saved(f"User {user['username']} saved."),
+                         buttons=self.edit_btn, busy_text="Saving…", title="Edit user")
+        self._with_roles(self.edit_btn, open_dialog)
     def delete_user(self):
         user=self.selected_user()
         if not user: QMessageBox.information(self,"Delete user","Select a user first."); return
         if QMessageBox.question(self,"Delete user",f"Delete {user['username']}?")!=QMessageBox.Yes: return
-        try: api.delete(f"/users/{user['id']}"); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete user",str(e))
+        uid=user['id']
+        run_task(self, lambda: api.delete(f"/users/{uid}"), lambda _r: self._saved(f"User {user['username']} deleted."), title="Delete user")
 
 
 class KioskDevicesBox(QGroupBox):
@@ -93,13 +118,17 @@ class KioskDevicesBox(QGroupBox):
         add=QPushButton("Enrol kiosk…"); add.clicked.connect(self.create_device)
         revoke=QPushButton("Revoke"); revoke.clicked.connect(self.revoke_device)
         refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        self.add_btn=add; self.revoke_btn=revoke; self.refresh_btn=refresh
         row.addWidget(add); row.addWidget(revoke); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
-        self.rows=[]; self.refresh()
+        self.rows=[]
 
     def refresh(self):
-        try: rows=api.get("/kiosk-devices")
-        except Exception as e:
-            self.table.setRowCount(0); self.setTitle(f"Kiosk devices — {e}"); return
+        def failed(message, _exc):
+            self.table.setRowCount(0); self.setTitle(f"Kiosk devices — {message}")
+        run_task(self, lambda: api.get("/kiosk-devices"), self._fill, buttons=self.refresh_btn, busy_text="Refreshing…", on_error=failed)
+
+    def _fill(self, rows):
+        rows=rows or []
         self.setTitle("Kiosk devices")
         self.rows=rows
         self.table.setRowCount(len(rows))
@@ -113,12 +142,11 @@ class KioskDevicesBox(QGroupBox):
         name, ok = QInputDialog.getText(self, "Enrol kiosk", "Kiosk name (for example 'Exit B kiosk'):")
         if not ok or not name.strip():
             return
-        try:
-            created=api.post("/kiosk-devices", {"name": name.strip()})
-        except Exception as e:
-            QMessageBox.critical(self, "Enrol kiosk", str(e)); return
-        self.refresh()
-        self.show_credential(created)
+        def done(created):
+            self.refresh()
+            self.show_credential(created or {})
+        run_task(self, lambda: api.post("/kiosk-devices", {"name": name.strip()}), done,
+                 buttons=self.add_btn, busy_text="Enrolling…", title="Enrol kiosk")
 
     def show_credential(self, created):
         d=QDialog(self); d.setWindowTitle("Kiosk credential — shown once")
@@ -139,8 +167,6 @@ class KioskDevicesBox(QGroupBox):
         if QMessageBox.question(self, "Revoke kiosk",
                                 f"Revoke {device.get('name')} ({device.get('device_id')})? It is signed out at once.") != QMessageBox.Yes:
             return
-        try:
-            api.post(f"/kiosk-devices/{device['id']}/revoke")
-        except Exception as e:
-            QMessageBox.critical(self, "Revoke kiosk", str(e)); return
-        self.refresh()
+        did=device['id']
+        run_task(self, lambda: api.post(f"/kiosk-devices/{did}/revoke"), lambda _r: self.refresh(),
+                 buttons=self.revoke_btn, busy_text="Revoking…", title="Revoke kiosk")

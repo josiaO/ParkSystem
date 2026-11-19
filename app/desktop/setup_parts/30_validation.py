@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+
+def _wizard_engine(url: str):
+    """A short-lived engine for one setup step.
+
+    No pool (the wizard opens it once and disposes it) and a bounded connect
+    timeout for PostgreSQL, so a wrong address or a switched-off Site Server
+    fails in seconds with a clear message instead of hanging the wizard.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    kwargs = {"future": True, "poolclass": NullPool}
+    if url.lower().startswith(("postgresql", "postgres")):
+        kwargs["connect_args"] = {"connect_timeout": 5}
+    return create_engine(url, **kwargs)
+
+
 class _SetupValidationMixin:
     def _test_connection(self) -> bool:
         url = self.server_url.text().strip().rstrip("/")
@@ -59,7 +76,7 @@ class _SetupValidationMixin:
         from app.models import Node, Role, Site, User, UserRole
         from app.services.node_authorization import hash_node_credential
 
-        engine = create_engine(database_url(db_config, password=self.pg_password.text() or None), future=True)
+        engine = _wizard_engine(database_url(db_config, password=self.pg_password.text() or None))
         try:
             with Session(engine) as db:
                 site = db.scalar(select(Site).order_by(Site.id))
@@ -184,7 +201,7 @@ class _SetupValidationMixin:
         # is launched from a process that has not imported app.db yet.
         if "app.db" not in sys.modules:
             apply_runtime_database_config(db_config)
-        engine = create_engine(database_url(db_config, password=self.pg_password.text() or None), future=True)
+        engine = _wizard_engine(database_url(db_config, password=self.pg_password.text() or None))
         try:
             with Session(engine) as db:
                 if db.scalar(select(User.id)) is not None:
@@ -233,7 +250,7 @@ class _SetupValidationMixin:
         from app.services.site_policy import save_site_policy
 
         chosen = self.site_timezone.currentText().strip()
-        engine = create_engine(database_url(db_config, password=self.pg_password.text() or None), future=True)
+        engine = _wizard_engine(database_url(db_config, password=self.pg_password.text() or None))
         try:
             with Session(engine) as db:
                 row = db.get(SiteSetting, "site")

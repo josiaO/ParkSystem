@@ -149,11 +149,24 @@ def _sqlite_on_connect(dbapi_conn, _connection_record):
                 pass
         try:
             cur.execute("PRAGMA busy_timeout=5000")
-            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute(f"PRAGMA synchronous={sqlite_synchronous_mode()}")
         except Exception:
             pass
     finally:
         cur.close()
+
+
+def sqlite_synchronous_mode(profile: str | None = None) -> str:
+    """FULL wherever the SQLite file is a lane's parking authority.
+
+    In WAL mode ``synchronous=NORMAL`` can roll back the last commits after a
+    power cut, so a barrier could have opened for a decision that no longer
+    exists (docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md section 4). FULL costs
+    one more disk flush per commit. Development keeps NORMAL for speed.
+    """
+    if profile is None:
+        profile = str(getattr(settings, "deployment_profile", "DEVELOPMENT") or "DEVELOPMENT")
+    return "NORMAL" if profile.strip().upper() == "DEVELOPMENT" else "FULL"
 
 
 def get_db():

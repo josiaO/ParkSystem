@@ -30,6 +30,8 @@ from typing import Any
 
 from app.config import settings
 from app.infrastructure.payments.common import (
+    initiate_outcome_unknown,
+    outcome_unknown,
     ProviderError,
     ProviderHTTP,
     amount_string,
@@ -173,8 +175,13 @@ class FlutterwavePaymentProvider:
                 "POST", f"{self.base_url}/charges?type=mobile_money_tanzania", headers=self._headers(), json=body
             )
         except ProviderError as exc:
+            if outcome_unknown(exc):
+                return initiate_outcome_unknown(self.id, intent["tx_ref"], str(exc))
             return {"status": "FAILED", "provider_id": self.id, "error": str(exc), "retryable": exc.retryable,
                     "tx_ref": intent["tx_ref"]}
+        if code >= 500:
+            # The charge may have been created before the server error.
+            return initiate_outcome_unknown(self.id, intent["tx_ref"], f"charge HTTP {code}")
         data = res.get("data") if isinstance(res, dict) else None
         data = data if isinstance(data, dict) else {}
         if code >= 400 or (isinstance(res, dict) and res.get("status") == "error"):

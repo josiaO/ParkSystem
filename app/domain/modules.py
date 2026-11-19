@@ -264,7 +264,8 @@ class NavItem:
     id: str
     label: str
     module_id: str
-    permission: str | None
+    # One permission, or a tuple where any one of them is enough.
+    permission: str | tuple[str, ...] | None
     page: str
     group: str
     profile_labels: dict[str, str] = field(default_factory=dict)
@@ -281,7 +282,7 @@ NAVIGATION: tuple[NavItem, ...] = (
     ),
     NavItem("plates", "Plate Engine", "recognition.alpr", "cameras.view", "plates", "Overview"),
     NavItem("health", "System Health", "core.devices", "hardware.view", "health", "Overview"),
-    NavItem("sessions", "Parking Sessions", "parking.sessions", "sessions.view", "sessions", "Operations",
+    NavItem("sessions", "Parking Sessions", "parking.sessions", ("sessions.view", "kiosk.use"), "sessions", "Operations",
             profile_labels={PROFILE_LPR_ONLY: "Detections", PROFILE_SECURITY: "Detections"}),
     NavItem("vehicles", "Vehicles", "parking.subscribers", "subscribers.view", "vehicles", "Operations"),
     NavItem("watchlists", "Watchlists", "security.watchlists", "subscribers.view", "watchlists", "Operations"),

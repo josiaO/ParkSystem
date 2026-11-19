@@ -256,7 +256,15 @@ def acquire_instance_lock(name: str) -> bool:
             if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
                 return False
             _lock_handle = handle
-            _lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            # The mutex is the lock. The PID file is only a diagnostic hint;
+            # it can belong to another Windows account (read-only for this
+            # one), and failing to write it used to fall through to the file
+            # lock below, which then reported "already open" and the desktop
+            # never started for that user.
+            try:
+                _lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            except OSError:
+                pass
             atexit.register(release_instance_lock)
             return True
         except Exception:

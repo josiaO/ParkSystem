@@ -365,11 +365,15 @@ async def apply_video_connect(camera: Camera, db: Session, user: User, *, raise_
                     "codec": str(result.get("codec") or ""),
                 }])
             if jpeg[:2] == b"\xff\xd8":
-                remember_frame(
+                # Through the gateway, not straight into the preview cache:
+                # the gateway refuses a one-shot probe frame while a live
+                # stream is already running, so the picture never goes back.
+                from app.services.media_gateway import gateway as _media_gateway
+                _media_gateway.publish(
                     camera.id, jpeg,
                     url=url,
-                    url_redacted=str(result.get("url_redacted") or ""),
                     source=str(result.get("source") or "rtsp"),
+                    detect=False,
                 )
             # Register the physical source before acquiring a detector. The
             # previous order could leave a direct FFmpeg pump alive beside the
