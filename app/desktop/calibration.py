@@ -23,6 +23,20 @@ from .frame_mailbox import FrameOrderGuard
 from .streams import MjpegStream
 from .video import VideoCanvas
 
+# Same rules as app/services/capture_calibration.RULES (kept here so the
+# desktop does not import server code).
+RULE_LABELS = (
+    ("zone", "Capture zone (plate outside the drawn area)"),
+    ("start_line", "Start line (plate not yet past it)"),
+    ("end_line", "End line (plate already past it)"),
+    ("plate_size", "Minimum plate width / height"),
+    ("detector", "Minimum detector confidence"),
+    ("picture_quality", "Sharpness, brightness and glare"),
+    ("recognition", "Minimum recognition confidence"),
+)
+DEFAULT_RULES = {"zone": True, "start_line": False, "end_line": False, "plate_size": True,
+                 "detector": True, "picture_quality": True, "recognition": True}
+
 ZONE_COLOR = QColor(255, 196, 0)
 LINE_COLOR = QColor(0, 200, 255)
 OK_COLOR = QColor(0, 220, 90)
@@ -291,6 +305,23 @@ class CalibrationWindow(QDialog):
             signal = getattr(widget, "valueChanged", None) or getattr(widget, "toggled")
             signal.connect(self._mark_dirty)
         rv.addWidget(settings_box)
+
+        # Which rules may stop a car from being stored. Off: the rule is still
+        # drawn and still helps pick the best picture, but never refuses a car.
+        rules_box = QGroupBox("Refuse a car that breaks…")
+        rules_form = QVBoxLayout(rules_box)
+        self.rule_checks = {}
+        for rule, label in RULE_LABELS:
+            check = QCheckBox(label)
+            check.setToolTip("Ticked: a read that breaks this rule is not stored (no session, no barrier).\n"
+                             "Not ticked: the rule only helps choose the best picture; the car is always stored.")
+            check.toggled.connect(self._mark_dirty)
+            rules_form.addWidget(check)
+            self.rule_checks[rule] = check
+        hint = QLabel("Not ticked = only used to choose the best picture; the car is still stored.")
+        hint.setObjectName("muted"); hint.setWordWrap(True)
+        rules_form.addWidget(hint)
+        rv.addWidget(rules_box)
         buttons = QHBoxLayout()
         self.save_btn = QPushButton("Save for this camera"); self.save_btn.clicked.connect(self.save)
         self.revert_btn = QPushButton("Revert"); self.revert_btn.setObjectName("secondary"); self.revert_btn.clicked.connect(self.load)
@@ -343,6 +374,8 @@ class CalibrationWindow(QDialog):
                        self.min_det, self.min_ocr, self.min_sharp, self.min_bright, self.max_bright, self.max_clip,
                        self.frames, self.window_s, self.test_minutes):
             widget.setEnabled(self.can_edit)
+        for check in self.rule_checks.values():
+            check.setEnabled(self.can_edit)
         self.canvas.editable = self.can_edit
         if not self.can_edit:
             self.status.setText("View only: changing calibration needs the camera management permission.")
@@ -418,6 +451,11 @@ class CalibrationWindow(QDialog):
         self.max_clip.setValue(float(cfg.get("max_clipped_fraction") if cfg.get("max_clipped_fraction") is not None else 1))
         self.frames.setValue(int(cfg.get("candidate_frames") or 3))
         self.window_s.setValue(float(cfg.get("candidate_seconds") or 0.8))
+        rules = dict(DEFAULT_RULES, **(cfg.get("enforce") or {}))
+        for rule, check in self.rule_checks.items():
+            check.blockSignals(True)
+            check.setChecked(bool(rules.get(rule, True)))
+            check.blockSignals(False)
         for widget in widgets:
             widget.blockSignals(False)
         self.canvas.zone = [list(p) for p in (cfg.get("zone") or [])]
@@ -466,6 +504,7 @@ class CalibrationWindow(QDialog):
             "max_clipped_fraction": self.max_clip.value(),
             "candidate_frames": self.frames.value(),
             "candidate_seconds": self.window_s.value(),
+            "enforce": {rule: check.isChecked() for rule, check in self.rule_checks.items()},
             # Plate sizes are set on this live picture; camera snapshots of
             # another size are scaled to it when they are checked.
             "reference_width": (self.canvas.pixmap().width() if not self.canvas.pixmap().isNull()
