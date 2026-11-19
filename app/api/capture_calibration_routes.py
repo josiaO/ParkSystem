@@ -33,6 +33,7 @@ def register() -> APIRouter:
             "defaults": dict(calibration.DEFAULTS),
             "limits": {k: list(v) for k, v in calibration.LIMITS.items()},
             "test_mode": calibration.test_mode_status(db, camera.id),
+            "warning": calibration.lane_warning(camera.id),
         }
 
     @router.put("/cameras/{camera_id}/calibration")
@@ -110,6 +111,18 @@ def register() -> APIRouter:
             "vehicle_boxes_note": "The installed detector finds plates, not whole vehicles; vehicle boxes are not available.",
             "has_snapshot": bool(calibration.selected_snapshot(camera.id)),
         }
+
+    @router.get("/cameras/{camera_id}/calibration/rejected.jpg")
+    def get_rejected(camera_id: int, part: str = "snapshot", db: Session = Depends(get_db),
+                     _: User = Depends(require("cameras.view"))):
+        """The last read this camera's calibration refused (whole picture or plate crop)."""
+        from app.services import capture_calibration as calibration
+
+        camera = _camera(db, camera_id)
+        jpeg = calibration.rejected_image(camera.id, "crop" if part == "crop" else "snapshot")
+        if jpeg[:2] != b"\xff\xd8":
+            raise HTTPException(404, "No refused read for this camera")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @router.get("/cameras/{camera_id}/calibration/snapshot.jpg")
     def get_snapshot(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
