@@ -139,6 +139,29 @@ def test_refused_read_replaces_the_old_stored_car_marked_not_stored(fixture_ui, 
     pane.close()
 
 
+def test_leaving_live_gates_briefly_keeps_the_stream_and_evidence(fixture_ui, monkeypatch):
+    """Out of sight: frames are kept, not painted; back: painted at once, no reconnect, no reload."""
+    pane = live_pane.CameraLivePane()
+    pane.camera = {"id": 904}
+    painted = []
+    requests = []
+    monkeypatch.setattr(pane, "_set_pixmap", lambda label, jpeg, *args: painted.append(jpeg) or True)
+    monkeypatch.setattr(live_pane.api, "get_bytes", lambda path, **kwargs: requests.append(path) or b"jpeg", raising=False)
+    pane._load_evidence(pane.last_snap, "/media/snapshots/a.jpg")
+    assert requests == ["/media/snapshots/a.jpg"]
+    pane.set_paused(True)
+    pane._queue_live_frame(b"frame-1", 1)
+    pane._queue_live_frame(b"frame-2", 2)
+    assert b"frame-2" not in painted
+    pane.set_paused(False)
+    assert painted[-1] == b"frame-2"
+    # A later stream restart of the same camera does not download the same evidence again.
+    pane._live_gen += 1
+    pane._load_evidence(pane.last_snap, "/media/snapshots/a.jpg")
+    assert requests == ["/media/snapshots/a.jpg"]
+    pane.close()
+
+
 def test_repeated_alpr_poll_does_not_repaint_an_unchanged_live_overlay(fixture_ui, monkeypatch):
     pane = live_pane.CameraLivePane()
     pane.camera = {"id": 901}

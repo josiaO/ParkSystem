@@ -38,6 +38,9 @@ class CameraLivePane(QFrame):
         self._held_car=None
         self._evidence_requests={}
         self._evidence_loaded={}
+        # Set while Live Gates is out of sight but the stream is kept open
+        # (short grace period): frames are kept, not decoded or painted.
+        self._paused=False
         self._watching=None
         # Read-only view of this camera's capture calibration (edited in
         # Settings): zone, trigger line, and the detector's plate boxes.
@@ -113,7 +116,18 @@ class CameraLivePane(QFrame):
             if not self._alpr_timer.isActive(): self._alpr_timer.start()
             return
         self.start_live()
+    def set_paused(self, paused):
+        """Out of sight: keep the connection, skip decoding; back: paint at once."""
+        paused=bool(paused)
+        if paused == self._paused:
+            return
+        self._paused=paused
+        if not paused:
+            self._flush_live_frame()
+            if self._alpr_timer.isActive():
+                self._tick_alpr()
     def stop_live(self):
+        self._paused=False
         self._live_gen += 1
         self._snap_timer.stop(); self._alpr_timer.stop(); self._calib_timer.stop(); self._stop_mjpeg()
         self._watching=None
@@ -336,7 +350,7 @@ class CameraLivePane(QFrame):
     def _queue_live_frame(self, jpeg, seq=None):
         self._pending_live=jpeg
         self._pending_seq=seq
-        if not self._paint_busy:
+        if not self._paint_busy and not self._paused:
             self._flush_live_frame()
     def _flush_live_frame(self):
         jpeg=self._pending_live
@@ -377,7 +391,7 @@ class CameraLivePane(QFrame):
         self.video.setText(text)
     def _tick_alpr(self):
         cid=self.camera_id()
-        if cid is None or self._alpr_busy: return
+        if cid is None or self._alpr_busy or self._paused: return
         self._alpr_busy=True
         generation=self._live_gen
         w=Worker(lambda: self._runtime_api().get(f"/cameras/{cid}/plates", timeout=8))
@@ -477,7 +491,8 @@ class CameraLivePane(QFrame):
         if not path:
             return
         key=(self.camera_id(), self._live_gen, path)
-        if self._evidence_loaded.get(label) == key or self._evidence_requests.get(label) == key:
+        loaded=self._evidence_loaded.get(label)
+        if (loaded and (loaded[0], loaded[2]) == (key[0], key[2])) or self._evidence_requests.get(label) == key:
             return
         self._evidence_requests[label]=key
         worker=Worker(lambda: self._runtime_api().get_bytes(path, timeout=8))

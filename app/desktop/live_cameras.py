@@ -1,6 +1,6 @@
 """Gate viewing, explicit node assignment, and camera device management."""
 import json
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout,
@@ -449,9 +449,32 @@ class Cameras(QWidget):
         self._start_pair(True)
     def _all_panes(self):
         return [self.pane_a, self.pane_b, *getattr(self, "extra_panes", [])]
+    # Leaving Live Gates for a moment (another page or the Devices tab) keeps
+    # the streams open, undecoded, so coming back is instant; after this long
+    # out of sight they are closed.
+    PAUSE_GRACE_MS = 60_000
+
     def _stop_panes(self):
+        timer=getattr(self, "_pause_timer", None)
+        if timer is not None:
+            timer.stop()
         for pane in self._all_panes():
             pane.stop_live()
+    def _pause_panes(self):
+        if getattr(self, "_pause_timer", None) is None:
+            self._pause_timer=QTimer(self)
+            self._pause_timer.setSingleShot(True)
+            self._pause_timer.timeout.connect(lambda: None if self._live_visible() else self._stop_panes())
+        for pane in self._all_panes():
+            pane.set_paused(True)
+        if not self._pause_timer.isActive():
+            self._pause_timer.start(self.PAUSE_GRACE_MS)
+    def _resume_panes(self):
+        timer=getattr(self, "_pause_timer", None)
+        if timer is not None:
+            timer.stop()
+        for pane in self._all_panes():
+            pane.set_paused(False)
     def _on_layout(self):
         self._sync_layout()
         self._start_pair(False)
@@ -504,9 +527,10 @@ class Cameras(QWidget):
             self._stop_panes()
     def _maybe_start_pair(self):
         if self._live_visible():
+            self._resume_panes()
             self._start_pair(False)
         else:
-            self._stop_panes()
+            self._pause_panes()
     def _start_pair(self, from_lane=False):
         if not self._live_visible():
             self._stop_panes(); return
@@ -540,7 +564,7 @@ class Cameras(QWidget):
         if cid is not None:
             self._load_streams(cid)
     def hideEvent(self, event):
-        self._stop_panes()
+        self._pause_panes()
         super().hideEvent(event)
     def showEvent(self, event):
         super().showEvent(event)
@@ -550,6 +574,9 @@ class Cameras(QWidget):
         else:
             self._maybe_start_pair()
     def shutdown(self):
+        timer=getattr(self, "_pause_timer", None)
+        if timer is not None:
+            timer.stop()
         for pane in self._all_panes():
             pane.shutdown()
     def _load_streams(self, cid):
