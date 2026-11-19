@@ -48,9 +48,10 @@ async def camera_recognition_commissioning_read(
     """Run one software plate read without creating sessions or controlling gates."""
     from app.services.recognition_commissioning import diagnostic_read
 
-    camera = _camera_for_node(db, camera_id, action="recognition-commissioning-read")
+    camera = await run_db(_camera_for_node, db, camera_id, action="recognition-commissioning-read")
     result = await asyncio.to_thread(diagnostic_read, db, camera)
-    write_audit(
+    await run_db(
+        write_audit,
         db, user, "camera.recognition_diagnostic", "camera", str(camera.id),
         f"source={result.get('evidence_source')} plate={(result.get('best') or {}).get('plate') if isinstance(result.get('best'), dict) else ''}",
     )
@@ -99,13 +100,13 @@ def ai_recent_reviews(_: User = Depends(require("cameras.view"))):
 async def ai_review_capture(capture_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     """Operator-requested second opinion on a stored capture. Stores the verdict; never edits the plate."""
     from app.services import ai_review
-    if not ai_review.enabled(db):
+    if not await run_db(ai_review.enabled, db):
         raise HTTPException(409, "AI review is disabled (SMARTPARK_AI_ENABLED=false)")
     try:
         review = await ai_review.review_capture(db, capture_id)
     except LookupError:
         raise HTTPException(404, "Capture not found")
-    write_audit(db, user, "ai.review", "capture", str(capture_id), f"AI verdict {review.verdict}")
+    await run_db(write_audit, db, user, "ai.review", "capture", str(capture_id), f"AI verdict {review.verdict}")
     return {"ok": review.verdict != "unavailable", "review": review.as_dict()}
 
 
@@ -159,7 +160,12 @@ async def alpr_recognize_upload(
 
 
 async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = _camera_for_node(db, camera_id, action="manual-alpr")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="manual-alpr")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     if await _worker_owns_continuous_reads(c.id):
         # The worker already has the bounded MediaMTX decoder and owns the
         # model session for this camera.  Starting a second detector here is a
@@ -167,13 +173,18 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
         raise HTTPException(409, "Continuous recognition owns this camera; use the latest worker result")
     grabbed = await live_snapshot(c)
     if not grabbed.get("ok"):
-        write_audit(db, user, "camera.alpr", "camera", str(c.id), grabbed.get("error") or "no frame")
+        await run_db(write_audit, db, user, "camera.alpr", "camera", str(c.id), grabbed.get("error") or "no frame")
         raise HTTPException(409, grabbed.get("error") or "Could not grab a live frame")
     # live_snapshot already admitted this frame through the media gateway
     # (or returned the gateway's current frame). Writing it into the preview
     # cache again bypassed the gateway's ordering guard and could put a
     # one-shot frame between two stream frames: the live clock jumped back.
-    persist_video(db, c, grabbed.get("url"))
+
+    def _persist_video():
+        persist_video(db, c, grabbed.get("url"))
+        release_connection(db)
+
+    await run_db(_persist_video)
     result = await _manual_alpr_read(
         grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
     )
@@ -199,5 +210,5 @@ async def camera_alpr(camera_id: int, db: Session = Depends(get_db), user: User 
         last = await _persist_capture_event(db, c, capture, grabbed["jpeg"], _crop_from_alpr(result))
         result["last_car"] = last
         result["capture"] = last
-    write_audit(db, user, "camera.alpr", "camera", str(c.id), fused.resolved_plate or result.get("detail") or "FastALPR")
+    await run_db(write_audit, db, user, "camera.alpr", "camera", str(c.id), fused.resolved_plate or result.get("detail") or "FastALPR")
     return result

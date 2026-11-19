@@ -112,7 +112,12 @@ def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(g
 
 @app.delete("/cameras/{camera_id}")
 async def delete_camera(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.manage"))):
-    c = _camera_mutation_for_node(db, camera_id, action="camera-delete")
+    def _prepare():
+        c = _camera_mutation_for_node(db, camera_id, action="camera-delete")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     name = c.name
     ref = getattr(c, "credentials_ref", "") or ""
     # Removing a row must also release its physical/session owners. Otherwise
@@ -140,24 +145,27 @@ async def delete_camera(camera_id: int, db: Session = Depends(get_db), user: Use
         # Cleanup is best effort: an unavailable host/sidecar must not prevent
         # removal of a stale camera record.
         log.warning("camera %s media cleanup failed during delete: %s", c.id, exc)
-    try:
-        db.delete(c)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        detail = str(getattr(exc, "orig", None) or exc).replace("\n", " ")[:500]
-        log.warning("camera delete blocked camera_id=%s: %s", camera_id, detail)
-        raise HTTPException(
-            409,
-            "This camera has parking history and cannot be deleted. Disable it or edit its address instead.",
-        ) from None
-    if ref:
-        from app.infrastructure.secrets import secret_store
+    def _delete_row():
         try:
-            secret_store().delete(ref)
-        except Exception as exc:
-            log.warning("camera %s: could not delete stored credential %s: %s", camera_id, ref, exc)
-    write_audit(db, user, "camera.delete", "camera", str(camera_id), f"Deleted {name}")
+            db.delete(c)
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            detail = str(getattr(exc, "orig", None) or exc).replace("\n", " ")[:500]
+            log.warning("camera delete blocked camera_id=%s: %s", camera_id, detail)
+            raise HTTPException(
+                409,
+                "This camera has parking history and cannot be deleted. Disable it or edit its address instead.",
+            ) from None
+        if ref:
+            from app.infrastructure.secrets import secret_store
+            try:
+                secret_store().delete(ref)
+            except Exception as exc:
+                log.warning("camera %s: could not delete stored credential %s: %s", camera_id, ref, exc)
+        write_audit(db, user, "camera.delete", "camera", str(camera_id), f"Deleted {name}")
+
+    await run_db(_delete_row)
     return {"ok": True}
 
 
@@ -214,16 +222,25 @@ def camera_adapter_catalog(_: User = Depends(require("cameras.view"))):
 
 @app.post("/cameras/{camera_id}/sdk/connect")
 async def sdk_connect(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = _camera_for_node(db, camera_id, action="sdk-connect")
-    from app.services.developer import camera_connections_enabled
-    if not camera_connections_enabled(db):
-        raise HTTPException(409, "Developer mode has camera connections disabled. No SDK connection was opened.")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="sdk-connect")
+        from app.services.developer import camera_connections_enabled
+        if not camera_connections_enabled(db):
+            raise HTTPException(409, "Developer mode has camera connections disabled. No SDK connection was opened.")
+        return c
+
+    c = await run_db(_prepare)
     return await apply_camera_connect(c, db, user, raise_on_host_error=False)
 
 
 @app.post("/cameras/{camera_id}/sdk/disconnect")
 async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = _camera_for_node(db, camera_id, action="sdk-disconnect")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="sdk-disconnect")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     if not c: raise HTTPException(404, "Camera not found")
     if c.sdk_handle is not None:
         try: await HVXHostClient().disconnect(c.sdk_handle, force=True)
@@ -235,11 +252,14 @@ async def sdk_disconnect(camera_id: int, db: Session = Depends(get_db), user: Us
         await gateway.unregister_stream(c.id)
     except Exception:
         pass
-    c.sdk_handle = None
-    c.status = CameraStatus.DISCOVERED.value
-    db.commit()
-    write_audit(db, user, "camera.sdk_disconnect", "camera", str(c.id), "Disconnected SDK session")
-    return camera_dict(c)
+    def _finish():
+        c.sdk_handle = None
+        c.status = CameraStatus.DISCOVERED.value
+        db.commit()
+        write_audit(db, user, "camera.sdk_disconnect", "camera", str(c.id), "Disconnected SDK session")
+        return camera_dict(c)
+
+    return await run_db(_finish)
 
 
 async def _read_upload_limited(file: UploadFile, *, maximum_bytes: int = 12 * 1024 * 1024) -> bytes:
@@ -264,35 +284,47 @@ def _require_development_simulation() -> None:
 
 @app.post("/cameras/{camera_id}/rtsp/probe")
 async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.connect"))):
-    c = _camera_for_node(db, camera_id, action="rtsp-probe")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="rtsp-probe")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     sdk = await _sdk_probe_status(c)
     http = await grab_http_snapshot(c.ip_address, c.username, c.password_secret)
     if http.get("ok"):
-        persist_video(db, c)
+        def _persist_video():
+            persist_video(db, c)
+            release_connection(db)
+
+        await run_db(_persist_video)
     results=[]
     for url in vendor_candidates(c.ip_address, c.username, c.password_secret, c.rtsp_url):
         r=await probe(url)
         results.append(r.__dict__)
         if r.ok:
-            c.rtsp_url=url
-            from app.services.stream_roles import default_capabilities, recommend_roles
-            c.stream_profiles = recommend_roles([{
-                "uri": url,
-                "protocol": "rtsp",
-                "codec": r.codec or "",
-                "width": r.width or 0,
-                "height": r.height or 0,
-                "fps": r.fps or 0,
-            }])
-            c.media_capabilities = default_capabilities(native_alpr=c.sdk_handle is not None, sdk=c.sdk_handle is not None, rtsp=True)
-            if c.status == CameraStatus.SDK_CONNECTED.value:
-                c.status=CameraStatus.VIDEO_CONNECTED.value
-            db.commit()
-            try:
-                from app.services.mediamtx_sources import sync_camera
-                sync_camera(c, db=db)
-            except Exception:
-                pass
+            def _save_stream(url=url, r=r):
+                c.rtsp_url=url
+                from app.services.stream_roles import default_capabilities, recommend_roles
+                c.stream_profiles = recommend_roles([{
+                    "uri": url,
+                    "protocol": "rtsp",
+                    "codec": r.codec or "",
+                    "width": r.width or 0,
+                    "height": r.height or 0,
+                    "fps": r.fps or 0,
+                }])
+                c.media_capabilities = default_capabilities(native_alpr=c.sdk_handle is not None, sdk=c.sdk_handle is not None, rtsp=True)
+                if c.status == CameraStatus.SDK_CONNECTED.value:
+                    c.status=CameraStatus.VIDEO_CONNECTED.value
+                db.commit()
+                try:
+                    from app.services.mediamtx_sources import sync_camera
+                    sync_camera(c, db=db)
+                except Exception:
+                    pass
+
+            await run_db(_save_stream)
             break
     return {
         "camera_id": c.id,
@@ -308,7 +340,7 @@ async def rtsp_probe(camera_id: int, db: Session = Depends(get_db), _: User = De
 
 @app.get("/cameras/{camera_id}/streams")
 async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = _camera_for_node(db, camera_id, action="stream-telemetry")
+    c = await run_db(_camera_for_node, db, camera_id, action="stream-telemetry")
     from app.services.media_gateway import gateway
     from app.services.stream_roles import profile_warnings, public_profiles
     from app.services.ffmpeg_profiles import list_profiles
@@ -318,11 +350,10 @@ async def camera_streams(camera_id: int, db: Session = Depends(get_db), _: User 
     live_endpoint = await media_registry.get_live_endpoint(c.id, db)
     detect_endpoint = await media_registry.get_detect_endpoint(c.id, db)
     evidence_endpoint = await media_registry.get_evidence_endpoint(c.id, db)
-    mediamtx_telemetry = (
-        media_registry.media_telemetry(c.id)
-        if media_registry.mediamtx_detect_active(c.id, db) or media_registry.mediamtx_live_active(c.id, db)
-        else None
+    mediamtx_active = await run_db(
+        lambda: media_registry.mediamtx_detect_active(c.id, db) or media_registry.mediamtx_live_active(c.id, db)
     )
+    mediamtx_telemetry = media_registry.media_telemetry(c.id) if mediamtx_active else None
     warnings = profile_warnings(profiles, upstream_consumers=1 if health.get("pumping") else 0)
     if mediamtx_telemetry:
         compat = mediamtx_telemetry.get("webrtc") or {}
@@ -356,26 +387,29 @@ async def update_camera_streams(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
-    c = _camera_for_node(db, camera_id, action="stream-profile-update")
-    from app.services.ffmpeg_profiles import normalize_profile, normalize_transport
-    from app.services.stream_roles import ROLE_DETECT, ROLE_LIVE, merge_profiles
-    if payload.ffmpeg_profile:
-        c.ffmpeg_profile = normalize_profile(payload.ffmpeg_profile)
-    if payload.rtsp_transport:
-        c.rtsp_transport = normalize_transport(payload.rtsp_transport)
-    profiles = dict(c.stream_profiles or {})
-    if payload.stream_profiles:
-        profiles = merge_profiles(profiles, payload.stream_profiles)
-    if payload.live_role:
-        profiles[ROLE_LIVE] = {**(profiles.get(ROLE_LIVE) or {}), "source": payload.live_role.upper(), "role": ROLE_LIVE}
-    if payload.detect_source:
-        profiles[ROLE_DETECT] = {**(profiles.get(ROLE_DETECT) or {}), "source": payload.detect_source.upper(), "role": ROLE_DETECT}
-    if payload.ai_fps is not None:
-        profiles[ROLE_DETECT] = {**(profiles.get(ROLE_DETECT) or {}), "ai_fps": payload.ai_fps, "role": ROLE_DETECT}
-    c.stream_profiles = profiles
-    db.commit()
-    write_audit(db, user, "camera.streams", "camera", str(c.id), f"profile={c.ffmpeg_profile} transport={c.rtsp_transport}")
-    spec = _live_spec(c)
+    def _save():
+        c = _camera_for_node(db, camera_id, action="stream-profile-update")
+        from app.services.ffmpeg_profiles import normalize_profile, normalize_transport
+        from app.services.stream_roles import ROLE_DETECT, ROLE_LIVE, merge_profiles
+        if payload.ffmpeg_profile:
+            c.ffmpeg_profile = normalize_profile(payload.ffmpeg_profile)
+        if payload.rtsp_transport:
+            c.rtsp_transport = normalize_transport(payload.rtsp_transport)
+        profiles = dict(c.stream_profiles or {})
+        if payload.stream_profiles:
+            profiles = merge_profiles(profiles, payload.stream_profiles)
+        if payload.live_role:
+            profiles[ROLE_LIVE] = {**(profiles.get(ROLE_LIVE) or {}), "source": payload.live_role.upper(), "role": ROLE_LIVE}
+        if payload.detect_source:
+            profiles[ROLE_DETECT] = {**(profiles.get(ROLE_DETECT) or {}), "source": payload.detect_source.upper(), "role": ROLE_DETECT}
+        if payload.ai_fps is not None:
+            profiles[ROLE_DETECT] = {**(profiles.get(ROLE_DETECT) or {}), "ai_fps": payload.ai_fps, "role": ROLE_DETECT}
+        c.stream_profiles = profiles
+        db.commit()
+        write_audit(db, user, "camera.streams", "camera", str(c.id), f"profile={c.ffmpeg_profile} transport={c.rtsp_transport}")
+        return c, _live_spec(c)
+
+    c, spec = await run_db(_save)
     if pumping_spec(c.id) is not None or viewers_for(c.id) > 0:
         start_live_pump(spec)
     return await camera_streams(c.id, db)
@@ -414,22 +448,32 @@ def update_camera_framing(
 
 @app.post("/cameras/{camera_id}/onvif/discover")
 async def camera_onvif_discover(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
-    c = _camera_for_node(db, camera_id, action="onvif-discover")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="onvif-discover")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     from app.services.stream_discover import discover_camera_streams
     from app.services.stream_roles import merge_profiles
     from app.services.onvif_profile import apply_discovery
     found = await discover_camera_streams(c.ip_address, c.username, c.password_secret, c.rtsp_url or "")
-    if found.get("stream_profiles"):
-        c.stream_profiles = merge_profiles(c.stream_profiles, found["stream_profiles"])
-    apply_discovery(c, found.get("onvif") or {})
-    db.commit()
-    write_audit(db, user, "camera.onvif_discover", "camera", str(c.id), found.get("source") or "")
+
+    def _save():
+        if found.get("stream_profiles"):
+            c.stream_profiles = merge_profiles(c.stream_profiles, found["stream_profiles"])
+        apply_discovery(c, found.get("onvif") or {})
+        db.commit()
+        write_audit(db, user, "camera.onvif_discover", "camera", str(c.id), found.get("source") or "")
+        return camera_dict(c)
+
+    camera = await run_db(_save)
     from app.services.stream_roles import public_profiles
     public = {k: v for k, v in found.items() if k not in {"onvif", "discovered", "stream_profiles"}}
     public["discovered"] = _strip_credential_uris(found.get("discovered") or [])
     public["stream_profiles"] = public_profiles(found.get("stream_profiles") or {})
     public["onvif"] = _public_onvif_discovery(found.get("onvif") or {})
-    return {"camera": camera_dict(c), **public}
+    return {"camera": camera, **public}
 
 
 def _strip_credential_uris(rows: list) -> list:
@@ -444,7 +488,7 @@ def _public_onvif_discovery(onvif: dict) -> dict:
 
 
 @app.patch("/cameras/{camera_id}/onvif/events")
-async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
+def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     """Enable/disable Profile M plate-event pulling for a camera that advertises it."""
     c = _camera_for_node(db, camera_id, action="onvif-events-toggle")
     from app.services.onvif_profile import set_events_enabled
@@ -460,7 +504,12 @@ async def camera_onvif_events_toggle(camera_id: int, payload: dict, db: Session 
 @app.post("/cameras/{camera_id}/onvif/events/pull")
 async def camera_onvif_events_pull(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.connect"))):
     """Hardware-lab diagnostic: one subscribe → pull → unsubscribe round trip."""
-    c = _camera_for_node(db, camera_id, action="onvif-events-pull")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="onvif-events-pull")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     profile = dict(c.onvif_profile or {})
     events_url = str(profile.get("events_url") or "")
     if not events_url:
@@ -475,7 +524,7 @@ async def camera_onvif_events_pull(camera_id: int, db: Session = Depends(get_db)
         raise HTTPException(502, str(exc))
     finally:
         await pullpoint.unsubscribe()
-    write_audit(db, user, "camera.onvif_events_pull", "camera", str(c.id), f"{len(events)} messages")
+    await run_db(write_audit, db, user, "camera.onvif_events_pull", "camera", str(c.id), f"{len(events)} messages")
     return {
         "ok": True,
         "messages": len(events),
@@ -508,7 +557,7 @@ async def media_gateway_health(db: Session = Depends(get_db), _: User = Depends(
         "local": {"sessions": sessions, "child_pids": pids},
         "mediamtx": mediamtx_health,
         "mediamtx_paths": mediamtx_paths,
-        "flags": migration_flags(db),
+        "flags": await run_db(migration_flags, db),
         "rollback": {
             "live_view_provider": ["DIRECT_LEGACY", "MEDIAMTX"],
             "recognition_pipeline": ["FASTALPR_LEGACY", "FASTALPR_NEW"],
