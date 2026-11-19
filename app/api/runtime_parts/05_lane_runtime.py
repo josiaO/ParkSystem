@@ -9,7 +9,7 @@ def _side_payload(camera: Camera | None, last: dict | None) -> dict | None:
     }
 
 
-async def _lane_view_dict(db: Session, gate: Gate, latest_by_camera: dict[int, VehicleCapture] | None = None) -> dict:
+def _lane_view_dict(db: Session, gate: Gate, latest_by_camera: dict[int, VehicleCapture] | None = None) -> dict:
     by_side: dict[str, Camera] = {}
     extras: list[Camera] = []
     for camera in gate.cameras or []:
