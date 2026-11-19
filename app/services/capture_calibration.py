@@ -41,7 +41,8 @@ TEST_MODE_MAX_MINUTES = 240
 DEFAULTS: dict[str, Any] = {
     "enabled": False,                 # False = uncalibrated: whole picture, no size/quality gate
     "zone": [],                       # [[x, y], ...] normalised; empty = whole picture
-    "trigger_line": None,             # {"y": 0..1, "side": "below"|"above"} or None
+    "trigger_line": None,             # start line: {"y": 0..1, "side": "below"|"above"} or None
+    "end_line": None,                 # end line: reading stops once the plate is past it
     "min_plate_width_px": 0,
     "min_plate_height_px": 0,
     "min_detection_confidence": 0.0,
@@ -123,6 +124,22 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         if not 0.0 <= y <= 1.0 or side not in {"below", "above"}:
             raise ValueError("Trigger line y must be 0-1 and side 'below' or 'above'.")
         out["trigger_line"] = {"y": round(y, 4), "side": side}
+    end = data.get("end_line")
+    if end not in (None, "", {}):
+        try:
+            end_y = float(end.get("y"))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("End line needs a y position between 0 and 1.") from None
+        if not 0.0 <= end_y <= 1.0:
+            raise ValueError("End line y must be between 0 and 1.")
+        start = out.get("trigger_line")
+        if start:
+            # The plate travels from the start line towards the end line.
+            if start["side"] == "below" and end_y <= start["y"]:
+                raise ValueError("The end line must be below the start (trigger) line.")
+            if start["side"] == "above" and end_y >= start["y"]:
+                raise ValueError("The end line must be above the start (trigger) line.")
+        out["end_line"] = {"y": round(end_y, 4)}
     for name, (low, high) in LIMITS.items():
         if name not in data or data[name] in (None, ""):
             continue
@@ -369,11 +386,20 @@ def measure_quality(gray_crop) -> dict[str, float]:
     }
 
 
-def _gray(jpeg: bytes):
+def _gray(jpeg: bytes, scale: float = 1.0):
+    """Grey picture, at ``scale`` of its size (sharpness is judged at the calibrated size)."""
     from PIL import Image
     import numpy as np
 
     image = Image.open(io.BytesIO(jpeg))
+    if scale < 0.999:
+        width, height = image.size
+        target = (max(1, int(width * scale)), max(1, int(height * scale)))
+        image.draft("L", target)            # decode at 1/2, 1/4… directly: cheap on big snapshots
+        image = image.convert("L")
+        if image.size != target:
+            image = image.resize(target, Image.Resampling.BILINEAR)
+        return np.asarray(image)
     image.load()
     return np.asarray(image.convert("L"))
 
@@ -443,6 +469,13 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
             past_line = cy >= float(line["y"]) if line.get("side", "below") == "below" else cy <= float(line["y"])
             if not past_line:
                 reasons.append("not past trigger line")
+        end = config.get("end_line") if calibrated else None
+        if end:
+            # Reading ends here: a car moving out past the end line is not read again.
+            travel_down = (line or {}).get("side", "below") == "below"
+            beyond = cy > float(end["y"]) if travel_down else cy < float(end["y"])
+            if beyond:
+                reasons.append("past end line")
         if calibrated:
             if width < float(config.get("min_plate_width_px") or 0):
                 reasons.append(f"plate {width:.0f}px wide < {float(config['min_plate_width_px']):.0f}px")
@@ -458,7 +491,7 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
         if not reasons and jpeg[:2] == b"\xff\xd8":
             try:
                 if gray is None:
-                    gray = _gray(jpeg)
+                    gray = _gray(jpeg, scale)
                 gh, gw = gray.shape[:2]
                 sx, sy = gw / fw, gh / fh
                 crop = gray[max(0, int(y1 * sy)):min(gh, int(math.ceil(y2 * sy))),
@@ -485,7 +518,8 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
     return out
 
 
-def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"") -> Candidate | None:
+def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"", *, plate: str = "",
+                  plate_confidence: float | None = None) -> Candidate | None:
     """Last check before any read becomes a capture (and so a session or a barrier).
 
     Every path (the camera's own trigger, ZIRP's video gate, the Recognition
@@ -496,9 +530,10 @@ def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"") -> Candid
     not eligible.
 
     Camera snapshots can be larger than the live picture the calibration was
-    drawn on; sizes are scaled to that picture's width. Quality limits
-    (sharpness, brightness) are only applied at the calibrated picture size,
-    because sharpness is not comparable across resolutions.
+    drawn on; sizes and sharpness are measured on the snapshot scaled to that
+    picture's width, so every limit means the same thing on every path. The
+    camera's own plate rectangle has no detector score and is judged on
+    position, size and quality.
     """
     config = for_camera(camera_id)
     if not config.get("enabled"):
@@ -516,23 +551,28 @@ def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"") -> Candid
         # A camera's own plate rectangle carries no detector score; it is
         # judged on position and size.
         box["confidence"] = 1.0
-    reference = int(config.get("reference_width") or 0)
-    try:
-        same_size = not reference or abs(float(box["image_width"]) - reference) <= 2
-    except (TypeError, ValueError):
-        same_size = False
-    checked = dict(config)
-    if not same_size:
-        for name in ("min_sharpness", "min_brightness"):
-            checked[name] = 0
-        checked["max_brightness"] = 255
-        checked["max_clipped_fraction"] = 1.0
-    candidates = evaluate_frame(jpeg if same_size else b"", [box], checked)
+    # Every limit applies at every picture size: plate sizes and sharpness
+    # are measured on the snapshot scaled to the live picture the camera was
+    # calibrated on.
+    candidates = evaluate_frame(jpeg, [box], config)
     if not candidates:
         return Candidate(box=box, eligible=False, reasons=["plate box could not be read"],
                          width_px=0, height_px=0, area_px=0, relative_width=0, in_zone=False, past_line=False,
                          confidence=0)
-    return candidates[0]
+    verdict = candidates[0]
+    if plate_confidence is not None and plate and float(plate_confidence) < float(config.get("min_ocr_confidence") or 0.0):
+        verdict.reasons.append(f"recognition {float(plate_confidence):.2f} < {float(config['min_ocr_confidence']):.2f}")
+        verdict.eligible = False
+    if verdict.eligible and quality_required(config) and not verdict.quality and jpeg[:2] == b"\xff\xd8":
+        verdict.reasons.append("picture could not be checked for sharpness/brightness")
+        verdict.eligible = False
+    return verdict
+
+
+def quality_required(config: dict[str, Any]) -> bool:
+    return bool(float(config.get("min_sharpness") or 0) > 0 or float(config.get("min_brightness") or 0) > 0
+                or float(config.get("max_brightness") if config.get("max_brightness") is not None else 255) < 255
+                or float(config.get("max_clipped_fraction") if config.get("max_clipped_fraction") is not None else 1) < 1)
 
 
 def _jpeg_size(jpeg: bytes) -> tuple[int, int] | None:

@@ -53,6 +53,19 @@ def same_vehicle(a: str, b: str) -> bool:
     return len(a) == len(b) and len(a) >= 5 and edit_distance(a, b) <= MAX_EDIT_DISTANCE
 
 
+def different_vehicle(a: str, b: str) -> bool:
+    """Two reads that cannot be slips of one plate: 3+ edits apart.
+
+    Stricter than ``not same_vehicle``: a truncated read (``15143`` vs
+    ``SM15143``) or a two-character slip still counts as the same car, so one
+    car is never split into two visits.
+    """
+    a, b = str(a or "").strip().upper(), str(b or "").strip().upper()
+    if len(a) < 5 or len(b) < 5 or a == b:
+        return False
+    return edit_distance(a, b) > MAX_EDIT_DISTANCE
+
+
 def _shape_weight(plate: str) -> float:
     return VALID_SHAPE_BONUS if _TZ_STANDARD.match(plate) else 1.0
 

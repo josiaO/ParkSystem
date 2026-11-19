@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -14,8 +16,26 @@ class HVXHostUnavailable(RuntimeError):
     pass
 
 
-_live_clients: dict[tuple[int, str, int], httpx.AsyncClient] = {}
+# Live frames (about 10 per second per camera) are fetched on these threads,
+# not on the Site Service event loop. Parsing ~100 KB HTTP responses there,
+# 40 times a second for four cameras, was the main source of event-loop
+# stalls (median 0.3 s, up to 11 s) that delayed camera events, OCR and gate
+# commands. Each camera keeps its own synchronous client, so one stalled
+# camera cannot block or close another camera's connection.
+_LIVE_WORKERS = 8
+_live_executor: ThreadPoolExecutor | None = None
+_live_executor_lock = threading.Lock()
+_live_clients: dict[tuple[str, int], httpx.Client] = {}
+_live_clients_lock = threading.Lock()
 _poll_clients: dict[tuple[int, str], httpx.AsyncClient] = {}
+
+
+def _live_pool() -> ThreadPoolExecutor:
+    global _live_executor
+    with _live_executor_lock:
+        if _live_executor is None:
+            _live_executor = ThreadPoolExecutor(max_workers=_LIVE_WORKERS, thread_name_prefix="hvx-live")
+        return _live_executor
 
 
 def _shared_poll_client(base_url: str) -> httpx.AsyncClient:
@@ -62,37 +82,47 @@ async def _host_client(base_url: str, timeout):
 async def close_host_clients() -> None:
     loop_id = id(asyncio.get_running_loop())
     clients = [_poll_clients.pop(key) for key in list(_poll_clients) if key[0] == loop_id]
-    clients.extend(_live_clients.pop(key) for key in list(_live_clients) if key[0] == loop_id)
     await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
+    with _live_clients_lock:
+        live = [_live_clients.pop(key) for key in list(_live_clients)]
+    for client in live:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _drop_live_client(base_url: str, handle: int) -> None:
-    try:
-        key = (id(asyncio.get_running_loop()), base_url.rstrip("/"), int(handle))
-    except RuntimeError:
-        return
-    client = _live_clients.pop(key, None)
-    if client is None:
-        return
-    try:
-        asyncio.create_task(client.aclose())
-    except Exception:
-        pass
+    """Forget one camera's connection after a transport error; others are untouched."""
+    with _live_clients_lock:
+        client = _live_clients.pop((base_url.rstrip("/"), int(handle)), None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
-def _shared_live_client(base_url: str, handle: int) -> httpx.AsyncClient:
-    """Reuse a camera's client without sharing its failures with the other lane."""
-    key = (id(asyncio.get_running_loop()), base_url.rstrip("/"), int(handle))
-    client = _live_clients.get(key)
-    if client is None or client.is_closed:
-        client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(0.8, connect=0.4),
-            limits=httpx.Limits(max_keepalive_connections=1, max_connections=2, keepalive_expiry=2.0),
-            trust_env=False,
-        )
-        _live_clients[key] = client
-    return client
+def _shared_live_client(base_url: str, handle: int) -> httpx.Client:
+    """One synchronous client per camera, used only from the live-frame threads."""
+    key = (base_url.rstrip("/"), int(handle))
+    with _live_clients_lock:
+        client = _live_clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                base_url=base_url.rstrip("/"),
+                timeout=httpx.Timeout(0.8, connect=0.4),
+                limits=httpx.Limits(max_keepalive_connections=1, max_connections=2, keepalive_expiry=2.0),
+                trust_env=False,
+            )
+            _live_clients[key] = client
+        return client
+
+
+def _fetch_live_frame(base_url: str, handle: int, params: dict) -> tuple[int, dict, bytes]:
+    """Runs on a live-frame thread: one long-poll request, fully read."""
+    response = _shared_live_client(base_url, handle).get(f"/live-jpeg/{int(handle)}", params=params, timeout=1.4)
+    return response.status_code, dict(response.headers), response.content
 
 
 def _trace_gpio_response(tracer, trace_id: str, handle: int, sent_ns: int, received_ns: int, payload) -> None:
@@ -368,24 +398,26 @@ class HVXHostClient:
         handle = int(handle)
         meta = {"status_code": None, "duration_ms": None, "fresh": False, "error": ""}
         try:
-            client = _shared_live_client(self.base_url, handle)
             previous = int(self.last_live_seq.get(handle, 0) or 0)
             # Always long-poll: on the first request the host waits for a
             # frame inside its live window instead of returning an old cache.
             params = {"after": previous, "wait_ms": 1000}
-            r = await client.get(f"/live-jpeg/{handle}", params=params, timeout=1.4)
-            meta["status_code"] = r.status_code
+            status, raw_headers, content = await asyncio.get_running_loop().run_in_executor(
+                _live_pool(), _fetch_live_frame, self.base_url, handle, params,
+            )
+            headers = httpx.Headers(raw_headers)
+            meta["status_code"] = status
             try:
-                self.last_live_seq[handle] = int(r.headers.get("x-frame-seq") or 0)
+                self.last_live_seq[handle] = int(headers.get("x-frame-seq") or 0)
             except (TypeError, ValueError):
                 self.last_live_seq[handle] = 0
             meta["frame_seq"] = self.last_live_seq.get(handle, 0)
-            meta["wait"] = r.headers.get("x-frame-wait") or ""
-            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            meta["wait"] = headers.get("x-frame-wait") or ""
+            if status == 200 and content[:2] == b"\xff\xd8":
                 meta["fresh"] = self.last_live_seq.get(handle, 0) > previous
                 meta["duration_ms"] = round((asyncio.get_running_loop().time() - started) * 1000.0, 1)
-                _trace_live_frame(handle, r.headers, meta, previous)
-                return r.content
+                _trace_live_frame(handle, headers, meta, previous)
+                return content
         except (httpx.TransportError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             _drop_live_client(self.base_url, handle)
             return b""

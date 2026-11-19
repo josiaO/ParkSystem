@@ -764,6 +764,13 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         from app.services import capture_calibration as calibration
 
         gate = calibration.gate_for(int(camera_id))
+        from app.services.recognition_runtime import runtime as _runtime
+        if _runtime.lane(int(camera_id)).visit.event_published:
+            # The camera's own trigger already read this passage. A second
+            # OCR of the same car only competes for the CPU (slower reads on
+            # the other lanes) and can return a different, wrong plate.
+            gate.hold()
+            return
         selected = gate.selected
         if selected is not None and selected.jpeg[:2] == b"\xff\xd8":
             jpeg = selected.jpeg                 # the best eligible frame, not merely the latest

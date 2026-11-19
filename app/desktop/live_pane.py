@@ -272,6 +272,11 @@ class CameraLivePane(QFrame):
             y=int(float(line.get("y") or 0) * height)
             painter.setPen(QPen(QColor(0, 200, 255), pen_w, Qt.PenStyle.DashLine))
             painter.drawLine(0, y, width, y)
+        end=config.get("end_line") if config.get("enabled") else None
+        if end:
+            y=int(float(end.get("y") or 0) * height)
+            painter.setPen(QPen(QColor(235, 70, 60), pen_w, Qt.PenStyle.DashLine))
+            painter.drawLine(0, y, width, y)
         painter.setFont(QFont("Sans Serif", max(9, width // 70), QFont.Weight.Bold))
         for plate in calib.get("plates") or []:
             box=plate.get("box") or {}
