@@ -39,6 +39,7 @@ CALIBRATED = cc.validate({
     "max_brightness": 230,
     "candidate_frames": 3,
     "candidate_seconds": 0.8,
+    "enforce": {"zone": True, "start_line": True, "end_line": True, "plate_size": True, "detector": True, "picture_quality": True, "recognition": True},
 })
 
 
@@ -371,6 +372,7 @@ ENFORCED = {
     "min_detection_confidence": 0.5, "min_ocr_confidence": 0.8,
     # Synthetic plates: sharp ~6000, blur(6) ~140; glare frame clips ~52% of the crop.
     "min_sharpness": 500, "min_brightness": 40, "max_brightness": 230, "max_clipped_fraction": 0.4,
+    "enforce": {"zone": True, "start_line": True, "end_line": True, "plate_size": True, "detector": True, "picture_quality": True, "recognition": True},
 }
 
 
@@ -477,3 +479,46 @@ def test_refused_reads_warn_the_lane_and_show_the_refused_car(db, monkeypatch):
     assert persist_event(db, camera, jpeg=_big_snapshot(good), crop=b"", capture=capture(4, good)) is not None
     assert cc.live_state(22)["warning"] == ""
     assert "refused" not in _refused_read(22)
+
+
+def test_new_calibration_does_not_refuse_on_the_lines_by_default():
+    assert cc.validate({"enabled": True})["enforce"]["start_line"] is False
+    assert cc.validate({"enabled": True})["enforce"]["end_line"] is False
+    assert cc.validate({"enabled": True})["enforce"]["zone"] is True
+    with pytest.raises(ValueError):
+        cc.validate({"enforce": {"made_up_rule": True}})
+
+
+@pytest.mark.parametrize("rule,box,kwargs,capture_extra", [
+    ("zone", {"x1": 100, "y1": 760, "x2": 360, "y2": 840}, {}, {}),
+    ("start_line", {"x1": 900, "y1": 580, "x2": 1160, "y2": 640}, {}, {}),
+    ("end_line", {"x1": 900, "y1": 990, "x2": 1160, "y2": 1060}, {}, {}),
+    ("plate_size", {"x1": 1000, "y1": 760, "x2": 1120, "y2": 840}, {}, {}),
+    ("detector", GOOD, {}, {"box_confidence": 0.3}),
+    ("recognition", GOOD, {}, {"score": 0.6}),
+    ("picture_quality", GOOD, {"blur": 6}, {}),
+])
+def test_a_rule_switched_off_never_refuses_a_car(db, monkeypatch, rule, box, kwargs, capture_extra):
+    """The same reads the rules refuse are stored once that rule is off; the reason is kept as a note."""
+    from app.services.captures import persist_event
+
+    camera = _camera(db, 32)
+    cc.save(db, camera, {**ENFORCED, "enforce": {**ENFORCED["enforce"], rule: False}})
+    monkeypatch.setattr(cc, "in_test_mode", lambda camera_id: False)
+    monkeypatch.setattr(cc, "for_camera", lambda camera_id, camera=None: cc.load(db, db.get(Camera, camera_id)))
+    bbox = {**box, "image_width": 1920, "image_height": 1080}
+    if "box_confidence" in capture_extra:
+        bbox["confidence"] = capture_extra["box_confidence"]
+    capture = {"plate": "T123ABC", "score": capture_extra.get("score", 0.97), "image_id": 79, "have_vehicle": True, "bbox": bbox}
+    row = persist_event(db, camera, jpeg=_snapshot_1920(box, **kwargs), crop=b"", capture=capture)
+    assert row is not None, f"{rule} is off but the car was refused"
+
+
+def test_frames_keeping_every_rule_are_preferred_when_a_rule_is_off():
+    loose = dict(CALIBRATED, enforce={**CALIBRATED["enforce"], "start_line": False})
+    before_jpeg, before = frame(0.5, 0.48, 120)       # above the start line
+    after_jpeg, after = frame(0.5, 0.7, 120)          # past it
+    early = cc.evaluate_frame(before_jpeg, [before], loose)[0]
+    late = cc.evaluate_frame(after_jpeg, [after], loose)[0]
+    assert early.eligible and early.advisory == ["not past trigger line"]
+    assert late.eligible and late.score > early.score
