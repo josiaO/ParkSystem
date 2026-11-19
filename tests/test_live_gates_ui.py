@@ -53,8 +53,11 @@ class LiveGatesUiTests(unittest.TestCase):
         self.assertIn('addTab(live, "Live")', desktop)
         self.assertIn('addTab(ips, "Devices")', desktop)
         self.assertIn("Choose camera", desktop)
-        self.assertIn("Onboard wizard", desktop)
-        self.assertIn("Fill both from lane", desktop)
+        # Duplicate/confusing desktop buttons were removed (choosing a lane
+        # already fills both panes; Add Camera covers onboarding).
+        self.assertNotIn("Onboard wizard", desktop)
+        self.assertNotIn("Fill both from lane", desktop)
+        self.assertNotIn('QPushButton("Load example cameras', desktop)
         self.assertIn("pair_lane_cameras", desktop)
         self.assertIn("Correct plate", desktop)
         self.assertIn("Manual close", desktop)

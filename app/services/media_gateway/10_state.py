@@ -103,6 +103,8 @@ class _GatewayStateMixin:
         row.live = LatestFrameBuffer("live", maxsize=1)
         row.detect = LatestFrameBuffer("detect", maxsize=1)
         row.source_frame_seq = 0
+        row.live_source_seq = 0
+        row.live_sequenced_at = 0.0
         row.last_fresh_frame_at = 0.0
         row.last_frame_received_at = 0.0
         row.last_received_at = 0.0

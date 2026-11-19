@@ -28,7 +28,7 @@ from app.models import Camera, Gate, ParkingSession, SiteSetting, as_utc, utcnow
 
 from app.services.access import Entitlement, lookup_entitlement
 
-from app.services.decisions import record_access_decision, record_gate_command
+from app.services.decisions import ensure_gate_request_committed, record_access_decision, record_gate_command
 
 from app.services.fee_engine import calculate_car1_fee, ensure_car1_tariff, load_active_rules, normalize_tariff_rules
 
@@ -63,9 +63,12 @@ DEFAULT_PARKING_SETTINGS = {
     # Lanes without a passage sensor: assume the car passed this long after
     # the barrier command (0 = wait for a sensor forever).
     "passage_timeout_seconds": 60,
-    # Entry attempts never authorized (printer failed, receipt not taken,
-    # driver left) are cancelled after this, freeing the plate.
-    "stranded_entry_minutes": 15,
+    # Optional: cancel entry attempts never authorized after this many minutes.
+    # Off (0) by default: a timer cannot tell a driver who reversed away from
+    # a car let in by an operator, and cancelling the second loses its visit
+    # (it reached the exit with "no session"). A plate read entering again
+    # supersedes its abandoned attempt instead (entry_lane.supersede_abandoned_entry).
+    "stranded_entry_minutes": 0,
     # False for an unattended kiosk: kiosk-device accounts cannot record cash.
     "kiosk_cash_enabled": True,
 }
@@ -101,6 +104,18 @@ async def _pulse_gate(
         )
         return blocked
     dry_run = bool(session is not None and session.simulated) or not should_pulse_physical(gate=gate, automatic=automatic)
+    # Authorization Commit: the command is durable as REQUESTED before any
+    # hardware is touched (lane controllers already committed it with their
+    # decision; manual opens get it here). A power cut after this point leaves
+    # a REQUESTED row that the lane sweeper turns INTERRUPTED for an operator.
+    if not command_uuid:
+        import uuid as _uuid
+
+        command_uuid = _uuid.uuid4().hex
+    ensure_gate_request_committed(
+        db, gate=gate, session=session, reason=reason, automatic=automatic,
+        command_uuid=command_uuid, side=side,
+    )
     started = time.perf_counter()
     from app.core import latency_trace
     # The gate command uuid is the trace id from here to the camera relay.
@@ -132,6 +147,7 @@ async def _pulse_gate(
         ok=bool(opened and opened.ok),
         message=(opened.message if opened else "") or "",
         command_uuid=command_uuid or None,
+        side=side,
     )
     return opened
 

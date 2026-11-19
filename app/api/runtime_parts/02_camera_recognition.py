@@ -408,7 +408,7 @@ async def _run_local_alpr_locked(
         image_height=int(native.get("image_height") or 0),
     )
     effective_roi = framing["detect_roi"] or native_roi or None
-    from app.services.camera_framing import gate_for
+    from app.services.capture_calibration import gate_for
     prepared = gate_for(int(camera.id)).prepared
     # Boxes already found on this exact still are reused when they were
     # searched at the zoom this read would use (the read re-checks the zone).
@@ -511,6 +511,17 @@ async def _run_local_alpr_locked(
     if not allowed:
         alpr = dict(alpr or {})
         alpr["persist_skipped"] = reason
+        return alpr
+    from app.services import capture_calibration as calibration
+    calibration.note_read(int(camera.id), plate=fused.resolved_plate, confidence=float(local.get("confidence") or native.get("confidence") or 0),
+                          source="fastalpr" if local.get("plate") else "camera",
+                          test_mode=calibration.in_test_mode(int(camera.id)), accepted=None)
+    if local.get("plate") and not native.get("plate") and not force and calibration.for_camera(int(camera.id)).get("enabled") \
+            and not calibration.ocr_confidence_ok(int(camera.id), float(local.get("confidence") or 0)):
+        # Below this camera's minimum recognition confidence: not this
+        # passage's plate. The capture gate tries a later frame instead.
+        alpr = dict(alpr or {})
+        alpr["persist_skipped"] = "below the camera's minimum recognition confidence"
         return alpr
     await _persist_capture_event(db, camera, capture, jpeg, _crop_from_alpr(alpr, jpeg))
     return alpr

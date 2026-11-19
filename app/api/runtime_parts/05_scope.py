@@ -85,18 +85,23 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     if not capture.get("visit_id"):
         lane.visit.observe(presence=True, native_event=True)
         capture["visit_id"] = lane.visit.visit_id
+    started_ns = time.perf_counter_ns()
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None
     previous_plate = str(previous.plate or "") if previous else ""
-    # JPEG decode/crop/encode and the INSERT run off the event loop (it also
-    # carries live video, gate commands and the other lane). This coroutine
-    # owns ``db`` and waits here, so the session is used by one thread at a
-    # time; duplicate events are still resolved by the unique capture keys.
+    # The INSERT runs off the event loop (it also carries live video, gate
+    # commands and the other lane). This coroutine owns ``db`` and waits here,
+    # so the session is used by one thread at a time; duplicate events are
+    # still resolved by the unique capture keys. The photos (zone snapshot,
+    # plate crop) are produced after the decision by app.services.evidence.
+    persist_started_ns = time.perf_counter_ns()
     row = await asyncio.to_thread(
         persist_event,
         db, camera, jpeg=jpeg, crop=crop, capture=capture,
         coil_occupied=coil_watch.occupied(camera.id),
+        defer_evidence=True,
     )
+    persisted_ns = time.perf_counter_ns()
     if row is None:
         return capture_dict(previous) if previous else None
     latest = row or previous
@@ -177,6 +182,22 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
             # Printing/payment/gate control may await hardware or a provider.
             # Commit the capture checkpoint before entering that external path.
             release_connection(db)
+            try:
+                # Splits "plate read -> parking controller" into the capture
+                # save and the lookups after it (tools/critical_path_report.py).
+                from app.core import latency_trace
+
+                now_ns = time.perf_counter_ns()
+                latency_trace.emit(
+                    "capture.pre_decision", camera=camera.id, visit_id=str(getattr(row, "visit_id", "") or ""),
+                    prefetch_ms=round((persist_started_ns - started_ns) / 1e6, 1),
+                    persist_ms=round((persisted_ns - persist_started_ns) / 1e6, 1),
+                    lookups_ms=round((now_ns - persisted_ns) / 1e6, 1),
+                    total_ms=round((now_ns - started_ns) / 1e6, 1),
+                    evidence_deferred=str(getattr(row, "evidence_state", "") or "") == "PENDING",
+                )
+            except Exception:
+                pass
             if side == "ENTRY":
                 from app.application.live_parking import handle_live_entry
                 result = await handle_live_entry(

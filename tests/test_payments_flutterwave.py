@@ -195,13 +195,21 @@ class FlutterwaveProviderTests(unittest.TestCase):
             self.assertEqual(out["currency"], "TZS")
 
     def test_provider_outage_is_reported_not_raised(self):
-        self.http.fail_with = ProviderError("flutterwave unreachable: ConnectTimeout", code="unreachable", retryable=True)
+        self.http.fail_with = ProviderError("flutterwave unreachable: ConnectTimeout", code="connect_failed", retryable=True)
         out = asyncio.run(self.provider.initiate_collection({"tx_ref": "T1", "amount": "1500", "currency": "TZS",
                                                              "phone": "+255712345678"}))
         self.assertEqual(out["status"], "FAILED")
         self.assertTrue(out["retryable"])
         status = asyncio.run(self.provider.query_status("T1"))
         self.assertEqual(status["status"], "UNKNOWN")
+
+    def test_charge_without_an_answer_stays_pending(self):
+        # The charge request may have reached Flutterwave: never call it failed.
+        self.http.fail_with = ProviderError("flutterwave unreachable: ReadTimeout", code="unreachable", retryable=True)
+        out = asyncio.run(self.provider.initiate_collection({"tx_ref": "T1", "amount": "1500", "currency": "TZS",
+                                                             "phone": "+255712345678"}))
+        self.assertEqual(out["status"], "PENDING")
+        self.assertTrue(out["outcome_unknown"])
 
     def test_health_never_leaks_secrets(self):
         body = json.dumps(self.provider.health())
@@ -447,7 +455,7 @@ class FlutterwaveApiFlowTests(unittest.TestCase):
         self.assertEqual(self._ledger()[0], [])
 
     def test_provider_unavailable_leaves_cash_and_local_parking_working(self):
-        self.http.fail_with = ProviderError("flutterwave unreachable: ConnectTimeout", code="unreachable", retryable=True)
+        self.http.fail_with = ProviderError("flutterwave unreachable: ConnectTimeout", code="connect_failed", retryable=True)
         res = self._start()
         self.assertEqual(res.status_code, 503, res.text)
         self.assertFalse(res.json()["ok"])

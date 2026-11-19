@@ -162,7 +162,11 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('ValidateSet("SITE_SERVER", "EDGE_NODE", "OPERATOR_CLIENT")', installer)
         self.assertIn("Set-DeploymentRole", installer)
         self.assertIn("$WebBaseUrl", installer)
-        self.assertIn("Start-Process '$WebUrl'", installer)
+        # The desktop is the operator console: installing or starting it must
+        # not open a browser. The "Zirp Web" shortcut is the on-request path.
+        self.assertNotIn("Start-Process '$WebUrl'", installer)
+        self.assertNotIn("Start-Process $WebUrl", installer)
+        self.assertIn('"Zirp Web.url"', installer)
         self.assertIn("The Site Server can publish a clean archive", installer)
         self.assertNotIn('Install-SmartPark-Client.bat', installer)
         self.assertNotIn('Install-SmartPark-Node.bat', installer)

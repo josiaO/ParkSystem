@@ -434,7 +434,8 @@ function defaultZone() {
 
 function loadZone(slot, camera) {
   const framing = (camera && camera.framing) || {};
-  zoneDraft[slot] = parseRoi(framing.detect_roi) || defaultZone();
+  // The old detection zone was replaced by per-camera capture calibration.
+  zoneDraft[slot] = null;
   zoneZoom[slot] = Math.min(4, Math.max(1, Number(framing.detect_zoom) || 1));
   const els = paneEls(slot);
   if (els.zoom) els.zoom.value = String(zoneZoom[slot]);

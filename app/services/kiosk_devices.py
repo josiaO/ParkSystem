@@ -6,7 +6,8 @@ and re-authenticates by itself when its session expires, so the kiosk does
 not log out in the middle of a shift.
 
 The device acts through a dedicated service account with the Kiosk Operator
-role (kiosk.use, payments.create, sessions/payments view). That account has an
+role (kiosk.use, payments.create: find one visit and take payment for it; no
+session list, payment history or dashboard). That account has an
 unusable password and cannot use ``/auth/login``. Revoking the device disables
 the account and deletes its sessions immediately.
 """

@@ -80,6 +80,32 @@ class _GatewayFramesMixin:
         row.ai_last_seq = sample.seq
         return sample
 
+    # A source sequence that drops by more than this is a restarted source
+    # (SDK host restart, new decoder), not a late frame.
+    SOURCE_RESET_GAP = 300
+
+    def _live_out_of_order(self, row: StreamSession, source_seq: int | None) -> bool:
+        """True when a frame must not replace the newer frame already in LIVE.
+
+        Two cases make the displayed clock jump backwards:
+        - a continuous producer frame whose source sequence is lower than the
+          frame already shown (late HTTP reply, a second reader of the same
+          source, a stale decoder);
+        - a one-shot snapshot (no sequence: manual read, connect probe, SDK
+          snapshot) slipped between frames of a running stream. Its image
+          comes from a different path with different latency.
+        """
+        if source_seq is None:
+            if row.live_sequenced_at <= 0:
+                return False
+            window = float(getattr(settings, "stale_stream_seconds", 2.5) or 2.5)
+            return (time.monotonic() - row.live_sequenced_at) <= window
+        incoming = int(source_seq or 0)
+        current = int(row.live_source_seq or 0)
+        if incoming <= 0 or current <= 0:
+            return False
+        return incoming < current and (current - incoming) < self.SOURCE_RESET_GAP
+
     def _note_arrival(self, row: StreamSession, jpeg: bytes, now: float, *, changed: bool) -> None:
         """Count every JPEG. Freshness and live FPS move only when the bytes change."""
         row.last_received_at = now
@@ -145,6 +171,13 @@ class _GatewayFramesMixin:
             row.frames_dropped_ai += 1
             return None
         previous = row.live.latest()
+        if previous is not None and self._live_out_of_order(row, source_seq):
+            # Never let LIVE go back in time. Every viewer paints LIVE, so an
+            # older frame here shows as the camera clock running 3, 4, 3, 4.
+            # Return the current sample (not None): None means "your
+            # generation is dead" and would stop a healthy producer.
+            row.frames_out_of_order += 1
+            return previous
         source_advanced = False
         if source_seq is not None:
             incoming_seq = int(source_seq or 0)
@@ -166,6 +199,9 @@ class _GatewayFramesMixin:
             jpeg, source=source, url=url, camera_id=camera_id,
             generation=row.generation,
         )
+        if source_seq is not None:
+            row.live_source_seq = int(source_seq or 0)
+            row.live_sequenced_at = sample.received_at
         self._note_arrival(row, jpeg, sample.received_at, changed=True)
         row.source = source or row.source
         row.url = url or row.url

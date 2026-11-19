@@ -46,6 +46,9 @@ class VehicleCapture(Base):
     visit_id: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
     # Optional cloud AI second opinion (supporting/conflicting/unreadable). Never the plate authority.
     ai_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # '' (written with the row, legacy) | PENDING (photos written after the
+    # decision, app/services/evidence.py) | STORED | MISSING
+    evidence_state: Mapped[str] = mapped_column(String(12), default="", server_default="", index=True)
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 class AccessPlan(Base):
@@ -100,7 +103,12 @@ class AccessDecision(Base):
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
 
 class GateCommandRecord(Base):
-    """Durable record of a boom command. Written after GPIO/Board/LED I/O returns."""
+    """Durable record of a boom command.
+
+    Written as REQUESTED and committed *before* the command is sent (with the
+    access decision), then ACCEPTED or FAILED when GPIO/Board/LED I/O returns.
+    INTERRUPTED: still REQUESTED after a restart. Legacy rows have state ''.
+    """
     __tablename__ = "gate_commands"
     __table_args__ = (UniqueConstraint("command_uuid", name="uq_gate_command_uuid"),)
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -112,4 +120,7 @@ class GateCommandRecord(Base):
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
     message: Mapped[str] = mapped_column(Text, default="")
+    state: Mapped[str] = mapped_column(String(20), default="", server_default="", index=True)
+    side: Mapped[str] = mapped_column(String(10), default="", server_default="")
+    completed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)

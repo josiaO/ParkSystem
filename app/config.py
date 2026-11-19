@@ -191,9 +191,11 @@ class Settings(BaseSettings):
     virtual_loop_detect_seconds: float = 0.25
     virtual_loop_max_plate_fraction: float = 0.40
     alpr_capture_far_fallback_seconds: float = 0.0
-    # SmartPark recognition zone (车牌识别区): skip sky / far field.
-    # Normalized x1,y1,x2,y2. "off" uses the full frame.
-    alpr_detect_roi: str = "0.06,0.18,0.94,0.92"
+    # Legacy site-wide recognition zone, the same for every camera. Removed:
+    # each camera now has its own capture calibration
+    # (app/services/capture_calibration.py). Kept as a setting name so old
+    # .env files still load; "off" = the detector sees the whole picture.
+    alpr_detect_roi: str = "off"
     alpr_min_ocr_confidence: float = 0.40
     alpr_min_ocr_confidence_shaped: float = 0.28
     alpr_save_debug_frames: bool = False

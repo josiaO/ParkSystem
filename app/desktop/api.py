@@ -74,9 +74,77 @@ def _detail(response: httpx.Response) -> str:
 
 
 class ApiError(RuntimeError):
+    """The Site Server answered and refused (``status_code`` >= 400).
+
+    ``detail`` is the server's own reason; ``str(error)`` is the plain
+    sentence an operator sees.
+    """
+
     def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
-        self.status_code = status_code
+        self.status_code = int(status_code or 0)
+        self.detail = str(detail or "")
+        super().__init__(refusal_message(self.status_code, self.detail))
+
+
+class SiteServerUnreachable(ApiError):
+    """No answer from the Site Server: network, server stopped, or too slow."""
+
+    def __init__(self, base_url: str, reason: str = "", *, timed_out: bool = False):
+        self.base_url = str(base_url or "")
+        self.reason = str(reason or "")
+        self.timed_out = bool(timed_out)
+        self.status_code = 0
+        self.detail = self.reason
+        RuntimeError.__init__(self, unreachable_message(self.base_url, timed_out=self.timed_out))
+
+
+def _host_of(base_url: str) -> str:
+    try:
+        return httpx.URL(base_url).host or base_url
+    except Exception:
+        return base_url
+
+
+def unreachable_message(base_url: str, *, timed_out: bool = False) -> str:
+    host = _host_of(base_url)
+    where = f" at {host}" if host else ""
+    if timed_out:
+        return (f"The Site Server{where} did not answer in time. It may be busy or the network is slow; "
+                "nothing was changed by this click unless it shows up after a refresh. Try again.")
+    return (f"Can't reach the Site Server{where}. Check this computer's network cable or Wi-Fi "
+            "and that the Site Server PC is switched on, then try again.")
+
+
+def refusal_message(status_code: int, detail: str) -> str:
+    """Plain words for 'the server answered no'."""
+    detail = str(detail or "").strip()
+    code = int(status_code or 0)
+    if code == 401:
+        return "Your sign-in has ended. Sign in again." + (f" ({detail})" if detail and "token" not in detail.lower() else "")
+    if code == 403:
+        return f"Not allowed for this account: {detail}" if detail else "Not allowed for this account."
+    if code == 404:
+        return detail or "Not found on the Site Server."
+    if code in {400, 409, 422}:
+        return f"The Site Server refused: {detail}" if detail else "The Site Server refused this request."
+    if code == 429:
+        return "Too many requests right now. Wait a moment and try again."
+    if code >= 500:
+        return (f"The Site Server had a problem and did not finish: {detail}" if detail
+                else "The Site Server had a problem and did not finish. Try again; if it repeats, check the server log.")
+    return detail or f"The Site Server answered HTTP {code}."
+
+
+def friendly_error(exc: BaseException) -> str:
+    """One sentence for any desktop failure: unreachable vs refused vs local."""
+    if isinstance(exc, ApiError):
+        return str(exc)
+    if isinstance(exc, httpx.TimeoutException):
+        return unreachable_message("", timed_out=True)
+    if isinstance(exc, httpx.TransportError):
+        return unreachable_message("")
+    text = str(exc) or type(exc).__name__
+    return text
 
 
 def _check(response: httpx.Response) -> httpx.Response:
@@ -198,11 +266,12 @@ class ApiClient:
         }
         perm = perm_for.get(page)
         if page == "dashboard":
-            return True
+            return self.can("dashboard.view") or self.can("cameras.view")
         if page == "sessions":
             return self.can("sessions.view") or self.can("fees.view") or self.can("kiosk.use")
         if page == "payments":
-            return self.can("payments.view") or self.can("fees.view") or self.can("kiosk.use")
+            # A kiosk takes payment for one visit; it does not read history.
+            return self.can("payments.view") or self.can("fees.view")
         if page == "health":
             return self.can("hardware.view")
         return bool(perm and self.can(perm))
@@ -221,12 +290,26 @@ class ApiClient:
                 break
         return friendly.get(label, label)
 
+    def _login_post(self, path: str, payload: dict) -> httpx.Response:
+        try:
+            response = httpx.post(f"{self.base_url}{path}", json=payload, timeout=20, trust_env=False)
+        except httpx.TimeoutException as exc:
+            raise SiteServerUnreachable(self.base_url, str(exc), timed_out=True) from exc
+        except httpx.TransportError as exc:
+            raise SiteServerUnreachable(self.base_url, str(exc)) from exc
+        if response.status_code == 401:
+            # At sign-in a 401 is a wrong name/password, not an ended session.
+            error = ApiError(401, _detail(response))
+            error.args = (_detail(response) or "Wrong user name or password.",)
+            raise error
+        return _check(response)
+
     def login(self, username, password):
         # Argon2 verification and the first database connection can be slower
         # on a Windows field PC. Five seconds made a healthy node look like a
         # network failure during startup. Keep this bounded and do not retry
         # the POST, because retrying could create duplicate auth sessions.
-        r=_check(httpx.post(f"{self.base_url}/auth/login", json={"username":username,"password":password}, timeout=20, trust_env=False))
+        r=self._login_post("/auth/login", {"username":username,"password":password})
         data=r.json()
         self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
         self.navigation=list(data.get("navigation") or [])
@@ -244,7 +327,7 @@ class ApiClient:
 
     def login_device(self, device_id: str, credential: str):
         """Sign an enrolled kiosk in with its device credential (no person's password)."""
-        r=_check(httpx.post(f"{self.base_url}/kiosk/auth", json={"device_id": device_id, "credential": credential}, timeout=20, trust_env=False))
+        r=self._login_post("/kiosk/auth", {"device_id": device_id, "credential": credential})
         data=r.json()
         self.token=data["token"]; self.username=data["username"]; self.permissions=set(data["permissions"])
         self.navigation=list(data.get("navigation") or [])
@@ -268,11 +351,19 @@ class ApiClient:
         self.token = owner.token
         return True
 
+    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        try:
+            return getattr(httpx, method)(self.base_url+path, headers=self._headers(), trust_env=False, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise SiteServerUnreachable(self.base_url, str(exc), timed_out=True) from exc
+        except httpx.TransportError as exc:
+            raise SiteServerUnreachable(self.base_url, str(exc)) from exc
+
     def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
-        response = getattr(httpx, method)(self.base_url+path, headers=self._headers(), trust_env=False, **kwargs)
+        response = self._request(method, path, **kwargs)
         # A 401 is returned before the server acts, so one retry is safe.
         if response.status_code == 401 and self._device_owner()._device and self._reauthenticate_device():
-            response = getattr(httpx, method)(self.base_url+path, headers=self._headers(), trust_env=False, **kwargs)
+            response = self._request(method, path, **kwargs)
         return _check(response)
 
     def get(self, path, timeout=8):

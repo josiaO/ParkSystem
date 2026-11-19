@@ -6,21 +6,78 @@ class DisplayMailbox:
     def __init__(self):
         self._lock = Lock()
         self._jpeg = None
+        self._seq = None
         self._notified = False
 
-    def offer(self, jpeg):
+    def offer(self, jpeg, seq=None):
         with self._lock:
             self._jpeg = jpeg
+            self._seq = seq
             if self._notified:
                 return False
             self._notified = True
             return True
 
     def take(self):
+        return self.take_with_seq()[0]
+
+    def take_with_seq(self):
+        """(jpeg, camera frame number or None) of the newest offered frame."""
         with self._lock:
             jpeg, self._jpeg = self._jpeg, None
+            seq, self._seq = self._seq, None
             self._notified = False
-            return jpeg
+            return jpeg, seq
+
+
+class FrameOrderGuard:
+    """Never paint a picture older than the one on screen.
+
+    A pane can receive frames from more than one path in a row (the lane
+    PC's SDK host, then the Site Server relay after a fallback, or a server
+    cache that briefly mixed a snapshot into a stream). Two rules:
+
+    - a frame carrying a source sequence lower than the last painted one
+      from the same source is old;
+    - a frame whose bytes match a picture painted a few frames ago (but not
+      the current one) is an old picture coming back.
+    """
+
+    def __init__(self, memory=16):
+        self._memory = max(2, int(memory))
+        self._recent = []
+        self._current = None
+        self._seq = {}
+
+    def reset(self):
+        self._recent.clear()
+        self._current = None
+        self._seq.clear()
+
+    # A camera frame number that drops by more than this is a restarted
+    # source (HVX host restart, new decoder), not an older frame.
+    RESET_GAP = 300
+
+    def accept(self, jpeg, *, source="", seq=None):
+        if not jpeg:
+            return False
+        if seq is not None:
+            last = self._seq.get(source)
+            if last is not None and int(seq) <= last and (last - int(seq)) < self.RESET_GAP:
+                return False
+        key = hash(jpeg)
+        if key == self._current:
+            return False                 # same picture: nothing to repaint
+        if key in self._recent:
+            return False                 # an older picture coming back
+        if seq is not None:
+            self._seq[source] = int(seq)
+        if self._current is not None:
+            self._recent.append(self._current)
+            if len(self._recent) > self._memory:
+                del self._recent[0]
+        self._current = key
+        return True
 
 
 class ImageRequestState:

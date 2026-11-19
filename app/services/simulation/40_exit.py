@@ -42,12 +42,8 @@ def mark_paid(
         operator_id=operator_id,
         idempotency_key=cash_settlement_key(row.id, paid, remaining),
     )
-    cfg = parking_settings(db)
+    # The ledger applied the site's configured exit grace when it settled.
     apply_from_ledger = recorded["session"]
-    from app.infrastructure.payments.ledger import apply_session_payment_state
-    apply_session_payment_state(
-        db, apply_from_ledger, grace_seconds=int(cfg.get("payment_exit_grace_seconds") or 15 * 60),
-    )
     db.commit()
     db.refresh(apply_from_ledger)
     return apply_from_ledger

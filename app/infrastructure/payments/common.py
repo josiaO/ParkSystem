@@ -122,6 +122,31 @@ class ProviderError(RuntimeError):
         self.retryable = retryable
 
 
+def outcome_unknown(exc: ProviderError) -> bool:
+    """True when a request may have reached the provider but no answer came back.
+
+    For a payment request this is not a failure: the provider may still
+    charge the customer, so the intent must stay open and be verified.
+    """
+    return exc.code == "unreachable"
+
+
+def initiate_outcome_unknown(provider_id: str, tx_ref: str, error: str) -> dict:
+    """Initiate result for a push request whose fate is unknown.
+
+    PENDING keeps the intent in reconciliation, which asks the provider for
+    the truth and expires it if the provider never heard of it.
+    """
+    return {
+        "status": "PENDING",
+        "provider_id": provider_id,
+        "tx_ref": tx_ref,
+        "outcome_unknown": True,
+        "error": error,
+        "message": "No answer from the payment provider. Waiting for confirmation before trying again.",
+    }
+
+
 class ProviderHTTP:
     """Small async JSON client with timeout + circuit breaker.
 
@@ -139,16 +164,20 @@ class ProviderHTTP:
     async def request(self, method: str, url: str, *, headers: dict | None = None, json: Any = None) -> tuple[int, Any]:
         if not self.breaker.allow():
             raise ProviderError(f"{self.name} circuit open", code="circuit_open", retryable=True)
-        try:
-            import httpx
+        import httpx
 
+        try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.request(method, url, headers=headers, json=json)
         except Exception as exc:  # network / timeout
             self.breaker.failure()
+            # A failed connect means the request never left this server. Any
+            # other failure (read timeout, dropped connection) may have
+            # happened after the provider acted on it: the outcome is unknown.
+            not_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
             raise ProviderError(
                 scrub_text(f"{self.name} unreachable: {type(exc).__name__}", *self._secrets),
-                code="unreachable",
+                code="connect_failed" if not_sent else "unreachable",
                 retryable=True,
             ) from exc
         try:

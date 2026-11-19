@@ -27,7 +27,7 @@ class MainWindow(DesktopShell):
         if api.nav_page("payments"):
             self.add_page(api.nav_label("payments", "Payments"), Payments)
         if api.nav_page("fees"):
-            self.add_page(api.nav_label("fees", "Tariffs & Schedules"), Fees)
+            pass  # Tariffs & Schedules is a tab in Settings.
         if api.nav_page("reports"):
             self.add_page(api.nav_label("reports", "Reports"), ReportsPage)
         if api.nav_page("gates"):
@@ -145,12 +145,13 @@ class MainWindow(DesktopShell):
         )
         if not ok:
             return
-        try:
-            api.post(f"/manual-opens/{newest['id']}/acknowledge", {"note": note}, timeout=10)
-        except Exception as e:
-            QMessageBox.critical(self, "Acknowledge manual open", str(e))
-            return
-        self._poll_manual_opens()
+        event_id=newest['id']
+        self.statusBar().showMessage("Saving acknowledgement…")
+        def done(_r):
+            self.statusBar().showMessage("Manual open acknowledged.", 6000)
+            self._poll_manual_opens()
+        run_task(self, lambda: api.post(f"/manual-opens/{event_id}/acknowledge", {"note": note}, timeout=10), done,
+                 title="Acknowledge manual open")
     def closeEvent(self, event):
         timer=getattr(self, "_link_timer", None)
         if timer is not None:

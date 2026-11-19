@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import QCoreApplication, QThread, Signal
 from PySide6.QtGui import QGuiApplication
 from app.branding import PRODUCT_NAME
-from .api import api
+from .api import api, friendly_error
 from .presentation import prepare_page
 
 
@@ -102,12 +102,108 @@ def method_label(method):
 
 
 class Worker(QThread):
+    """Run one blocking call (network, database, file) off the UI thread.
+
+    ``failed`` carries a plain sentence: "Can't reach the Site Server…" when
+    there was no answer, "The Site Server refused: …" when it said no.
+    ``error`` is the original exception for callers that branch on it.
+    """
     done=Signal(object)
     failed=Signal(str)
-    def __init__(self, fn): super().__init__(); self.fn=fn
+    def __init__(self, fn):
+        super().__init__(); self.fn=fn; self.error=None
     def run(self):
         try: self.done.emit(self.fn())
-        except Exception as e: self.failed.emit(str(e))
+        except Exception as e:
+            self.error=e
+            self.failed.emit(friendly_error(e))
+
+
+# Tests drive page methods without a running Qt event loop. With this set,
+# run_task calls the work and its callbacks inline, in order.
+TASKS_INLINE = False
+
+_live_tasks: set = set()
+
+
+def _set_busy(widgets, busy, busy_text):
+    for widget in widgets:
+        if widget is None:
+            continue
+        try:
+            if busy:
+                widget._idle_text = widget.text() if hasattr(widget, "text") else None
+                widget.setEnabled(False)
+                if busy_text and hasattr(widget, "setText"):
+                    widget.setText(busy_text)
+            else:
+                widget.setEnabled(True)
+                idle = getattr(widget, "_idle_text", None)
+                if idle is not None and hasattr(widget, "setText"):
+                    widget.setText(idle)
+        except RuntimeError:
+            pass  # widget already deleted (page closed while working)
+
+
+def show_status(owner, text, ms=8000):
+    """Show a short result in the main window's status bar, if there is one."""
+    try:
+        window = owner.window() if hasattr(owner, "window") else None
+    except RuntimeError:
+        return
+    bar = getattr(window, "statusBar", None)
+    if callable(bar):
+        try:
+            bar().showMessage(str(text), ms)
+        except RuntimeError:
+            pass
+
+
+def run_task(owner, fn, on_done=None, *, buttons=(), busy_text="Working…", title="",
+             on_error=None, status=None):
+    """Do ``fn`` off the UI thread with visible feedback.
+
+    While it runs the given buttons are disabled and show ``busy_text`` and
+    the status bar says ``status``; afterwards the buttons come back,
+    ``on_done(result)`` runs on the UI thread, and any failure is shown in
+    plain words (``on_error(message, exc)`` overrides the default dialog).
+    """
+    buttons = tuple(b for b in (buttons if isinstance(buttons, (list, tuple)) else (buttons,)) if b is not None)
+
+    def finish_ok(result):
+        _set_busy(buttons, False, None)
+        if on_done is not None:
+            on_done(result)
+
+    def finish_error(message, exc):
+        _set_busy(buttons, False, None)
+        if on_error is not None:
+            on_error(message, exc)
+            return
+        from PySide6.QtWidgets import QMessageBox, QWidget
+        parent = owner if isinstance(owner, QWidget) else None
+        QMessageBox.warning(parent, title or PRODUCT_NAME, message)
+
+    if TASKS_INLINE:
+        _set_busy(buttons, True, busy_text)
+        try:
+            result = fn()
+        except Exception as exc:
+            finish_error(friendly_error(exc), exc)
+            return None
+        finish_ok(result)
+        return None
+
+    _set_busy(buttons, True, busy_text)
+    if status:
+        show_status(owner, status)
+    worker = Worker(fn)
+    worker.done.connect(finish_ok)
+    worker.failed.connect(lambda message, w=worker: finish_error(message, getattr(w, "error", None)))
+    _live_tasks.add(worker)
+    worker.finished.connect(lambda w=worker: _live_tasks.discard(w))
+    worker.start()
+    return worker
 
 
 _retired_threads = set()

@@ -65,10 +65,10 @@ class MjpegStream(QThread):
                     if len(buf) > 2_500_000:
                         start=buf.rfind(b"\xff\xd8")
                         buf = buf[start:] if start>=0 else buf[-120_000:]
-                    latest, buf = pop_latest_mjpeg(buf)
+                    latest, latest_seq, buf = pop_latest_mjpeg_with_seq(buf)
                     if latest is not None:
                         last_frame=time.monotonic()
-                        if self.mailbox.offer(latest):
+                        if self.mailbox.offer(latest, latest_seq):
                             self.frame.emit()
                     now=time.monotonic()
                     if now-last_frame > 8.0:
@@ -136,7 +136,7 @@ def _mjpeg_stream_run_from_local_host(self) -> bool:
             new_seq = int(response.headers.get("x-frame-seq") or 0)
             if response.status_code == 200 and response.content[:2] == b"\xff\xd8" and new_seq > seq:
                 seq, last_frame, misses = new_seq, time.monotonic(), 0
-                if self.mailbox.offer(response.content):
+                if self.mailbox.offer(response.content, new_seq):
                     self.frame.emit()
             elif response.status_code == 404:
                 handle = local_host_handle(client, ip)   # handles change after a host restart
@@ -158,36 +158,50 @@ MjpegStream._run_from_local_host = _mjpeg_stream_run_from_local_host
 
 def pop_latest_mjpeg(buf: bytes) -> tuple[bytes | None, bytes]:
     """Pull complete MJPEG parts from buf; keep only the newest JPEG."""
+    latest, _seq, rest = pop_latest_mjpeg_with_seq(buf)
+    return latest, rest
+
+
+def pop_latest_mjpeg_with_seq(buf: bytes) -> tuple[bytes | None, int | None, bytes]:
+    """Like pop_latest_mjpeg, plus the part's X-Frame-Source-Seq (camera frame number)."""
     latest = None
+    latest_seq = None
     boundary = b"--smartparkframe"
     while True:
         mark = buf.find(boundary)
         if mark < 0:
             jpeg, rest = _pop_raw_jpegs(buf)
             if jpeg:
-                latest = jpeg
-            return latest, rest
+                latest, latest_seq = jpeg, None
+            return latest, latest_seq, rest
         header_end = buf.find(b"\r\n\r\n", mark)
         if header_end < 0:
-            return latest, buf[mark:]
+            return latest, latest_seq, buf[mark:]
         headers = buf[mark:header_end]
         body = buf[header_end + 4:]
         length = None
+        part_seq = None
         for line in headers.split(b"\r\n"):
-            if line.lower().startswith(b"content-length:"):
+            lower = line.lower()
+            if lower.startswith(b"content-length:"):
                 try:
                     length = int(line.split(b":", 1)[1].strip())
                 except ValueError:
                     length = None
-                break
+            elif lower.startswith(b"x-frame-source-seq:"):
+                try:
+                    part_seq = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    part_seq = None
         if length is None or length <= 0 or length > 2_500_000:
             jpeg, rest = _pop_raw_jpegs(body)
             if jpeg:
-                latest = jpeg
-            return latest, rest
+                latest, latest_seq = jpeg, None
+            return latest, latest_seq, rest
         if len(body) < length:
-            return latest, buf[mark:]
+            return latest, latest_seq, buf[mark:]
         latest = body[:length]
+        latest_seq = part_seq
         buf = body[length:]
         if buf.startswith(b"\r\n"):
             buf = buf[2:]

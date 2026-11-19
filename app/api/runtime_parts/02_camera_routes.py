@@ -388,22 +388,27 @@ def update_camera_framing(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.manage")),
 ):
-    """Save the detection zone and zoom for any camera, not only HVX/OcxConfig."""
-    from app.services.camera_framing import apply_framing, framing_from_profiles
+    """Recognition decode width only.
+
+    The old detection zone, zoom and capture distance were removed; each
+    camera's capture conditions are set in its capture calibration
+    (``/cameras/{id}/calibration``).
+    """
+    from app.services.camera_framing import FRAMING_KEY, DETECT_WIDTHS, framing_from_profiles
 
     camera = _camera_for_node(db, camera_id, action="framing-update")
-    try:
-        camera.stream_profiles = apply_framing(
-            camera.stream_profiles,
-            detect_roi=payload.detect_roi,
-            detect_zoom=payload.detect_zoom,
-            detect_width=payload.detect_width,
-            capture_plate_width=payload.capture_plate_width,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    db.commit()
-    write_audit(db, user, "camera.framing", "camera", str(camera.id), payload.detect_roi or "site default")
+    legacy = (str(payload.detect_roi or "").strip().lower() not in {"", "off", "site", "full", "none"}
+              or float(payload.detect_zoom or 1.0) != 1.0 or (payload.capture_plate_width or 0) != 0)
+    if legacy:
+        raise HTTPException(410, "The detection zone, zoom and capture distance were replaced by the camera's capture calibration. Open Calibrate capture for this camera.")
+    if payload.detect_width is not None:
+        if int(payload.detect_width) not in DETECT_WIDTHS:
+            raise HTTPException(400, f"Recognition decode width must be one of {', '.join(map(str, DETECT_WIDTHS))} pixels.")
+        profiles = dict(camera.stream_profiles or {})
+        profiles[FRAMING_KEY] = {"detect_width": int(payload.detect_width)}
+        camera.stream_profiles = profiles
+        db.commit()
+        write_audit(db, user, "camera.framing", "camera", str(camera.id), f"detect_width={payload.detect_width}")
     return {"camera": camera_dict(camera), "framing": framing_from_profiles(camera.stream_profiles)}
 
 

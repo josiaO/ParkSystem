@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from app.services.live_pair import lane_options, pair_lane_cameras, reconcile_slots
 from .api import api
-from .common import Worker, action_label, is_technician
+from .common import Worker, action_label, is_technician, run_task, show_status
 from .presentation import configure_table, label_for
 from .live_pane import CameraLivePane
 
@@ -21,8 +21,18 @@ def runtime_api():
     resolver = getattr(api, "runtime_client", None)
     return resolver() if callable(resolver) else api
 
+def with_gates(owner, then):
+    """Load the gate list in the background, then call ``then(gates)``.
+
+    Opening the camera dialog used to fetch gates on the UI thread; a slow or
+    unreachable Site Server froze the window before the dialog appeared.
+    """
+    run_task(owner, lambda: runtime_api().get("/gates"), lambda gates: then(gates or []),
+             on_error=lambda _message, _exc: then([]), status="Loading gates…")
+
+
 class CameraDialog(QDialog):
-    def __init__(self, camera=None):
+    def __init__(self, camera=None, gates=None):
         super().__init__(); self.camera=camera; self.setWindowTitle("Edit Camera" if camera else "Add Camera")
         self.setMinimumWidth(360); self.setMaximumWidth(520)
         form=QFormLayout(self)
@@ -60,10 +70,8 @@ class CameraDialog(QDialog):
             self.recognition.addItem(label, key)
         self.controller=QLineEdit(); self.display=QLineEdit()
         self.gate=QComboBox(); self.gate.addItem("No gate — monitoring only", None)
-        try:
-            for g in runtime_api().get("/gates"): self.gate.addItem(g["name"], g["id"])
-        except Exception:
-            pass
+        # Gates are loaded by the caller off the UI thread (with_gates).
+        for g in (gates or []): self.gate.addItem(g["name"], g["id"])
         if camera:
             self.name.setText(camera["name"]); self.ip.setText(camera["ip_address"]); self.port.setText(str(camera["sdk_port"]))
             self.username.setText(camera["username"])
@@ -120,8 +128,6 @@ class Cameras(QWidget):
         lane_row.addWidget(label_for("&Lane preset", self.lane), 0, 2)
         lane_row.addWidget(self.lane, 0, 3, 1, 2)
         lane_row.setColumnStretch(3, 1)
-        fill_lane=QPushButton("Fill both from lane"); fill_lane.clicked.connect(lambda: self._start_pair(True))
-        lane_row.addWidget(fill_lane, 1, 0, 1, 2)
         self.scope_hint=QLabel(""); self.scope_hint.setWordWrap(True)
         self.assign_node=QPushButton("Assign PC to this gate…")
         self.assign_node.setVisible(api.can("settings.manage"))
@@ -156,15 +162,11 @@ class Cameras(QWidget):
         tools=QGridLayout()
         add=QPushButton(action_label("Add Camera", "Ctrl+N")); add.clicked.connect(self.add_camera); add.setVisible(api.can("cameras.manage")); add.setToolTip("Add Camera (Ctrl+N)")
         discover=QPushButton("Discover"); discover.clicked.connect(self.discover); discover.setVisible(api.can("cameras.manage"))
-        onboard=QPushButton("Onboard wizard"); onboard.clicked.connect(self.onboard); onboard.setVisible(api.can("cameras.manage"))
         connect_all=QPushButton("Connect all"); connect_all.clicked.connect(self.connect_all)
         edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_camera); edit.setVisible(api.can("cameras.manage")); edit.setToolTip("Edit (Ctrl+E)")
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_camera); delete.setVisible(api.can("cameras.manage")); delete.setToolTip("Delete (Del)")
         refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
-        self.seed_button=QPushButton("Load example cameras…")
-        self.seed_button.setVisible(api.can("cameras.manage"))
-        self.seed_button.clicked.connect(self.seed_site)
-        for index, widget in enumerate((add, edit, delete, refresh, discover, onboard, connect_all, self.seed_button)):
+        for index, widget in enumerate((add, edit, delete, refresh, discover, connect_all)):
             tools.addWidget(widget, index // 4, index % 4)
         ips_l.addLayout(tools)
         ips_hint=QLabel("Cameras on this site. Add one to start live monitoring and plate recognition.")
@@ -187,8 +189,7 @@ class Cameras(QWidget):
         self.disconnect_btn=QPushButton("Disconnect camera"); self.disconnect_btn.clicked.connect(self.sdk_disconnect); self.disconnect_btn.setVisible(tech)
         self.open_side_btn=QPushButton(action_label("Manual open", "F8")); self.open_side_btn.clicked.connect(self.open_this_side); self.open_side_btn.setToolTip("Open this barrier (F8)")
         self.close_side_btn=QPushButton(action_label("Manual close", "F9")); self.close_side_btn.clicked.connect(self.close_this_side); self.close_side_btn.setToolTip("Close this barrier (F9)")
-        self.snap_btn=QPushButton("Capture snapshot"); self.snap_btn.clicked.connect(self.capture_snapshot)
-        for index, widget in enumerate((self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.snap_btn, self.disconnect_btn, self.open_side_btn, self.close_side_btn)):
+        for index, widget in enumerate((self.connect_btn, self.probe_btn, self.onvif_btn, self.alpr_btn, self.disconnect_btn, self.open_side_btn, self.close_side_btn)):
             actions.addWidget(widget, index // 4, index % 4)
         ips_l.addLayout(actions)
         if not tech:
@@ -210,8 +211,12 @@ class Cameras(QWidget):
         if row<0: return None
         return int(self.table.item(row,0).text())
     def refresh(self):
-        try: rows=runtime_api().get("/cameras")
-        except Exception as e: QMessageBox.warning(self,"Cameras",str(e)); return
+        def failed(message, _exc):
+            if hasattr(self, "empty_devices"):
+                self.empty_devices.setText(f"Camera list not refreshed. {message}")
+        run_task(self, lambda: runtime_api().get("/cameras"), self._fill_rows, on_error=failed)
+    def _fill_rows(self, rows):
+        rows=rows or []
         self.rows=rows
         self.table.setRowCount(len(rows))
         for r,c in enumerate(rows):
@@ -258,7 +263,9 @@ class Cameras(QWidget):
     def _show_onboard(self, data):
         data=data or {}
         QMessageBox.information(self, "Onboard", json.dumps({k: data.get(k) for k in ("ok","recommended_adapter","camera_type","recognition_mode","capabilities","note") if k in data}, indent=2))
-        dlg=CameraDialog()
+        with_gates(self, lambda gates: self._onboard_dialog(data, gates))
+    def _onboard_dialog(self, data, gates):
+        dlg=CameraDialog(gates=gates)
         dlg.ip.setText(str((data.get("ip") or "")))
         if data.get("recommended_adapter"):
             idx=dlg.adapter.findData(str(data.get("recommended_adapter")))
@@ -324,26 +331,34 @@ class Cameras(QWidget):
         QMessageBox.information(self,"Connect all","\n".join(lines)[:2000])
         self.refresh(); self._maybe_start_pair()
     def add_camera(self):
-        d=CameraDialog()
-        if d.exec():
-            try: runtime_api().post("/cameras",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Add camera",str(e))
+        def open_dialog(gates):
+            d=CameraDialog(gates=gates)
+            if d.exec():
+                payload=d.payload()
+                run_task(self, lambda: runtime_api().post("/cameras",payload),
+                         lambda _r: (show_status(self, "Camera added."), self.refresh()), title="Add camera", status="Adding camera…")
+        with_gates(self, open_dialog)
     def edit_camera(self):
         cam=self.selected_camera()
         if not cam: QMessageBox.information(self,"Edit camera","Select a camera first."); return
-        d=CameraDialog(cam)
-        if d.exec():
-            try: runtime_api().patch(f"/cameras/{cam['id']}",d.payload()); self.refresh()
-            except Exception as e: QMessageBox.critical(self,"Edit camera",str(e))
+        def open_dialog(gates):
+            d=CameraDialog(cam, gates=gates)
+            if d.exec():
+                payload=d.payload(); cid=cam['id']
+                run_task(self, lambda: runtime_api().patch(f"/cameras/{cid}",payload),
+                         lambda _r: (show_status(self, "Camera saved."), self.refresh()), title="Edit camera", status="Saving camera…")
+        with_gates(self, open_dialog)
     def delete_camera(self):
         cam=self.selected_camera()
         if not cam: QMessageBox.information(self,"Delete camera","Select a camera first."); return
         if QMessageBox.question(self,"Delete camera",f"Delete {cam['name']}?")!=QMessageBox.Yes: return
-        try: runtime_api().delete(f"/cameras/{cam['id']}"); self.refresh()
-        except Exception as e: QMessageBox.critical(self,"Delete camera",str(e))
+        cid=cam['id']
+        run_task(self, lambda: runtime_api().delete(f"/cameras/{cid}"),
+                 lambda _r: (show_status(self, "Camera deleted."), self.refresh()), title="Delete camera", status="Deleting camera…")
     def _run(self, fn, title):
         cid=self.selected_id()
         if cid is None: QMessageBox.information(self,title,"Select a camera first."); return
+        show_status(self, f"{title}: working…")
         w=Worker(lambda: fn(cid)); w.done.connect(lambda data:(self._after_connect(data,title),self.refresh())); w.failed.connect(lambda e:QMessageBox.critical(self,title,e)); self._keep(w); w.start()
     def _after_connect(self, data, title):
         QMessageBox.information(self,title,str(data)[:1200])
@@ -373,8 +388,12 @@ class Cameras(QWidget):
         if QMessageBox.question(self,title,prompt)!=QMessageBox.Yes: return
         reason,ok=QInputDialog.getText(self,title,"Reason", text=f"manual {verb}")
         if ok and reason:
-            try: QMessageBox.information(self,"Barrier",str(runtime_api().post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
-            except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
+            cid=cam['id']
+            def done(result):
+                result=result or {}
+                QMessageBox.information(self,"Barrier",str(result.get("message") or result.get("reason") or f"Barrier {verb} sent."))
+            run_task(self, lambda: runtime_api().post(f"/cameras/{cid}/barrier/open",{"reason":reason,"action":verb}, timeout=20),
+                     done, title="Barrier", status=f"Sending {verb} to the barrier…")
     def _keep(self, worker):
         self._workers.append(worker)
         worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)

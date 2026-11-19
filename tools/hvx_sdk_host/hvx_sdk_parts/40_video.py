@@ -603,6 +603,13 @@ class _HVXVideoMixin:
         last_progress_at = time.monotonic()
         previous_jpeg = b""
         previous_seq = 0
+        # Recently served pictures. Without a draw callback this loop reads
+        # the legacy GetJpgBuffer and, when that is empty, the PlaySdk window.
+        # GetJpgBuffer can hand back an older cached JPEG after the window
+        # capture already served a newer one; comparing only with the last
+        # JPEG treated that as "new", and viewers saw the camera clock run
+        # 3, 4, 3, 4, 5. A picture already served is never served again.
+        recent_served = deque(maxlen=12)
         ready = self._draw_ready_event(handle)
         def publish(jpeg):
             with self._lock:
@@ -672,6 +679,10 @@ class _HVXVideoMixin:
                 draw_seq = int(getattr(self, "_draw_frame_seq", {}).get(handle, 0) or 0)
                 encoded_seq = int(getattr(self, "_draw_encoded_seq", {}).get(handle, 0) or 0)
             new_frame = bool(jpeg) and (jpeg != previous_jpeg or current_seq > previous_seq or draw_seq > encoded_seq)
+            if new_frame and jpeg != previous_jpeg and hash(jpeg) in recent_served:
+                new_frame = False          # an older picture coming back: not progress
+            if new_frame:
+                recent_served.append(hash(jpeg))
             if jpeg and not new_frame:
                 # A cached draw/window JPEG is not progress. Route it through
                 # the normal no-frame recovery path so a frozen PlaySdk port

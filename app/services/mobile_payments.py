@@ -34,6 +34,7 @@ from app.infrastructure.payments import (
     transaction_dict,
 )
 from app.infrastructure.payments.common import mask_msisdn, redact, to_decimal
+from app.db import release_connection
 from app.models import ParkingSession, PaymentIntent
 from app.services.audit import write_audit
 
@@ -210,6 +211,7 @@ async def start_mobile_payment(
 
     prompt_guard().claim(phone, session_id=row.id)
 
+    release_connection(db)  # no pooled connection held across provider I/O
     request = await provider.create_intent({
         "session_id": row.id,
         "amount": pay_amount,
@@ -254,6 +256,7 @@ async def start_mobile_payment(
         message=result.get("message") or "",
         error=result.get("error") or "",
         initiated_at=_now().isoformat(),
+        outcome_unknown=bool(result.get("outcome_unknown")),
     )
     if status != PENDING:
         _stats["failed"] += 1
@@ -296,13 +299,20 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
     """Ask the provider for the truth and credit the ledger at most once."""
     if intent.status == SUCCEEDED:
         return {"status": SUCCEEDED, "credited": False, "duplicate": True}
-    if intent.status in (BLOCKED, MISMATCH, FAILED):
+    if intent.status in (BLOCKED, MISMATCH):
         return {"status": intent.status, "credited": False, "duplicate": False}
-    # EXPIRED is re-checked: a driver can approve the USSD prompt after the
-    # intent's local expiry. If the provider confirms a matching success,
-    # the money was taken and must be credited (flagged as late).
-    was_expired = intent.status == EXPIRED
+    # EXPIRED and FAILED are re-checked: a driver can approve the USSD prompt
+    # after the local expiry, and a push recorded as failed may still have
+    # reached the phone. If the provider confirms a matching success, the
+    # money was taken and must be credited (flagged as late). Reconciliation
+    # only scans open intents, so closed ones are re-checked only when a
+    # verified webhook arrives for them.
+    closed_status = intent.status if intent.status in (EXPIRED, FAILED) else None
     provider = payment_provider_for(intent.provider_id)
+    # Do not hold a database connection (and an open transaction) while the
+    # provider answers over the internet; a slow ClickPesa call would pin a
+    # pooled PostgreSQL connection that the gate lanes need.
+    release_connection(db)
     result = await provider.query_status(_verification_ref(intent))
     status = str(result.get("status") or "UNKNOWN").upper()
     now_iso = _now().isoformat()
@@ -340,12 +350,13 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
         )
         duplicate = bool(recorded.get("duplicate"))
         _merge_extra(intent, credited_at=now_iso, verification=redact(result.get("raw") or {}))
-        if was_expired:
-            _merge_extra(intent, late_success=True)
+        if closed_status:
+            _merge_extra(intent, late_success=True, late_success_after=closed_status)
             if not duplicate:
                 _stats["late_credited"] += 1
                 write_audit(db, None, "payments.late_success", "payment_intent", str(intent.id),
-                            f"{intent.provider_id} {intent.idempotency_key} confirmed after local expiry")
+                            f"{intent.provider_id} {intent.idempotency_key} confirmed after local "
+                            f"{'expiry' if closed_status == EXPIRED else 'failure'}")
         if duplicate:
             _stats["duplicates"] += 1
         else:
@@ -360,10 +371,10 @@ async def settle_intent(db: Session, intent: PaymentIntent) -> dict[str, Any]:
             "transaction": transaction_dict(recorded["transaction"]),
         }
 
-    if was_expired:
-        # Still no success from the provider: stays expired, nothing changes.
+    if closed_status:
+        # Still no success from the provider: the status stays as it was.
         db.commit()
-        return {"status": EXPIRED, "credited": False, "duplicate": False}
+        return {"status": closed_status, "credited": False, "duplicate": False}
 
     if status == FAILED:
         intent.status = FAILED
