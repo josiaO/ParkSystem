@@ -338,3 +338,85 @@ def test_uncalibrated_camera_is_not_blocked(db, monkeypatch):
     _camera(db, 13)
     monkeypatch.setattr(cc, "for_camera", lambda camera_id, camera=None: cc.load(db, db.get(Camera, camera_id)))
     assert cc.check_capture(13, {"x1": 1, "y1": 1, "x2": 5, "y2": 3}, b"") is None
+
+
+# --- Every setting is enforced on the storage path (not only on screen) -----
+
+def _snapshot_1920(box, *, blur=0, dark=False, glare=False):
+    image = Image.new("RGB", (1920, 1080), (110, 110, 110))
+    d = ImageDraw.Draw(image)
+    d.rectangle([box["x1"], box["y1"], box["x2"], box["y2"]], fill=(235, 235, 235))
+    step = max(4, (box["x2"] - box["x1"]) // 14)
+    for x in range(box["x1"] + step, box["x2"] - step, step * 2):
+        d.rectangle([x, box["y1"] + 8, x + step - 1, box["y2"] - 8], fill=(10, 10, 10))
+    if blur:
+        image = image.filter(ImageFilter.GaussianBlur(blur))
+    if dark:
+        image = image.point(lambda v: v // 8)
+    if glare:
+        image = image.point(lambda v: 255 if v > 60 else v)
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+GOOD = {"x1": 900, "y1": 760, "x2": 1160, "y2": 840}        # 95 x 29 px at 704 wide, centre y 0.74
+
+ENFORCED = {
+    "enabled": True, "reference_width": 704,
+    "zone": [[0.3, 0.5], [0.9, 0.5], [0.9, 1.0], [0.3, 1.0]],
+    "trigger_line": {"y": 0.6, "side": "below"},
+    "end_line": {"y": 0.9},
+    "min_plate_width_px": 60, "min_plate_height_px": 20,
+    "min_detection_confidence": 0.5, "min_ocr_confidence": 0.8,
+    # Synthetic plates: sharp ~6000, blur(6) ~140; glare frame clips ~52% of the crop.
+    "min_sharpness": 500, "min_brightness": 40, "max_brightness": 230, "max_clipped_fraction": 0.4,
+}
+
+
+@pytest.mark.parametrize("name,box,kwargs,capture_extra,reason", [
+    ("zone", {"x1": 100, "y1": 760, "x2": 360, "y2": 840}, {}, {}, "outside capture zone"),
+    ("start line", {"x1": 900, "y1": 580, "x2": 1160, "y2": 640}, {}, {}, "not past trigger line"),
+    ("end line", {"x1": 900, "y1": 990, "x2": 1160, "y2": 1060}, {}, {}, "past end line"),
+    ("min width", {"x1": 1000, "y1": 760, "x2": 1120, "y2": 840}, {}, {}, "wide"),
+    ("min height", {"x1": 900, "y1": 790, "x2": 1160, "y2": 830}, {}, {}, "tall"),
+    ("detector confidence", GOOD, {}, {"box_confidence": 0.3}, "detector"),
+    ("recognition confidence", GOOD, {}, {"score": 0.6}, "recognition"),
+    ("sharpness", GOOD, {"blur": 6}, {}, "blurred"),
+    ("brightness", GOOD, {"dark": True}, {}, "too dark"),
+    ("glare", GOOD, {"glare": True}, {}, "glare"),
+])
+def test_each_setting_refuses_a_read_that_breaks_it(db, monkeypatch, name, box, kwargs, capture_extra, reason):
+    from app.services.captures import persist_event
+
+    camera = _camera(db, 30)
+    cc.save(db, camera, ENFORCED)
+    monkeypatch.setattr(cc, "in_test_mode", lambda camera_id: False)
+    monkeypatch.setattr(cc, "for_camera", lambda camera_id, camera=None: cc.load(db, db.get(Camera, camera_id)))
+    bbox = {**box, "image_width": 1920, "image_height": 1080}
+    if "box_confidence" in capture_extra:
+        bbox["confidence"] = capture_extra["box_confidence"]
+    capture = {"plate": "T123ABC", "score": capture_extra.get("score", 0.97), "image_id": 77, "have_vehicle": True, "bbox": bbox}
+    row = persist_event(db, camera, jpeg=_snapshot_1920(box, **kwargs), crop=b"", capture=capture)
+    assert row is None, f"{name} was not enforced"
+    reasons = cc.live_state(30)["last_rejected"]["reasons"]
+    assert any(reason in r for r in reasons), (name, reasons)
+
+
+def test_a_read_inside_every_limit_is_stored(db, monkeypatch):
+    from app.services.captures import persist_event
+
+    camera = _camera(db, 31)
+    cc.save(db, camera, ENFORCED)
+    monkeypatch.setattr(cc, "in_test_mode", lambda camera_id: False)
+    monkeypatch.setattr(cc, "for_camera", lambda camera_id, camera=None: cc.load(db, db.get(Camera, camera_id)))
+    capture = {"plate": "T123ABC", "score": 0.97, "image_id": 78, "have_vehicle": True,
+               "bbox": {**GOOD, "image_width": 1920, "image_height": 1080}}
+    row = persist_event(db, camera, jpeg=_snapshot_1920(GOOD), crop=b"", capture=capture)
+    assert row is not None and row.plate == "T123ABC"
+
+
+def test_end_line_must_be_after_the_start_line():
+    with pytest.raises(ValueError):
+        cc.validate({"trigger_line": {"y": 0.6, "side": "below"}, "end_line": {"y": 0.5}})
+    assert cc.validate({"trigger_line": {"y": 0.6, "side": "below"}, "end_line": {"y": 0.9}})["end_line"] == {"y": 0.9}

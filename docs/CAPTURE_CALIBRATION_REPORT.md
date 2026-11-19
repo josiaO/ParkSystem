@@ -160,3 +160,44 @@ Reading the numbers honestly:
 * Field accuracy and latency on the four real cameras still need measuring
   after each camera is calibrated (run test mode per camera and compare the
   shown reads with the cars).
+
+## Update: start/end lines, full enforcement, latency (19 Nov, evening)
+
+Start and end of reading. Each camera can have a start (trigger) line and an
+end line. A plate is read only between them; past the end line nothing is
+read, so a car moving out cannot be read a second time. Both lines are drawn
+in Settings → Camera calibration and shown on Live Gates.
+
+Enforced on every read path (`persist_event`, tested per setting in
+`tests/test_capture_calibration.py` with 1920×1080 camera snapshots): zone,
+start line, end line, minimum width and height, detector confidence,
+recognition confidence, sharpness, brightness range and glare. Snapshots are
+scaled to the calibrated live-picture width before sizes and sharpness are
+measured, so each limit means the same thing on every path. Not applicable to
+the camera-trigger path: best-of-N frame selection (the camera sends its own
+snapshots).
+
+Tried and withdrawn: a time/position heuristic that treated a different plate
+seen soon after a read, further along the path, as the same car leaving. On
+live traffic it refused real cars at 1# Entry (T850BCR, T152EAP and others at
+19:32-19:35) and was removed within minutes. The end line is the guard
+against re-reads instead.
+
+Recognition latency, last 6 h before these changes (2,040 cars, camera
+snapshot to decision): median 0.84 s, p90 1.4 s, p99 3.3 s, worst 12.7 s.
+Slow cases are dominated by the wait before the camera event is picked up
+(median 256 ms, p99 1.1 s) and OCR spikes (p99 1.6 s, worst 11.6 s). Fixed:
+the video path no longer OCRs a passage the camera trigger already read
+(duplicate CPU work, and a source of second reads); folder checks run once
+instead of on every media write. Not fixed yet: event-loop stalls of up to
+11 s while live frames are fetched from the HVX host (`hvx_client.live_jpeg`);
+moving that fetch off the event loop is the next latency step.
+
+Follow-up (19:50): live frames from the HVX host are now fetched on a small
+dedicated thread pool (one connection per camera) instead of the Site
+Service event loop (`app/services/hvx_client.py`). Measured on live traffic:
+event-loop stalls 48/hour → 4/hour (none during frame fetch);
+camera-snapshot-to-decision median 925 → 725 ms, p90 1.74 → 1.06 s,
+p99 4.4 → 2.3 s. Caveat: 4.7 h before (1,484 cars) vs 15 min after
+(64 cars, lighter evening traffic). OCR still has rare multi-second spikes
+(worst 5.4 s after the change).

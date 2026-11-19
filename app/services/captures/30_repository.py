@@ -230,6 +230,21 @@ def _recent_native_duplicate(
     )
     return latest
 
+def _read_plate(capture: dict | None, native: dict) -> str:
+    return str(native.get("plate") or (capture or {}).get("plate") or "").strip().upper()
+
+
+def _read_confidence(capture: dict | None, native: dict) -> float | None:
+    """Recognition confidence of this read (0-1), or None when there is no plate."""
+    for value in (native.get("confidence"), (capture or {}).get("confidence"), (capture or {}).get("score")):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        return number / 100.0 if number > 1.0 else number
+    return None
+
+
 def persist_event(
     db: Session,
     camera: Camera,
@@ -259,7 +274,9 @@ def persist_event(
     if _calibration.in_test_mode(int(camera.id)):
         _test_box = _native_read.get("bbox") if isinstance(_native_read.get("bbox"), dict) else (
             bbox_from_lp_box((capture or {}).get("plate_box")) or (capture or {}).get("bbox"))
-        _verdict = _calibration.check_capture(int(camera.id), _test_box if isinstance(_test_box, dict) else None, jpeg or b"")
+        _verdict = _calibration.check_capture(
+            int(camera.id), _test_box if isinstance(_test_box, dict) else None, jpeg or b"",
+            plate=_read_plate(capture, _native_read), plate_confidence=_read_confidence(capture, _native_read))
         _calibration.note_read(
             int(camera.id), plate=str(_native_read.get("plate") or (capture or {}).get("plate") or ""),
             confidence=float(_native_read.get("confidence") or 0.0),
@@ -315,11 +332,19 @@ def persist_event(
         box = raw_box if isinstance(raw_box, dict) else {}
     else:
         box = dict(box)
+    raw_box = (capture or {}).get("bbox") if isinstance((capture or {}).get("bbox"), dict) else {}
+    for key in ("image_width", "image_height", "confidence"):
+        # The camera-side box drops the picture size and detector score;
+        # the calibration check needs both.
+        if box.get(key) in (None, "") and raw_box.get(key) not in (None, ""):
+            box[key] = raw_box[key]
     if not force:
         # A car is never read outside its camera's capture calibration,
         # whatever triggered the read (camera, ZIRP video, worker). Only an
         # explicit operator action (force) bypasses it.
-        verdict = _calibration.check_capture(int(camera.id), box, jpeg)
+        verdict = _calibration.check_capture(int(camera.id), box, jpeg,
+                                             plate=_read_plate(capture, _native_read),
+                                             plate_confidence=_read_confidence(capture, _native_read))
         if verdict is not None and not verdict.eligible:
             _calibration.note_rejected(
                 int(camera.id), plate=str(_native_read.get("plate") or (capture or {}).get("plate") or ""),

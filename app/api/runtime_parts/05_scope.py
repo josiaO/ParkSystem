@@ -85,6 +85,29 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     if not capture.get("visit_id"):
         lane.visit.observe(presence=True, native_event=True)
         capture["visit_id"] = lane.visit.visit_id
+    # One capture per visit is enforced by the database. A visit stays open
+    # while the lane looks occupied, so a second car that arrives without an
+    # empty-lane gap used to inherit the first car's visit: its read was
+    # folded into the first car's capture, and the snapshot/crop (and the
+    # session evidence shown at the kiosk) stayed on the first car. A clearly
+    # different plate (not an OCR slip of it) is a new car: new visit.
+    new_plate = str(capture.get("plate") or native_from_sdk_capture(capture).get("plate") or "").strip().upper()
+    if capture.get("visit_id") and new_plate:
+        visit_id = str(capture["visit_id"])
+
+        def _visit_plate() -> str:
+            row = db.scalar(select(VehicleCapture).where(
+                VehicleCapture.camera_id == camera.id, VehicleCapture.visit_id == visit_id))
+            return str(row.plate or "") if row is not None else ""
+
+        held_plate = (await asyncio.to_thread(_visit_plate)).strip().upper()
+        from app.services.lane_stay import different_vehicle
+        if held_plate and different_vehicle(held_plate, new_plate):
+            lane.visit.reset(time.monotonic())
+            lane.visit.observe(presence=True, plate=new_plate, native_event=True)
+            capture["visit_id"] = lane.visit.visit_id
+            log.info("camera=%s new car %s while visit %s still held %s: new visit %s",
+                     camera.id, new_plate, visit_id[:12], held_plate, capture["visit_id"][:12])
     started_ns = time.perf_counter_ns()
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None

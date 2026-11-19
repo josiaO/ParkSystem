@@ -41,6 +41,7 @@ class CalibrationCanvas(VideoCanvas):
         super().__init__("Waiting for live video…", parent)
         self.zone: list[list[float]] = []
         self.line: dict | None = None
+        self.end_line: dict | None = None
         self.plates: list[dict] = []
         self.mode = "idle"             # idle | rect | polygon | line
         self.editable = True
@@ -80,6 +81,10 @@ class CalibrationCanvas(VideoCanvas):
             self.line = {"y": point[1], "side": (self.line or {}).get("side", "below")}
             self._drag = ("line",)
             self.on_changed()
+        elif self.mode == "end":
+            self.end_line = {"y": point[1]}
+            self._drag = ("end",)
+            self.on_changed()
         else:
             hit = self._vertex_at(event.pos())
             if hit is not None:
@@ -88,6 +93,8 @@ class CalibrationCanvas(VideoCanvas):
                 self._drag = ("zone", point, [list(p) for p in self.zone])
             elif self.line and abs(self._to_widget(0, self.line["y"]).y() - event.pos().y()) < 8:
                 self._drag = ("line",)
+            elif self.end_line and abs(self._to_widget(0, self.end_line["y"]).y() - event.pos().y()) < 8:
+                self._drag = ("end",)
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -114,12 +121,14 @@ class CalibrationCanvas(VideoCanvas):
             self.zone = [[round(p[0] + dx, 4), round(p[1] + dy, 4)] for p in original]
         elif kind == "line" and self.line is not None:
             self.line["y"] = point[1]
+        elif kind == "end" and self.end_line is not None:
+            self.end_line["y"] = point[1]
         self.update()
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         if self._drag:
-            if self._drag[0] in {"rect", "line"}:
+            if self._drag[0] in {"rect", "line", "end"}:
                 self.mode = "idle"
             self._drag = None
             self.on_changed()
@@ -164,7 +173,13 @@ class CalibrationCanvas(VideoCanvas):
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
             painter.setFont(QFont("Sans Serif", 9))
             side = "read below this line" if self.line.get("side", "below") == "below" else "read above this line"
-            painter.drawText(QPointF(rect.left() + 6, y - 4), f"Trigger line · {side}")
+            painter.drawText(QPointF(rect.left() + 6, y - 4), f"Start line · {side}")
+        if self.end_line:
+            y = self._to_widget(0, self.end_line["y"]).y()
+            painter.setPen(QPen(NO_COLOR, 2, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+            painter.setFont(QFont("Sans Serif", 9))
+            painter.drawText(QPointF(rect.left() + 6, y - 4), "End line · no reading past here")
         painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
         for plate in self.plates:
             box = plate.get("box") or {}
@@ -224,11 +239,15 @@ class CalibrationWindow(QDialog):
         self.rect_btn = QPushButton("Draw rectangle"); self.rect_btn.clicked.connect(lambda: self._tool("rect"))
         self.poly_btn = QPushButton("Draw polygon"); self.poly_btn.clicked.connect(lambda: self._tool("polygon"))
         self.poly_done = QPushButton("Finish polygon"); self.poly_done.clicked.connect(lambda: self._tool("idle"))
-        self.line_btn = QPushButton("Place trigger line"); self.line_btn.clicked.connect(lambda: self._tool("line"))
+        self.line_btn = QPushButton("Place start line"); self.line_btn.clicked.connect(lambda: self._tool("line"))
+        self.end_btn = QPushButton("Place end line"); self.end_btn.clicked.connect(lambda: self._tool("end"))
+        self.end_btn.setToolTip("Reading stops past this line, so a car moving out is not read again.")
+        self.clear_end = QPushButton("Remove end line"); self.clear_end.clicked.connect(self._remove_end_line)
         self.line_side = QComboBox(); self.line_side.addItem("Read below the line", "below"); self.line_side.addItem("Read above the line", "above")
         self.line_side.currentIndexChanged.connect(self._side_changed)
         self.clear_line = QPushButton("Remove line"); self.clear_line.clicked.connect(self._remove_line)
-        for w in (self.rect_btn, self.poly_btn, self.poly_done, self.line_btn, self.line_side, self.clear_line):
+        for w in (self.rect_btn, self.poly_btn, self.poly_done, self.line_btn, self.line_side, self.clear_line,
+                  self.end_btn, self.clear_end):
             tools.addWidget(w)
         tools.addStretch()
         lv.addLayout(tools)
@@ -315,6 +334,7 @@ class CalibrationWindow(QDialog):
         root.addWidget(self.status)
 
         for widget in (self.rect_btn, self.poly_btn, self.poly_done, self.line_btn, self.line_side, self.clear_line,
+                       self.end_btn, self.clear_end,
                        self.save_btn, self.revert_btn, self.reset_btn, self.test_btn, self.enabled, self.min_w, self.min_h,
                        self.min_det, self.min_ocr, self.min_sharp, self.min_bright, self.max_bright, self.max_clip,
                        self.frames, self.window_s, self.test_minutes):
@@ -398,6 +418,7 @@ class CalibrationWindow(QDialog):
             widget.blockSignals(False)
         self.canvas.zone = [list(p) for p in (cfg.get("zone") or [])]
         self.canvas.line = dict(cfg["trigger_line"]) if cfg.get("trigger_line") else None
+        self.canvas.end_line = dict(cfg["end_line"]) if cfg.get("end_line") else None
         side = (self.canvas.line or {}).get("side", "below")
         self.line_side.blockSignals(True)
         self.line_side.setCurrentIndex(max(0, self.line_side.findData(side)))
@@ -425,6 +446,7 @@ class CalibrationWindow(QDialog):
             "enabled": self.enabled.isChecked(),
             "zone": self.canvas.zone if len(self.canvas.zone) >= 3 else [],
             "trigger_line": self.canvas.line,
+            "end_line": self.canvas.end_line,
             "min_plate_width_px": self.min_w.value(),
             "min_plate_height_px": self.min_h.value(),
             "min_detection_confidence": self.min_det.value(),
@@ -491,7 +513,8 @@ class CalibrationWindow(QDialog):
         hints = {
             "rect": "Drag a rectangle over the area where plates are close enough to read.",
             "polygon": "Click each corner of the capture area, then Finish polygon.",
-            "line": "Click where the plate should cross before it is read; drag the line to adjust.",
+            "line": "Click where reading starts: the plate must cross this line first; drag to adjust.",
+            "end": "Click where reading ends: plates past this line are never read (a car moving out).",
             "idle": "Drag a corner to move it, drag inside the zone to move it all.",
         }
         self.tool_hint.setText(hints.get(mode, ""))
@@ -503,6 +526,11 @@ class CalibrationWindow(QDialog):
             self.canvas.line["side"] = self.line_side.currentData()
             self.canvas.update()
             self._mark_dirty()
+
+    def _remove_end_line(self):
+        self.canvas.end_line = None
+        self.canvas.update()
+        self._mark_dirty()
 
     def _remove_line(self):
         self.canvas.line = None

@@ -67,7 +67,7 @@ def test_hot_host_polls_reuse_connections_and_close_at_shutdown():
 
 def test_one_camera_timeout_does_not_close_its_neighbors_live_client():
     async def run():
-        real_client=httpx.AsyncClient
+        real_client=httpx.Client
         def reply(request):
             if request.url.path.endswith("/7"):
                 raise httpx.ReadTimeout("camera stalled", request=request)
@@ -75,7 +75,7 @@ def test_one_camera_timeout_does_not_close_its_neighbors_live_client():
         def factory(**kwargs):
             return real_client(**kwargs, transport=httpx.MockTransport(reply))
         try:
-            with patch.object(hvx_client.httpx, "AsyncClient", side_effect=factory):
+            with patch.object(hvx_client.httpx, "Client", side_effect=factory):
                 host=hvx_client.HVXHostClient("http://host.test:8010")
                 neighbor=hvx_client._shared_live_client(host.base_url, 8)
                 assert await host.live_jpeg(7) == b""
@@ -83,6 +83,39 @@ def test_one_camera_timeout_does_not_close_its_neighbors_live_client():
                 assert not neighbor.is_closed
                 assert hvx_client._shared_live_client(host.base_url, 8) is neighbor
                 assert await host.live_jpeg(8) == JPEG
+        finally:
+            await hvx_client.close_host_clients()
+    asyncio.run(run())
+
+
+def test_live_frame_fetch_does_not_block_the_event_loop():
+    """A slow frame response must not stall camera events, OCR or gate commands."""
+    import threading
+    import time as _time
+
+    async def run():
+        real_client = httpx.Client
+        def reply(request):
+            _time.sleep(0.6)                       # slow host / big frame being read
+            return httpx.Response(200, content=JPEG, headers={"x-frame-seq": "5"})
+        def factory(**kwargs):
+            return real_client(**kwargs, transport=httpx.MockTransport(reply))
+        ticks = []
+        async def heartbeat():
+            while True:
+                ticks.append(_time.monotonic())
+                await asyncio.sleep(0.05)
+        try:
+            with patch.object(hvx_client.httpx, "Client", side_effect=factory):
+                host = hvx_client.HVXHostClient("http://host.test:8010")
+                beat = asyncio.create_task(heartbeat())
+                frames = await asyncio.gather(host.live_jpeg(1), host.live_jpeg(2), host.live_jpeg(3), host.live_jpeg(4))
+                beat.cancel()
+                assert frames == [JPEG] * 4
+                assert host.last_live_seq[1] == 5
+                gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+                assert len(ticks) >= 8 and max(gaps) < 0.3, f"event loop blocked: {max(gaps):.2f}s"
+                assert threading.main_thread() is threading.current_thread()
         finally:
             await hvx_client.close_host_clients()
     asyncio.run(run())

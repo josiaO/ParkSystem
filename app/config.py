@@ -56,6 +56,19 @@ def default_node_id() -> str:
     return f"{hostname}-{suffix}"
 
 
+_made_dirs: set[str] = set()
+
+
+def _ensure_dir(path: Path) -> None:
+    """Create a folder once per process. These properties are read on every
+    media write; a filesystem call each time showed up as event-loop stalls."""
+    key = str(path)
+    if key in _made_dirs:
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    _made_dirs.add(key)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=install_directory() / ".env", extra="ignore")
 
@@ -508,13 +521,13 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         p = default_data_dir()
-        p.mkdir(parents=True, exist_ok=True)
+        _ensure_dir(p)
         return p
 
     @property
     def media_dir(self) -> Path:
         p = self.shared_media_dir or self.data_dir / "media"
-        p.mkdir(parents=True, exist_ok=True)
+        _ensure_dir(p)
         return p
 
     @property
