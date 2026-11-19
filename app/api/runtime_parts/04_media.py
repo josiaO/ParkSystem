@@ -45,7 +45,7 @@ async def camera_live_endpoint(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    _camera_for_node(db, camera_id, action="live-endpoint")
+    await run_db(_camera_for_node, db, camera_id, action="live-endpoint")
     from app.infrastructure.media import registry as media_registry
     endpoint = await media_registry.get_live_endpoint(camera_id, db)
     from app.services.whep import browser_endpoint
@@ -66,7 +66,11 @@ async def camera_whep_signaling(
     camera_id: int, request: Request, session_id: str = "",
     db: Session = Depends(get_db), _: User = Depends(require("cameras.view")),
 ):
-    _camera_for_node(db, camera_id, action="whep")
+    def _check():
+        _camera_for_node(db, camera_id, action="whep")
+        release_connection(db)
+
+    await run_db(_check)
     from app.services.mediamtx import live_endpoint
     from app.services.whep import proxy_signaling
     path = live_endpoint(camera_id)["mediamtx_path"]
@@ -78,8 +82,12 @@ _snapshot_status_checked: set[int] = set()
 
 @app.get("/cameras/{camera_id}/snapshot.jpg")
 async def camera_snapshot(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
-    _camera_for_node(db, camera_id, action="snapshot")
-    spec = pumping_spec(camera_id) or _camera_live_spec(camera_id)
+    def _prepare():
+        _camera_for_node(db, camera_id, action="snapshot")
+        release_connection(db)
+        return pumping_spec(camera_id) or _camera_live_spec(camera_id)
+
+    spec = await run_db(_prepare)
     # A snapshot is a temporary live consumer. This guarantees that MediaMTX
     # or the SDK producer is already supplying the shared latest-frame cache;
     # snapshot capture must never open a competing RTSP/FFmpeg reader.
@@ -106,14 +114,17 @@ async def _camera_snapshot_with_live_lease(camera_id: int, spec: CameraLiveSpec)
         touch_live(spec)
         # Promote DISCOVERED→VIDEO_CONNECTED once; never open SQLite on every 40ms poll.
         if camera_id not in _snapshot_status_checked:
-            with short_session() as db:
-                camera = db.get(Camera, spec.id)
-                if camera is not None:
-                    if camera.status in {
-                        CameraStatus.UNKNOWN.value, CameraStatus.DISCOVERED.value,
-                    }:
-                        persist_video(db, camera, row.url or None)
-                    _snapshot_status_checked.add(camera_id)
+            def _promote_once():
+                with short_session() as db:
+                    camera = db.get(Camera, spec.id)
+                    if camera is not None:
+                        if camera.status in {
+                            CameraStatus.UNKNOWN.value, CameraStatus.DISCOVERED.value,
+                        }:
+                            persist_video(db, camera, row.url or None)
+                        _snapshot_status_checked.add(camera_id)
+
+            await run_db(_promote_once)
         return _jpeg_response(row.jpeg, row.seq)
     touch_live(spec)
     if pumping_spec(camera_id) is not None:
@@ -142,12 +153,15 @@ async def _camera_snapshot_with_live_lease(camera_id: int, spec: CameraLiveSpec)
     if not grabbed.get("ok"):
         raise HTTPException(409, grabbed.get("error") or "No live JPEG")
     if not grabbed.get("cached"):
-        with short_session() as db:
-            camera = db.get(Camera, spec.id)
-            if camera is not None and camera.status in {
-                CameraStatus.UNKNOWN.value, CameraStatus.DISCOVERED.value,
-            }:
-                persist_video(db, camera, grabbed.get("url"))
+        def _promote():
+            with short_session() as db:
+                camera = db.get(Camera, spec.id)
+                if camera is not None and camera.status in {
+                    CameraStatus.UNKNOWN.value, CameraStatus.DISCOVERED.value,
+                }:
+                    persist_video(db, camera, grabbed.get("url"))
+
+        await run_db(_promote)
     return Response(
         content=grabbed["jpeg"],
         media_type="image/jpeg",
@@ -173,8 +187,13 @@ def unwatch_camera_live(camera_id: int, db: Session = Depends(get_db), _: User =
 @app.post("/cameras/{camera_id}/snapshot/capture")
 async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db), user: User = Depends(require("cameras.view"))):
     """Grab one live JPEG and save a car snapshot only when a vehicle/plate is present."""
-    c = _camera_for_node(db, camera_id, action="snapshot-capture")
-    spec = _live_spec(c)
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="snapshot-capture")
+        spec = _live_spec(c)
+        release_connection(db)
+        return c, spec
+
+    c, spec = await run_db(_prepare)
     touch_live(spec)
     grabbed = await snapshot_for_camera(
         spec.id, spec.ip, spec.username, spec.password, spec.rtsp_url,
@@ -198,26 +217,32 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
             local_confidence=float(local.get("confidence") or 0),
             mode=fusion_mode(c),
         )
-        latest = latest_for_camera(db, c.id)
-        recent = False
-        if latest is not None and latest.created_at is not None:
-            created = latest.created_at
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            recent = (datetime.now(timezone.utc) - created).total_seconds() <= max(
-                4.0, float(getattr(settings, "live_plate_fresh_seconds", 4.0) or 4.0),
-            )
-        if recent and latest is not None and fused.resolved_plate and latest.plate == fused.resolved_plate:
-            write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
-            return {
-                "ok": True,
-                "camera_id": c.id,
-                "bytes": len(jpeg),
-                "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
-                "capture": capture_dict(latest),
-                "plate": latest.plate or fused.resolved_plate or "",
-                "recognition": "worker",
-            }
+        def _worker_result():
+            latest = latest_for_camera(db, c.id)
+            recent = False
+            if latest is not None and latest.created_at is not None:
+                created = latest.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                recent = (datetime.now(timezone.utc) - created).total_seconds() <= max(
+                    4.0, float(getattr(settings, "live_plate_fresh_seconds", 4.0) or 4.0),
+                )
+            if recent and latest is not None and fused.resolved_plate and latest.plate == fused.resolved_plate:
+                write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
+                return {
+                    "ok": True,
+                    "camera_id": c.id,
+                    "bytes": len(jpeg),
+                    "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
+                    "capture": capture_dict(latest),
+                    "plate": latest.plate or fused.resolved_plate or "",
+                    "recognition": "worker",
+                }
+            return None
+
+        reused = await run_db(_worker_result)
+        if reused is not None:
+            return reused
         raise HTTPException(
             409,
             "Continuous recognition is processing this camera; snapshot capture did not start a competing model read",
@@ -233,7 +258,10 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         mode=fusion_mode(c),
     )
     image_id = int(time.time() * 1000) % 2_000_000_000
-    if fused.resolved_plate or native.get("have_vehicle"):
+    if not (fused.resolved_plate or native.get("have_vehicle")):
+        raise HTTPException(409, "No vehicle or plate in frame. Snapshot not saved.")
+
+    def _save():
         capture = _capture_from_readings(native, local, fused, image_id=image_id)
         if native.get("have_vehicle"):
             capture["have_vehicle"] = True
@@ -247,32 +275,35 @@ async def capture_camera_snapshot(camera_id: int, db: Session = Depends(get_db),
         if not allowed:
             raise HTTPException(409, f"No vehicle in frame ({reason}). Snapshot not saved.")
         row = persist_event(db, c, jpeg=jpeg, crop=_crop_from_alpr(alpr), capture=capture)
-    else:
-        raise HTTPException(409, "No vehicle or plate in frame. Snapshot not saved.")
-    write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
-    latest = row or latest_for_camera(db, c.id)
-    return {
-        "ok": True,
-        "camera_id": c.id,
-        "bytes": len(jpeg),
-        "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
-        "capture": capture_dict(latest) if latest else None,
-        "plate": (latest.plate if latest else "") or fused.resolved_plate or "",
-    }
+        write_audit(db, user, "camera.snapshot", "camera", str(c.id), c.name)
+        latest = row or latest_for_camera(db, c.id)
+        return {
+            "ok": True,
+            "camera_id": c.id,
+            "bytes": len(jpeg),
+            "snapshot_url": f"/cameras/{c.id}/snapshot.jpg",
+            "capture": capture_dict(latest) if latest else None,
+            "plate": (latest.plate if latest else "") or fused.resolved_plate or "",
+        }
+
+    return await run_db(_save)
 
 
 @app.get("/cameras/{camera_id}/live.mjpeg")
 async def camera_live(camera_id: int, role: str = "LIVE", db: Session = Depends(get_db), _: User = Depends(require_media("cameras.view"))):
-    _camera_for_node(db, camera_id, action="mjpeg")
-    # The MJPEG response can remain open for hours.  Do not keep the request's
-    # SQLAlchemy session checked out for the lifetime of that stream: with the
-    # old behavior four live panes plus plate polling exhausted PostgreSQL's
-    # 5+5 pool and made unrelated recognition queries fail with QueuePool
-    # timeouts.  The generator reads only the in-memory frame cache.
-    close = getattr(db, "close", None)
-    if close is not None:
-        close()
-    spec = _camera_live_spec(camera_id)
+    def _prepare():
+        _camera_for_node(db, camera_id, action="mjpeg")
+        # The MJPEG response can remain open for hours.  Do not keep the request's
+        # SQLAlchemy session checked out for the lifetime of that stream: with the
+        # old behavior four live panes plus plate polling exhausted PostgreSQL's
+        # 5+5 pool and made unrelated recognition queries fail with QueuePool
+        # timeouts.  The generator reads only the in-memory frame cache.
+        close = getattr(db, "close", None)
+        if close is not None:
+            close()
+        return _camera_live_spec(camera_id)
+
+    spec = await run_db(_prepare)
     wanted = (role or "LIVE").upper()
     if wanted in {"MAIN", "EVIDENCE"}:
         from dataclasses import replace
@@ -330,7 +361,12 @@ async def camera_preview(
     db: Session = Depends(get_db),
     _: User = Depends(require("cameras.view")),
 ):
-    c = _camera_for_node(db, camera_id, action="preview")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="preview")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     cached = get_state(c.id)
     live = live_is_current(c.id)
     grabbed = {"ok": live, "jpeg": cached.jpeg, "url_redacted": cached.url_redacted}
@@ -351,9 +387,9 @@ async def camera_preview(
             recognize_frame, grabbed["jpeg"], camera_label=f"cam-{c.id}-{c.ip_address}",
         )
         remember_alpr(c.id, alpr)
-    plates = _plate_payload(c, native, alpr, db)
+    plates, camera = await run_db(lambda: (_plate_payload(c, native, alpr, db), camera_dict(c)))
     return {
-        "camera": camera_dict(c),
+        "camera": camera,
         "live": live,
         "error": None if live else (grabbed.get("error") or "No live JPEG"),
         "url_redacted": grabbed.get("url_redacted") or get_state(c.id).url_redacted,
@@ -373,16 +409,25 @@ async def camera_preview(
 
 @app.get("/cameras/{camera_id}/plates")
 async def camera_plates(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = _camera_for_node(db, camera_id, action="plates")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="plates")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     from app.services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
     native = {} if camera_recognition_mode(c) == LOCAL_ONLY else await _native_capture_for_camera(c)
-    payload = _plate_payload(c, native, fresh_alpr(c.id), db)
-    from app.services.node_scope import camera_active_on_this_installation
-    if not camera_active_on_this_installation(c, db=db):
-        payload["recognition"]["last_error"] = "View only: assign this PC to this camera's gate under Devices to enable recognition."
-    latest = latest_for_camera(db, c.id)
-    payload["evidence"] = capture_dict(latest) if latest else None
-    return payload
+
+    def _payload():
+        payload = _plate_payload(c, native, fresh_alpr(c.id), db)
+        from app.services.node_scope import camera_active_on_this_installation
+        if not camera_active_on_this_installation(c, db=db):
+            payload["recognition"]["last_error"] = "View only: assign this PC to this camera's gate under Devices to enable recognition."
+        latest = latest_for_camera(db, c.id)
+        payload["evidence"] = capture_dict(latest) if latest else None
+        return payload
+
+    return await run_db(_payload)
 
 
 @app.post("/cameras/{camera_id}/plate-corrections")
@@ -396,23 +441,27 @@ async def correct_camera_plate(
     from app.core.plate import apply_site_plate, normalize_plate
     from app.services.captures import apply_operator_plate_correction
 
-    camera = _camera_for_node(db, camera_id, action="plate-correction")
-    row = db.get(VehicleCapture, int(payload.capture_id)) if payload.capture_id else latest_for_camera(db, camera.id)
-    if row is None or row.camera_id != camera.id:
-        raise HTTPException(404, "No vehicle capture to correct")
-    original = row.plate_raw or row.plate
-    chosen = normalize_plate(payload.plate) if payload.plate else normalize_plate(row.plate)
-    if not chosen:
-        raise HTTPException(400, "Corrected plate is empty")
-    assessed = apply_site_plate(chosen, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
-    apply_operator_plate_correction(row, chosen)
-    write_audit(
-        db, user, "plate.correct", "vehicle_capture", str(row.id),
-        f"ocr={original} corrected={chosen} confirm={bool(payload.confirm)}",
-    )
-    db.commit()
-    db.refresh(row)
-    gate = db.get(Gate, camera.gate_id) if camera.gate_id else None
+    def _correct():
+        camera = _camera_for_node(db, camera_id, action="plate-correction")
+        row = db.get(VehicleCapture, int(payload.capture_id)) if payload.capture_id else latest_for_camera(db, camera.id)
+        if row is None or row.camera_id != camera.id:
+            raise HTTPException(404, "No vehicle capture to correct")
+        original = row.plate_raw or row.plate
+        chosen = normalize_plate(payload.plate) if payload.plate else normalize_plate(row.plate)
+        if not chosen:
+            raise HTTPException(400, "Corrected plate is empty")
+        assessed = apply_site_plate(chosen, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+        apply_operator_plate_correction(row, chosen)
+        write_audit(
+            db, user, "plate.correct", "vehicle_capture", str(row.id),
+            f"ocr={original} corrected={chosen} confirm={bool(payload.confirm)}",
+        )
+        db.commit()
+        db.refresh(row)
+        gate = db.get(Gate, camera.gate_id) if camera.gate_id else None
+        return camera, row, assessed, gate
+
+    camera, row, assessed, gate = await run_db(_correct)
     side = (camera.lane_direction or "ENTRY").upper()
     if side == "ENTRY":
         from app.application.live_parking import handle_live_entry
@@ -424,7 +473,7 @@ async def correct_camera_plate(
         result = await handle_live_exit(
             db, camera=camera, capture=row, gate=gate, source="operator-correction",
         )
-    last = capture_dict(row)
+    last = await run_db(capture_dict, row)
     remember_last_car(camera.id, last)
     return {
         "ok": True,
@@ -438,7 +487,12 @@ async def correct_camera_plate(
 
 @app.get("/cameras/{camera_id}/presence")
 async def get_camera_presence(camera_id: int, db: Session = Depends(get_db), _: User = Depends(require("cameras.view"))):
-    c = _camera_for_node(db, camera_id, action="presence-read")
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="presence-read")
+        release_connection(db)
+        return c
+
+    c = await run_db(_prepare)
     gpio = None
     pins: list[dict] = []
     learned = coil_watch.learned_index(c.id)
@@ -476,11 +530,11 @@ async def post_camera_presence(
     db: Session = Depends(get_db),
     user: User = Depends(require("cameras.connect")),
 ):
-    c = _camera_for_node(db, camera_id, action="presence-write")
+    c = await run_db(_camera_for_node, db, camera_id, action="presence-write")
     edge = coil_watch.observe(c.id, occupied, source="api")
     if edge.falling:
         await _complete_passage_from_sensor(c.id)
-    write_audit(db, user, "camera.presence", "camera", str(c.id), f"occupied={occupied}")
+    await run_db(write_audit, db, user, "camera.presence", "camera", str(c.id), f"occupied={occupied}")
     if edge.rising and c.sdk_handle is not None:
         await _read_presence_now(c.id, int(c.sdk_handle))
     elif edge.rising:
