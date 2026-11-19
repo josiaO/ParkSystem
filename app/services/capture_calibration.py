@@ -70,6 +70,20 @@ LIMITS = {
     "reference_width": (0, 8000),
 }
 
+# Values beyond these would refuse most or all cars (night headlights make
+# plates bright; a 0-255 "brightness to" of 2 refused every car on 2# Entry).
+# Saving them is refused; such values already saved are ignored and reported.
+SAFE = {
+    "max_brightness": (150.0, 255.0, "Brightness to must be at least 150 (0-255); lower refuses plates lit by headlights."),
+    "min_brightness": (0.0, 100.0, "Brightness from must be 100 or less (0-255); higher refuses plates at night."),
+    "max_clipped_fraction": (0.2, 1.0, "Most glare/black allowed must be at least 0.20; lower refuses ordinary plates."),
+    "min_detection_confidence": (0.0, 0.9, "Minimum detector confidence must be 0.90 or less; higher refuses most plates."),
+    "min_ocr_confidence": (0.0, 0.9, "Minimum recognition confidence must be 0.90 or less; higher refuses most reads."),
+    "min_plate_height_px": (0, 40, "Minimum plate height must be 40 px or less on the live picture; plates are rarely taller."),
+    "min_plate_width_px": (0, 160, "Minimum plate width must be 160 px or less on the live picture; plates are rarely wider."),
+}
+MIN_BAND = 0.08   # start and end line at least 8% of the picture apart
+
 
 # --------------------------------------------------------------- storage --
 
@@ -152,6 +166,13 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         out[name] = int(value) if isinstance(DEFAULTS[name], int) and not isinstance(DEFAULTS[name], bool) else value
     if out["min_brightness"] > out["max_brightness"]:
         raise ValueError("Minimum brightness cannot be above maximum brightness.")
+    for name, (low, high, message) in SAFE.items():
+        if not low <= float(out[name]) <= high:
+            raise ValueError(message)
+    if out.get("trigger_line") and out.get("end_line"):
+        if abs(float(out["end_line"]["y"]) - float(out["trigger_line"]["y"])) < MIN_BAND:
+            raise ValueError("Leave at least 8% of the picture between the start and end lines, "
+                             "or cars will pass between two snapshots without being read.")
     return out
 
 
@@ -169,6 +190,18 @@ def load(db, camera) -> dict[str, Any]:
     config["updated_at"] = stored.get("updated_at") or None
     config["updated_by"] = stored.get("updated_by") or None
     config["calibrated"] = bool(stored) and bool(config["enabled"])
+    # A saved value that would refuse every car (from before these limits)
+    # is not applied; the calibration window and Live Gates say so.
+    ignored = []
+    for name, (low, high, message) in SAFE.items():
+        try:
+            value = float(config.get(name))
+        except (TypeError, ValueError):
+            continue
+        if not low <= value <= high:
+            config[name] = DEFAULTS[name]
+            ignored.append(message)
+    config["ignored"] = ignored
     config.update(identity(camera))
     return config
 
@@ -788,26 +821,83 @@ def note_read(camera_id: int, *, plate: str, confidence: float, source: str, tes
         _snapshots[int(camera_id)] = jpeg
 
 
-def note_rejected(camera_id: int, *, plate: str, reasons: list[str], candidate: Candidate | None = None) -> None:
+def note_rejected(camera_id: int, *, plate: str, reasons: list[str], candidate: Candidate | None = None,
+                  jpeg: bytes = b"") -> None:
     """A read that did not meet the calibration and so was not stored."""
     import logging
 
+    now = time.time()
     row = _live.setdefault(int(camera_id), {})
     row["last_rejected"] = {
-        "at": time.time(),
+        "at": now,
         "plate": str(plate or ""),
         "reasons": list(reasons or []),
         "candidate": candidate.as_dict() if candidate is not None else None,
+        "has_image": bool(jpeg[:2] == b"\xff\xd8"),
     }
     row["rejected_count"] = int(row.get("rejected_count") or 0) + 1
+    recent = [item for item in row.get("recent_rejections", []) if now - item[0] <= WARN_WINDOW_SECONDS]
+    recent.append((now, list(reasons or [])))
+    row["recent_rejections"] = recent[-50:]
+    if jpeg[:2] == b"\xff\xd8":
+        _rejected_images[int(camera_id)] = (jpeg, dict(candidate.box) if candidate is not None else {})
     logging.getLogger("smartpark").info(
         "camera=%s read not stored: outside capture calibration plate=%s reasons=%s",
         camera_id, plate or "-", "; ".join(reasons or []),
     )
 
 
+WARN_WINDOW_SECONDS = 600.0
+WARN_MIN_REFUSED = 3
+_rejected_images: dict[int, tuple[bytes, dict]] = {}
+
+
+def note_stored(camera_id: int) -> None:
+    """A read for this camera became a capture (it met the calibration)."""
+    _live.setdefault(int(camera_id), {})["last_stored_at"] = time.time()
+
+
+def lane_warning(camera_id: int) -> str:
+    """Plain warning when the calibration keeps refusing cars and stores none."""
+    row = _live.get(int(camera_id)) or {}
+    now = time.time()
+    stored_at = float(row.get("last_stored_at") or 0)
+    recent = [item for item in row.get("recent_rejections", [])
+              if now - item[0] <= WARN_WINDOW_SECONDS and item[0] > stored_at]
+    if len(recent) < WARN_MIN_REFUSED:
+        return ""
+    import collections
+
+    reasons = collections.Counter(
+        reason.split(" (")[0].split(" <")[0] for _, items in recent for reason in items[:1]
+    )
+    top = ", ".join(f"{reason} ({count})" for reason, count in reasons.most_common(2))
+    minutes = int(min(WARN_WINDOW_SECONDS, now - recent[0][0]) // 60) + 1
+    return (f"{len(recent)} cars not stored in the last {minutes} min and none stored since: {top}. "
+            "Check this camera's calibration in Settings.")
+
+
 def live_state(camera_id: int) -> dict[str, Any]:
-    return dict(_live.get(int(camera_id)) or {})
+    row = dict(_live.get(int(camera_id)) or {})
+    row.pop("recent_rejections", None)
+    row["warning"] = lane_warning(camera_id)
+    return row
+
+
+def rejected_image(camera_id: int, part: str = "snapshot") -> bytes:
+    """The last refused read's picture (or its plate crop), for the live view."""
+    item = _rejected_images.get(int(camera_id))
+    if not item:
+        return b""
+    jpeg, box = item
+    if part != "crop" or not box:
+        return jpeg
+    try:
+        from app.services.captures import _crop_from_bbox
+
+        return _crop_from_bbox(jpeg, box) or b""
+    except Exception:
+        return b""
 
 
 def selected_snapshot(camera_id: int) -> bytes:

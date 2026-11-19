@@ -84,7 +84,36 @@ def _plate_payload(camera: Camera, native: dict, alpr: dict | None, db: Session 
         "live_provider": live_provider_label({**live_endpoint, "viewer_transport": viewer}) if viewer else live_provider_label(live_endpoint),
         "media": _camera_media_brief(camera.id),
         "recognition": rec,
+        **_refused_read(camera.id),
     }
+
+
+REFUSED_SHOWN_SECONDS = 120.0
+
+
+def _refused_read(camera_id: int) -> dict:
+    """The newest read the calibration refused, when no car was stored after it.
+
+    The live view shows its picture marked NOT STORED, so the operator never
+    sees an older stored car as if it were the one at the gate.
+    """
+    from app.services import capture_calibration as calibration
+
+    state = calibration.live_state(camera_id)
+    out = {"calibration_warning": state.get("warning") or ""}
+    rejected = state.get("last_rejected") or {}
+    at = float(rejected.get("at") or 0)
+    if (rejected.get("has_image") and at > float(state.get("last_stored_at") or 0)
+            and time.time() - at <= REFUSED_SHOWN_SECONDS):
+        stamp = int(at * 1000)
+        out["refused"] = {
+            "plate": rejected.get("plate") or "",
+            "reasons": list(rejected.get("reasons") or []),
+            "at": at,
+            "snapshot_url": f"/cameras/{int(camera_id)}/calibration/rejected.jpg?t={stamp}",
+            "crop_url": f"/cameras/{int(camera_id)}/calibration/rejected.jpg?part=crop&t={stamp}",
+        }
+    return out
 
 
 _local_alpr_at: dict[int, float] = {}

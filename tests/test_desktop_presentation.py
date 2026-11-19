@@ -119,6 +119,26 @@ def test_last_evidence_loads_without_reviving_a_departed_plate(fixture_ui, monke
     pane.close()
 
 
+def test_refused_read_replaces_the_old_stored_car_marked_not_stored(fixture_ui, monkeypatch):
+    """A car the calibration refused is shown as NOT STORED, never the previous stored car."""
+    pane = live_pane.CameraLivePane()
+    pane.camera={"id": 903, "lane_direction": "ENTRY"}
+    requests=[]
+    monkeypatch.setattr(live_pane.api, "get_bytes", lambda path, **kwargs: requests.append(path) or b"jpeg", raising=False)
+    monkeypatch.setattr(pane, "_set_pixmap", lambda label, jpeg, *args: True)
+    stored={"plate": "T111AAA", "snapshot_url": "/media/snapshots/old.jpg", "crop_url": "/media/crops/old.jpg"}
+    pane._show_alpr({"last_car": stored, "evidence": stored})
+    pane._show_alpr({"last_car": stored, "evidence": stored, "calibration_warning": "3 cars not stored",
+                     "refused": {"plate": "SM15672", "reasons": ["too bright (200 > 2)"],
+                                 "snapshot_url": "/cameras/903/calibration/rejected.jpg?t=1",
+                                 "crop_url": "/cameras/903/calibration/rejected.jpg?part=crop&t=1"}})
+    assert requests[-2:] == ["/cameras/903/calibration/rejected.jpg?t=1", "/cameras/903/calibration/rejected.jpg?part=crop&t=1"]
+    assert pane.decision.text() == "NOT STORED"
+    assert "SM15672" in pane.details.text() and "too bright" in pane.details.text()
+    assert pane.hold_label.text() == "3 cars not stored"
+    pane.close()
+
+
 def test_repeated_alpr_poll_does_not_repaint_an_unchanged_live_overlay(fixture_ui, monkeypatch):
     pane = live_pane.CameraLivePane()
     pane.camera = {"id": 901}

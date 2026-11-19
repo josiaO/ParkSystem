@@ -285,7 +285,7 @@ def persist_event(
         )
         if _verdict is not None and not _verdict.eligible:
             _calibration.note_rejected(int(camera.id), plate=str(_native_read.get("plate") or ""),
-                                       reasons=_verdict.reasons, candidate=_verdict)
+                                       reasons=_verdict.reasons, candidate=_verdict, jpeg=jpeg or b"")
         return None
     existing = _capture_by_identity(db, camera.id, capture)
     if existing is not None:
@@ -348,9 +348,10 @@ def persist_event(
         if verdict is not None and not verdict.eligible:
             _calibration.note_rejected(
                 int(camera.id), plate=str(_native_read.get("plate") or (capture or {}).get("plate") or ""),
-                reasons=verdict.reasons, candidate=verdict,
+                reasons=verdict.reasons, candidate=verdict, jpeg=jpeg or b"",
             )
             return None
+        _calibration.note_stored(int(camera.id))
     if native.get("source"):
         box["source"] = native.get("source")
     # Preserve the camera's read-only OcxConfig geometry for diagnostics and
