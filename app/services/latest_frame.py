@@ -89,10 +89,20 @@ class LatestFrameBuffer:
         return items[-count:]
 
     def take(self) -> FrameSample | None:
+        """Consume the newest frame. Older frames still queued are dropped.
+
+        Without the clear, a buffer with ``maxsize > 1`` would hand out an
+        *older* frame on the next ``take()`` (LIFO pop), letting a consumer
+        decide on a frame that is staler than one it already processed.
+        """
         with self._lock:
             if not self._items:
                 return None
-            return self._items.pop()
+            newest = self._items.pop()
+            if self._items:
+                self.dropped += len(self._items)
+                self._items.clear()
+            return newest
 
     def depth(self) -> int:
         with self._lock:

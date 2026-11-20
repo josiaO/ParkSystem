@@ -6,7 +6,7 @@
 A factory reset deletes ``%ProgramData%\\SmartParkEdge`` (photos, logs, local
 SQLite). With PostgreSQL the visit records live elsewhere, so wiping only the
 files left records pointing at missing photos (SITE-PC01 lost 4,435 photos
-that way). ``Wipe-SmartPark.ps1`` asks this module what the PC holds and then
+that way). ``zirpctl purge-data`` (packaging/installer/bin) asks this module what the PC holds and then
 either resets the database too (Site Server) or keeps the site data.
 
 Edge Nodes and operator workstations never reset the database: it is the

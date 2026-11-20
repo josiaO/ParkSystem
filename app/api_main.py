@@ -43,5 +43,5 @@ adapter_has_native_plates(camera)
 spec = _live_spec(camera, need_detect=True)
 acquire_detect(spec)
 async def _outbox_loop
-/downloads/zirp-installer.zip
+/downloads/zirp-setup.exe
 '''

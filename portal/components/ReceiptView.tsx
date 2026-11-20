@@ -39,7 +39,7 @@ function flowFromIntent(r: Receipt): Flow {
   }
 }
 
-/** T939DXW -> "T 626 DXW"; anything else is shown as read. */
+/** T626DXW -> "T 626 DXW"; anything else is shown as read. */
 function platePretty(plate: string): string {
   const m = /^(T)(\d{3})([A-Z]{2,4})$/.exec(plate || "");
   return m ? `${m[1]} ${m[2]} ${m[3]}` : plate || "—";
@@ -334,7 +334,17 @@ function AmountBar({ t, receipt, open, onToggle }: { t: Strings; receipt: Receip
   );
 }
 
+// A USSD PIN prompt closes on the phone after about a minute and the
+// provider then reports a failure. Past this, the answer is late or lost.
+const SLOW_ANSWER_SECONDS = 120;
+
 function WaitingCard({ t, phone, amount }: { t: Strings; phone: string; amount: string }) {
+  const [started] = useState(() => Date.now());
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const id = window.setTimeout(() => setSlow(true), Math.max(0, SLOW_ANSWER_SECONDS * 1000 - (Date.now() - started)));
+    return () => window.clearTimeout(id);
+  }, [started]);
   return (
     <section className="card space-y-3 p-4 text-center">
       <span className="relative mx-auto grid h-9 w-9 place-items-center text-amber-500">
@@ -350,6 +360,7 @@ function WaitingCard({ t, phone, amount }: { t: Strings; phone: string; amount: 
         <Step active label={t.stepApprove} />
         <Step label={t.stepConfirmed} />
       </ol>
+      {slow && <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-left text-[11px] text-amber-900">{t.slowAnswer}</p>}
     </section>
   );
 }

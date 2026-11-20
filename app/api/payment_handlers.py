@@ -98,13 +98,43 @@ async def sim_exit_ep(payload: SimExitRequest, db: Session = Depends(get_db), us
     return result
 
 
-def public_receipt(token: str, db: Session = Depends(get_db)):
+def _driver_portal_redirect(request: Request, db: Session, token: str):
+    """One driver pay page: send /p/{token} to the configured public portal.
+
+    Receipt QR codes already point at the public receipt URL (normally the
+    Zirp portal). Someone who opens this server's own /p/{token} is sent
+    there too, so drivers never see two different pay pages. With no public
+    URL set, or one that points back at this server, the built-in page is
+    served: it is the fallback that needs nothing but the Site Server.
+    """
+    from urllib.parse import urlsplit
+
+    from app.services.receipts import resolve_public_base_url
+
+    base = (resolve_public_base_url(db) or "").strip().rstrip("/")
+    target = urlsplit(base)
+    if not target.scheme or not target.netloc:
+        return None
+    here = (request.headers.get("host") or request.url.netloc or "").lower()
+    if target.netloc.lower() == here:
+        return None
+    from urllib.parse import quote
+
+    return RedirectResponse(f"{base}/p/{quote(token, safe='')}", status_code=307)
+
+
+def public_receipt(token: str, request: Request, db: Session = Depends(get_db)):
     from app.services.public_pay import public_session_payload, session_by_public_token
     from app.services.public_ingress import privacy_headers
 
     row = session_by_public_token(db, token)
     if not row:
         raise HTTPException(404, "Receipt not found")
+    redirect = _driver_portal_redirect(request, db, token)
+    if redirect is not None:
+        for key, value in privacy_headers().items():
+            redirect.headers[key] = value
+        return redirect
     data = public_session_payload(db, row)
     external_pay = str(data.get("pay_endpoint") or "").startswith("/api/public/")
     remaining = float(data["amount_remaining"])

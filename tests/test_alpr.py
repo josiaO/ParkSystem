@@ -423,14 +423,14 @@ class PlateFusionTests(unittest.TestCase):
         self.assertEqual(result["plates"], [])
         self.assertIn("not substituting simulated plates", result["detail"])
 
-    def test_windows_kit_lists_fastalpr(self):
-        text = (ROOT / "packaging" / "windows" / "requirements-windows.txt").read_text()
+    def test_windows_installer_ships_fastalpr(self):
+        text = (ROOT / "packaging" / "installer" / "requirements-windows.txt").read_text()
         self.assertIn("fast-alpr", text)
         self.assertIn("pillow", text)
         self.assertIn("onnxruntime", text)
-        kit = (ROOT / "packaging" / "make_windows_kit.sh").read_text()
-        self.assertIn("yolo-v9-t-384-license-plates-end2end.onnx", kit)
-        self.assertIn("models/fastalpr", kit)
+        build = (ROOT / "packaging" / "installer" / "build.ps1").read_text()
+        self.assertIn("yolo-v9-t-384-license-plates-end2end.onnx", build)
+        self.assertIn('"fast_alpr"', build)          # the staged runtime must import it
 
     def test_ensure_alpr_model_cache_copies_bundled_files(self):
         import tempfile

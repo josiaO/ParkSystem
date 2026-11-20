@@ -112,10 +112,25 @@ async def _pulse_gate(
         import uuid as _uuid
 
         command_uuid = _uuid.uuid4().hex
-    ensure_gate_request_committed(
+    request_row = ensure_gate_request_committed(
         db, gate=gate, session=session, reason=reason, automatic=automatic,
         command_uuid=command_uuid, side=side,
     )
+    # One command UUID is one barrier movement. A retry/replay of a command
+    # whose physical pulse was already ACCEPTED must not lift the boom a
+    # second time (that would admit a second vehicle on one authorization).
+    if (
+        request_row is not None
+        and getattr(request_row, "state", "") == "ACCEPTED"
+        and bool(getattr(request_row, "ok", False))
+        and not bool(getattr(request_row, "dry_run", False))
+    ):
+        return GateCommandResult(
+            ok=True,
+            simulated=False,
+            message="duplicate command: already accepted, barrier not pulsed again",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
     started = time.perf_counter()
     from app.core import latency_trace
     # The gate command uuid is the trace id from here to the camera relay.

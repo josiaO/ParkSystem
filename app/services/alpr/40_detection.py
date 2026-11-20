@@ -48,6 +48,11 @@ def _fix_tz_ocr_plate(text: str) -> str:
     plate = normalize_plate(raw)
     if len(plate) < MIN_PLATE_CHARS:
         return plate
+    # A bolt, emblem or glare over the leading "T" is read as "7" (seen on
+    # TestingData/I0105082026002824.jpg: T843ADF -> 7843ADF). No Tanzanian
+    # format is 4 digits + 3 letters, so that exact shape is a lost T.
+    if re.fullmatch(r"7\d{3}[A-Z]{3}", plate):
+        plate = "T" + plate[1:]
     # Classic TZ private plate: T + 3 digits + 3 letters.
     if len(plate) >= 7 and plate[0] == "T":
         chars = list(plate)

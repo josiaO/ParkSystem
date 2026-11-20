@@ -67,6 +67,33 @@ def _prepare_env(root: Path) -> None:
         os.environ["QT_PLUGIN_PATH"] = str(plugins)
     if platforms.is_dir():
         os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms)
+    _apply_installed_role()
+
+
+def installed_role_path() -> Path:
+    base = Path(os.environ.get("PROGRAMDATA") or Path.home()) if os.name == "nt" else Path.home()
+    return base / "SmartParkEdge" / "install" / "role.json"
+
+
+def _apply_installed_role() -> None:
+    """Role and station chosen in the Windows installer (written by zirpctl).
+
+    Shortcuts start pythonw directly, so the installer's choice is read here.
+    Explicit environment variables still win.
+    """
+    import json
+
+    try:
+        data = json.loads(installed_role_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for key, env in (("deployment_role", "SMARTPARK_ROLE_LOCKED"), ("station", "SMARTPARK_STATION"),
+                     ("deployment_profile", "SMARTPARK_DEPLOYMENT_PROFILE")):
+        value = str(data.get(key) or "").strip()
+        if value and not os.environ.get(env):
+            os.environ[env] = value
 
 
 def _log_dir() -> Path:
@@ -297,7 +324,7 @@ def _start_scheduled_task(name: str) -> bool:
         return False
 
 
-# Windows services registered by Install-SmartParkWinService.ps1 (NSSM).
+# Windows services registered by the installer (packaging/installer/bin/zirpctl.ps1, NSSM).
 _SERVICE_SITE = "SmartParkSiteService"
 _SERVICE_HVX = "SmartParkHvxHost"
 _SERVICE_DEPENDENTS = {
@@ -348,6 +375,30 @@ def _service_failure(name: str) -> RuntimeError:
     )
 
 
+_NEED_KEYS = {
+    "app.media_service": "media_service_needed",
+    "app.recognition_worker": "recognition_worker_needed",
+}
+
+
+def pipeline_needs(local_url: str) -> dict:
+    """Ask the Site Service which helpers its cameras need; on any doubt, all of them."""
+    import json
+
+    try:
+        with urllib.request.urlopen(f"{local_url.rstrip('/')}/health/pipeline", timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8") or "{}")
+        if isinstance(data, dict) and data.get("known"):
+            return data
+    except Exception:
+        pass
+    return {"media_service_needed": True, "recognition_worker_needed": True}
+
+
+def _needed(module: str, needs: dict) -> bool:
+    return bool(needs.get(_NEED_KEYS.get(module, ""), True))
+
+
 def _ensure_windows_services(root: Path, local_url: str) -> None:
     """Services own the runtime: start what is stopped, never spawn duplicates."""
     if _windows_service_state(_SERVICE_HVX) is not None:
@@ -362,8 +413,14 @@ def _ensure_windows_services(root: Path, local_url: str) -> None:
     if _windows_service_state(_SERVICE_SITE) != "RUNNING" and not _start_windows_service(_SERVICE_SITE):
         raise _service_failure(_SERVICE_SITE)
     wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
+    # QY/HVX-only sites need neither MediaMTX nor the Recognition Worker; do
+    # not start them (they only take CPU and memory). They start again here
+    # as soon as a generic IP camera is added.
+    needs = pipeline_needs(local_url)
     missing = []
     for service, module in _SERVICE_DEPENDENTS.items():
+        if not _needed(module, needs):
+            continue
         state = _windows_service_state(service)
         if state is None:
             missing.append(module)
@@ -405,8 +462,9 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
         if not _start_scheduled_site_service():
             raise _scheduled_task_failure(_SCHEDULED_SITE_SERVICE)
         wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
+        needs = pipeline_needs(local_url)
         for task_name, module in _SCHEDULED_DEPENDENTS.items():
-            if task_name == "SmartPark HVX Host":
+            if task_name == "SmartPark HVX Host" or not _needed(module, needs):
                 continue
             if _scheduled_task_exists(task_name):
                 if not _start_scheduled_task(task_name):
@@ -425,7 +483,10 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
         # stale process or a transient port race can lead to WinError 10061
         # on the first login request.
         wait_for_api(timeout=SITE_SERVICE_START_TIMEOUT_SECONDS, base_url=local_url)
-        start_pipeline_services(root)
+        needs = pipeline_needs(local_url)
+        modules = [m for m in ("app.media_service", "app.recognition_worker") if _needed(m, needs)]
+        if modules:
+            start_pipeline_services(root, modules=modules)
         return
     if not start_site_service(root, config=config):
         raise RuntimeError(
@@ -444,7 +505,10 @@ def ensure_background_services(root: Path | None = None, config=None) -> None:
             "Check the Site Service log and site-service-launch.log in the SmartParkEdge logs folder; "
             f"the desktop will not start a second API process. {exc}"
         ) from exc
-    start_pipeline_services(root)
+    needs = pipeline_needs(local_url)
+    modules = [m for m in ("app.media_service", "app.recognition_worker") if _needed(m, needs)]
+    if modules:
+        start_pipeline_services(root, modules=modules)
 
 
 def _end_scheduled_task(name: str) -> None:

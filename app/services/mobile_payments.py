@@ -159,6 +159,9 @@ def latest_intent_for_session(db: Session, session_id: int) -> PaymentIntent | N
 def _remaining(db: Session, row: ParkingSession) -> Decimal:
     from app.services.simulation import quote_session
 
+    from app.infrastructure.payments.ledger import reopen_after_grace
+
+    reopen_after_grace(db, row)
     if row.status not in ("CLOSED", "PAID"):
         quote_session(db, row)
         db.flush()

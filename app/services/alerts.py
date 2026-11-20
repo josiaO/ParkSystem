@@ -374,6 +374,55 @@ def send_one(db: Session, delivery: AlertDelivery, event: ManualOpenEvent) -> st
 
 # ----------------------------------------------------------------------- delivery
 
+UNQUEUED_GRACE = timedelta(seconds=30)
+UNQUEUED_LOOKBACK = timedelta(days=2)
+
+
+def queue_unqueued_events(db: Session, *, now: datetime | None = None, limit: int = 50) -> int:
+    """Queue alerts for manual-open events that were saved but never queued.
+
+    ``record_manual_open`` commits the event first and queues alerts second so
+    alerting never blocks the barrier. A crash, power cut or DB error between
+    the two commits left ``alert_status='NONE'`` and the owner was never told.
+    This sweep (run by the delivery loop) closes that gap. ``NONE`` is only the
+    pre-queue state: ``queue_for_event`` always moves it to QUEUED, NOT_SENT or
+    NO_RECIPIENTS, so an event is queued at most once.
+    """
+    now = now or _now()
+    ids = db.scalars(
+        select(ManualOpenEvent.id)
+        .where(
+            ManualOpenEvent.alert_status == "NONE",
+            ManualOpenEvent.created_at < now - UNQUEUED_GRACE,
+            ManualOpenEvent.created_at > now - UNQUEUED_LOOKBACK,
+        )
+        .order_by(ManualOpenEvent.id)
+        .limit(limit)
+    ).all()
+    queued = 0
+    for event_id in ids:
+        # Claim the event so two Site Services sharing a database do not both queue it.
+        claimed = db.execute(
+            update(ManualOpenEvent)
+            .where(ManualOpenEvent.id == event_id, ManualOpenEvent.alert_status == "NONE")
+            .values(alert_status="QUEUEING")
+        )
+        db.commit()
+        if claimed.rowcount != 1:
+            continue
+        event = db.get(ManualOpenEvent, event_id)
+        try:
+            queue_for_event(db, event)
+            queued += 1
+            log.warning("ALERT recovered unqueued manual-open event id=%s", event_id)
+        except Exception as exc:
+            db.rollback()
+            db.execute(update(ManualOpenEvent).where(ManualOpenEvent.id == event_id).values(alert_status="NONE"))
+            db.commit()
+            log.error("ALERT re-queue failed for manual-open event id=%s: %s", event_id, exc)
+    return queued
+
+
 def _backoff_seconds(attempts: int) -> int:
     return int(min(3600, 15 * (2 ** max(0, attempts - 1))))
 
@@ -419,6 +468,11 @@ def deliver_due_once(
     send = sender or send_one
     counts = {"sent": 0, "retry": 0, "dead": 0}
     with factory() as db:
+        try:
+            queue_unqueued_events(db, now=now)
+        except Exception as exc:
+            db.rollback()
+            log.warning("ALERT unqueued-event sweep failed: %s", exc)
         claimed = claim_due(db, now=now)
         for delivery_id in claimed:
             delivery = db.get(AlertDelivery, delivery_id)
