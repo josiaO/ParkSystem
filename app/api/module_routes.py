@@ -42,6 +42,8 @@ def modules_for_route(path: str) -> tuple[str, ...]:
     ownership = {"payments": "payments.core", "gates": "access.gates",
                  "fees": "parking.tariffs", "tariffs": "parking.tariffs",
                  "vehicles": "parking.subscribers", "access-plans": "parking.subscribers",
+                 "vehicle-groups": "parking.subscribers", "visitor-passes": "parking.subscribers",
+                 "exits": "parking.sessions",
                  "alpr": "recognition.alpr", "recognition": "recognition.alpr",
                  "captures": "recognition.alpr", "reports": "reports", "ai": "recognition.alpr",
                  "media": "media.streaming", "printers": "parking.sessions",

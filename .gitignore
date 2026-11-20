@@ -100,3 +100,6 @@ TestingData/
 
 # Stray runtime artefacts (e.g. a session file created next to an in-memory DB URL)
 /:memory:*
+
+# Third-party binaries for the Windows installer build (camera SDK, ffmpeg, nssm, wheels, models). Not redistributable via git.
+packaging/thirdparty/

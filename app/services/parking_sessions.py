@@ -64,7 +64,7 @@ def _current(row: ParkingSession) -> str:
     return row.lifecycle or infer_lifecycle(row.status, side=row.lane_direction)
 
 
-def _commit_transition(db: Session, row: ParkingSession, target: str, policy: LanePolicy) -> ParkingSession:
+def _commit_transition(db: Session, row: ParkingSession, target: str, policy: LanePolicy, *, evidence: str = "") -> ParkingSession:
     current = _current(row)
     nxt = apply_transition(current, target, policy, parker_kind=row.parker_kind)
     if nxt == current and row.lifecycle == target:
@@ -88,6 +88,15 @@ def _commit_transition(db: Session, row: ParkingSession, target: str, policy: La
     if nxt == ENTRY_CANCELLED:
         row.status = "CLOSED"
         row.closed_at = row.closed_at or utcnow()
+    if nxt in (CLOSED, ENTRY_CANCELLED) and getattr(row, "authorization_group_id", None):
+        # Linked vehicles: the group slot is released (or kept locked) in the
+        # same transaction that closes the visit, according to the evidence.
+        from app.domain import vehicle_groups as vg
+        from app.services.vehicle_groups import on_session_closed
+
+        if nxt == ENTRY_CANCELLED:
+            evidence = vg.EV_ENTRY_NOT_OPENED if not (row.open_command_uuid or "") else vg.EV_UNCONFIRMED
+        on_session_closed(db, row, evidence=evidence or vg.EV_UNCONFIRMED)
     db.commit()
     db.refresh(row)
     return row
@@ -295,12 +304,18 @@ def start_entry(
     parker_kind: str = "CASUAL",
     policy: LanePolicy | None = None,
     visit_id: str = "",
+    entitlement: Any = None,
 ) -> tuple[ParkingSession, bool]:
     """Create or reuse a site session for one recognition/presence event.
 
     Returns ``(session, created)``. Same ``event_id``, ``visit_id``, or an
     already-open plate at this site is reused (no second session). The
     ``parking_entry_claims`` unique constraint is the concurrent authority.
+
+    With an ``entitlement`` for a linked vehicle, the authorization-group slot
+    is claimed in the same transaction as the session insert; when the group
+    is full ``GroupOccupied`` is raised and no session is created. A visitor
+    pass entry is counted in the same transaction (``VisitorPassExhausted``).
     """
     policy = policy or LanePolicy()
     site_id = int(site_id or DEFAULT_SITE_ID)
@@ -328,6 +343,55 @@ def start_entry(
     )
     if existing is not None:
         return existing, False
+    registered = entitlement is not None and bool(getattr(entitlement, "registered", False))
+    group_id = getattr(entitlement, "group_id", None) if registered else None
+    vehicle_id = getattr(entitlement, "vehicle_id", None) if registered else None
+    visitor_pass_id = getattr(entitlement, "visitor_pass_id", None) if registered else None
+    row = None
+    for attempt in range(3):
+        row, outcome = _insert_entry(
+            db, site_id=site_id, plate=plate, plate_raw=plate_raw, gate_id=gate_id, camera_id=camera_id,
+            lane_id=lane_id, tariff_rules=tariff_rules, policy=policy, parker_kind=parker_kind,
+            event_id=event_id, visit_id=visit_id, image_ref=image_ref, entitlement=entitlement if registered else None,
+            group_id=group_id, vehicle_id=vehicle_id, visitor_pass_id=visitor_pass_id,
+            last_attempt=attempt == 2,
+        )
+        if outcome == "retry":
+            continue
+        if outcome == "duplicate":
+            return row, False
+        break
+    _commit_transition(db, row, IDENTITY_RESOLVED, policy)
+    _commit_transition(db, row, SESSION_CREATED, policy)
+    from app.services.lane_timing import mark
+    mark("session_created", session_id=row.id)
+    return row, True
+
+
+def _insert_entry(
+    db: Session,
+    *,
+    site_id: int,
+    plate: str,
+    plate_raw: str,
+    gate_id: int | None,
+    camera_id: int | None,
+    lane_id: int | None,
+    tariff_rules: dict,
+    policy: LanePolicy,
+    parker_kind: str,
+    event_id: str,
+    visit_id: str,
+    image_ref: str,
+    entitlement: Any,
+    group_id: int | None,
+    vehicle_id: int | None,
+    visitor_pass_id: int | None,
+    last_attempt: bool,
+) -> tuple[ParkingSession | None, str]:
+    """One insert attempt. Returns (row, "created" | "duplicate" | "retry")."""
+    from app.domain.vehicle_groups import GroupOccupied, VisitorPassExhausted
+
     token, human = _allocate_identity(db)
     row = ParkingSession(
         site_id=site_id,
@@ -352,6 +416,11 @@ def start_entry(
         parker_kind=parker_kind or "CASUAL",
         receipt_status="",
     )
+    if entitlement is not None:
+        row.access_plan_id = getattr(entitlement, "plan_id", None)
+        row.vehicle_id = vehicle_id
+        row.authorization_group_id = group_id
+        row.visitor_pass_id = visitor_pass_id
     db.add(row)
     try:
         if visit_id and camera_id is not None:
@@ -367,8 +436,19 @@ def start_entry(
             claim = _claim_for_visit(db, site_id=site_id, camera_id=camera_id, visit_id=visit_id)
             if claim is not None and not claim.session_id:
                 claim.session_id = row.id
+        if group_id:
+            from app.services.vehicle_groups import claim_for_session
+
+            claim_for_session(db, session=row, group_id=int(group_id), vehicle_id=vehicle_id, plate=plate)
+        if visitor_pass_id:
+            from app.services.vehicle_groups import consume_visitor_entry
+
+            consume_visitor_entry(db, int(visitor_pass_id))
         db.commit()
         db.refresh(row)
+    except (GroupOccupied, VisitorPassExhausted):
+        db.rollback()
+        raise
     except (IntegrityError, InvalidRequestError):
         db.rollback()
         dup = _existing_entry(
@@ -381,8 +461,12 @@ def start_entry(
             visit_id=visit_id,
         )
         if dup is None:
+            if group_id and not last_attempt:
+                # Lost a concurrent race for the group's slot: re-read the
+                # group; the next attempt raises GroupOccupied if it is full.
+                return None, "retry"
             raise
-        return dup, False
+        return dup, "duplicate"
     except Exception:
         db.rollback()
         dup = _existing_entry(
@@ -396,12 +480,8 @@ def start_entry(
         )
         if dup is None:
             raise
-        return dup, False
-    _commit_transition(db, row, IDENTITY_RESOLVED, policy)
-    _commit_transition(db, row, SESSION_CREATED, policy)
-    from app.services.lane_timing import mark
-    mark("session_created", session_id=row.id)
-    return row, True
+        return dup, "duplicate"
+    return row, "created"
 
 
 def start_entry_from_recognition(
@@ -411,6 +491,7 @@ def start_entry_from_recognition(
     gate_id: int | None = None,
     policy: LanePolicy | None = None,
     parker_kind: str = "CASUAL",
+    entitlement: Any = None,
 ) -> tuple[ParkingSession | None, bool]:
     """Create a session only from a normalized recognition event.
 
@@ -436,11 +517,13 @@ def start_entry_from_recognition(
         parker_kind=parker_kind,
         policy=policy,
         visit_id=visit_id,
+        entitlement=entitlement,
     )
 
 
-def advance(db: Session, row: ParkingSession, target: str, *, policy: LanePolicy | None = None) -> ParkingSession:
-    return _commit_transition(db, row, target, policy or LanePolicy())
+def advance(db: Session, row: ParkingSession, target: str, *, policy: LanePolicy | None = None,
+            evidence: str = "") -> ParkingSession:
+    return _commit_transition(db, row, target, policy or LanePolicy(), evidence=evidence)
 
 
 def complete_casual_entry(db: Session, row: ParkingSession, *, policy: LanePolicy | None = None) -> ParkingSession:
@@ -552,7 +635,11 @@ def request_entry_open(db: Session, row: ParkingSession, *, command_uuid: str, p
     return row
 
 
-def mark_vehicle_passed(db: Session, row: ParkingSession, *, policy: LanePolicy | None = None, side: str = "ENTRY") -> ParkingSession:
+def mark_vehicle_passed(db: Session, row: ParkingSession, *, policy: LanePolicy | None = None, side: str = "ENTRY",
+                        evidence: str = "PASSAGE_SENSOR") -> ParkingSession:
+    """A passage signal for this visit. ``evidence`` says how sure the exit is
+    (PASSAGE_SENSOR from a loop/beam; EXIT_LANE when it is assumed after the
+    exit lane opened for this car) and decides a linked group's release."""
     policy = policy or LanePolicy()
     current = _current(row)
     if (side or "ENTRY").upper() == "EXIT":
@@ -561,7 +648,7 @@ def mark_vehicle_passed(db: Session, row: ParkingSession, *, policy: LanePolicy 
         if current == EXIT_GATE_OPEN_REQUESTED:
             row = advance(db, row, EXIT_VEHICLE_PASSED, policy=policy)
         if _current(row) == EXIT_VEHICLE_PASSED:
-            return advance(db, row, CLOSED, policy=policy)
+            return advance(db, row, CLOSED, policy=policy, evidence=evidence)
         raise InvalidTransition(f"{current} -> EXIT_VEHICLE_PASSED is not allowed")
     if current in {VEHICLE_PASSED, ACTIVE}:
         if current == VEHICLE_PASSED:
@@ -701,8 +788,10 @@ def complete_authorized_exit(db: Session, row: ParkingSession, *, policy: LanePo
             db.commit()
     if policy.passage_fallback() and _current(row) == EXIT_GATE_OPEN_REQUESTED:
         # Commissioning fallback only: a successful OPEN command is treated as
-        # passage when no physical passage sensor is configured.
-        row = advance(db, row, CLOSED, policy=policy)
+        # passage when no physical passage sensor is configured. For a linked
+        # group this is EXIT_LANE evidence (the exit lane identified the car
+        # and the barrier accepted), never passage-sensor proof.
+        row = advance(db, row, CLOSED, policy=policy, evidence="EXIT_LANE")
         return row
     # With WAIT_FOR_PASSAGE, the session deliberately remains open until a
     # loop/beam/sensor calls mark_vehicle_passed(side="EXIT").
@@ -735,10 +824,14 @@ def snapshot(row: ParkingSession) -> dict[str, Any]:
         "receipt_status": row.receipt_status,
         "open_command_uuid": row.open_command_uuid,
         "exit_open_command_uuid": getattr(row, "exit_open_command_uuid", ""),
+        "vehicle_id": getattr(row, "vehicle_id", None),
+        "authorization_group_id": getattr(row, "authorization_group_id", None),
+        "visitor_pass_id": getattr(row, "visitor_pass_id", None),
     }
 
 
-def supervised_close(db: Session, row: ParkingSession, *, reason: str, user_id: int | None = None) -> dict[str, Any]:
+def supervised_close(db: Session, row: ParkingSession, *, reason: str, user_id: int | None = None,
+                     vehicle_left: bool = False) -> dict[str, Any]:
     """Close a visit whose exit the lane never confirmed, with an audit trail.
 
     For visits that cannot leave through the normal machine: the car left
@@ -763,13 +856,20 @@ def supervised_close(db: Session, row: ParkingSession, *, reason: str, user_id: 
     row.closed_at = now
     row.amount_due = money["due"]
     row.amount_paid = money["paid"]
+    if getattr(row, "authorization_group_id", None):
+        # Closing the record is not proof the car left: a linked group stays
+        # locked unless the supervisor states the vehicle has left.
+        from app.domain import vehicle_groups as vg
+        from app.services.vehicle_groups import on_session_closed
+
+        on_session_closed(db, row, evidence=vg.EV_SUPERVISOR if vehicle_left else vg.EV_UNCONFIRMED)
     db.commit()
     record_access_decision(
         db, session=row, plate=row.plate, gate=None, lane_direction="EXIT",
         outcome="SUPERVISED_CLOSE", reason=reason[:200], parker_kind=row.parker_kind or "CASUAL",
         automatic=False, barrier_opened=False,
         extra={"previous_lifecycle": previous, "written_off": money["owed"], "currency": money["currency"],
-               "closed_by": user_id},
+               "closed_by": user_id, "vehicle_left": bool(vehicle_left)},
     )
     db.refresh(row)
     return {"session": snapshot(row), "previous_lifecycle": previous, "written_off": money["owed"],
@@ -786,8 +886,15 @@ def manual_entry(db: Session, *, plate: str, site_id: int = DEFAULT_SITE_ID, gat
         raise ValueError("Plate is required")
     if active_for_plate(db, plate, site_id=site_id) is not None:
         raise InvalidTransition(f"{plate} already has an open visit")
+    # A manual entry is still bound by a linked group's one-at-a-time rule
+    # (GroupOccupied propagates to the caller) and by visitor-pass limits.
+    from app.services.access import lookup_entitlement
+
+    entitlement = lookup_entitlement(db, plate, site_id=site_id, strict=True)
     row, _created = start_entry(
         db, plate=plate, event_id=f"manual-{uuid4().hex}", site_id=site_id, gate_id=gate_id,
         lane_id=lane_id, camera_id=camera_id, policy=LanePolicy(),
+        parker_kind=entitlement.kind if entitlement.registered else "CASUAL",
+        entitlement=entitlement if entitlement.registered else None,
     )
     return complete_casual_entry(db, row, policy=LanePolicy())

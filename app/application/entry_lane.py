@@ -28,6 +28,7 @@ from app.domain.parking_engine import (
     VEHICLE_PASSED,
 )
 from app.domain.recognition import NormalizedRecognitionEvent
+from app.domain.vehicle_groups import GroupOccupied, VisitorPassExhausted
 from app.infrastructure.hardware.receipt_printers import receipt_printer_for
 from app.models import Camera, Gate, ParkingSession
 from app.services.access import lookup_entitlement
@@ -300,9 +301,26 @@ class EntryLaneController:
         payload = rec.as_dict()
         payload["plate_normalized"] = plate
         payload["plate_text"] = plate
-        row, created = start_entry_from_recognition(
-            db, payload, gate_id=gate.id if gate else None, policy=policy, parker_kind=parker_kind,
-        )
+        try:
+            row, created = start_entry_from_recognition(
+                db, payload, gate_id=gate.id if gate else None, policy=policy, parker_kind=parker_kind,
+                entitlement=entitlement,
+            )
+        except GroupOccupied as exc:
+            return self._group_occupied(db, exc, plate=plate, gate=gate, parker_kind=parker_kind,
+                                        entitlement=entitlement, source=source)
+        except VisitorPassExhausted:
+            record_access_decision(
+                db, session=None, plate=plate, gate=gate, lane_direction="ENTRY", outcome="VISITOR_PASS_USED",
+                reason="visitor pass has no entries left", parker_kind=parker_kind, barrier_opened=False,
+                extra={"visitor_pass_id": entitlement.visitor_pass_id},
+            )
+            return {
+                "ok": False, "action": "ENTRY", "reason": "visitor_pass_used", "created_session": False,
+                "duplicate": False, "barrier_opened": False, "assistance_required": True, "session": None,
+                "entitlement": entitlement.__dict__, "source": source,
+                "message": f"{plate}: the visitor pass is already used. Barrier not opened.",
+            }
         if row is None:
             return {
                 "ok": False,
@@ -432,6 +450,39 @@ class EntryLaneController:
             db, row, gate=gate, camera=camera, policy=policy,
             entitlement=entitlement, source=source, created=True,
         )
+
+    def _group_occupied(self, db: Session, exc: GroupOccupied, *, plate: str, gate, parker_kind: str,
+                        entitlement, source: str) -> dict[str, Any]:
+        """A linked vehicle of the same group is still inside: refuse, say who."""
+        holders = exc.holders or []
+        inside = ", ".join(
+            f"{h.get('plate') or '?'}" + (" (exit not confirmed)" if h.get("state") != "ACTIVE" else "")
+            for h in holders
+        ) or "another linked vehicle"
+        label = exc.group.get("display_name") or exc.group.get("name") or "this group"
+        unconfirmed = any(h.get("state") != "ACTIVE" for h in holders)
+        record_access_decision(
+            db, session=None, plate=plate, gate=gate, lane_direction="ENTRY", outcome="GROUP_OCCUPIED",
+            reason=f"{label}: {inside} inside"[:200], parker_kind=parker_kind, barrier_opened=False,
+            extra={"group_id": exc.group.get("id"), "holders": holders, "vehicle_id": entitlement.vehicle_id},
+        )
+        hint = (" Confirm that vehicle's exit at the desk if it has left." if unconfirmed
+                else " It must exit before this vehicle can enter.")
+        return {
+            "ok": False,
+            "action": "ENTRY",
+            "reason": "authorization_group_occupied",
+            "created_session": False,
+            "duplicate": False,
+            "barrier_opened": False,
+            "assistance_required": True,
+            "session": None,
+            "group": exc.group,
+            "group_holders": holders,
+            "entitlement": entitlement.__dict__,
+            "source": source,
+            "message": f"{plate} refused — {label}: linked vehicle {inside} is still inside.{hint}",
+        }
 
     def _same_stay(self, db: Session, row: ParkingSession, stay, *, gate, plate: str, parker_kind: str,
                    entitlement, source: str) -> dict[str, Any]:

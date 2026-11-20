@@ -158,19 +158,13 @@ def test_worker_reads_the_actual_detect_path_not_the_live_fallback():
 
 
 def test_windows_registers_and_activates_recognition():
-    services = Path("packaging/windows/Install-SmartParkServices.ps1").read_text()
-    installer = Path("packaging/windows/Install-SmartPark.ps1").read_text()
-    win_service = Path("packaging/windows/Install-SmartParkWinService.ps1").read_text()
-    assert '-Arguments "-m app.recognition_worker"' in services
-    assert 'Register-SmartParkTask -Name "SmartPark Recognition Worker"' in services
-    # The installer owns deployment roles and task startup; pipeline behavior
-    # remains the stable main-branch runtime implementation.
-    assert 'ValidateSet("SITE_SERVER", "EDGE_NODE", "OPERATOR_CLIENT")' in installer
-    assert "PreserveMediaRollout" not in installer
-    assert '& $enableMedia -InstallDir $InstallDir -LiveView' not in installer
-    assert 'SMARTPARK_NODE_ROLE=SERVER' in services
-    assert 'SMARTPARK_NODE_ROLE            = "SERVER"' in installer
-    assert 'SMARTPARK_NODE_ROLE=$nodeRole' in win_service
+    ctl = Path("packaging/installer/bin/zirpctl.ps1").read_text(encoding="utf-8")
+    assert '-Arguments @("-m", "app.recognition_worker")' in ctl
+    assert '-Arguments @("-m", "app.site_service")' in ctl
+    assert '"SMARTPARK_NODE_ROLE=$NodeRole"' in ctl
+    assert '$nodeRole = "SERVER"' in ctl
+    # The recognition worker waits for the media service (or the site service).
+    assert '$workerDepends = @($MediaService)' in ctl
 
 
 def test_recognition_worker_uses_main_runtime_without_installer_preflight():

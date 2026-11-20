@@ -88,7 +88,10 @@ def sweep_once(db: Session, *, now: datetime | None = None, cfg: dict[str, Any] 
         for row in rows:
             side = "EXIT" if row.lifecycle == EXIT_GATE_OPEN_REQUESTED else "ENTRY"
             try:
-                mark_vehicle_passed(db, row, policy=policy, side=side)
+                # Assumed, not sensed: for a linked vehicle group this counts only
+                # as EXIT_LANE evidence (the exit lane identified the car and the
+                # barrier accepted). Groups that require passage proof stay locked.
+                mark_vehicle_passed(db, row, policy=policy, side=side, evidence="EXIT_LANE")
             except Exception as exc:
                 db.rollback()
                 log.warning("passage time-out failed session=%s: %s", row.id, exc)
@@ -159,6 +162,10 @@ async def sweeper_loop(session_factory: Callable[[], Session] | None = None, int
             def _run() -> None:
                 with factory() as db:
                     sweep_once(db)
+                # A paid car still inside after its exit grace owes more.
+                from app.infrastructure.payments.ledger import reopen_expired_graces
+                with factory() as db:
+                    reopen_expired_graces(db)
 
             await asyncio.to_thread(_run)
         except asyncio.CancelledError:

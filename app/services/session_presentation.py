@@ -122,6 +122,9 @@ def session_presentation(db: Session, row: ParkingSession, *, audience: str = "d
     operator projection adds only the identifiers needed by the authenticated
     kiosk controls; both projections use the same due/paid/image calculations.
     """
+    from app.infrastructure.payments.ledger import reopen_after_grace
+
+    reopen_after_grace(db, row)
     if row.status not in ("CLOSED", "PAID"):
         quote_session(db, row, persist=False)
 

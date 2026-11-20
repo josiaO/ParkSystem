@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 class Login(QDialog):
-    def __init__(self):
+    def __init__(self, kiosk_station=False):
         super().__init__(); self.setWindowTitle(f"{PRODUCT_NAME} — Sign In")
+        self.kiosk_station=bool(kiosk_station)
         self.setMinimumWidth(360); self.setMaximumWidth(460)
         l=QVBoxLayout(self); l.setContentsMargins(28,28,28,28); l.setSpacing(8)
         brand=QLabel(PRODUCT_NAME); brand.setStyleSheet("font-size:18px;font-weight:700;letter-spacing:-0.2px")
@@ -35,6 +36,10 @@ class Login(QDialog):
         if device is None:
             if enrolled_device_id():
                 self.sub.setText("This kiosk's saved credential could not be read. Use Kiosk device… to enrol it again.")
+            elif self.kiosk_station:
+                # Installed as a Kiosk: enrolment is the first thing to do.
+                self.sub.setText("This PC was installed as a payment kiosk. Enrol it with a device credential from Admin → Kiosk devices.")
+                QTimer.singleShot(0, self.manage_kiosk_device)
             return
         self.sign_in_kiosk(*device, on_ok=self.accept)
     def sign_in_kiosk(self, device_id: str, credential: str, on_ok=None):

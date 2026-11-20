@@ -92,3 +92,28 @@ def test_stop_background_services_stops_windows_services_consumers_first(tmp_pat
          patch.object(launch, "_port_open", return_value=False):
         launch.stop_background_services()
     assert stopped == ["SmartParkRecognitionWorker", "SmartParkMediaService", "SmartParkSiteService", "SmartParkHvxHost"]
+
+
+def test_qy_only_site_does_not_start_media_service_or_recognition_worker(monkeypatch):
+    """QY/HVX cameras are read by the SDK host; MediaMTX and the worker only cost CPU there."""
+    from app.desktop import launch
+
+    started = []
+    monkeypatch.setattr(launch, "_windows_service_state", lambda name: "RUNNING" if name in (launch._SERVICE_SITE, launch._SERVICE_HVX) else ("STOPPED" if name == "SmartParkMediaService" else None))
+    monkeypatch.setattr(launch, "_start_windows_service", lambda name: started.append(name) or True)
+    monkeypatch.setattr(launch, "wait_for_api", lambda **kw: None)
+    monkeypatch.setattr(launch, "start_pipeline_services", lambda root, modules=None: started.append(tuple(modules or ())))
+    monkeypatch.setattr(launch, "pipeline_needs", lambda url: {"known": True, "media_service_needed": False, "recognition_worker_needed": False})
+    launch._ensure_windows_services(launch.Path("."), "http://127.0.0.1:8760")
+    assert "SmartParkMediaService" not in started and not any(isinstance(item, tuple) for item in started)
+
+    started.clear()
+    monkeypatch.setattr(launch, "pipeline_needs", lambda url: {"known": True, "media_service_needed": True, "recognition_worker_needed": True})
+    launch._ensure_windows_services(launch.Path("."), "http://127.0.0.1:8760")
+    assert "SmartParkMediaService" in started and ("app.recognition_worker",) in started
+
+
+def test_pipeline_needs_falls_back_to_everything_when_the_server_cannot_say(monkeypatch):
+    from app.desktop import launch
+
+    assert launch.pipeline_needs("http://127.0.0.1:9") == {"media_service_needed": True, "recognition_worker_needed": True}

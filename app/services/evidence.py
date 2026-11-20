@@ -1,6 +1,6 @@
 """Evidence photos written after the access decision (operational path).
 
-docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md step 3. A live camera capture is
+docs/architecture.md, "Evidence after the decision". A live camera capture is
 committed with *reserved* photo names and ``evidence_state='PENDING'``; the
 decision runs at once. Cropping the zone snapshot and the plate crop (about
 150 ms p50 and over 1 s at worst on SERVER01) and writing the files happen

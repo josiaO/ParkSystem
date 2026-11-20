@@ -177,7 +177,7 @@ def sqlite_synchronous_mode(profile: str | None = None) -> str:
 
     In WAL mode ``synchronous=NORMAL`` can roll back the last commits after a
     power cut, so a barrier could have opened for a decision that no longer
-    exists (docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md section 4). FULL costs
+    exists (docs/architecture.md, "Authorization commit"). FULL costs
     one more disk flush per commit. Development keeps NORMAL for speed.
     """
     if profile is None:

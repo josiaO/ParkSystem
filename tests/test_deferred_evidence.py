@@ -1,6 +1,6 @@
 """Evidence photos follow the decision instead of delaying it (step 3).
 
-docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md: the zone snapshot and plate crop
+docs/architecture.md: the zone snapshot and plate crop
 cost about 150 ms per car on SERVER01. A live capture row is committed with
 reserved photo names (``evidence_state='PENDING'``) and the image work runs on
 the evidence pool afterwards.

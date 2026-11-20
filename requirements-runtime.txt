@@ -1,6 +1,6 @@
 # Direct runtime dependencies of SmartPark Edge (Site Service, Media Service,
 # Recognition Worker, desktop), pinned to the versions in requirements.txt
-# (the full lockfile). Windows kits use packaging/windows/requirements-windows.txt.
+# (the full lockfile). The Windows installer uses packaging/installer/requirements-windows.txt.
 
 alembic==1.20.0
 argon2-cffi==25.1.0
