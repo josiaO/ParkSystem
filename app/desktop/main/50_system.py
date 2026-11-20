@@ -1079,3 +1079,34 @@ class SettingsPage(QWidget):
     def open_web(self):
         import webbrowser
         webbrowser.open(api.base_url + "/")
+
+
+class CalibrationPage(SettingsPage):
+    """Camera calibration on its own page.
+
+    An Edge Node signs in with the Processing Node account: it may manage its
+    cameras (cameras.manage) but has no site settings, so the Settings page,
+    and with it the calibration tab, never appeared there. The node is also
+    the only computer that has the live picture and plate boxes of its
+    cameras (the Site Server hands those cameras over to it), so this is where
+    they must be calibrated.
+    """
+
+    def __init__(self, window):
+        QWidget.__init__(self)
+        self.window = window
+        layout = QVBoxLayout(self)
+        title = QLabel("Camera calibration")
+        title.setStyleSheet("font-size:24px;font-weight:700")
+        layout.addWidget(title)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+        self._build_calibration()
+
+    def showEvent(self, event):
+        QWidget.showEvent(self, event)
+        if not hasattr(api, "base_url"):
+            return
+        if not getattr(self, "_loaded", False):
+            self._loaded = True
+            self.load_calibration()
