@@ -1,6 +1,6 @@
 """Authorization Commit: no barrier command before the decision is durable.
 
-docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md section 4. The opener in these tests
+docs/architecture.md, "Authorization commit". The opener in these tests
 plays the barrier: when it is called it reads the database through a *separate
 connection* and checks that the session claim, the access decision and the
 REQUESTED gate command are already committed. A "power cut" is an exception

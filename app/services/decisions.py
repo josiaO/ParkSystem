@@ -1,6 +1,6 @@
 """Persist access decisions and gate commands.
 
-Authorization Commit (docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md section 4):
+Authorization Commit (docs/architecture.md, "Authorization commit"):
 a lane controller *stages* the access decision and a REQUESTED gate command
 (``stage_access_decision`` / ``stage_gate_request``, no commit) in the same
 transaction as its session claim, and commits once, before any barrier

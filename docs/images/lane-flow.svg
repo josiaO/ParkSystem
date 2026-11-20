@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>A car's trip through a Zirp site</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6b7a"/>
+    </marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8f9fc"/>
+      <stop offset="1" stop-color="#eef1f8"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="960" height="300" rx="16" fill="url(#bg)"/>
+  <text x="32" y="44" font-size="20" font-weight="600" fill="#0c1c45">A car's trip through the site</text>
+  <text x="32" y="68" font-size="13" fill="#4a5a68">Every step works on the local network. Only mobile money needs the internet.</text>
+
+  <!-- entry lane -->
+  <g font-size="13" text-anchor="middle">
+    <rect x="32" y="100" width="150" height="76" rx="12" fill="#ffffff" stroke="#cfd7e6"/>
+    <text x="107" y="130" font-weight="600" fill="#0c1c45">1 · Arrive</text>
+    <text x="107" y="152" fill="#4a5a68">camera reads plate</text>
+
+    <rect x="214" y="100" width="150" height="76" rx="12" fill="#ffffff" stroke="#cfd7e6"/>
+    <text x="289" y="130" font-weight="600" fill="#0c1c45">2 · Check</text>
+    <text x="289" y="152" fill="#4a5a68">fresh frame, in zone</text>
+
+    <rect x="396" y="100" width="150" height="76" rx="12" fill="#e8eefb" stroke="#1d3b8a"/>
+    <text x="471" y="130" font-weight="600" fill="#0c1c45">3 · Decide</text>
+    <text x="471" y="152" fill="#4a5a68">saved before barrier</text>
+
+    <rect x="578" y="100" width="150" height="76" rx="12" fill="#ffffff" stroke="#cfd7e6"/>
+    <text x="653" y="130" font-weight="600" fill="#0c1c45">4 · Pay</text>
+    <text x="653" y="152" fill="#4a5a68">cash · kiosk · M-Pesa</text>
+
+    <rect x="760" y="100" width="168" height="76" rx="12" fill="#e8eefb" stroke="#1d3b8a"/>
+    <text x="844" y="130" font-weight="600" fill="#0c1c45">5 · Exit</text>
+    <text x="844" y="152" fill="#4a5a68">paid? barrier opens</text>
+  </g>
+  <g stroke="#5b6b7a" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path d="M182 138 H210"/>
+    <path d="M364 138 H392"/>
+    <path d="M546 138 H574"/>
+    <path d="M728 138 H756"/>
+  </g>
+
+  <!-- guarantees -->
+  <g font-size="12.5" fill="#33434f">
+    <circle cx="44" cy="216" r="5" fill="#1d3b8a"/>
+    <text x="58" y="220">Old frames never open a barrier</text>
+    <circle cx="44" cy="244" r="5" fill="#1d3b8a"/>
+    <text x="58" y="248">One decision lifts the barrier once</text>
+    <circle cx="344" cy="216" r="5" fill="#1d3b8a"/>
+    <text x="358" y="220">A payment is recorded once, even if the webhook repeats</text>
+    <circle cx="344" cy="244" r="5" fill="#1d3b8a"/>
+    <text x="358" y="248">A power cut can't open a barrier for a car we have no record of</text>
+    <circle cx="44" cy="272" r="5" fill="#d08a1e"/>
+    <text x="58" y="276">Manual openings are logged with photo, reason and amount owed, and the owner is alerted</text>
+  </g>
+</svg>

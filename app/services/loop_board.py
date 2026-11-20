@@ -4,7 +4,7 @@ Each lane side has a small network I/O board (192.168.10.61/.69/.65/.67 on
 SITE-PC01) that the ground loops, ticket button and barrier are wired to.
 The protocol below was read from the legacy ParkWatch program
 (``TFormInOut.IdUDPServer1UDPRead`` and its send routine in Park.exe); see
-``docs/LOOP_BOARD_PROTOCOL.md``. Nothing here depends on ParkWatch.
+``docs/loop-boards.md``. Nothing here depends on ParkWatch.
 
 Board -> PC (UDP, from the board's port 8000 to the PC's port 8000)::
 

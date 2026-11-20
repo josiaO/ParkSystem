@@ -1,396 +1,263 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/x-icon" href="zirp.ico">
-  <title>Zirp — Production Documentation</title>
-  <meta name="description" content="Production installation, operations, troubleshooting and developer reference for Zirp.">
+  <title>Zirp: download and documentation</title>
+  <meta name="description" content="Download the Zirp parking system installer and read how to install it, connect cameras, take payments and run a site.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="layout">
-  <nav class="sidebar" aria-label="Documentation navigation">
-    <div class="brand">Zirp</div>
+  <nav class="sidebar" aria-label="Documentation">
+    <div class="brand"><img src="../app/assets/zirp-logo.png" alt="">Zirp</div>
     <div class="toolbar">
-      <span class="badge blue">Production</span>
-      <button type="button" id="theme-toggle" class="theme-btn" title="Toggle theme" aria-label="Toggle theme">☾</button>
+      <span class="badge soft">Docs</span>
+      <button type="button" id="theme-toggle" class="theme-btn" title="Light or dark" aria-label="Switch between light and dark">☀</button>
     </div>
 
-    <div class="group">Start here</div>
-    <a href="#overview">Overview</a>
-    <a href="#roles">Deployment roles</a>
-    <a href="#production-checklist">Production checklist</a>
+    <div class="group">Get started</div>
+    <a href="#download">Download</a>
+    <a href="#overview">What Zirp does</a>
+    <a href="#install">Install</a>
+    <a href="#update">Update or repair</a>
 
-    <div class="group">Technician guides</div>
-    <a href="#prerequisites">Prerequisites</a>
-    <a href="#site-server">Install the Site Server</a>
-    <a href="#operator-workstation">Add an Operator Workstation</a>
-    <a href="#processing-node">Add a Processing Node</a>
-    <a href="#network">Network and firewall</a>
-    <a href="#database">Database</a>
-    <a href="#cameras">Cameras and lanes</a>
-    <a href="#gates">Gates and safety</a>
+    <div class="group">Set up a site</div>
+    <a href="#roles">Computer roles</a>
+    <a href="#cameras">Cameras</a>
+    <a href="#gates">Barriers and loops</a>
+    <a href="#payments">Payments</a>
+    <a href="#database">Database and backups</a>
 
-    <div class="group">Operations</div>
-    <a href="#daily-operations">Daily operation</a>
-    <a href="#recognition">Recognition</a>
-    <a href="#backups">Backups and recovery</a>
+    <div class="group">Run a site</div>
+    <a href="#operations">Services and logs</a>
     <a href="#troubleshooting">Troubleshooting</a>
 
-    <div class="group">Developer reference</div>
+    <div class="group">Developers</div>
     <a href="#architecture">Architecture</a>
-    <a href="#runtime">Runtime and configuration</a>
-    <a href="#api">API and health checks</a>
-    <a href="#development">Development and testing</a>
+    <a href="#development">Build and test</a>
+    <a href="#guides">All guides</a>
   </nav>
 
   <main>
     <header class="hero" id="top">
-      <span class="badge green">Technician + developer guide</span>
-      <h1>Zirp production documentation</h1>
-      <p>Deploy a Site Server, connect operator workstations, commission cameras and gates, and keep the parking operation supportable after handover.</p>
-      <div class="quick-links">
-        <a href="#site-server">Install a Site Server</a>
-        <a href="#processing-node">Add a processing node</a>
-        <a href="#operator-workstation">Connect a workstation</a>
-        <a href="#troubleshooting">Fix a problem</a>
-        <a href="#development">Build and test</a>
+      <span class="badge">Parking for Tanzania · works offline</span>
+      <h1>Zirp parking system</h1>
+      <p>Number-plate cameras, barriers, cash and mobile money in one system that
+        runs on your site's own network. If the internet goes down, the car park
+        keeps running.</p>
+      <div class="actions">
+        <a class="btn primary" href="#download">⬇ Download the installer</a>
+        <a class="btn ghost" href="#install">How to install</a>
+        <a class="btn ghost" href="https://github.com/josiaO/ParkSystem">Source on GitHub</a>
       </div>
     </header>
 
+    <!-- ------------------------------------------------------------ download -->
+    <section id="download">
+      <h2>Download</h2>
+      <p class="lead">One installer for every computer on the site: server, lane PC,
+        cashier desk and payment kiosk. You choose the role while installing.</p>
+
+      <div class="card download" id="release-card">
+        <div>
+          <h3 id="rel-title">Zirp-Setup-1.0.0-rc4.exe</h3>
+          <div class="meta" id="rel-meta">Release candidate · Windows 10/11 64-bit · about 220 MB</div>
+          <div class="sha" id="rel-sha">SHA-256 be1ea34d5a69904e273335f3dddb044a248b63e0e623311026c876e01392df14</div>
+        </div>
+        <div class="actions">
+          <a class="btn solid" id="rel-download"
+             href="https://github.com/josiaO/ParkSystem/releases/download/v1.0.0-rc4/Zirp-Setup-1.0.0-rc4.exe">⬇ Download</a>
+          <a class="btn" id="rel-notes" href="https://github.com/josiaO/ParkSystem/releases">Release notes</a>
+        </div>
+      </div>
+
+      <p>Previous versions are on the
+        <a href="https://github.com/josiaO/ParkSystem/releases">releases page</a>.
+        To check the file after downloading, compare its hash with the one above:</p>
+      <pre><code>Get-FileHash .\Zirp-Setup-1.0.0-rc4.exe -Algorithm SHA256</code></pre>
+      <p class="note">The installer isn't code-signed yet, so Windows may show
+        "Unknown publisher". Check the hash, then choose <b>More info → Run anyway</b>.</p>
+      <p>Already have a Site Server running? Other PCs on the site can download the
+        installer from it, no internet needed:
+        <code>http://&lt;site-server&gt;:8760/downloads/zirp-setup.exe</code></p>
+    </section>
+
+    <!-- ------------------------------------------------------------ overview -->
     <section id="overview">
-      <h2>Overview</h2>
-      <p>Zirp is a plate-first parking system. The Site Server owns the authoritative database and site state. Processing Nodes use that database but run only the cameras and recognition assigned to their persisted gate. Operator Workstations are UI clients of the server.</p>
-      <div class="card ok"><strong>Production rule:</strong> install one Site Server per parking site. Use a Processing Node for another PC that must own cameras, or an Operator Workstation for UI-only access. A node starts fail-closed until its gate is assigned.</div>
+      <h2>What Zirp does</h2>
+      <div class="figure"><img src="../docs/images/lane-flow.svg" alt="A car's trip through a Zirp site: arrive, check, decide, pay, exit"></div>
       <div class="grid3">
-        <div class="card icon-card"><div class="icon">🖥️</div><h4>Site Server</h4><p>Runs Zirp services, database, cameras, recognition, gates and receipts.</p></div>
-        <div class="card icon-card"><div class="icon">📡</div><h4>Processing Node</h4><p>Runs local camera/media/recognition services for one dynamically assigned gate.</p></div>
-        <div class="card icon-card"><div class="icon">👥</div><h4>Operator Workstation</h4><p>Displays the server UI and sends authenticated operator actions to it.</p></div>
-        <div class="card icon-card"><div class="icon">📷</div><h4>Field hardware</h4><p>Cameras, barriers, controllers, displays and printers connected to the site server.</p></div>
+        <div class="card icon-card"><div class="icon">📷</div><h3>Reads plates</h3>
+          <p>From the camera's own reader, Zirp's model, or both. Tuned for <code>T123ABC</code> plates.</p></div>
+        <div class="card icon-card"><div class="icon">🚧</div><h3>Opens barriers safely</h3>
+          <p>A decision is saved before the barrier moves. One decision lifts it once.</p></div>
+        <div class="card icon-card"><div class="icon">💳</div><h3>Takes payment</h3>
+          <p>Cash, kiosk, and M-Pesa, Mixx by Yas, Airtel Money and HaloPesa through ClickPesa.</p></div>
+        <div class="card icon-card"><div class="icon">🔔</div><h3>Tells the owner</h3>
+          <p>Hand-opened barriers are logged with photo and amount owed, and sent by SMS or email.</p></div>
+        <div class="card icon-card"><div class="icon">🚗</div><h3>Knows the regulars</h3>
+          <p>Company fleets, family cars sharing one place, visitor passes.</p></div>
+        <div class="card icon-card"><div class="icon">🛟</div><h3>Recovers on its own</h3>
+          <p>Services restart, cameras reconnect, failed updates roll back.</p></div>
       </div>
-      <figure class="figure">
-        <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Zirp production topology">
-          <defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#22c55e"/></linearGradient></defs>
-          <rect x="20" y="55" width="145" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="92" y="87" fill="var(--diagram-text)" text-anchor="middle" font-size="12">Cameras</text><text x="92" y="106" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">LAN / SDK / RTSP</text>
-          <rect x="210" y="38" width="200" height="105" rx="8" fill="var(--diagram-accent)" stroke="#3b82f6"/><text x="310" y="75" fill="var(--accent2)" text-anchor="middle" font-size="14" font-weight="bold">Site Server</text><text x="310" y="97" fill="var(--diagram-text)" text-anchor="middle" font-size="11">API · DB · recognition</text><text x="310" y="116" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">gates · receipts · backups</text>
-          <rect x="455" y="18" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="42" fill="var(--diagram-text)" text-anchor="middle" font-size="11">PostgreSQL</text><text x="517" y="58" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">production DB</text>
-          <rect x="455" y="102" width="125" height="55" rx="8" fill="var(--diagram-fill)" stroke="var(--diagram-stroke)"/><text x="517" y="126" fill="var(--diagram-text)" text-anchor="middle" font-size="11">Nodes / PCs</text><text x="517" y="142" fill="var(--diagram-muted)" text-anchor="middle" font-size="9">scoped clients</text>
-          <rect x="625" y="55" width="115" height="70" rx="8" fill="var(--diagram-fill)" stroke="var(--accent)"/><text x="682" y="86" fill="var(--accent)" text-anchor="middle" font-size="12">Gates</text><text x="682" y="105" fill="var(--diagram-muted)" text-anchor="middle" font-size="10">controllers / LEDs</text>
-          <path d="M165 90 H210 M410 65 L455 46 M410 115 L455 130 M580 75 L625 90" stroke="url(#g1)" stroke-width="2" fill="none"/>
-        </svg>
-        <figcaption>Only the Site Server owns the parking state and hardware control path. Operator PCs use the Zirp API and do not connect directly to PostgreSQL or cameras.</figcaption>
-      </figure>
     </section>
 
+    <!-- ------------------------------------------------------------ install -->
+    <section id="install">
+      <h2>Install</h2>
+      <ol class="steps">
+        <li>Install <b>PostgreSQL</b> on the Site Server and create a <code>smartpark</code> database and login.
+          <a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/database.md">How →</a></li>
+        <li>Run <code>Zirp-Setup-&lt;version&gt;.exe</code> as administrator.</li>
+        <li>Pick what this computer does (see <a href="#roles">roles</a>).</li>
+        <li>Wait for the installer to start the services and check they're healthy.</li>
+        <li>Open <b>Zirp</b> from the Start menu. The setup wizard connects the database and creates the first administrator.</li>
+      </ol>
+      <p>Program files go to <code>C:\Program Files\Zirp</code>. Settings, the database
+        connection, photos and backups live in <code>C:\ProgramData\SmartParkEdge</code>
+        and survive updates.</p>
+      <p>IT departments can install silently:</p>
+      <pre><code>Zirp-Setup-1.0.0-rc4.exe /VERYSILENT /ROLE=OPERATOR</code></pre>
+    </section>
+
+    <section id="update">
+      <h2>Update or repair</h2>
+      <p>Run the new installer on a PC that already has Zirp. It asks what you want:</p>
+      <table>
+        <tr><th>Choice</th><th>What happens</th></tr>
+        <tr><td><b>Update</b> (recommended)</td><td>Keeps the role and settings, backs up the database, installs the new version beside the old one and switches over.</td></tr>
+        <tr><td><b>Repair</b></td><td>Shown when you run the same version again. Puts the program files back.</td></tr>
+        <tr><td><b>Change role or options</b></td><td>Shows the role pages again, then updates.</td></tr>
+      </table>
+      <p>If the new version doesn't come up healthy, the installer switches back to the
+        old one by itself. To go back by hand:</p>
+      <pre><code>&amp; "C:\Program Files\Zirp\bin\zirpctl.ps1" rollback</code></pre>
+    </section>
+
+    <!-- ------------------------------------------------------------ roles -->
     <section id="roles">
-      <h2>Deployment roles</h2>
+      <h2>Computer roles</h2>
       <table>
-        <thead><tr><th>Role</th><th>Owns</th><th>Must not do</th></tr></thead>
-        <tbody>
-          <tr><td><strong>Site Server</strong></td><td>Database, API, parking logic, cameras, recognition, MediaMTX, HVX SDK, gates, printers, evidence, backups and users.</td><td>Expose PostgreSQL or camera credentials to the operator LAN.</td></tr>
-          <tr><td><strong>Processing Node</strong></td><td>Local camera host, MediaMTX, recognition worker and one persisted gate scope using PostgreSQL.</td><td>Start with no gate assignment, stream another node's camera, or use shared SQLite.</td></tr>
-          <tr><td><strong>Operator Workstation</strong></td><td>Desktop UI, local UI preferences, server URL and verified server identity.</td><td>Run a local database, migrations, camera SDK, recognition worker, MediaMTX, gate hardware or Site Service.</td></tr>
-        </tbody>
-      </table>
-      <div class="card warn"><strong>Important two-PC boundary:</strong> the authoritative database must be PostgreSQL. Do not make a second laptop process its own gate against a shared SQLite file or install it as an Operator Workstation when it must own cameras. Use the Processing Node installer and assign its gate after setup.</div>
-      <p>Every live media boundary is scope-checked. A node cannot open another node's WHEP, MJPEG, snapshot, preview, stream telemetry or probe path; the request returns <code>403</code> and the Site Service log records the node, gate and camera IDs.</p>
-    </section>
-
-    <section id="production-checklist">
-      <h2>Production checklist</h2>
-      <p>Use this as the handover gate. Every item needs an owner and an observed result; do not mark a check complete from configuration alone.</p>
-      <ol class="steps">
-        <li><strong>Approve the site design.</strong> Record the Site Server name, reserved IP/DNS name, lanes, camera IPs, gate/controller addresses, printer model and operator accounts.</li>
-        <li><strong>Install the approved Zirp release.</strong> Use the signed or otherwise approved installer package supplied by the software owner. After the Site Server is running, another PC may download the same clean installer from the server login page on the private LAN.</li>
-        <li><strong>Configure the Site Server.</strong> Select the Site Server role, configure PostgreSQL, create the first administrator and complete the deployment wizard.</li>
-        <li><strong>Commission hardware safely.</strong> Add cameras, verify live video and recognition, then test gate outputs with the lane physically safe and a technician present.</li>
-        <li><strong>Add workstations or nodes.</strong> Select Operator Workstation for UI-only access. Select Processing Node for local camera processing, use the same PostgreSQL database, then assign its gate in Live Gates.</li>
-        <li><strong>Prove failure handling.</strong> Disconnect one camera, close a workstation, restart the UI and restart the server services. The remaining lanes and server state must remain correct.</li>
-        <li><strong>Prove recovery.</strong> Take a backup, verify it, record the restore owner and document the support contact, release version and configuration identifiers.</li>
-      </ol>
-    </section>
-
-    <section id="prerequisites">
-      <h2>Prerequisites</h2>
-      <table>
-        <thead><tr><th>Area</th><th>Requirement</th><th>Check before installation</th></tr></thead>
-        <tbody>
-          <tr><td>Server OS</td><td>Supported Windows 10/11 64-bit workstation or server-class PC for the full HVX deployment.</td><td>Use a stable power source, automatic time sync and an account authorised to install software and scheduled tasks.</td></tr>
-          <tr><td>Network</td><td>Private site LAN with a stable server address. Reserve the address in DHCP or use an approved DNS name.</td><td>From every intended operator PC, resolve and reach the server address.</td></tr>
-          <tr><td>Database</td><td>PostgreSQL for a multi-workstation production site. SQLite is for development, demonstrations and temporary evaluation.</td><td>Have the approved PostgreSQL host, database, user and secret ready; do not send the password in a ticket or screenshot.</td></tr>
-          <tr><td>Cameras</td><td>Camera IPs, lane direction, vendor credentials and the correct adapter choice.</td><td>Confirm the camera LAN is reachable from the Site Server and no other SDK client owns the camera session.</td></tr>
-          <tr><td>Gate hardware</td><td>Barrier/controller/LED addresses, safe manual override and a responsible technician.</td><td>Keep automatic opening disabled until recognition and lane mapping are proven.</td></tr>
-          <tr><td>Printer</td><td>ESC/POS thermal printer, paper, power and USB or LAN connection if receipts are required.</td><td>Print a test ticket before site handover.</td></tr>
-        </tbody>
+        <tr><th>Role</th><th>Runs</th><th>Use it for</th></tr>
+        <tr><td><b>Site Server with cameras and gates</b></td><td>Everything</td><td>A small site with one PC</td></tr>
+        <tr><td><b>Site Server only</b></td><td>API, decisions, payments, portal</td><td>The central server when lanes have their own PCs</td></tr>
+        <tr><td><b>Edge Node</b></td><td>Cameras, recognition, lane control</td><td>A PC wired to a lane's cameras and barriers</td></tr>
+        <tr><td><b>Operator Workstation</b></td><td>Desktop app</td><td>Cashier and supervisor desks</td></tr>
+        <tr><td><b>Payment Kiosk</b></td><td>Full-screen kiosk</td><td>The driver's pay station</td></tr>
       </table>
     </section>
 
-    <section id="site-server">
-      <h2>Install and configure the Site Server</h2>
-      <p>These are the production steps for a technician using the Zirp installer supplied by the software owner.</p>
-      <ol class="steps">
-        <li>Run the installer with administrator approval. Keep the application in the approved installation directory and allow the installer to register the background startup tasks.</li>
-        <li>Open Zirp and choose <strong>Site Server</strong> in Deployment Configuration. Do not use the desktop UI as proof that the background server is healthy.</li>
-        <li>Set the site name and confirm the LAN address shown by the wizard. Use a DHCP reservation or DNS name so operator workstations do not depend on a changing address.</li>
-        <li>Select <strong>PostgreSQL</strong> for production. Enter the approved database server, port, database name and username, then use <strong>Test Database</strong>. If PostgreSQL is not reachable, correct the database installation or deliberately select SQLite for evaluation.</li>
-        <li>Apply the configuration. Zirp creates or upgrades the schema, validates the migration revision, checks database read/write behavior and stores only a protected secret reference—not the password—in <code>deployment.json</code>.</li>
-        <li>Create the first administrator in the wizard. Use a site-specific password held under the site’s credential policy. There is no production default password in this guide.</li>
-        <li>Configure lanes, camera adapters, printers and gate/controller values in the application. Save one lane at a time and verify its live status before continuing.</li>
-        <li>Run the server acceptance checks in <a href="#network">Network and firewall</a>, <a href="#cameras">Cameras and lanes</a> and <a href="#gates">Gates and safety</a>.</li>
-      </ol>
-      <div class="card warn"><strong>Do not edit:</strong> Python files, <code>.env</code>, SQL, <code>deployment.json</code> or PowerShell files to complete a normal installation. If the wizard cannot complete, capture the error and logs and use the recovery procedure.</div>
-      <h3>Startup behavior</h3>
-      <p>The supported Windows startup path registers restartable scheduled tasks at user logon for the Site Service, recognition worker, MediaMTX and the optional HVX SDK host. A Windows service installation is an advanced path and should be used only after the vendor SDK has been validated on the target hardware.</p>
-    </section>
-
-    <section id="operator-workstation">
-      <h2>Add an Operator Workstation</h2>
-      <p>Once the Site Server is running, open <code>http://SERVER_IP:8760/</code> on the new node or PC and select <strong>Download the Zirp installer for a node or another PC</strong> on the login page. Extract the downloaded <code>Zirp-Installer.zip</code>, run <code>Install-SmartPark.bat</code>, and then complete the normal role setup below. The download contains application/runtime files only; it does not contain the Site Server database, media, credentials or deployment identity.</p>
-      <ol class="steps">
-        <li>Install the approved Zirp package on the workstation. Do not copy the Site Server database or camera configuration to this PC.</li>
-        <li>Open Deployment Configuration and select <strong>Operator Workstation</strong>.</li>
-        <li>Enter the Site Server URL, for example <code>http://smartpark-server:8760</code> or <code>http://192.168.10.20:8760</code>. Prefer the approved DNS name or reserved address.</li>
-        <li>Press <strong>Test connection</strong>. Confirm that the server identity is shown as <strong>VERIFIED</strong>; stop if it is not the expected site.</li>
-        <li>Complete setup and sign in with a site user. The workstation should open the remote site UI and must not create <code>smartpark.db</code> locally.</li>
-      </ol>
-      <div class="card ok"><strong>Reachability promise:</strong> a correctly configured Site Server listens on <code>0.0.0.0:8760</code>, and its Private-network firewall rule allows operator clients on the local subnet. Verify with a browser and <code>/health/live</code> from the workstation before declaring it ready.</div>
-    </section>
-
-    <section id="processing-node">
-      <h2>Add a Processing Node</h2>
-      <p>Use this role when the second PC must connect to its own cameras and recognition lane. From the Site Server login page, download the single Zirp installer, extract it, and run <code>Install-SmartPark.bat</code>, then choose <strong>EDGE_NODE</strong> (Processing Node).</p>
-      <ol class="steps">
-        <li>Install PostgreSQL on the Site Server and create the dedicated Zirp database user. Allow the node PC to reach PostgreSQL on the private network.</li>
-        <li>The node installer locks the wizard to <strong>Processing Node</strong>. Enter the existing Site Server address, then a dedicated PostgreSQL host/database/user/password approved for this deployment. SQLite is hidden and rejected; the node only checks the existing schema and never creates or migrates a local site database.</li>
-        <li>The Site Server pairing response contains identity only; it does not hand out the web administrator password, camera passwords, RTSP credentials or secret-store references. Never reuse the Site Server web password or the PostgreSQL <code>postgres</code> superuser on a node.</li>
-        <li>During node setup, create the node's own username and password in the wizard. Zirp creates that account with only the built-in <strong>Processing Node</strong> role. The node login rejects the Site Administrator account and other shared-database usernames. The node password is never written to <code>deployment.json</code>; only its Argon2 hash is stored.</li>
-        <li>A node session is restricted to its assigned camera/media lane and local hardware diagnostics. Users, roles, site settings, tariffs, payments, subscribers, backups and central topology must be managed from the Site Server.</li>
-        <li>Sign in locally on the node. It starts with no camera ownership and must not open the server's cameras.</li>
-        <li>Open <strong>Live Gates</strong>, select the gate for this PC, and click <strong>Assign this PC to selected gate</strong>.</li>
-        <li>Add or edit the cameras with their actual gate assignment. The node will connect only to cameras in its assigned gate; the Site Server remains the central configuration/database owner.</li>
-      </ol>
-      <div class="card ok"><strong>Isolation check:</strong> if the node log shows an empty assigned gate, its recognition worker and MediaMTX should claim zero cameras. A request for a foreign camera returns HTTP 403 and is logged with the node identity and gate IDs.</div>
-    </section>
-
-    <section id="network">
-      <h2>Network and firewall</h2>
-      <p>Keep the Zirp network private. The installer creates inbound rules only for the Site Server API and, when enabled, the WebRTC media path.</p>
-      <table>
-        <thead><tr><th>Port</th><th>Purpose</th><th>Who may reach it</th></tr></thead>
-        <tbody>
-          <tr><td><code>TCP 8760</code></td><td>Zirp API and web UI</td><td>Operator PCs on the private site LAN</td></tr>
-          <tr><td><code>TCP 8889</code></td><td>MediaMTX WebRTC signalling</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
-          <tr><td><code>UDP/TCP 8189</code></td><td>WebRTC ICE media</td><td>Operator PCs when WebRTC live view is enabled</td></tr>
-          <tr><td><code>TCP 5432</code></td><td>PostgreSQL</td><td>Site Server and explicitly assigned Processing Nodes only; never open to operator workstations or the Internet</td></tr>
-          <tr><td><code>TCP 8554</code></td><td>Internal RTSP</td><td>Site Server only</td></tr>
-          <tr><td><code>TCP 9997/9998</code></td><td>MediaMTX control and metrics</td><td>Site Server only</td></tr>
-          <tr><td><code>TCP 8765</code></td><td>HVX SDK host</td><td>Site Server only</td></tr>
-        </tbody>
-      </table>
-      <h3>Verify from an Operator Workstation</h3>
-      <pre><code>http://&lt;site-server&gt;:8760/health/live
-http://&lt;site-server&gt;:8760/health/ready</code></pre>
-      <p>A response from <code>/health/live</code> proves that the API process answered. <code>/health/ready</code> additionally reflects whether the site is configured and ready for service. Authentication is still required for operational data.</p>
-    </section>
-
-    <section id="database">
-      <h2>Database policy</h2>
-      <div class="grid2">
-        <div class="card ok"><h4>PostgreSQL — production</h4><p>Recommended for multi-user, multi-workstation sites. PostgreSQL may be installed separately by the site’s approved process; Zirp does not silently download a database during an offline installation.</p></div>
-        <div class="card warn"><h4>SQLite — evaluation</h4><p>Useful for development, demonstrations, Camera Lab and a single-computer field test. It is not recommended for concurrent multi-workstation production. The wizard requires an explicit acknowledgement.</p></div>
-      </div>
-      <h3>PostgreSQL prerequisite</h3>
-      <p>For production, install PostgreSQL as a normal system service before starting Zirp setup. Use the official <a href="https://www.postgresql.org/download/windows/">PostgreSQL Windows installer</a> or the site’s approved offline installer. Keep the PostgreSQL administrator credential separate from the Zirp application credential.</p>
-      <div class="card warn"><strong>Do not install PostgreSQL Server on a Processing Node.</strong> PostgreSQL runs on the Site Server only. The node connects to the Site Server's PostgreSQL over the private LAN and needs only the Zirp package, a dedicated database login, and firewall access to the server. Installing PostgreSQL on the node creates a second unrelated database.</div>
-      <ol class="steps">
-        <li>Confirm the service from an Administrator CMD: <code>sc query type= service state= all | findstr /I "postgres"</code>, then start the exact service name if needed, for example <code>net start postgresql-x64-17</code>.</li>
-        <li>Check the port with <code>netstat -ano | findstr ":5432"</code> and <code>powershell -NoProfile -Command "Test-NetConnection 127.0.0.1 -Port 5432"</code>. Keep the default port <code>5432</code> unless there is a documented conflict.</li>
-        <li>Use the installed <code>psql.exe</code> to connect as the PostgreSQL administrator, then create a dedicated <code>smartpark</code> login and a database owned by it. Do not use <code>postgres</code> for Zirp.</li>
-        <li>Verify the exact credentials with <code>psql -h 127.0.0.1 -p 5432 -U smartpark -d smartpark -c "select current_user, current_database();"</code>. Enter the password at the prompt; do not put it in the command line.</li>
-        <li>In Zirp choose <strong>Site Server → PostgreSQL</strong>, enter <code>127.0.0.1</code>, <code>5432</code>, <code>smartpark</code>, <code>smartpark</code> and the tested password, then run <strong>Test Database</strong>, apply and verify <code>/health/database</code>.</li>
-      </ol>
-      <div class="card info"><strong>Already installed but cannot connect?</strong> Run the checks above in order. A running service and open port are not enough: the database and login must exist, the login must own the database, and the password must pass the exact <code>psql</code> command. The full copy/paste CMD procedure, including the safe interactive <code>CREATE ROLE</code>, <code>CREATE DATABASE</code> and <code>\password</code> steps, is in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</div>
-      <h3>PostgreSQL requirements</h3>
-      <ul>
-        <li>Create the database and a Zirp user with the permissions required to create and migrate the Zirp schema.</li>
-        <li>Keep PostgreSQL listening locally on the Site Server where possible. Operator Workstations connect to Zirp on port 8760, not directly to port 5432.</li>
-        <li>Enter the host, port, database, username and password in the wizard, then run <strong>Test Database</strong> before applying.</li>
-        <li>The protected secret store holds the password. <code>deployment.json</code>, logs, support exports and status pages contain no password or credential-bearing URL.</li>
-      </ul>
-      <h3>SQLite location and warning</h3>
-      <p>On Windows the default database is <code>C:\ProgramData\SmartParkEdge\smartpark.db</code>. Zirp creates the data directory, runs Alembic migrations, checks integrity/WAL/read-write behavior and creates the first administrator. Do not copy a live SQLite database with Explorer while Zirp is running.</p>
-      <p>Operator Workstations never run migrations. Migrations belong to the Site Server and a migration failure prevents the Site Service from starting until the database is repaired or restored.</p>
-      <p>See the installed <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>, <a href="#" data-doc="DATABASE_CONFIGURATION.md">database reference</a> and the <a href="https://www.postgresql.org/docs/current/">official PostgreSQL documentation</a> for the detailed health, authentication, backup and recovery contract.</p>
-    </section>
-
+    <!-- ------------------------------------------------------------ cameras -->
     <section id="cameras">
-      <h2>Cameras and lanes</h2>
-      <p>Configure one camera record per physical camera, assign it to a lane and choose the adapter that matches the camera’s actual interface.</p>
-      <table>
-        <thead><tr><th>Adapter</th><th>Use when</th><th>Expected healthy state</th></tr></thead>
-        <tbody>
-          <tr><td><code>hvx</code></td><td>HVX / QY NetSDK camera, normally port 30000, with the vendor SDK path.</td><td>SDK connected, live frames and native plate events.</td></tr>
-          <tr><td><code>dahua</code> / <code>hikvision</code></td><td>Supported IP camera with video but no usable native Zirp plate callback.</td><td>Video connected; local recognition may provide plate reads.</td></tr>
-          <tr><td><code>rtsp</code></td><td>Generic RTSP/HTTP camera.</td><td>MediaMTX/local gateway delivers fresh frames; recognition is bounded and local.</td></tr>
-        </tbody>
-      </table>
-      <ol class="steps">
-        <li>Open the camera or lane administration screen and enter the camera address, credentials, lane side and adapter.</li>
-        <li>Connect cameras from the Site Server. A failed camera must not prevent healthy cameras from connecting.</li>
-        <li>Confirm fresh live video, not merely a successful ping or login. Check that timestamps or changing frames advance.</li>
-        <li>Confirm recognition with a permitted test vehicle and verify that the plate is assigned to the intended lane.</li>
-        <li>Record the result for every camera, including the camera model, stream, adapter, last successful frame and recognition method.</li>
-      </ol>
-      <h3>Allowing a Processing Node to reach PostgreSQL</h3>
-      <p>Example: Site Server <code>192.168.10.20</code>, Processing Node <code>192.168.10.21</code>. On the Site Server, set <code>listen_addresses = '192.168.10.20,127.0.0.1'</code> in <code>postgresql.conf</code>, then add <code>host smartpark smartpark 192.168.10.21/32 scram-sha-256</code> to <code>pg_hba.conf</code>. Restart the PostgreSQL Windows service. Add a Private-profile firewall rule that permits TCP <code>5432</code> from <code>192.168.10.21</code> only.</p>
-      <p>From the node, run <code>powershell -NoProfile -Command "Test-NetConnection 192.168.10.20 -Port 5432"</code>. Then run <code>Install-SmartPark.bat</code>, choose <code>EDGE_NODE</code>, use <code>http://192.168.10.20:8760</code> for the Site Server address, and use <code>192.168.10.20</code>—never <code>localhost</code> or <code>127.0.0.1</code>—as the PostgreSQL host. The full Windows CMD procedure and failure table are in the <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">PostgreSQL prerequisite runbook</a>.</p>
-      <div class="card warn"><strong>Camera ownership:</strong> close other vendor SDK clients before connecting HVX cameras. Another program may allow video while preventing the callback path required for plate events.</div>
+      <h2>Cameras</h2>
+      <p>Add cameras in <span class="ui-path">Live Gates → Devices</span>: click
+        <b>Discover</b> or type the IP, choose the direction and gate, then
+        <b>Test Video</b>, <b>Test Recognition</b> and <b>Save Camera</b>.</p>
+      <p>Supported: QY/HVX LPR cameras (vendor SDK), ONVIF cameras and any RTSP camera.
+        Each camera has exactly one reader, and recognition only ever uses fresh frames.</p>
+      <p>Use <span class="ui-path">Settings → Camera calibration</span> to draw the zone,
+        start and end lines and minimum plate size, so cars in the next lane never
+        open your barrier.</p>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/cameras.md">Full camera guide: connecting, calibration, troubleshooting →</a></p>
     </section>
 
     <section id="gates">
-      <h2>Gates, barriers and safety</h2>
-      <p>Recognition is not a physical safety system. Mechanical safety circuits, emergency stops, loop detectors and the barrier manufacturer’s controls remain authoritative.</p>
-      <ul>
-        <li>Verify that each lane’s camera, controller, display and barrier address belong to the same physical lane.</li>
-        <li>Keep the lane in commissioning/manual mode while mapping and testing outputs.</li>
-        <li>Use a trained technician at the barrier during any output test. Confirm the physical lane before pressing Open.</li>
-        <li>Test registered, unregistered, unreadable and duplicate-visit cases. Confirm that a camera or network failure fails safe according to the site policy.</li>
-        <li>Do not claim automatic gate acceptance until the observed barrier behavior matches the site’s approved safety procedure.</li>
-      </ul>
+      <h2>Barriers and loops</h2>
+      <p>The decision and a barrier command with its own ID are saved together before
+        the barrier is told to move. After a power cut, an unanswered command shows up
+        as <i>interrupted</i> for an operator instead of being re-sent. Ground-loop
+        boards talk to Zirp on UDP port 8000.</p>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/gates-and-loops.md">Barriers, manual opening and alerts →</a> ·
+         <a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/loop-boards.md">Loop board protocol →</a></p>
     </section>
 
-    <section id="daily-operations">
-      <h2>Daily operation</h2>
-      <div class="grid2">
-        <div class="card"><h4>Live Gates</h4><p>Monitor lane video, current plate reads, connectivity and manual/commissioning state.</p></div>
-        <div class="card"><h4>Sessions</h4><p>Review vehicles inside, entry/exit events, tickets, payments and reprints.</p></div>
-        <div class="card"><h4>Vehicles</h4><p>Register approved plates and access types according to site policy.</p></div>
-        <div class="card"><h4>System Health</h4><p>Supervisors use health and service status to decide whether a problem is local, network or server-side.</p></div>
-      </div>
-      <p>Close an Operator Workstation without stopping the Site Server. The parking service and recognition continue on the Site Server while the server remains configured and its background tasks are running.</p>
+    <section id="payments">
+      <h2>Payments</h2>
+      <p>The server always computes the amount. Each mobile-money payment is recorded
+        once, even if ClickPesa sends the webhook twice. Keys alone don't collect
+        money: real collection has to be switched on separately, so a test setup
+        can't charge anyone.</p>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/payments.md">ClickPesa setup, exit grace, testing with the mock →</a></p>
     </section>
 
-    <section id="recognition">
-      <h2>Recognition behavior</h2>
-      <div class="grid2">
-        <div class="card ok"><h4>Native camera recognition</h4><p>HVX cameras can send plate text through the 32-bit SDK host. This is the preferred path for the site’s native cameras.</p></div>
-        <div class="card"><h4>Local OCR</h4><p>Generic IP cameras use bounded frame sampling and FastALPR/ONNX recognition on the Site Server. OCR is not run on every displayed frame.</p></div>
-      </div>
-      <p>The system uses the freshest valid evidence and site rules to form a parking event. An empty lane must not retain a stale plate, a single vehicle must not create duplicate sessions, and one stalled camera must not freeze other lanes. These are acceptance conditions, not assumptions.</p>
+    <section id="database">
+      <h2>Database and backups</h2>
+      <p>PostgreSQL on the Site Server is the single source of truth. Migrations run by
+        themselves on start. Every update takes a backup first, and a restore either
+        completes fully or changes nothing.</p>
+      <pre><code>&amp; "C:\Program Files\Zirp\bin\zirpctl.ps1" backup -Label manual</code></pre>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/database.md">PostgreSQL setup, backup and restore →</a></p>
     </section>
 
-    <section id="backups">
-      <h2>Backups and recovery</h2>
-      <ol class="steps">
-        <li>Define the backup owner, schedule, retention period and off-machine destination with the site owner.</li>
-        <li>Back up before upgrades, database changes, role changes or hardware replacement. Keep the previous deployment configuration with the backup.</li>
-        <li>For SQLite, stop Zirp writes and use the Zirp consistent backup operation; do not copy a live WAL database in Explorer.</li>
-        <li>For PostgreSQL, use the matching <code>pg_dump</code> tooling through the approved administrator procedure. The password must be supplied process-locally, never as a command-line argument.</li>
-        <li>Verify that the backup can be read before changing the live site. A file existing on disk is not proof of a usable backup.</li>
-        <li>For restore, stop writes, preserve a backup of the current database, restore using the approved PostgreSQL/SQLite procedure, verify the Alembic revision and run the health checks before reopening the site.</li>
-      </ol>
-      <div class="card warn"><strong>Never use a wipe or fresh migration as a troubleshooting step on a live site.</strong> If Apply fails, preserve the database and deployment file, collect logs and use the recovery runbook.</div>
-      <p>See <a href="#" data-doc="DATABASE_CONFIGURATION.md">DATABASE_CONFIGURATION.md</a> and <a href="#" data-doc="MIGRATION-AND-ROLLBACK.md">MIGRATION-AND-ROLLBACK.md</a> for the detailed recovery procedures.</p>
+    <!-- ------------------------------------------------------------ operations -->
+    <section id="operations">
+      <h2>Services and logs</h2>
+      <table>
+        <tr><th>Service</th><th>Port</th></tr>
+        <tr><td><code>SmartParkSiteService</code>: API, decisions, payments, alerts</td><td>TCP 8760</td></tr>
+        <tr><td><code>SmartParkMediaService</code>: camera streams, live video</td><td>TCP 8889, 8189</td></tr>
+        <tr><td><code>SmartParkRecognitionWorker</code>: plate recognition</td><td>—</td></tr>
+        <tr><td><code>SmartParkHvxHost</code>: QY/HVX camera SDK</td><td>local 8765</td></tr>
+        <tr><td><code>SmartParkPortal</code>: back office and pay page</td><td>TCP 3000</td></tr>
+      </table>
+      <p>Health: <code>http://&lt;server&gt;:8760/health/pipeline</code> shows frame age and
+        reconnects per camera. Logs: <code>C:\ProgramData\SmartParkEdge\logs</code>.</p>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/operations.md">Running a site: zirpctl, health checks, recovery →</a></p>
     </section>
 
     <section id="troubleshooting">
       <h2>Troubleshooting</h2>
       <table>
-        <thead><tr><th>Symptom</th><th>Check first</th><th>Do not do</th></tr></thead>
-        <tbody>
-          <tr><td>Workstation says offline</td><td>Resolve the server name, open <code>http://server:8760/health/live</code>, verify the Private-network firewall and confirm Site Service is running.</td><td>Do not configure a local database on the workstation.</td></tr>
-          <tr><td>Site Server is not ready</td><td>Open Deployment Configuration, check database health, migration status, disk space and the service logs.</td><td>Do not delete <code>deployment.json</code> or recreate the database.</td></tr>
-          <tr><td>PostgreSQL refused</td><td>Verify the approved PostgreSQL service, host/port, database permissions and local firewall. Re-run Test Database.</td><td>Do not open 5432 to the whole operator LAN.</td></tr>
-          <tr><td>Video frozen or stale</td><td>Check camera ownership, stream freshness, camera network path, MediaMTX status and the camera delivery diagnostics.</td><td>Do not treat ping or an old cached frame as a healthy camera.</td></tr>
-          <tr><td>Video works but no plate</td><td>Check adapter, native callback status, OCR model availability, image quality, lane assignment and recent recognition logs.</td><td>Do not enable every adapter or run OCR on every live frame as a workaround.</td></tr>
-          <tr><td>Gate does not behave</td><td>Verify lane mapping, controller/LED addresses, commissioning state, safety circuit and technician presence.</td><td>Do not repeatedly pulse an unknown lane.</td></tr>
-          <tr><td>No receipt</td><td>Verify printer selection, power, paper, USB/LAN path and the receipt test from Settings.</td><td>Do not assume an event was lost because a paper roll is empty.</td></tr>
-        </tbody>
-      </table>
-      <h3>Logs and escalation bundle</h3>
-      <p>Collect the Zirp logs, release version, deployment state, server identity, failing camera/lane, exact time window and the result of <code>/health/live</code>, <code>/health/ready</code> and <code>/health/database</code>. Redact credentials, database URLs and plate data according to the site policy.</p>
-      <table>
-        <tbody><tr><th>Application logs</th><td><code>%ProgramData%\SmartParkEdge\logs\</code></td></tr><tr><th>Deployment metadata</th><td><code>%ProgramData%\SmartParkEdge\deployment.json</code> — non-secret, but still site information</td></tr><tr><th>Installed documentation</th><td><code>%LOCALAPPDATA%\Programs\SmartPark Edge\documentation\</code> or the approved all-users install path</td></tr></tbody>
+        <tr><th>Problem</th><th>First thing to check</th></tr>
+        <tr><td>Camera picture is black</td><td>Ping it, check the login, and close VLC or the vendor tool if it's open on the same camera.</td></tr>
+        <tr><td>Live view works but no plates</td><td>Calibration test mode tells you which rule refused the read.</td></tr>
+        <tr><td>Update failed</td><td><code>C:\ProgramData\SmartParkEdge\logs\install\last-error.txt</code>. The old version is already running again.</td></tr>
+        <tr><td>Barrier command "interrupted"</td><td>The PC lost power mid-command. Look at the lane and retry from the desktop.</td></tr>
+        <tr><td>Mobile money shows MOCK or LIVE_DISABLED</td><td>See "Switching on real money" in the payments guide.</td></tr>
       </table>
     </section>
 
+    <!-- ------------------------------------------------------------ developers -->
     <section id="architecture">
-      <h2>Developer reference: architecture</h2>
-      <p>Keep hardware behind adapters and keep the parking core independent of vendor SDK details. The 64-bit application communicates with the 32-bit HVX sidecar rather than loading <code>NetSDK.dll</code> directly.</p>
-      <table>
-        <thead><tr><th>Component</th><th>Responsibility</th><th>Process boundary</th></tr></thead>
-        <tbody>
-          <tr><td><code>app.site_service</code></td><td>API, parking state, authentication, migrations and server lifecycle.</td><td>64-bit Site Server process</td></tr>
-          <tr><td><code>app.recognition_worker</code></td><td>Bounded recognition for generic media streams and event delivery.</td><td>64-bit background worker</td></tr>
-          <tr><td><code>app.media_service</code></td><td>MediaMTX supervision and local media gateway support.</td><td>64-bit background worker + sidecar</td></tr>
-          <tr><td><code>tools/hvx_sdk_host</code></td><td>Vendor camera SDK login, callbacks and native capture.</td><td>32-bit Windows Python process</td></tr>
-          <tr><td><code>app.desktop</code></td><td>Site Server desktop or remote Operator Workstation UI.</td><td>Interactive client process</td></tr>
-          <tr><td><code>app.web</code></td><td>Browser UI launch and remote site access.</td><td>API-served/static client</td></tr>
-          <tr><td><code>app/database_config.py</code></td><td>Authoritative database selection, secret reference, preflight and runtime application.</td><td>Shared configuration boundary</td></tr>
-        </tbody>
-      </table>
-      <p>Primary code areas are <code>app/api</code>, <code>app/services</code>, <code>app/infrastructure/hardware</code>, <code>app/desktop</code>, <code>app/web</code>, <code>app/migrations</code> and <code>tools/hvx_sdk_host</code>. Add a new camera or printer through its adapter seam; do not replace the parking engine with vendor-specific code.</p>
-    </section>
-
-    <section id="runtime">
-      <h2>Runtime and configuration reference</h2>
-      <table>
-        <thead><tr><th>Item</th><th>Contract</th></tr></thead>
-        <tbody>
-          <tr><td>Deployment state</td><td><code>UNCONFIGURED</code>, <code>CONFIGURING</code>, <code>CONFIGURED</code> or <code>RECOVERY_REQUIRED</code>. Presence of a JSON file alone is not sufficient.</td></tr>
-          <tr><td>Server identity</td><td>The public identity includes installation, server, site and pairing identifiers. Workstations verify the expected server identity before completing setup.</td></tr>
-          <tr><td>Database</td><td>Use the database configuration service. Do not construct a second URL in a worker or setup page.</td></tr>
-          <tr><td>Secrets</td><td>Passwords use the protected Zirp secret mechanism. Never log a password or credential-bearing connection URL.</td></tr>
-          <tr><td>Windows data</td><td>Application data and logs are under <code>%ProgramData%\SmartParkEdge\</code>; the install directory contains code and bundled runtimes.</td></tr>
-          <tr><td>Client mode</td><td>Operator Workstations apply paired server metadata, open the remote API and remove/avoid local server tasks.</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="api">
-      <h2>API and health checks</h2>
-      <p>These endpoints are intended for diagnostics and deployment verification. They do not replace authentication for operational routes.</p>
-      <table>
-        <thead><tr><th>Endpoint</th><th>Use</th></tr></thead>
-        <tbody>
-          <tr><td><code>GET /health/live</code></td><td>Process is answering HTTP.</td></tr>
-          <tr><td><code>GET /health/ready</code></td><td>Site is configured and ready for service.</td></tr>
-          <tr><td><code>GET /health/database</code></td><td>Safe database engine/state, migration revision/head, status and latency. Never returns a password.</td></tr>
-          <tr><td><code>GET /api/...</code></td><td>Authenticated parking, camera, session, receipt and administration APIs.</td></tr>
-        </tbody>
-      </table>
-      <p>When the API is exposed beyond localhost, use the private LAN rules supplied by the installer and place TLS/reverse-proxy policy under the site’s network owner. Do not expose the development server or database directly to the public Internet.</p>
+      <h2>Architecture</h2>
+      <div class="figure"><img src="../docs/images/architecture.svg" alt="Camera inputs, media engine, frame distribution, live display, AI processing and event coordinator"></div>
+      <p>Python services (FastAPI, SQLAlchemy, Alembic), a PySide6 operator desktop,
+        a Next.js portal, ONNX Runtime for plates, MediaMTX and FFmpeg for video.</p>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/architecture.md">How it's put together, and why →</a></p>
     </section>
 
     <section id="development">
-      <h2>Development, validation and test packaging</h2>
-      <p>This section is for Zirp maintainers and technicians validating a release. It is deliberately separate from the production install path.</p>
-      <h3>Local development</h3>
-      <pre><code>python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m app.site_service</code></pre>
-      <p>Use SQLite for local development only unless you are explicitly testing the PostgreSQL deployment path. Run the focused deployment, packaging and pipeline tests before a field test.</p>
-      <h3>Windows test package</h3>
-      <p>The USB/portable package is a test and distribution artifact for maintainers. It is not the production documentation or the end-user installation contract.</p>
-      <pre><code>./packaging/make_windows_kit.sh
-python3 packaging/verify_windows_kit.py dist/SmartParkEdge-Install/payload
-python3 -m pytest tests/test_production_deployment.py tests/test_windows_packaging.py tests/test_windows_ready.py</code></pre>
-      <p>The package contains the offline Python runtimes, vendor SDK payload, FFmpeg, MediaMTX, FastALPR models, wheels and commissioning tools. Camera Lab, field acceptance, startup checks and wipe scripts belong to testing/maintenance; do not ask a normal parking operator to run them.</p>
-      <h3>Release discipline</h3>
-      <ul>
-        <li>Keep the tested Windows wheel set, ONNX models, FFmpeg, MediaMTX and vendor DLL family together.</li>
-        <li>Run compile, focused tests, kit verification and real hardware acceptance before publishing a release.</li>
-        <li>Do not independently upgrade Qt, ONNX, the camera SDK DLLs or the 32-bit host on a site.</li>
-        <li>When adding an adapter, add its configuration, health behavior, failure isolation and acceptance tests together.</li>
-      </ul>
-      <p>Additional maintainer references are included beside this page: <a href="#" data-doc="SYSTEM-GUIDE.md">SYSTEM-GUIDE.md</a>, <a href="#" data-doc="DEPLOYMENT.md">DEPLOYMENT.md</a>, <a href="#" data-doc="POSTGRESQL-PREREQUISITE.md">POSTGRESQL-PREREQUISITE.md</a>, <a href="#" data-doc="DATABASE_CONFIGURATION.md">DATABASE_CONFIGURATION.md</a>, <a href="#" data-doc="MEDIA-ARCHITECTURE.md">MEDIA-ARCHITECTURE.md</a>, <a href="#" data-doc="CAMERA-DELIVERY-DIAGNOSTICS.md">CAMERA-DELIVERY-DIAGNOSTICS.md</a> and <a href="#" data-doc="MIGRATION-AND-ROLLBACK.md">MIGRATION-AND-ROLLBACK.md</a>.</p>
+      <h2>Build and test</h2>
+      <pre><code>git clone https://github.com/josiaO/ParkSystem.git
+cd ParkSystem
+python -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q</code></pre>
+      <p>Build the installer on Windows:</p>
+      <pre><code>powershell -ExecutionPolicy Bypass -File packaging\installer\build.ps1 -Version 1.0.0-rc5</code></pre>
+      <p><a href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/development.md">Development guide →</a></p>
     </section>
 
-    <footer class="site-footer">
-      <p>Zirp production documentation · Maintained with the release source tree.</p>
-      <p>Last reviewed: 2026-10-27. Confirm site-specific release notes and hardware acceptance records before handover.</p>
+    <section id="guides">
+      <h2>All guides</h2>
+      <div class="grid2">
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/install.md"><h3>Installing and updating</h3><p>Roles, updates, rollback, uninstall</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/cameras.md"><h3>Connecting cameras</h3><p>Adding, calibration, troubleshooting</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/gates-and-loops.md"><h3>Barriers and loops</h3><p>Safe opening, manual opening, alerts</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/payments.md"><h3>Payments</h3><p>Cash, kiosk, ClickPesa</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/vehicle-groups.md"><h3>Linked vehicles</h3><p>Fleets, family cars, visitor passes</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/database.md"><h3>Database</h3><p>PostgreSQL, backups, restore</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/operations.md"><h3>Running a site</h3><p>Services, logs, recovery</p></a>
+        <a class="card icon-card" href="https://github.com/josiaO/ParkSystem/blob/production-readiness/docs/architecture.md"><h3>Architecture</h3><p>Design rules and code map</p></a>
+      </div>
+    </section>
+
+    <footer>
+      Zirp, parking management built for Tanzanian sites. ·
+      <a href="https://github.com/josiaO/ParkSystem">GitHub</a> ·
+      <a href="https://github.com/josiaO/ParkSystem/releases">Releases</a>
     </footer>
   </main>
 </div>
