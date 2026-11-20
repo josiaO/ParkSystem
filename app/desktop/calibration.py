@@ -468,6 +468,13 @@ class CalibrationWindow(QDialog):
         self.canvas.update()
         self._dirty = False
         self._show_header(data.get("test_mode") or {})
+        owner = str(data.get("owned_by_node") or "")
+        if owner:
+            # The live picture and plate boxes live on the node that runs the camera.
+            self.status.setText(
+                f"This camera is run by {owner}. Its live picture and plate boxes are only on that computer: "
+                f"calibrate it there (Camera calibration page). Settings saved here still apply."
+            )
         notes = list(cfg.get("ignored") or [])
         if data.get("warning"):
             notes.insert(0, str(data["warning"]))
