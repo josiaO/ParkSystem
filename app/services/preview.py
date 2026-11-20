@@ -284,8 +284,51 @@ def held_plate_box(camera_id: int, *, max_age_seconds: float = 180.0) -> dict | 
     return dict(row.plate_box)
 
 
+# A later read of the same car (a slip of one or two characters, read as the
+# car moves) must not replace a better plate already on screen.
+SAME_CAR_DISPLAY_SECONDS = 10.0
+
+
+def _flagged(payload: dict, key: str) -> bool:
+    value = payload.get(key)
+    return value.strip().lower() in {"1", "true", "yes"} if isinstance(value, str) else bool(value)
+
+
+def keeps_displayed_plate(current: dict | None, current_age: float, incoming: dict | None) -> bool:
+    """True when ``incoming`` is a weaker re-read of the car already shown.
+
+    Field report (SERVER01, 21 Nov 2026): a good read (T760DCB 0.99) was
+    replaced on screen by the next frame's misread (T260DCB 0.97) while the
+    car moved. The parking decision already treats such a read as the same car
+    (DUPLICATE); the display did not. A clearly different plate (another car)
+    always replaces it, held or not, so an operator can still confirm it.
+    """
+    if not current or not incoming or current_age > SAME_CAR_DISPLAY_SECONDS:
+        return False
+    old = str(current.get("plate") or "").strip().upper()
+    new = str(incoming.get("plate") or "").strip().upper()
+    if not old or not new or old == new:
+        return False
+    from app.services.lane_stay import different_vehicle
+
+    if different_vehicle(old, new):
+        return False
+    try:
+        old_conf = float(current.get("confidence") or 0)
+        new_conf = float(incoming.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return False
+    old_held = _flagged(current, "pending_confirmation") or _flagged(current, "needs_review")
+    new_held = _flagged(incoming, "pending_confirmation") or _flagged(incoming, "needs_review")
+    if new_held and not old_held:
+        return True
+    return new_conf <= old_conf and not (old_held and not new_held)
+
+
 def remember_last_car(camera_id: int, payload: dict | None) -> None:
     row = get_state(camera_id)
+    if payload and keeps_displayed_plate(row.last_car, time.monotonic() - float(row.last_car_at or 0), payload):
+        return
     if payload:
         row.last_car = payload
         row.last_car_at = time.monotonic()

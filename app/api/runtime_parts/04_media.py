@@ -551,7 +551,19 @@ async def _read_presence_now(camera_id: int, handle: int, *, background: bool = 
     with short_session() as db:
         previous = latest_for_camera(db, camera_id)
         previous_key = (previous.id, previous.image_id, previous.plate) if previous else None
+        own = db.get(Camera, camera_id)
+        camera_ip = str(getattr(own, "ip_address", "") or "")
     hvx = HVXHostClient()
+    # Callers pass the stored (shared) handle; use this camera's handle on
+    # this host now, so a loop or board edge on one lane never snaps, drains
+    # or reads the other lane's camera.
+    try:
+        live = await hvx.handle_for_ip(camera_ip)
+    except Exception:
+        live = handle
+    if live is None:
+        return
+    handle = int(live)
     try:
         await hvx.snapshot_trigger(handle)
     except Exception:
