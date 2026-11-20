@@ -1,6 +1,6 @@
 """Regression tests for defects found in the November 2026 production audit.
 
-See docs/PRODUCTION_AUDIT_2026-11.md. Each test names the defect it proves fixed.
+See docs/audit-2026-11.md. Each test names the defect it proves fixed.
 """
 
 from __future__ import annotations

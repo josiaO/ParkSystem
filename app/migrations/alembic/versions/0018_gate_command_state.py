@@ -4,7 +4,7 @@ A barrier command is recorded as REQUESTED in the same transaction as the
 access decision, *before* the command is sent; the hardware answer moves it
 to ACCEPTED or FAILED. A REQUESTED row found after a restart was interrupted
 (power cut or crash between commit and answer) and becomes INTERRUPTED for an
-operator. See docs/ZIRP_HIGH_THROUGHPUT_ARCHITECTURE.md section 4.
+operator. See docs/architecture.md, "Authorization commit".
 
 Additive: three nullable/defaulted columns and an index. Existing rows are
 back-filled from ``ok`` (ACCEPTED / FAILED). Downgrade drops the columns.

@@ -1,4 +1,4 @@
-"""Phase 1 security hardening (see CLAUDE_CODE_TASK.md section 4)."""
+"""Security hardening: public surfaces, receipts, sign-in throttling."""
 
 from __future__ import annotations
 
