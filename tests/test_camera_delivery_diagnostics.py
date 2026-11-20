@@ -555,3 +555,38 @@ def test_frames_from_a_decoder_that_could_not_be_stopped_are_dropped():
     sdk._on_draw_data(0, *args, new_token)
     assert sdk._draw_frame_seq[0] == 1                  # current decoder's picture used
     assert sdk._draw_data_jpeg(0).startswith(b"\xff\xd8")
+
+
+def _stale_sdk(tmp_path, monkeypatch, *, uptime=1000.0):
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._process_started_at = time.monotonic() - uptime
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path))
+    exits = []
+    monkeypatch.setattr("tools.hvx_sdk_host.hvx_sdk.os._exit", lambda code: exits.append(code))
+    monkeypatch.setattr("tools.hvx_sdk_host.hvx_sdk.time.sleep", lambda s: None)
+    return sdk, exits
+
+
+def test_a_leftover_decoder_that_keeps_running_restarts_the_host_once(tmp_path, monkeypatch):
+    sdk, exits = _stale_sdk(tmp_path, monkeypatch)
+    clock = [5000.0]
+    monkeypatch.setattr("tools.hvx_sdk_host.hvx_sdk.time.monotonic", lambda: clock[0])
+    sdk._process_started_at = 1000.0
+    sdk._note_stale_decoder(2)
+    clock[0] += 30
+    sdk._note_stale_decoder(2)
+    assert not getattr(sdk, "_stale_restart_scheduled", False)     # not yet: may be a brief overlap
+    clock[0] += 31
+    sdk._note_stale_decoder(2)
+    assert sdk._stale_restart_scheduled
+    for thread in threading.enumerate():
+        if thread.name == "stale-decoder-restart":
+            thread.join(2)
+    assert exits == [75]
+    # A second host shortly after does not restart again for the same reason (no loop).
+    again, exits_again = _stale_sdk(tmp_path, monkeypatch)
+    again._process_started_at = 1000.0
+    again._note_stale_decoder(2)
+    clock[0] += 61
+    again._note_stale_decoder(2)
+    assert not getattr(again, "_stale_restart_scheduled", False) and exits_again == []

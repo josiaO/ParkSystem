@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -271,11 +271,21 @@ def _apply_answer(db: Session, row: GateCommandRecord, *, ok: bool, dry_run: boo
     if row.ok and (not ok or row.state in {GATE_ACCEPTED, ""}):
         # Never downgrade an accepted command; an accepted one is final.
         return row
-    row.ok = bool(ok)
-    row.dry_run = bool(dry_run)
-    row.message = message or row.message
-    row.state = GATE_ACCEPTED if ok else GATE_FAILED
-    row.completed_at = datetime.now(timezone.utc)
+    # Conditional UPDATE, not read-modify-write: two answers for one command
+    # racing on separate connections must not let a FAILED overwrite an
+    # ACCEPTED that committed in between our read and our write.
+    values = {
+        "ok": bool(ok),
+        "dry_run": bool(dry_run),
+        "state": GATE_ACCEPTED if ok else GATE_FAILED,
+        "completed_at": datetime.now(timezone.utc),
+    }
+    if message:
+        values["message"] = message
+    stmt = update(GateCommandRecord).where(GateCommandRecord.id == row.id)
+    if not ok:
+        stmt = stmt.where(GateCommandRecord.ok.is_(False))
+    db.execute(stmt.values(**values))
     db.commit()
     db.refresh(row)
     return row

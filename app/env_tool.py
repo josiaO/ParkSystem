@@ -53,9 +53,9 @@ def _settings_class():
 def env_file_path(explicit: str | Path | None = None) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
-    from app.config import install_directory
+    from app.config import env_file_location
 
-    return install_directory() / ".env"
+    return env_file_location()
 
 
 def field_names() -> dict[str, Any]:

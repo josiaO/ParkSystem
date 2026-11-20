@@ -252,6 +252,7 @@ def fee_quote(payload: FeeQuoteRequest, db: Session = Depends(get_db), _: User =
 def open_session(payload: SessionCreate, db: Session = Depends(get_db), user: User = Depends(require("sessions.create"))):
     """Manual entry for a car the cameras missed: same engine as a camera entry."""
     from app.domain.parking_engine import InvalidTransition
+    from app.domain.vehicle_groups import GroupOccupied, VisitorPassExhausted
     from app.services.parking_sessions import manual_entry
 
     camera = db.get(Camera, payload.camera_id) if payload.camera_id else None
@@ -262,6 +263,10 @@ def open_session(payload: SessionCreate, db: Session = Depends(get_db), user: Us
             gate_id=payload.gate_id or (camera.gate_id if camera else None),
             camera_id=payload.camera_id, lane_id=camera.lane_id if camera else None,
         )
+    except GroupOccupied as exc:
+        raise HTTPException(409, f"Not allowed: {exc}. Confirm that vehicle's exit first.") from exc
+    except VisitorPassExhausted as exc:
+        raise HTTPException(409, "The visitor pass for this plate is already used") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except InvalidTransition as exc:
@@ -286,7 +291,8 @@ def close_session(
     if not row:
         raise HTTPException(404, "Session not found")
     try:
-        result = supervised_close(db, row, reason=str((payload or {}).get("reason") or ""), user_id=user.id)
+        result = supervised_close(db, row, reason=str((payload or {}).get("reason") or ""), user_id=user.id,
+                                  vehicle_left=bool((payload or {}).get("vehicle_left")))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except InvalidTransition as exc:

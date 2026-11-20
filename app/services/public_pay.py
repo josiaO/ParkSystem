@@ -67,6 +67,9 @@ async def pay_public_session(
     Real mobile-money aggregators must replace SimulatedPaymentProvider with a
     webhook that calls record_succeeded_payment only after verification.
     """
+    from app.infrastructure.payments.ledger import reopen_after_grace
+
+    reopen_after_grace(db, row)
     quote_session(db, row)
     due = float(row.amount_due or 0)
     paid = float(row.amount_paid or 0)

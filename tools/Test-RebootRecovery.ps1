@@ -51,7 +51,7 @@ if ($Arm) {
     }
     $services = @(Get-Service -Name "SmartPark*" -ErrorAction SilentlyContinue)
     if ($services.Count -eq 0) {
-        throw "No SmartPark Windows services are installed. Run Install-SmartParkWinService.ps1 first."
+        throw "No SmartPark Windows services are installed. Install Zirp with Zirp-Setup.exe (Site Server or Edge Node role) first."
     }
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     Remove-Item -LiteralPath $ReportPath -ErrorAction SilentlyContinue

@@ -116,6 +116,8 @@ class ParkingSession(Base):
     parker_kind: Mapped[str] = mapped_column(String(40), default="CASUAL", index=True)
     access_plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("registered_vehicles.id"), nullable=True)
+    authorization_group_id: Mapped[int | None] = mapped_column(ForeignKey("vehicle_groups.id"), nullable=True, index=True)
+    visitor_pass_id: Mapped[int | None] = mapped_column(ForeignKey("visitor_passes.id"), nullable=True, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)

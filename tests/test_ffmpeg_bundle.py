@@ -32,12 +32,6 @@ def test_linux_ignores_windows_bundle(monkeypatch, tmp_path):
     assert frame_grab.ffmpeg_bin() == '/usr/bin/ffmpeg'
 
 
-def test_payload_verifier_rejects_missing_decoder(tmp_path):
-    import importlib.util
-
-    source = Path(__file__).resolve().parents[1] / 'packaging/verify_windows_kit.py'
-    spec = importlib.util.spec_from_file_location('kit_verifier', source)
-    verifier = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(verifier)
-    errors = verifier.verify_payload(tmp_path)
-    assert 'FFmpeg missing: vendor/ffmpeg/bin/ffmpeg.exe' in errors
+def test_installer_build_refuses_a_payload_without_decoder():
+    build = (Path(__file__).resolve().parents[1] / 'packaging/installer/build.ps1').read_text(encoding='utf-8')
+    assert 'vendor\\ffmpeg\\bin\\ffmpeg.exe") "FFmpeg' in build

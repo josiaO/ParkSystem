@@ -206,6 +206,29 @@ def _avg(values: deque[float]) -> float:
     return round(sum(values) / len(values), 1)
 
 
+def pipeline_needs() -> dict:
+    """Helpers needed by the configured cameras. Unknown = needed (safe default)."""
+    try:
+        from app.db import short_session
+        from app.infrastructure.media.registry import _sdk_camera
+        from app.models import Camera
+
+        with short_session() as db:
+            cameras = db.query(Camera).all()
+            generic = sum(1 for camera in cameras if not _sdk_camera(camera.id, db))
+            total = len(cameras)
+    except Exception as exc:
+        return {"known": False, "error": type(exc).__name__,
+                "media_service_needed": True, "recognition_worker_needed": True}
+    return {
+        "known": True,
+        "cameras": total,
+        "generic_cameras": generic,
+        "media_service_needed": generic > 0,
+        "recognition_worker_needed": generic > 0,
+    }
+
+
 def live() -> dict:
     from app.services.db_link import monitor
 

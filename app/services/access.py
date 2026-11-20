@@ -33,10 +33,20 @@ class Entitlement:
     vehicle_id: int | None = None
     owner_name: str = ""
     plate: str = ""
+    # Linked vehicles: the authorization group this car shares an entitlement with.
+    group_id: int | None = None
+    group_name: str = ""
+    group_kind: str = ""
+    company_name: str = ""
+    belongs_to: str = ""          # "Company: ACME Ltd" / "Private: J. Owner" for the operator
+    # Temporary visitor authorization (no registered vehicle).
+    visitor_pass_id: int | None = None
+    visitor_name: str = ""
+    host_name: str = ""
 
     @property
     def registered(self) -> bool:
-        return self.kind != "CASUAL" and self.vehicle_id is not None
+        return self.kind != "CASUAL" and (self.vehicle_id is not None or self.visitor_pass_id is not None)
 
 
 def ensure_access_plans(db: Session, *, site_id: int = DEFAULT_SITE_ID) -> list[AccessPlan]:
@@ -119,7 +129,8 @@ def lookup_entitlement(
         # Automatic barrier authority must not be granted from a fuzzy plate
         # guess. Recognition may reach a stable exact plate before calling us;
         # otherwise the vehicle follows the normal casual/operator fallback.
-        return Entitlement(plate=plate)
+        # Visitor passes are exact-plate only too.
+        return _visitor_entitlement(db, plate, at=at, site_id=site_id) or Entitlement(plate=plate)
     if vehicle is None:
         known = [
             row.plate
@@ -143,13 +154,19 @@ def lookup_entitlement(
             )
     if vehicle is None:
         vehicle = _fuzzy_match_vehicle(db, plate, at=at, site_id=site_id)
-    if vehicle is None or not vehicle.enabled:
+    if vehicle is None:
+        return _visitor_entitlement(db, plate, at=at, site_id=site_id) or Entitlement(plate=plate)
+    if not vehicle.enabled:
         return Entitlement(plate=plate)
     now = at or utcnow()
     if not _in_window(vehicle, now):
         return Entitlement(plate=plate, owner_name=vehicle.owner_name, vehicle_id=vehicle.id)
     plan = vehicle.plan
     if plan is not None and not plan.enabled:
+        return Entitlement(plate=plate, owner_name=vehicle.owner_name, vehicle_id=vehicle.id)
+    group = _group_for(db, vehicle)
+    if group is not None and not group.enabled:
+        # A suspended group suspends every member's entitlement.
         return Entitlement(plate=plate, owner_name=vehicle.owner_name, vehicle_id=vehicle.id)
     kind = (plan.kind if plan else "SUBSCRIBER") or "SUBSCRIBER"
     return Entitlement(
@@ -161,6 +178,57 @@ def lookup_entitlement(
         vehicle_id=vehicle.id,
         owner_name=vehicle.owner_name,
         plate=vehicle.plate,
+        **_group_fields(group),
+    )
+
+
+def _group_for(db: Session, vehicle: RegisteredVehicle):
+    group_id = getattr(vehicle, "group_id", None)
+    if not group_id:
+        return None
+    from app.models import VehicleGroup
+
+    return db.get(VehicleGroup, int(group_id))
+
+
+def _group_fields(group) -> dict:
+    if group is None:
+        return {}
+    from app.services.vehicle_groups import group_display
+
+    return {
+        "group_id": group.id,
+        "group_name": group.name,
+        "group_kind": group.kind,
+        "company_name": group.company_name or "",
+        "belongs_to": group_display(group),
+    }
+
+
+def _visitor_entitlement(db: Session, plate: str, *, at: datetime | None, site_id: int) -> Entitlement | None:
+    """A valid temporary visitor pass for this exact plate, if any."""
+    from app.services.vehicle_groups import active_visitor_pass, group_display
+
+    row = active_visitor_pass(db, plate, at=at, site_id=site_id)
+    if row is None:
+        return None
+    host = None
+    if row.host_group_id:
+        from app.models import VehicleGroup
+
+        host = db.get(VehicleGroup, int(row.host_group_id))
+    host_name = row.host_name or ((host.company_name or host.name) if host is not None else "")
+    return Entitlement(
+        kind="VISITOR",
+        auto_open=True,
+        print_receipt=False,
+        plate=row.plate,
+        owner_name=row.visitor_name or "",
+        visitor_pass_id=row.id,
+        visitor_name=row.visitor_name or "",
+        host_name=host_name,
+        company_name=(host.company_name or host.name) if host is not None and host.kind == "FLEET" else "",
+        belongs_to=(f"Visitor of {host_name}" if host_name else "Visitor") + (f" ({group_display(host)})" if host else ""),
     )
 
 
@@ -183,6 +251,8 @@ def vehicle_dict(row: RegisteredVehicle) -> dict:
         "plate": row.plate,
         "owner_name": row.owner_name or "",
         "plan_id": row.plan_id,
+        "group_id": getattr(row, "group_id", None),
+        **_vehicle_group_labels(getattr(row, "group", None)),
         "plan_name": row.plan.name if row.plan else "",
         "plan_kind": row.plan.kind if row.plan else "",
         "auto_open": bool(row.plan.auto_open) if row.plan else True,
@@ -190,4 +260,18 @@ def vehicle_dict(row: RegisteredVehicle) -> dict:
         "valid_from": row.valid_from.isoformat() if row.valid_from else None,
         "valid_until": row.valid_until.isoformat() if row.valid_until else None,
         "notes": row.notes or "",
+    }
+
+
+def _vehicle_group_labels(group) -> dict:
+    """Who a registered car belongs to, for lists and the gate screen."""
+    if group is None:
+        return {"group_name": "", "group_kind": "", "company_name": "", "belongs_to": ""}
+    from app.services.vehicle_groups import group_display
+
+    return {
+        "group_name": group.name,
+        "group_kind": group.kind,
+        "company_name": group.company_name or "",
+        "belongs_to": group_display(group),
     }
