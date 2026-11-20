@@ -6,8 +6,19 @@ import re
 from typing import Any, Iterable
 
 _ALNUM_RE = re.compile(r"[^A-Z0-9]+")
-_TZ_RE = re.compile(r"^T[A-Z0-9]{5,8}$")
+_TZ_RE = re.compile(r"^T[A-Z0-9]{5,8}$")   # loose shape, used only to rank candidates
 _TZ_STANDARD_RE = re.compile(r"^T\d{3}[A-Z]{2,4}$")
+# Site validation "TZ": what may open a session without an operator.
+# Private plates are T + 3 digits + 3 letters (T123ABC); motorcycles MC123ABC;
+# government, police, army and diplomatic plates use their own prefixes with
+# digits. "T + anything" used to pass, so badge and glare reads such as TQYOTA,
+# T70DMT, TA93EPZ and T825QDZR opened sessions on SERVER01 (14 days, 60 plates,
+# none of them a real registration). Anything else is held for an operator.
+_TZ_VALID_RE = re.compile(
+    r"^(?:T\d{3}[A-Z]{3}"
+    r"|MC\d{3}[A-Z]{3}"
+    r"|(?:STK|STL|STM|STN|STJ|SU|SM|PT|JWTZ|DFPA|DFP|CD|TCDF)\d{2,5}[A-Z]{0,3})$"
+)
 _KE_RE = re.compile(r"^K[A-Z]{2}\d{3}[A-Z]$")
 _ZA_RE = re.compile(r"^[A-Z]{2,3}\d{2,3}[A-Z]{2}$")
 _AE_RE = re.compile(r"^[A-Z]?\d{1,6}$")
@@ -68,7 +79,7 @@ def validate_plate(value: str | None, policy: str = "NONE") -> dict[str, Any]:
         return {"ok": False, "policy": chosen, "result": "EMPTY", "normalized": ""}
     if chosen in {"", "NONE"}:
         return {"ok": True, "policy": "NONE", "result": "ACCEPTED", "normalized": normalised}
-    patterns = {"TZ": _TZ_RE, "KE": _KE_RE, "ZA": _ZA_RE, "AE": _AE_RE}
+    patterns = {"TZ": _TZ_VALID_RE, "KE": _KE_RE, "ZA": _ZA_RE, "AE": _AE_RE}
     regex = patterns.get(chosen)
     if regex is None:
         return {"ok": True, "policy": chosen, "result": "UNVALIDATED", "normalized": normalised}

@@ -82,6 +82,21 @@ It fixes the usual OCR mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`,
 `B`/`8` in the right positions, and a leading `T` hidden by a bolt that gets
 read as `7`. Restart the services afterwards (`zirpctl services restart`).
 
+Also set **Settings → Site → Plate validation** to `TZ`. Then only real
+Tanzanian formats open a visit on their own: `T123ABC`, motorcycles
+`MC123ABC`, and government, police, army and diplomatic plates (`STK…`, `PT…`,
+`JWTZ…`, `CD…`). Anything else, like a badge read as `TQYOTA` or a glare read
+like `T70DMT`, waits for an operator instead of opening a session.
+
+### When a car is read more than once
+
+Most cars are read several times: from the live video and from the camera's
+own snapshots. Zirp keeps one capture per car, and **the best read wins**. A
+weak read that's waiting for review is replaced by a more confident read of
+the same car, and two frames that agree exactly are enough to go ahead even
+when each is below the 0.92 confidence bar. A read that has already been
+decided (visit opened, exit checked) is never changed afterwards.
+
 ## Capture calibration (where on the picture a car counts)
 
 Every camera can be calibrated so only reads from the right part of the picture
@@ -89,7 +104,10 @@ become a visit. This stops cars in the next lane, or plates read from too far
 away, from opening the barrier.
 
 Open **Settings → Camera calibration**, select the camera and click
-**Calibrate selected camera…**. You can set:
+**Calibrate selected camera…**. On an Edge Node (signed in with its node
+account) it's the **Camera calibration** page. Cameras assigned to an Edge Node
+are calibrated on that node: only the computer that runs a camera has its live
+picture and plate boxes. You can set:
 
 | Rule | What it does | On by default |
 |---|---|---|
@@ -115,6 +133,24 @@ creating visits or opening the barrier. Use it after every calibration change.
 Calibration applies to every way a car can be read: the camera's own trigger,
 Zirp's video reader and the recognition worker. All of them go through the
 same check before a visit is created.
+
+### Start and end lines with the camera's own trigger
+
+With `SMARTPARK_CAPTURE_TRIGGER=external`, the camera decides when to take its
+snapshot, and it sends one or two stills per car. The lines can only accept or
+refuse those stills; they can't make the camera wait. On our first site,
+43% of one entry camera's snapshots were taken before the plate reached the
+drawn start line, so switching that line on would have refused those cars.
+
+If you want the start line to **start** the read, let Zirp trigger the camera:
+
+```
+SMARTPARK_CAPTURE_TRIGGER=zirp
+```
+
+Zirp then watches the live video and asks the camera for its full-resolution
+snapshot when the plate crosses the start line. Try it on one lane with test
+mode first. `both` keeps the camera's trigger as well.
 
 ## Troubleshooting
 

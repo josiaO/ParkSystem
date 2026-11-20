@@ -20,6 +20,31 @@ def _camera(db: Session, camera_id: int) -> Camera:
     return camera
 
 
+def _owning_edge_node(db: Session, camera: Camera) -> str:
+    """Name of the Edge Node running this camera, when it is not this computer.
+
+    The live picture, plate boxes and test-mode reads of a camera exist only in
+    the process that runs it. On the Site Server a camera handed to an Edge
+    Node therefore shows no picture here; the desktop says where to go instead.
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.models import Node, NodeGateAssignment
+        from app.services.node_scope import camera_owned_by_edge_node, is_processing_node
+
+        if is_processing_node() or not camera_owned_by_edge_node(camera, db=db):
+            return ""
+        name = db.scalar(
+            select(Node.name).join(NodeGateAssignment, NodeGateAssignment.node_id == Node.id)
+            .where(NodeGateAssignment.gate_id == camera.gate_id, NodeGateAssignment.enabled == True)  # noqa: E712
+            .order_by(Node.last_seen_at.desc())
+        )
+        return str(name or "an Edge Node")
+    except Exception:
+        return ""
+
+
 def register() -> APIRouter:
     router = APIRouter()
 
@@ -29,6 +54,7 @@ def register() -> APIRouter:
 
         camera = _camera(db, camera_id)
         return {
+            "owned_by_node": _owning_edge_node(db, camera),
             "calibration": calibration.load(db, camera),
             "defaults": dict(calibration.DEFAULTS),
             "limits": {k: list(v) for k, v in calibration.LIMITS.items()},

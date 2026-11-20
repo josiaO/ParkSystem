@@ -68,6 +68,52 @@ def post_recognition_scope(
 
 
 
+def _upgrade_visit_capture(db: Session, camera: Camera, capture: dict, jpeg: bytes, crop: bytes) -> str | None:
+    """Let a better or agreeing read of the same visit replace its held capture.
+
+    Returns the upgrade kind (``consensus`` / ``better`` / ``better_candidate``)
+    or None when the stored capture stays as it is.
+    """
+    from app.services import visit_reads
+    from app.services.captures import _plate_jpeg, _write_jpeg
+
+    visit_id = str(capture.get("visit_id") or "")
+    row = db.scalar(select(VehicleCapture).where(
+        VehicleCapture.camera_id == camera.id, VehicleCapture.visit_id == visit_id))
+    if row is None:
+        return None
+    incoming_plate = str(capture.get("plate") or "").strip().upper()
+    kind = visit_reads.plan_upgrade(
+        held=visit_reads.row_is_held(row),
+        held_plate=str(row.plate or ""),
+        held_confidence=float(row.confidence or 0),
+        incoming_plate=incoming_plate,
+        incoming_confidence=visit_reads.capture_confidence(capture),
+        incoming_held=visit_reads.capture_is_held(capture),
+    )
+    if kind is None:
+        return None
+    crop_ref = snapshot_ref = ""
+    if kind != visit_reads.CONSENSUS:
+        stem = f"cam{camera.id}-visit{visit_id[:12]}-{visit_reads.normalize_plate(incoming_plate) or 'plate'}"
+        try:
+            box = capture.get("bbox") if isinstance(capture.get("bbox"), dict) else None
+            plate_jpeg = _plate_jpeg(jpeg or b"", crop or b"", box, capture)
+            if plate_jpeg[:2] == b"\xff\xd8":
+                crop_ref = _write_jpeg("crops", f"{stem}.jpg", plate_jpeg)
+            if (jpeg or b"")[:2] == b"\xff\xd8":
+                snapshot_ref = _write_jpeg("snapshots", f"{stem}-car.jpg", jpeg)
+        except Exception:
+            log.debug("visit upgrade evidence failed camera=%s", camera.id, exc_info=True)
+    previous_plate, previous_conf = str(row.plate or ""), float(row.confidence or 0)
+    visit_reads.apply_upgrade(row, capture, kind, crop_ref=crop_ref, snapshot_ref=snapshot_ref)
+    db.commit()
+    log.info("camera=%s visit %s read %s: %s (%.2f) -> %s (%.2f)%s",
+             camera.id, visit_id[:12], kind, previous_plate, previous_conf, row.plate,
+             float(row.confidence or 0), "" if kind == visit_reads.BETTER_CANDIDATE else "; released for decision")
+    return kind
+
+
 async def _persist_capture_event(db: Session, camera: Camera, capture: dict | None, jpeg: bytes, crop: bytes) -> dict | None:
     from app.services.node_scope import camera_active_on_this_installation
     if not camera_active_on_this_installation(camera, db=db):
@@ -108,6 +154,15 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
             capture["visit_id"] = lane.visit.visit_id
             log.info("camera=%s new car %s while visit %s still held %s: new visit %s",
                      camera.id, new_plate, visit_id[:12], held_plate, capture["visit_id"][:12])
+    # Same car read again (same visit): the best read wins. A held first read
+    # (usually the 704 px live frame) must not swallow the camera's better
+    # full-resolution read of the same car. See app/services/visit_reads.py.
+    visit_upgrade = None
+    if capture.get("visit_id") and new_plate:
+        visit_upgrade = await asyncio.to_thread(_upgrade_visit_capture, db, camera, capture, jpeg, crop)
+        if visit_upgrade in {"consensus", "better"}:
+            capture["needs_review"] = False
+            capture["pending_confirmation"] = False
     started_ns = time.perf_counter_ns()
     previous = latest_for_camera(db, camera.id)
     previous_id = previous.id if previous else None
@@ -154,7 +209,12 @@ async def _persist_capture_event(db: Session, camera: Camera, capture: dict | No
     if not is_enabled("parking.sessions", db):
         return capture_dict(latest) if latest else None
     side = (camera.lane_direction or "ENTRY").upper()
-    new_capture = bool(row and (row.id != previous_id or row.plate != previous_plate))
+    new_capture = bool(row and (
+        row.id != previous_id or row.plate != previous_plate
+        # A held read of this visit was released by a better or agreeing read:
+        # this is the first time the car can be decided.
+        or visit_upgrade in {"consensus", "better"}
+    ))
     # Fuzzy OCR correction is for operator assistance only.  Automatic
     # barrier authority requires an exact normalized registered plate.
     entitlement = lookup_entitlement(db, row.plate, site_id=camera.site_id, strict=True) if row and row.plate else None

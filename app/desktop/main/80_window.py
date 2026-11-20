@@ -36,6 +36,10 @@ class MainWindow(DesktopShell):
             self.add_page(api.nav_label("users", "Users & Roles"), Users)
         if api.nav_page("settings") or api.can("settings.view") or api.can("dashboard.view"):
             self.add_page(api.nav_label("settings", "Settings"), lambda: SettingsPage(self))
+        elif api.can("cameras.manage"):
+            # Edge Node (Processing Node account): no site settings, but its
+            # cameras are calibrated here, where their live picture is.
+            self.add_page("Camera calibration", lambda: CalibrationPage(self))
         if api.nav_page("hardware"):
             self.add_page(api.nav_label("hardware", "Hardware Lab"), Hardware)
         if api.nav_page("sim"):

@@ -552,5 +552,7 @@ async def _run_local_alpr_locked(
         alpr = dict(alpr or {})
         alpr["persist_skipped"] = "below the camera's minimum recognition confidence"
         return alpr
-    await _persist_capture_event(db, camera, capture, jpeg, _crop_from_alpr(alpr, jpeg))
+    # Cropping decodes the full frame: keep it off the event loop.
+    plate_crop_jpeg = await asyncio.to_thread(_crop_from_alpr, alpr, jpeg)
+    await _persist_capture_event(db, camera, capture, jpeg, plate_crop_jpeg)
     return alpr
