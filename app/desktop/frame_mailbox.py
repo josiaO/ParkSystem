@@ -43,16 +43,26 @@ class FrameOrderGuard:
       the current one) is an old picture coming back.
     """
 
-    def __init__(self, memory=16):
+    def __init__(self, memory=16, *, clock=None):
+        import time
+
         self._memory = max(2, int(memory))
         self._recent = []
         self._current = None
         self._seq = {}
+        self._clock = clock or time.monotonic
+        self._refusing_since = None
 
     def reset(self):
         self._recent.clear()
         self._current = None
         self._seq.clear()
+        self._refusing_since = None
+
+    # Refusing every frame for this long means the source started over
+    # (restarted host, new decoder) with a low frame number, not that old
+    # frames keep arriving: start again from the next frame.
+    STUCK_SECONDS = 2.0
 
     # A camera frame number that drops by more than this is a restarted
     # source (HVX host restart, new decoder), not an older frame.
@@ -64,7 +74,13 @@ class FrameOrderGuard:
         if seq is not None:
             last = self._seq.get(source)
             if last is not None and int(seq) <= last and (last - int(seq)) < self.RESET_GAP:
-                return False
+                now = self._clock()
+                if self._refusing_since is None:
+                    self._refusing_since = now
+                if now - self._refusing_since < self.STUCK_SECONDS:
+                    return False
+                self.reset()             # source restarted: follow its new numbering
+        self._refusing_since = None
         key = hash(jpeg)
         if key == self._current:
             return False                 # same picture: nothing to repaint

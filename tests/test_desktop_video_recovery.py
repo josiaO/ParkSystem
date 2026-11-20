@@ -87,13 +87,14 @@ def test_clean_stream_eof_requests_reconnect():
     from app.desktop.frame_mailbox import DisplayMailbox
     from app.desktop.api import api
     import time
-    run, env = method('run', cls='MjpegStream')
+    run, env = method('_run_relay', cls='MjpegStream')   # the relay part of MjpegStream.run
     response = SimpleNamespace(status_code=200, iter_bytes=lambda: iter([]))
     client = SimpleNamespace(stream=lambda *a, **k: nullcontext(response), close=Mock())
     env.update(httpx=SimpleNamespace(Client=lambda **kw: client, Timeout=lambda **kw: kw),
                BASE='http://local', api=SimpleNamespace(base_url='http://local', _headers=lambda: {}), time=time)
-    thread = SimpleNamespace(_stop=False, camera_id=1, mailbox=DisplayMailbox(), failed=Mock(), frame=Mock())
-    run(thread)
+    thread = SimpleNamespace(_stop=False, camera_id=1, mailbox=DisplayMailbox(), failed=Mock(), frame=Mock(),
+                             LOCAL_PROBE_SECONDS=10.0)
+    assert run(thread) is False
     thread.failed.emit.assert_called_once_with('Camera stream ended; reconnecting.')
     client.close.assert_called_once()
 

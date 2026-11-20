@@ -276,11 +276,10 @@ class CameraLivePane(QFrame):
         if config.get("enabled") and len(zone) >= 3:
             from PySide6.QtCore import QPointF
             from PySide6.QtGui import QPolygonF
-            fill=QColor(255, 196, 0, 30)
-            painter.setBrush(fill)
+            # Outline only: a translucent antialiased fill of the whole zone
+            # cost ~4 ms per frame on the screen thread, per camera.
             painter.setPen(QPen(QColor(255, 196, 0), pen_w))
-            painter.drawPolygon(QPolygonF([QPointF(x * width, y * height) for x, y in zone]))
-            painter.setBrush(QColor(0, 0, 0, 0))
+            painter.drawPolyline(QPolygonF([QPointF(x * width, y * height) for x, y in zone + zone[:1]]))
         rules=config.get("enforce") or {}
         painter.setFont(QFont("Sans Serif", max(8, width // 90)))
         line=config.get("trigger_line") if config.get("enabled") else None

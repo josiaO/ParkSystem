@@ -147,6 +147,11 @@ def main():
     login=Login()
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()
+    try:
+        from app.desktop import cpu_watch
+        cpu_watch.start()          # logs what is busy when the desktop uses a lot of CPU
+    except Exception:
+        pass
     if w.restored_geometry:
         w.show()
     else:
