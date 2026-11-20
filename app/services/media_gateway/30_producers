@@ -18,6 +18,22 @@ class _GatewayProducersMixin:
         await self._reap_children(row)
         await asyncio.sleep(wait)
 
+    async def _sdk_handle_now(self, row: StreamSession, host) -> int | None:
+        """This camera's handle on this PC's SDK host, looked up by IP.
+
+        Falls back to the stored handle only while the host's connection list
+        cannot be read at all (the read itself will then fail and recover).
+        """
+        spec = row.spec
+        try:
+            live = await host.handle_for_ip(spec.ip)
+        except Exception:
+            return int(spec.sdk_handle) if spec.sdk_handle is not None else None
+        if live is None:
+            row.last_error = f"{spec.ip} is not connected on this PC's camera SDK host"
+            row.state = "DEGRADED"
+        return live
+
     async def _sdk_frames(self, row: StreamSession) -> bool:
         spec = row.spec
         generation = row.generation
@@ -26,13 +42,18 @@ class _GatewayProducersMixin:
             row.state = "DEGRADED"
             return False
         host = HVXHostClient()
+        # The handle this camera has on this PC's host *now*, by IP. The
+        # stored spec.sdk_handle can name another camera after a host restart.
+        handle = await self._sdk_handle_now(row, host)
+        if handle is None:
+            return False
         interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
         got = False
         last_jpeg_at = time.monotonic()
         previous_response_jpeg = b""
         initial_sequence_map = getattr(host, "last_live_seq", {})
         previous_response_seq = (
-            int(initial_sequence_map.get(int(spec.sdk_handle), 0) or 0)
+            int(initial_sequence_map.get(int(handle), 0) or 0)
             if isinstance(initial_sequence_map, dict) else 0
         )
         next_diag_at = 0.0
@@ -41,14 +62,20 @@ class _GatewayProducersMixin:
         row.source = "sdk"
         while row.wanted() or row.viewers > 0:
             started = time.monotonic()
+            current_handle = await self._sdk_handle_now(row, host)
+            if current_handle != handle:
+                # Reassigned or gone: restart this session on the right handle
+                # (new media generation) instead of reading another camera.
+                log.warning("camera=%s sdk handle changed %s -> %s; restarting video session",
+                            spec.id, handle, current_handle)
+                return False
             try:
-                jpeg = await host.live_jpeg(int(spec.sdk_handle))
+                jpeg = await host.live_jpeg(int(handle))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 row.last_error = str(exc)[:300]
                 jpeg = b""
-            handle = int(spec.sdk_handle)
             metadata_map = getattr(host, "last_live_meta", {})
             raw_meta = metadata_map.get(handle) if isinstance(metadata_map, dict) else {}
             meta = dict(raw_meta or {})
@@ -88,7 +115,7 @@ class _GatewayProducersMixin:
                 published = self.publish(
                     spec.id, jpeg,
                     source="sdk",
-                    url=f"sdk://handle/{int(spec.sdk_handle)}",
+                    url=f"sdk://handle/{int(handle)}",
                     source_seq=current_seq or None,
                     generation=generation,
                 )

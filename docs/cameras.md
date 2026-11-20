@@ -160,6 +160,7 @@ mode first. `both` keeps the camera's trigger as well.
 | Picture freezes now and then | Look at `http://<server>:8760/health/pipeline`: it shows the frame age and reconnect count per camera. Network drops show up there first. |
 | Live view works, but no plates | Run **Test Recognition**. If calibration is on, test mode tells you which rule refused the read (for example "plate too small"). |
 | Plates read wrong at night | Usually glare from headlights on two-row plates. Camera exposure or IR settings help more than anything in software. Turn on the Tanzania profile. |
+| One lane's car shows on the other lane's camera | Fixed in 1.0.0-rc6 (sessions are matched by camera IP). On older versions, restart the services after a camera-host restart. |
 | QY/HVX camera won't connect | The camera SDK host must be running (`SmartParkHvxHost` service or its sign-in task). Check `C:\ProgramData\SmartParkEdge\logs\services`. |
 
 ### Testing a camera without touching parking
