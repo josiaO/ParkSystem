@@ -151,29 +151,10 @@ class FieldAcceptanceScoringTests(unittest.TestCase):
         rows = evaluate_soak(samples, connected_ids={1})
         self.assertEqual(next(row for row in rows if row["id"] == "S2")["status"], PASS)
 
-    def test_windows_field_script_is_ascii(self):
-        path = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Run-FieldAcceptanceTest.ps1"
-        data = path.read_bytes()
-        data.decode("ascii")
-        self.assertNotIn("\u2014".encode("utf-8"), data)
-        self.assertIn(b"--password", data)
-        self.assertIn(b"keep cars moving", data)
-        lab = (Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Run-CameraLab.bat").read_bytes()
-        lab.decode("ascii")
-        self.assertNotIn("\u2014".encode("utf-8"), lab)
-
-    def test_windows_wipe_script_deletes_data_and_cache(self):
-        path = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Wipe-SmartPark.ps1"
-        data = path.read_bytes()
-        data.decode("ascii")
-        self.assertNotIn("\u2014".encode("utf-8"), data)
-        text = data.decode("ascii")
-        self.assertIn(r"ProgramData", text)
-        self.assertIn("SmartParkEdge", text)
-        self.assertIn("fast-plate-ocr", text)
-        self.assertIn("open-image-models", text)
-        self.assertIn("Unregister-ScheduledTask", text)
-        self.assertIn("Stop-SmartParkProcesses", text)
-        self.assertIn("SMARTPARK_*", text)
-        bat = (Path(__file__).resolve().parents[1] / "packaging" / "windows" / "Wipe-SmartPark.bat").read_text(encoding="ascii")
-        self.assertIn("Wipe-SmartPark.ps1", bat)
+    def test_windows_purge_requires_explicit_force(self):
+        text = (Path(__file__).resolve().parents[1] / "packaging" / "installer" / "bin" / "zirpctl.ps1").read_text(encoding="utf-8")
+        block = text[text.index('"purge-data" {'):text.index('default { throw "Unknown command')]
+        self.assertIn("if (-not $Force)", block)
+        # A Site Server's PostgreSQL is reset together with the photos (never photos alone).
+        self.assertLess(block.index("db reset --confirm-name"), block.index("Remove-Item -LiteralPath $DataDir"))
+        self.assertIn("local_photos_referenced_externally", block)

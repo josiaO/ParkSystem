@@ -29,6 +29,11 @@ RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 SITE_SERVER = "SITE_SERVER"
 OPERATOR_CLIENT = "OPERATOR_CLIENT"
 EDGE_NODE = "EDGE_NODE"
+# A station type refines a role. KIOSK = an Operator Client that is a
+# driver-facing payment kiosk: full screen, signs in with its device credential.
+STATION_STANDARD = ""
+STATION_KIOSK = "KIOSK"
+STATIONS = (STATION_STANDARD, STATION_KIOSK)
 
 
 def config_path() -> Path:
@@ -72,6 +77,11 @@ class DeploymentConfig:
     machine_name: str = ""
     configured_at: str = ""
     database: DatabaseConfig = field(default_factory=default_database_config)
+    station: str = STATION_STANDARD
+
+    @property
+    def is_kiosk(self) -> bool:
+        return self.role == OPERATOR_CLIENT and self.station == STATION_KIOSK
 
     @property
     def is_site_server(self) -> bool:
@@ -138,7 +148,17 @@ def _from_mapping(data: dict) -> DeploymentConfig:
         machine_name=str(data.get("machine_name") or socket.gethostname()),
         configured_at=str(data.get("configured_at") or ""),
         database=database_config_from_mapping(data.get("database")),
+        station=_station(data.get("station"), role),
     )
+
+
+def _station(value, role: str) -> str:
+    station = str(value or "").strip().upper()
+    if station not in STATIONS:
+        raise ValueError(f"Unsupported station type: {station}")
+    if station == STATION_KIOSK and role != OPERATOR_CLIENT:
+        raise ValueError("A kiosk station must use the Operator Client role")
+    return station
 
 
 def _legacy_config() -> DeploymentConfig:

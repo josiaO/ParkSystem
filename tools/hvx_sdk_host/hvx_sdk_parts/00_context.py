@@ -43,6 +43,7 @@ class _NullMetrics:
 
 
 HOST_METRICS = _latency.MetricsRegistry() if _latency is not None else _NullMetrics()
+HOST_PROCESS_STARTED_AT = time.monotonic()   # uptime for the leftover-decoder restart guard
 # Window for the callback / JPEG frame-rate diagnostics (a rolling rate, not lifetime).
 FPS_WINDOW_SECONDS = 60.0
 

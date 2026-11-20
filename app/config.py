@@ -24,6 +24,23 @@ def install_directory() -> Path:
     return Path(os.environ.get("SMARTPARK_HOME") or Path(__file__).resolve().parents[1]).resolve()
 
 
+def env_file_location() -> Path:
+    r"""Where the site's settings file lives.
+
+    Per-machine installs keep one settings file outside the versioned program
+    folder so upgrades and rollbacks never lose it:
+    ``%ProgramData%\SmartParkEdge\config\zirp.env``. ``SMARTPARK_ENV_FILE``
+    overrides; older installs keep ``<install>\.env``.
+    """
+    explicit = os.environ.get("SMARTPARK_ENV_FILE")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    machine = default_data_dir() / "config" / "zirp.env"
+    if machine.is_file():
+        return machine
+    return install_directory() / ".env"
+
+
 def default_node_id() -> str:
     """Return a stable per-computer identity for shared-site ownership.
 
@@ -70,7 +87,7 @@ def _ensure_dir(path: Path) -> None:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=install_directory() / ".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SMARTPARK_", env_file=env_file_location(), extra="ignore")
 
     app_name: str = PRODUCT_NAME
     app_version: str = "0.3.0"

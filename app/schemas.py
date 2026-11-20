@@ -361,6 +361,7 @@ class VehicleCreate(BaseModel):
     plate: str
     owner_name: str = ""
     plan_id: int | None = None
+    group_id: int | None = None
     enabled: bool = True
     valid_from: datetime | None = None
     valid_until: datetime | None = None
@@ -403,6 +404,7 @@ class VehicleUpdate(BaseModel):
     plate: str | None = None
     owner_name: str | None = None
     plan_id: int | None = None
+    group_id: int | None = None
     enabled: bool | None = None
     valid_from: datetime | None = None
     valid_until: datetime | None = None

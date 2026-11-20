@@ -189,6 +189,19 @@ class MockClickPesaFlowTests(unittest.TestCase):
         txns, paid, intent = self.ledger()
         self.assertEqual((txns, paid, intent.status), ([], 0.0, "FAILED"))
 
+    def test_unanswered_pin_prompt_closes_like_a_real_phone(self):
+        """The USSD PIN prompt does not wait for ever: the provider reports a failure."""
+        from app.mock_services.clickpesa import Faults
+
+        self.assertGreater(Faults().pin_timeout_seconds, 0)
+        self.start()
+        payment = self.phone("timeout")
+        self.assertEqual(payment.status, "FAILED")
+        txns, paid, intent = self.ledger()
+        self.assertEqual((txns, paid, intent.status), ([], 0.0, "FAILED"))
+        # A prompt already answered is not closed by a late timer.
+        self.assertEqual(self.phone("timeout").status, "FAILED")
+
     def test_ignored_prompt_expires_without_payment(self):
         self.start()
         self.age_intent(minutes=int(settings.payments_intent_expiry_minutes) + 1)

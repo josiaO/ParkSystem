@@ -108,6 +108,81 @@ def apply_session_payment_state(
     return row
 
 
+def _aware_utc(value):
+    from datetime import timezone
+
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def reopen_after_grace(db: Session, row: ParkingSession, *, at=None) -> bool:
+    """A paid car still inside after its exit grace owes the rest of its stay.
+
+    Payment freezes the price only for the walk/drive-to-exit grace. Once it
+    runs out the stay is quoted again from entry; if that is more than the
+    ledger holds, the visit goes back to ACTIVE with the difference due, and
+    its paid_at / grace are cleared so the next payment starts a fresh grace.
+    Returns True when the visit was reopened. Flushes, never commits.
+    """
+    from datetime import datetime, timezone
+
+    if (row.status or "").upper() != "PAID" or row.exit_time is not None:
+        return False
+    if (getattr(row, "parker_kind", None) or "CASUAL").upper() not in {"", "CASUAL"}:
+        return False
+    grace_until = _aware_utc(row.payment_exit_grace_until)
+    if grace_until is None:
+        return False
+    at = _aware_utc(at) or datetime.now(timezone.utc)
+    if at <= grace_until:
+        return False
+    from app.services.simulation import quote_session
+
+    quote_session(db, row, at=at, persist=False)
+    paid = paid_total(db, row.id)
+    row.amount_paid = paid
+    if float(row.amount_due or 0) <= paid + 0.0001:
+        db.flush()
+        return False      # the stay has not reached the next tariff step yet
+    row.status = "ACTIVE"
+    row.payment_status = PENDING
+    row.paid_at = None
+    row.payment_exit_grace_until = None
+    db.flush()
+    return True
+
+
+def reopen_expired_graces(db: Session, *, at=None, limit: int = 200) -> int:
+    """Background sweep: reopen every paid visit whose exit grace ran out."""
+    from datetime import datetime, timezone
+
+    from app.models import AuditLog
+
+    at = _aware_utc(at) or datetime.now(timezone.utc)
+    rows = db.scalars(
+        select(ParkingSession)
+        .where(
+            ParkingSession.status == "PAID",
+            ParkingSession.exit_time.is_(None),
+            ParkingSession.payment_exit_grace_until.is_not(None),
+            ParkingSession.payment_exit_grace_until < at,
+        )
+        .order_by(ParkingSession.id.asc())
+        .limit(int(limit))
+    ).all()
+    reopened = 0
+    for row in rows:
+        if reopen_after_grace(db, row, at=at):
+            reopened += 1
+            db.add(AuditLog(user_id=None, action="payments.grace_expired", target_type="parking_session",
+                            target_id=str(row.id),
+                            detail=f"{row.plate} still inside after the exit grace; "
+                                   f"{float(row.amount_due or 0) - float(row.amount_paid or 0):.2f} {row.currency or ''} more due"))
+    db.commit()
+    return reopened
+
+
 def record_succeeded_payment(
     db: Session,
     row: ParkingSession,

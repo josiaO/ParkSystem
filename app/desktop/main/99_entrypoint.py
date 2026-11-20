@@ -54,6 +54,21 @@ def _check_operator_server(config):
         raise RuntimeError("Site identity changed. Open deployment configuration and verify the Site Server.")
 
 
+def _apply_installer_station(config):
+    """The installer's Kiosk role sets SMARTPARK_STATION=KIOSK; persist it once."""
+    from dataclasses import replace
+
+    from app.deployment import OPERATOR_CLIENT, STATION_KIOSK, save_deployment_config
+
+    wanted = str(os.environ.get("SMARTPARK_STATION") or "").strip().upper()
+    if wanted != STATION_KIOSK or config.station == STATION_KIOSK or config.role != OPERATOR_CLIENT:
+        return config
+    try:
+        return save_deployment_config(replace(config, station=STATION_KIOSK))
+    except Exception:
+        return replace(config, station=STATION_KIOSK)
+
+
 def main():
     app=QApplication(sys.argv); app.setApplicationName(PRODUCT_NAME)
     assets = Path(__file__).resolve().parents[1] / "assets"
@@ -144,7 +159,8 @@ def main():
                         continue
                 return 1
     configure_desktop_base_url()
-    login=Login()
+    config = _apply_installer_station(config)
+    login=Login(kiosk_station=config.is_kiosk)
     if login.exec()!=QDialog.Accepted: return 0
     w=MainWindow()
     try:
@@ -152,7 +168,9 @@ def main():
         cpu_watch.start()          # logs what is busy when the desktop uses a lot of CPU
     except Exception:
         pass
-    if w.restored_geometry:
+    if config.is_kiosk:
+        w.showFullScreen()   # driver-facing payment kiosk
+    elif w.restored_geometry:
         w.show()
     else:
         w.showMaximized()

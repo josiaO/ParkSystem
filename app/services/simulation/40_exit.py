@@ -26,6 +26,9 @@ def mark_paid(
     operator_id: int | None = None,
     method: str = "KIOSK_CASH",
 ) -> ParkingSession:
+    from app.infrastructure.payments.ledger import reopen_after_grace
+
+    reopen_after_grace(db, row)   # overstayed the exit grace: a new grace follows this payment
     quote_session(db, row)
     from app.infrastructure.payments.ledger import cash_settlement_key, paid_total
     due = float(row.amount_due or 0)

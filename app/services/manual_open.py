@@ -289,6 +289,9 @@ def record_manual_open(
         command_ok=bool(command_ok),
         command_message=(command_message or "")[:2000],
         extra={**(extra or {}), "crop_ref": crop, "money_basis": money.get("basis", "")},
+        # NONE = alerts still to be queued (the delivery loop sweeps it);
+        # SKIPPED = the caller opted out, never swept.
+        alert_status="NONE" if queue_alerts else "SKIPPED",
         created_at=at,
     )
     db.add(event)
@@ -305,6 +308,12 @@ def record_manual_open(
         try:
             alerts.queue_for_event(db, event)
         except Exception as exc:  # alerting problems never block the barrier path
+            # The event stays alert_status='NONE'; the delivery loop's
+            # queue_unqueued_events sweep queues it later.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             log.error("manual-open alert queueing failed id=%s: %s", event.id, exc, exc_info=True)
     return event
 
