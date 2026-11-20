@@ -678,6 +678,12 @@ class _HVXVideoMixin:
             # behind after a viewer disconnects.
             if started - requested > 5.0:
                 retry_at = started + 5.0
+                # No viewer is not a frozen decoder. Without this, a viewer
+                # returning after >5 s (Site Service restart, Live Gates left
+                # and reopened) found "no progress for 5 s" and restarted a
+                # healthy decoder; when that stop failed, the old decoder kept
+                # running beside the new one (stutter, clock back and forth).
+                last_progress_at = time.monotonic()
                 time.sleep(0.25)
                 continue
             if started < not_before:
@@ -784,6 +790,13 @@ class _HVXVideoMixin:
                 if time.monotonic() - last_progress_at < 5.0:
                     # Between camera frames: wait for the next draw callback
                     # (or the same timeout as before), not a blind timer.
+                    self._wait_for_frame(handle, ready, max(0.05, interval))
+                    continue
+                with self._lock:
+                    callback_last = float(getattr(self, "_video_diagnostics", {}).get(handle, {}).get("callback_last_at") or 0.0)
+                if callback_last and time.monotonic() - callback_last < 2.0:
+                    # The current decoder is still delivering pictures (only
+                    # not copied yet): it is not empty, do not restart it.
                     self._wait_for_frame(handle, ready, max(0.05, interval))
                     continue
                 if time.monotonic() >= retry_at:
@@ -1273,6 +1286,48 @@ class _HVXVideoMixin:
             HOST_METRICS.observe("callback.draw_data", (time.perf_counter_ns() - callback_perf_ns) / 1_000_000.0)
             HOST_METRICS.incr(f"frames.callbacks.{int(handle)}")
 
+    # A decoder that could not be stopped lives inside this process and still
+    # takes camera bandwidth and decode time (the live picture dropped to ~5
+    # fps). Only a fresh process frees it: after this long, the host exits and
+    # the Windows service restarts it (about 15 s without video, once).
+    STALE_DECODER_RESTART_SECONDS = 60.0
+    STALE_DECODER_MIN_UPTIME_SECONDS = 300.0
+    STALE_DECODER_RESTART_HOLDOFF_SECONDS = 1800.0
+
+    def _note_stale_decoder(self, handle: int) -> None:
+        now = time.monotonic()
+        first = getattr(self, "_stale_first_at", None)
+        if first is None:
+            first = self._stale_first_at = {}
+        started = first.setdefault(int(handle), now)
+        if now - started < self.STALE_DECODER_RESTART_SECONDS or getattr(self, "_stale_restart_scheduled", False):
+            return
+        if now - float(getattr(self, "_process_started_at", 0.0) or HOST_PROCESS_STARTED_AT) < self.STALE_DECODER_MIN_UPTIME_SECONDS:
+            return
+        marker = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SmartParkEdge" / "hvx-host-stale-restart.txt"
+        try:
+            last = float(marker.read_text(encoding="utf-8").strip() or 0)
+        except Exception:
+            last = 0.0
+        if time.time() - last < self.STALE_DECODER_RESTART_HOLDOFF_SECONDS:
+            return                       # restarted for this recently: do not loop
+        self._stale_restart_scheduled = True
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+        logging.getLogger("smartpark.hvx").error(
+            "Leftover video decoder still running for handle=%s for %.0fs; restarting the SDK host to free it",
+            handle, now - started,
+        )
+
+        def leave():
+            time.sleep(1.0)              # let the log line and in-flight replies go out
+            os._exit(75)                 # the service manager starts a clean host
+
+        threading.Thread(target=leave, name="stale-decoder-restart", daemon=True).start()
+
     def _on_draw_data_inner(self, handle, hdd, bmi, data, width, height, user, callback_perf_ns) -> None:
         handle = int(handle)
         if user is not None:
@@ -1289,6 +1344,7 @@ class _HVXVideoMixin:
                 if diagnostics is not None:
                     diagnostics["stale_decoder_frames"] = stale[handle]
                     diagnostics["stale_decoder_last_at"] = time.monotonic()
+                self._note_stale_decoder(handle)
                 return
         width = int(width or 0)
         height_arg = int(height or 0)

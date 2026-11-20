@@ -56,6 +56,9 @@ class Faults:
     bad_checksum: bool = False          # Zirp must reject the webhook
     provider_down: bool = False         # every API call returns 503
     auto_approve_seconds: float = 0.0   # >0: approve pushes automatically (load tests)
+    # A real USSD PIN prompt closes on the phone after about a minute and the
+    # provider reports the push as failed. 0 = wait for ever (old behaviour).
+    pin_timeout_seconds: float = 60.0
 
 
 @dataclass
@@ -158,6 +161,11 @@ class MockClickPesa:
                 raise HTTPException(409, f"Payment is {payment.status}")
             payment.status = "FAILED"
             event = "PAYMENT FAILED"
+        elif action == "timeout":
+            if payment.status != "PROCESSING":
+                return payment
+            payment.status = "FAILED"
+            event = "PAYMENT FAILED"
         elif action == "reverse":
             if payment.status not in {"SUCCESS", "SETTLED"}:
                 raise HTTPException(409, "Only a successful payment can be reversed")
@@ -228,6 +236,12 @@ def create_app(mock: MockClickPesa | None = None) -> FastAPI:
                 if payment.status == "PROCESSING":
                     await mock.resolve(ref, "approve")
             asyncio.get_running_loop().create_task(_auto())
+        if mock.faults.pin_timeout_seconds > 0:
+            async def _pin_timeout(wait=float(mock.faults.pin_timeout_seconds)):
+                await asyncio.sleep(wait)
+                if payment.status == "PROCESSING":
+                    await mock.resolve(ref, "timeout")
+            asyncio.get_running_loop().create_task(_pin_timeout())
         return payment.public()
 
     @app.get(f"{BASE}/payments/{{order_reference}}")
@@ -311,11 +325,13 @@ PHONE_HTML = """<!doctype html><html><head><meta charset=utf-8><meta name=viewpo
 <script>
 const fmt=n=>Number(n).toLocaleString();
 async function act(ref,a){await fetch('/api/payments/'+encodeURIComponent(ref)+'/'+a,{method:'POST'});load()}
+let pinTimeout=0;fetch('/api/faults').then(r=>r.json()).then(f=>{pinTimeout=Number(f.pin_timeout_seconds)||0});
+const left=p=>{if(!pinTimeout)return'';const s=Math.max(0,Math.round(pinTimeout-(Date.now()-Date.parse(p.createdAt))/1000));return` <b>Closes in ${s}s.</b>`};
 async function load(){const r=await fetch('/api/payments');const rows=await r.json();const el=document.getElementById('list');
 if(!rows.length){el.innerHTML='<p class=muted>No prompts yet. Start a mobile payment from a receipt.</p>';return}
 el.innerHTML=rows.map(p=>`<div class=card><div class=row><div><div class=muted>+${p.phoneNumber} · ${p.channel}</div>
 <div class=amt>${p.currency} ${fmt(p.amount)}</div><div class=muted>Ref ${p.orderReference}</div></div><span class="pill ${p.status}">${p.status}</span></div>
-${p.status==='PROCESSING'?`<p class=muted>Enter PIN to pay ${p.currency} ${fmt(p.amount)} to ZIRP PARKING?</p><div class=row>
+${p.status==='PROCESSING'?`<p class=muted>Enter PIN to pay ${p.currency} ${fmt(p.amount)} to ZIRP PARKING?${left(p)}</p><div class=row>
 <button class=ok onclick="act('${p.orderReference}','approve')">Approve (PIN)</button><button class=bad onclick="act('${p.orderReference}','decline')">Decline</button></div>`:''}
 ${p.status==='SUCCESS'?`<div class=row><span class=muted>Collected ${p.collectedCurrency} ${fmt(p.collectedAmount)}</span><button class=ghost style="flex:0" onclick="act('${p.orderReference}','reverse')">Reverse</button></div>`:''}
 ${(p.webhooks||[]).map(w=>`<div class=muted>↳ ${w.event}: ${w.result}</div>`).join('')}</div>`).join('')}
@@ -329,7 +345,7 @@ ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8><meta name=viewpo
 <div class=card id=f></div></main>
 <script>
 const help={webhook_delay_seconds:'Delay webhooks (s)',drop_webhook:'Drop webhooks (reconciliation must settle)',duplicate_webhook:'Send every webhook twice',
-underpay_by:'Collect less than asked (TZS)',bad_checksum:'Forge webhook checksum',provider_down:'Provider outage (HTTP 503)',auto_approve_seconds:'Auto-approve after (s, 0 = off)'};
+underpay_by:'Collect less than asked (TZS)',bad_checksum:'Forge webhook checksum',provider_down:'Provider outage (HTTP 503)',auto_approve_seconds:'Auto-approve after (s, 0 = off)',pin_timeout_seconds:'PIN prompt closes after (s, 0 = never)'};
 async function save(k,v){await fetch('/api/faults',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({[k]:v})});load()}
 async function load(){const f=await (await fetch('/api/faults')).json();document.getElementById('f').innerHTML=Object.entries(f).map(([k,v])=>
 typeof v==='boolean'?`<label>${help[k]||k}<input type=checkbox ${v?'checked':''} onchange="save('${k}',this.checked)" style="width:auto"></label>`

@@ -159,10 +159,13 @@ class Gates(QWidget):
         run_task(self, lambda: api.runtime_client().post(f"/cameras/{cam_id}/led",{"text":text}), done, title="LED", status="Sending text to the display…")
 
 class VehicleDialog(QDialog):
-    def __init__(self, vehicle=None, plans=None):
+    def __init__(self, vehicle=None, plans=None, groups=None):
         super().__init__(); self.setWindowTitle("Edit vehicle" if vehicle else "Register plate")
         form=QFormLayout(self)
         self.plate=QLineEdit(); self.owner=QLineEdit(); self.plan=QComboBox(); self.enabled=QComboBox(); self.enabled.addItems(["Yes","No"]); self.notes=QLineEdit()
+        # Linked vehicles: a private owner's cars (one inside at a time) or a company fleet.
+        self.group=QComboBox(); self.group.addItem("— Not linked —", None)
+        for g in groups or []: self.group.addItem(g.get("display_name") or g.get("name") or "", g.get("id"))
         self.use_from=QCheckBox("Starts on")
         self.valid_from=QDateEdit(QDate.currentDate()); self.valid_from.setCalendarPopup(True); self.valid_from.setDisplayFormat("yyyy-MM-dd")
         self.use_until=QCheckBox("Ends on")
@@ -172,6 +175,8 @@ class VehicleDialog(QDialog):
             self.plate.setText(vehicle.get("plate") or ""); self.owner.setText(vehicle.get("owner_name") or "")
             idx=self.plan.findData(vehicle.get("plan_id"));
             if idx>=0: self.plan.setCurrentIndex(idx)
+            gidx=self.group.findData(vehicle.get("group_id"))
+            if gidx>=0: self.group.setCurrentIndex(gidx)
             self.enabled.setCurrentText("Yes" if vehicle.get("enabled") else "No")
             self.notes.setText(vehicle.get("notes") or "")
             start=_iso_date(str(vehicle.get("valid_from") or ""))
@@ -183,6 +188,7 @@ class VehicleDialog(QDialog):
                 self.use_until.setChecked(True)
                 self.valid_until.setDate(QDate.fromString(finish[:10], "yyyy-MM-dd"))
         form.addRow("Plate", self.plate); form.addRow("Owner", self.owner); form.addRow("Plan", self.plan)
+        form.addRow("Belongs to (company / linked cars)", self.group)
         form.addRow("Enabled", self.enabled); form.addRow("Notes", self.notes)
         from_row=QHBoxLayout(); from_row.addWidget(self.use_from); from_row.addWidget(self.valid_from)
         start_today=QPushButton("Start today"); start_today.clicked.connect(lambda: (self.use_from.setChecked(True), self.valid_from.setDate(QDate.currentDate())))
@@ -196,6 +202,7 @@ class VehicleDialog(QDialog):
         return {
             "plate": self.plate.text().strip(), "owner_name": self.owner.text().strip(),
             "plan_id": self.plan.currentData(), "enabled": self.enabled.currentText()=="Yes",
+            "group_id": self.group.currentData(),
             "notes": self.notes.text().strip(),
             "valid_from": _iso_date(self.valid_from.date().toString("yyyy-MM-dd")) if self.use_from.isChecked() else None,
             "valid_until": _iso_date(self.valid_until.date().toString("yyyy-MM-dd"), end=True) if self.use_until.isChecked() else None,
@@ -209,6 +216,9 @@ def mobile_unconfirmed_message(state: str) -> str:
     return ("No confirmation from ClickPesa yet. Do not take cash now: the driver may still be "
             "charged, and a late approval is credited automatically. Look this visit up again "
             "in a few minutes; it shows as paid once ClickPesa confirms.")
+
+
+AUTO_REFRESH_MS=8000
 
 
 class Sessions(QWidget):
@@ -266,13 +276,65 @@ class Sessions(QWidget):
         admit.setVisible(api.can("gates.open"))
         admit.setToolTip("Open the entry barrier for a visit waiting on a receipt. Requires a reason; recorded in the audit log.")
         self.admit_btn=admit
-        row.addWidget(receipt); row.addWidget(admit); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        # A boom opened by hand does not prove the car left: the guard confirms
+        # the exit here (photo + reason), or sends it to a supervisor.
+        confirm_exit=QPushButton("Confirm vehicle left…"); confirm_exit.clicked.connect(self.confirm_exit)
+        confirm_exit.setVisible(api.can("exits.confirm")); self.confirm_exit_btn=confirm_exit
+        confirm_exit.setToolTip("The camera missed an exit or the boom was opened by hand: confirm the car left, with a reason.")
+        waiting=QPushButton("Linked cars inside / exits waiting…"); waiting.clicked.connect(self.exits_waiting)
+        waiting.setVisible(api.can("exits.confirm"))
+        row.addWidget(receipt); row.addWidget(admit); row.addWidget(confirm_exit); row.addWidget(waiting); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
         self.rows=[]; self.visit=None; self._loaded=False
+        # Payments arrive from phones, kiosks and other desks: while this page
+        # is on screen it re-reads the list and the shown visit by itself.
+        self._auto=QTimer(self); self._auto.setInterval(AUTO_REFRESH_MS); self._auto.timeout.connect(self._auto_refresh)
     def showEvent(self, event):
         super().showEvent(event)
         if not self._loaded:
             self._loaded=True
             self.refresh()
+        else:
+            self._auto_refresh()
+        self._auto.start()
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._auto.stop()
+    def _auto_refresh(self):
+        if getattr(self, "_auto_busy", False):
+            return
+        from urllib.parse import quote
+        token=(self.visit or {}).get("token")
+        def load():
+            rows=api.get("/sessions", timeout=10) if getattr(self, "can_browse", True) else None
+            visit=api.get(f"/sessions/lookup?q={quote(str(token), safe='')}", timeout=10) if token else None
+            return rows, visit
+        def done(result):
+            self._auto_busy=False
+            rows, visit = result
+            if rows is not None:
+                self._fill_rows(rows)
+            if visit and (self.visit or {}).get("token")==token:
+                self._show_visit(visit, quiet=True)
+        def failed(_message, _exc):
+            self._auto_busy=False   # a missed refresh is retried on the next tick
+        self._auto_busy=True
+        run_task(self, load, done, on_error=failed)
+    def confirm_exit(self):
+        from app.desktop.linked_vehicles import open_manual_exit
+        s=self.selected() if getattr(self, "can_browse", False) else None
+        query=(f"#{s['id']}" if s and s.get("id") else "") or str((self.visit or {}).get("token") or "") or self.query.text().strip()
+        if not query:
+            QMessageBox.information(self,"Confirm vehicle left","Select a session, scan its receipt or type the plate first."); return
+        def done(result):
+            confirmation=(result or {}).get("confirmation") or {}
+            QMessageBox.information(self,"Confirm vehicle left",
+                "Exit recorded." if confirmation.get("action")=="MANUAL_EXIT_CONFIRMED"
+                else "Sent to a supervisor. Linked cars stay blocked until it is decided.")
+            self.refresh()
+        open_manual_exit(self, query, on_done=done)
+    def exits_waiting(self):
+        from app.desktop.linked_vehicles import PendingExitsDialog
+        PendingExitsDialog(self).exec(); self.refresh()
     def admit_without_receipt(self):
         s=self.selected()
         if not s: QMessageBox.information(self,"Admit without receipt","Select a session first."); return
@@ -307,7 +369,8 @@ class Sessions(QWidget):
             label.setPixmap(pix.scaled(320, 180, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         run_task(self, lambda: api.get_bytes(path, timeout=12), done,
                  on_error=lambda _m, _e: label.setText(empty or "Photo not available.") if getattr(label, "_photo_request", None) is token else None)
-    def _show_visit(self, data):
+    def _show_visit(self, data, quiet=False):
+        """``quiet``: a background re-read of the same visit; keep photos and typing."""
         self.visit=data or None
         if not data:
             self.kiosk_plate.setText("—")
@@ -331,11 +394,14 @@ class Sessions(QWidget):
         else:
             self.kiosk_due.setText(data.get("pay_blocked_reason") or "Nothing to pay.")
         self.kiosk_note.setText(data.get("image_note") or "")
-        self.correct.setText("" if data.get("image_matches_plate") is False else (data.get("plate") or ""))
+        if not quiet:
+            self.correct.setText("" if data.get("image_matches_plate") is False else (data.get("plate") or ""))
         payable=bool(data.get("payable"))
         self.pay_btn.setEnabled(payable)
         self.mobile_btn.setEnabled(payable and bool(data.get("token")))
         self.exit_btn.setEnabled(bool(data.get("token")) and data.get("still_inside") is not False)
+        if quiet:
+            return
         self._pixmap(self.photo, data.get("snapshot_url"), "No entry photo stored.")
         self._pixmap(self.crop, data.get("crop_url"), "")
     def _exit_lanes(self):
@@ -446,6 +512,7 @@ class Sessions(QWidget):
         run_task(self, lambda: api.get("/sessions"), self._fill_rows,
                  buttons=getattr(self, "refresh_btn", None), busy_text="Refreshing…", on_error=failed)
     def _fill_rows(self, rows):
+        keep=(self.selected() or {}).get("id")
         self.rows=rows or []
         self._filling=True
         self.table.setRowCount(len(self.rows))
@@ -461,6 +528,8 @@ class Sessions(QWidget):
                 s.get("gate_id") or "—",
             ]
             for c,val in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(val)))
+            if keep is not None and s.get("id")==keep:
+                self.table.selectRow(r)
         self._filling=False
     def selected(self):
         row=self.table.currentRow()
@@ -675,7 +744,7 @@ class Vehicles(QWidget):
         title=QLabel("Registered vehicles"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
         note=QLabel("Registered vehicles and access plans. A matching plate can be allowed through when gate access is enabled.")
         note.setWordWrap(True); l.addWidget(note)
-        self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(["Plate","Owner","Plan","Auto-open","Enabled","From","Until"])
+        self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Owner","Belongs to","Plan","Auto-open","Enabled","From","Until"])
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         configure_table(self.table); l.addWidget(self.table, 1)
         bulk_note=QLabel("Register many, one plate per line: plate, owner, start date, end date")
@@ -690,9 +759,14 @@ class Vehicles(QWidget):
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete); delete.setVisible(manage); delete.setToolTip("Delete (Del)")
         delete_many=QPushButton(action_label("Delete selected", "Del")); delete_many.clicked.connect(self.delete_selected); delete_many.setVisible(manage); delete_many.setToolTip("Delete selected (Del)")
         refresh=QPushButton(action_label("Refresh", "F5")); refresh.clicked.connect(self.refresh); refresh.setToolTip("Refresh (F5)")
+        groups=QPushButton("Linked cars & companies…"); groups.clicked.connect(self.open_groups)
+        groups.setToolTip("Group a private owner's cars (one inside at a time) or a company's fleet")
+        visitors=QPushButton("Visitor passes…"); visitors.clicked.connect(self.open_visitors)
+        visitors.setVisible(api.can("visitors.manage") or manage)
         self.refresh_btn=refresh; self.add_btn=add; self.bulk_btn=bulk; self.edit_btn=edit
         self.status=QLabel(""); self.status.setWordWrap(True)
-        row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh)
+        row.addWidget(groups); row.addWidget(visitors); row.addStretch(); l.addLayout(row)
         l.addWidget(self.status)
         self.rows=[]; self._loaded=False
     def showEvent(self, event):
@@ -710,7 +784,7 @@ class Vehicles(QWidget):
         self.table.setRowCount(len(self.rows))
         for r,v in enumerate(self.rows):
             vals=[
-                v["plate"], v.get("owner_name") or "—", v.get("plan_name") or "—",
+                v["plate"], v.get("owner_name") or "—", v.get("belongs_to") or "—", v.get("plan_name") or "—",
                 "Yes" if v.get("auto_open") else "No", "Yes" if v.get("enabled") else "No",
                 (v.get("valid_from") or "—")[:10], (v.get("valid_until") or "—")[:10],
             ]
@@ -730,14 +804,29 @@ class Vehicles(QWidget):
         show_status(self, text)
         self.status.setText(text)
         self.refresh()
+    def open_groups(self):
+        from app.desktop.linked_vehicles import GroupsDialog
+        GroupsDialog(self).exec(); self.refresh()
+    def open_visitors(self):
+        from app.desktop.linked_vehicles import VisitorsDialog
+        VisitorsDialog(self).exec()
+    @staticmethod
+    def _plans_and_groups():
+        plans=api.get("/access-plans")
+        try:
+            groups=api.get("/vehicle-groups")
+        except Exception:
+            groups=[]   # an older Site Service without linked groups
+        return plans, groups
     def add(self):
-        def with_plans(plans):
-            d=VehicleDialog(plans=plans)
+        def with_plans(loaded):
+            plans, groups = loaded
+            d=VehicleDialog(plans=plans, groups=groups)
             if d.exec():
                 payload=d.payload()
                 run_task(self, lambda: api.post("/vehicles", payload), lambda _r: self._saved(f"Registered {payload.get('plate')}."),
                          buttons=self.add_btn, busy_text="Saving…", title="Register plate")
-        run_task(self, lambda: api.get("/access-plans"), with_plans, buttons=self.add_btn, busy_text="Opening…", title="Register plate")
+        run_task(self, self._plans_and_groups, with_plans, buttons=self.add_btn, busy_text="Opening…", title="Register plate")
     def add_bulk(self):
         lines=[line.strip() for line in self.bulk.toPlainText().splitlines() if line.strip()]
         if not lines:
@@ -767,13 +856,14 @@ class Vehicles(QWidget):
     def edit(self):
         v=self.selected()
         if not v: QMessageBox.information(self,"Edit","Select a plate first."); return
-        def with_plans(plans):
-            d=VehicleDialog(v, plans=plans)
+        def with_plans(loaded):
+            plans, groups = loaded
+            d=VehicleDialog(v, plans=plans, groups=groups)
             if d.exec():
                 payload=d.payload(); vid=v['id']
                 run_task(self, lambda: api.patch(f"/vehicles/{vid}", payload), lambda _r: self._saved(f"Saved {payload.get('plate')}."),
                          buttons=self.edit_btn, busy_text="Saving…", title="Edit")
-        run_task(self, lambda: api.get("/access-plans"), with_plans, buttons=self.edit_btn, busy_text="Opening…", title="Edit")
+        run_task(self, self._plans_and_groups, with_plans, buttons=self.edit_btn, busy_text="Opening…", title="Edit")
     def delete(self):
         v=self.selected()
         if not v: return

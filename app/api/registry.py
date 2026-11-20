@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from . import alerts, capture_calibration_routes, payment_settings, payments, recognition
+from . import alerts, capture_calibration_routes, payment_settings, payments, recognition, vehicle_groups_routes
 
 
 def register_subsystem_routers(app: FastAPI, handlers: Mapping[str, Any]) -> None:
@@ -18,3 +18,4 @@ def register_subsystem_routers(app: FastAPI, handlers: Mapping[str, Any]) -> Non
     app.include_router(alerts.register())
     app.include_router(payment_settings.register())
     app.include_router(capture_calibration_routes.register())
+    app.include_router(vehicle_groups_routes.register())

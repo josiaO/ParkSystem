@@ -314,10 +314,12 @@ def create_vehicle(payload: VehicleCreate, db: Session = Depends(get_db), user: 
         plan_id = first.id if first else None
     if plan_id and db.get(AccessPlan, plan_id) is None:
         raise HTTPException(404, "Access plan not found")
+    if payload.group_id and db.get(VehicleGroup, payload.group_id) is None:
+        raise HTTPException(404, "Vehicle group not found")
     row = RegisteredVehicle(
         plate=plate, owner_name=payload.owner_name or "", plan_id=plan_id,
         enabled=payload.enabled, valid_from=payload.valid_from, valid_until=payload.valid_until,
-        notes=payload.notes or "",
+        notes=payload.notes or "", group_id=payload.group_id or None,
     )
     db.add(row)
     commit_or_conflict(db, "That number plate is already registered")
@@ -338,6 +340,10 @@ def update_vehicle(vehicle_id: int, payload: VehicleUpdate, db: Session = Depend
             raise HTTPException(400, "Enter a number plate")
     if data.get("plan_id") and db.get(AccessPlan, data["plan_id"]) is None:
         raise HTTPException(404, "Access plan not found")
+    if "group_id" in data:
+        data["group_id"] = data["group_id"] or None
+        if data["group_id"] and db.get(VehicleGroup, data["group_id"]) is None:
+            raise HTTPException(404, "Vehicle group not found")
     for key, value in data.items():
         setattr(row, key, value)
     commit_or_conflict(db, "That number plate is already registered")
@@ -368,7 +374,7 @@ def create_vehicles_bulk(payload: VehicleBulkCreate, db: Session = Depends(get_d
         row = RegisteredVehicle(
             plate=plate, owner_name=item.owner_name or "", plan_id=plan_id,
             enabled=item.enabled, valid_from=item.valid_from, valid_until=item.valid_until,
-            notes=item.notes or "",
+            notes=item.notes or "", group_id=item.group_id or None,
         )
         db.add(row)
         try:

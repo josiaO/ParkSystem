@@ -109,6 +109,22 @@ class OperatorDeskTests(unittest.TestCase):
         self.assertIn("Time inside", page.text)
         self.assertIn("disabled", page.text)
 
+    def test_server_pay_page_sends_drivers_to_the_one_public_portal(self):
+        from unittest.mock import patch
+
+        from app.config import settings
+
+        self._open(plate="T201DEF", hours_ago=3)
+        with patch.object(settings, "public_base_url", "http://192.168.100.117:3000"):
+            res = self.client.get("/p/tok-T201DEF", follow_redirects=False)
+            self.assertEqual(res.status_code, 307)
+            self.assertEqual(res.headers["location"], "http://192.168.100.117:3000/p/tok-T201DEF")
+            # The API the portal itself uses is not redirected.
+            self.assertEqual(self.client.get("/p/tok-T201DEF/status").status_code, 200)
+        # A public URL that is this server keeps the built-in page (no loop).
+        with patch.object(settings, "public_base_url", "http://testserver"):
+            self.assertEqual(self.client.get("/p/tok-T201DEF", follow_redirects=False).status_code, 200)
+
     def test_tariff_form_round_trip(self):
         saved = self.client.patch("/fees/tariff", headers=self.headers, json={
             "day_block_fee": 1500,

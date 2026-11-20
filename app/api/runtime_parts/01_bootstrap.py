@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.config import settings
 from app.db import Base, engine, ensure_schema, get_db, run_db, short_session, SessionLocal, release_connection
 from app.domain.site import DEFAULT_SITE_ID
-from app.models import AccessPlan, AccessDecision, AuditLog, Camera, CameraStatus, Gate, GateCommandRecord, GateMode, Node, NodeGateAssignment, ParkingEntryClaim, ParkingSession, PaymentIntent, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture
+from app.models import AccessPlan, AccessDecision, AuditLog, Camera, CameraStatus, Gate, GateCommandRecord, GateMode, Node, NodeGateAssignment, ParkingEntryClaim, ParkingSession, PaymentIntent, PaymentTransaction, Receipt, RegisteredVehicle, Role, Site, Tariff, User, VehicleCapture, VehicleGroup
 from app.schemas import (
     CameraCreate, CameraFramingUpdate, CameraImport, CameraOnboardProbe, CameraOnboardTest, CameraUpdate, FeeQuoteRequest, FusionRequest, GateCreate, GateUpdate, LedWrite,
     LoginRequest, LoginResponse, ManualGateCommand, MigrationFlagsUpdate, ModelPackRequest, ParkingSettingsUpdate, PaymentConfirm, PublicPaymentIntentRequest, ExitQrScanRequest, PlateCorrection, PlateEngineCorrection, SessionCreate, SimEntryRequest, SimExitRequest,
@@ -226,7 +226,16 @@ DEFAULT_ROLES = {
         "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
         "gates.open", "gates.open_simulated", "fees.view",
         "subscribers.view", "sessions.view", "sessions.create", "payments.view", "payments.create",
-        "settings.view",
+        "settings.view", "exits.confirm", "visitors.manage",
+    ]),
+    # Shift supervisor: everything an operator does, plus closing visits and
+    # deciding uncertain exits of linked vehicles (exits.reconcile).
+    "Supervisor": ",".join([
+        "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
+        "gates.open", "gates.open_simulated", "fees.view",
+        "subscribers.view", "subscribers.manage", "sessions.view", "sessions.create", "sessions.close",
+        "payments.view", "payments.create", "settings.view", "alerts.view",
+        "exits.confirm", "exits.reconcile", "visitors.manage",
     ]),
     "Developer": ",".join([
         "dashboard.view", "cameras.view", "cameras.connect", "gates.view",
@@ -234,6 +243,7 @@ DEFAULT_ROLES = {
         "subscribers.view", "subscribers.manage", "sessions.view",
         "payments.view", "payments.create", "settings.view", "settings.manage",
         "users.view", "alerts.view", "sessions.create", "sessions.close",
+        "exits.confirm", "exits.reconcile", "visitors.manage",
     ]),
     # A kiosk may be driver-facing and unattended: it finds the visit on the
     # receipt (or plate) in front of it and takes payment for that visit only.
@@ -661,25 +671,25 @@ def favicon():
     return FileResponse(WEB_DIR / "assets" / "zirp.ico", media_type="image/x-icon")
 
 
-@app.get("/downloads/zirp-installer.zip", include_in_schema=False)
+@app.get("/downloads/zirp-setup.exe", include_in_schema=False)
 def download_zirp_installer():
-    """Download a clean installer package for another LAN computer.
+    """Download this site's Zirp installer for another LAN computer.
 
-    This endpoint deliberately excludes ``settings.data_dir``.  It can be
-    linked from the unauthenticated login page because the archive contains
-    application/runtime files only, never this site's database or secrets.
+    Serves the installer file the Site Server was installed with (it keeps a
+    copy of itself). It can be linked from the unauthenticated login page
+    because it is the release installer only, never this site's data or secrets.
     """
     try:
-        from app.services.installer_download import build_installer_archive
+        from app.services.installer_download import latest_installer
 
-        archive = build_installer_archive()
+        setup = latest_installer()
     except (FileNotFoundError, OSError, ValueError) as exc:
         log.warning("LAN installer download unavailable: %s", redact_text(str(exc)))
-        raise HTTPException(404, "The installer package is not available on this installation") from exc
+        raise HTTPException(404, "The installer is not available on this computer") from exc
     return FileResponse(
-        archive,
-        media_type="application/zip",
-        filename="Zirp-Installer.zip",
+        setup,
+        media_type="application/vnd.microsoft.portable-executable",
+        filename=setup.name,
         headers={"Cache-Control": "no-cache"},
     )
 
@@ -694,6 +704,18 @@ def health():
 def health_live():
     from app.services.health import live
     return live()
+
+
+@app.get("/health/pipeline")
+def health_pipeline():
+    """Which helper processes this site's cameras need (no camera details).
+
+    QY/HVX cameras are read through the SDK host: they need neither MediaMTX
+    (Media Service) nor the Recognition Worker. Only generic IP cameras do.
+    The desktop launcher asks this before starting those helpers.
+    """
+    from app.services.health import pipeline_needs
+    return pipeline_needs()
 
 
 @app.get("/deployment/info")

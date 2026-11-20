@@ -1,6 +1,6 @@
 # HVX SDK Host
 
-This process exists because the camera vendor SDK is **32-bit Windows x86** while SmartPark stays a normal 64-bit application.
+This process exists because the camera vendor SDK is **32-bit Windows x86** while the rest of Zirp is a normal 64-bit application.
 
 It uses only the Python standard library and `ctypes` so the 32-bit environment stays small.
 
@@ -17,7 +17,7 @@ OcxConfig/DecodeSdk.dll
 
 `hvx_host.py` loads that directory automatically. Override with `SMARTPARK_HVX_VENDOR_DIR` if needed. `vendor/` is only a fallback.
 
-If the vendor requires a USB license dongle (SoftDog / SuperDog), plug it into this PC. See [docs/16-OPENCV-AND-SOFTDOG.md](../../docs/16-OPENCV-AND-SOFTDOG.md).
+If the vendor requires a USB license dongle (SoftDog / SuperDog), plug it into this PC. Camera setup is described in [docs/cameras.md](../../docs/cameras.md).
 
 ## Run
 

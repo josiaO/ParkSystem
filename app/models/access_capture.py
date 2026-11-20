@@ -78,12 +78,16 @@ class RegisteredVehicle(Base):
     plate: Mapped[str] = mapped_column(String(32), index=True)
     owner_name: Mapped[str] = mapped_column(String(160), default="")
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("access_plans.id"), nullable=True)
+    # Linked vehicles (one owner's private cars, or a company fleet) share the
+    # group's entitlement and occupancy limit. NULL = an independent vehicle.
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("vehicle_groups.id", ondelete="SET NULL"), nullable=True, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     valid_from: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     valid_until: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(AwareDateTime(), default=utcnow)
     plan: Mapped[AccessPlan | None] = relationship(back_populates="vehicles")
+    group: Mapped["VehicleGroup | None"] = relationship("VehicleGroup", lazy="selectin")  # noqa: F821
 
 class AccessDecision(Base):
     """Authorization outcome for one plate event. Does not pulse hardware."""

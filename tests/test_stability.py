@@ -49,7 +49,9 @@ class QueueAndCircuitTests(unittest.TestCase):
         self.assertTrue(snap["alert"])
 
     def test_outbox_survives_ack(self):
-        dest = Path("/tmp/smartpark-outbox-test.jsonl")
+        import tempfile
+
+        dest = Path(tempfile.gettempdir()) / "smartpark-outbox-test.jsonl"  # /tmp does not exist on Windows
         dest.write_text("", encoding="utf-8")
         box = DurableOutbox(dest)
         item_id = box.enqueue("plate-event", {"plate": "T123ABC"})
