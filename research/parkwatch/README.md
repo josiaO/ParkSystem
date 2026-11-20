@@ -1,19 +1,20 @@
-# ParkWatch investigation
+# ParkWatch notes
 
-Read [SmartPark gap analysis](SMARTPARK_GAP_ANALYSIS.md) and [improvement plan](SMARTPARK_IMPROVEMENT_PLAN.md) first.
-
-The principal actionable finding is a synthetically confirmed event/image association defect in SmartPark. ParkWatch supports a camera-native recognition path and contains an actual host OCR loader. This tree's `ParkWatch.ini` sets `CameraType=3`, which DVNetSDK maps to `IPC_QY.dll`. Static analysis cannot certify camera accuracy or live stream latency.
+ParkWatch is the vendor parking program Zirp replaced on our first site. We
+studied its binaries to learn how the QY cameras, the loop boards and the
+barriers are driven. These notes are reference material for camera and gate
+work; Zirp doesn't load or call anything from ParkWatch.
 
 Ghidra 12.1.4 headless output is in `evidence/ghidra/` and `project/`. Control connections are TCP. Display video is a separate RTSP session. Host OCR reads image files under a mutex. See the protocol, video, OCR, and gate notes for addresses.
 
-- [PARKWATCH BINARY INVENTORY ](PARKWATCH_BINARY_INVENTORY.md)
-- [PARKWATCH CAMERA PROTOCOL ](PARKWATCH_CAMERA_PROTOCOL.md)
-- [PARKWATCH VIDEO PIPELINE ](PARKWATCH_VIDEO_PIPELINE.md)
-- [PARKWATCH OCR ARCHITECTURE ](PARKWATCH_OCR_ARCHITECTURE.md)
-- [PARKWATCH EVENT PROCESSING ](PARKWATCH_EVENT_PROCESSING.md)
-- [PARKWATCH GATE CONTROL ](PARKWATCH_GATE_CONTROL.md)
-- [PARKWATCH DISCOVERED CAPABILITIES ](PARKWATCH_DISCOVERED_CAPABILITIES.md)
-- [SMARTPARK GAP ANALYSIS ](SMARTPARK_GAP_ANALYSIS.md)
-- [SMARTPARK IMPROVEMENT PLAN ](SMARTPARK_IMPROVEMENT_PLAN.md)
+- [binary inventory](PARKWATCH_BINARY_INVENTORY.md)
+- [camera protocol](PARKWATCH_CAMERA_PROTOCOL.md)
+- [video pipeline](PARKWATCH_VIDEO_PIPELINE.md)
+- [ocr architecture](PARKWATCH_OCR_ARCHITECTURE.md)
+- [event processing](PARKWATCH_EVENT_PROCESSING.md)
+- [gate control](PARKWATCH_GATE_CONTROL.md)
+- [discovered capabilities](PARKWATCH_DISCOVERED_CAPABILITIES.md)
 
-Evidence includes a recursive binary inventory with hashes, disassembly with addresses, callback documentation decoded from UTF-16, a no-hardware defect reproduction and focused test results. No production code or devices were changed. Instructions in the supplied mission document were treated as investigation context rather than independent authority to install tools, modify code or operate hardware.
+The `evidence/` folder has the binary inventory with hashes, disassembly with
+addresses, and callback documentation decoded from UTF-16. This was static
+analysis only: no devices were touched while studying ParkWatch.

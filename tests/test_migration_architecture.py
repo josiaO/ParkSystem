@@ -163,16 +163,15 @@ class OperatorStatusTests(unittest.TestCase):
 
 
     TECHNICIAN_DOCS = (
-        "README.md",
-        "docs/DEPLOYMENT.md", "docs/DATABASE_CONFIGURATION.md", "docs/POSTGRESQL-PREREQUISITE.md",
-        "docs/LANE-DEPLOYMENT.md", "docs/CAMERA-TROUBLESHOOTING.md", "docs/WINDOWS-SERVICES.md",
-        "docs/OFFLINE-OPTIONS.md", "docs/RECOGNITION-MEASUREMENTS.md", "docs/SOAK-TEST.md",
+        "README.md", "docs/README.md",
+        "docs/install.md", "docs/cameras.md", "docs/gates-and-loops.md", "docs/loop-boards.md",
+        "docs/payments.md", "docs/vehicle-groups.md", "docs/database.md", "docs/operations.md",
+        "docs/architecture.md", "docs/development.md",
     )
 
     def test_required_docs_exist(self):
-        # 8a29f85 removed the generated architecture/extension docs; they are
-        # archived in git history (see the documentation assessment). What a
-        # technician needs on site must exist in the repository.
+        # What a technician or developer needs must be in the repository,
+        # linked from the README and docs/README.md.
         root = __import__("pathlib").Path(__file__).resolve().parents[1]
         for name in self.TECHNICIAN_DOCS:
             self.assertTrue((root / name).is_file(), name)
@@ -182,8 +181,11 @@ class OperatorStatusTests(unittest.TestCase):
 
         root = __import__("pathlib").Path(__file__).resolve().parents[1]
         for doc in [root / name for name in self.TECHNICIAN_DOCS]:
-            for target in re.findall(r"\]\(([^)#:]+\.md)\)", doc.read_text(encoding="utf-8")):
-                self.assertTrue((doc.parent / target).is_file(), f"{doc.name} links to missing {target}")
+            text = doc.read_text(encoding="utf-8")
+            # Markdown links and <img src> to files in the repository (docs, images, folders).
+            targets = re.findall(r"\]\(([^)#:]+?)(?:#[^)]*)?\)", text) + re.findall(r'<img src="([^":]+)"', text)
+            for target in targets:
+                self.assertTrue((doc.parent / target).exists(), f"{doc.name} links to missing {target}")
 
 
 if __name__ == "__main__":

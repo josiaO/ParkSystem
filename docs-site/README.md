@@ -1,25 +1,19 @@
-# Zirp — Production documentation (static website)
+# Zirp documentation site
 
-Production-first documentation for technicians and developers. The page is organised by task: deployment, operation, support and developer reference. It intentionally does not describe the maintainer USB/test package as an end-user installation method.
+A single page with the download link and a short version of every guide. Open
+`index.html` in a browser; there's no build step.
 
-## Open locally
+| File | What it is |
+|---|---|
+| `index.html` | The page |
+| `styles.css` | Light and dark themes |
+| `app.js` | Theme switch, sidebar highlighting, and the download card |
 
-Double-click `index.html` or open it in any web browser.
+The download card shows the version written into the page. When the browser is
+online, it fetches the newest release from GitHub and updates the version,
+size, link and SHA-256 itself, so you don't have to edit the page for every
+release. Pre-releases count.
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `index.html` | Guide content and illustrations |
-| `styles.css` | Layout, light/dark themes |
-| `app.js` | Theme toggle and section navigation |
-
-Language and theme choices are remembered in the browser.
-
-## On the installed Site Server or Operator Workstation
-
-After installing Zirp through the approved site software-distribution process, open:
-
-`%LOCALAPPDATA%\Programs\SmartPark Edge\documentation\index.html`
-
-For an all-users installation, use the documentation folder below the approved installation directory. The portable/USB package is a maintainer testing artifact and is documented only in the package README.
+The full guides live in [`../docs`](../docs/README.md); the page links to them
+on GitHub. Images come from `../docs/images` and `../app/assets`, so keep the
+folder inside the repository when you open it.
