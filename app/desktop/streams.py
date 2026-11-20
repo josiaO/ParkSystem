@@ -24,18 +24,40 @@ class MjpegStream(QThread):
                 client.close()
             except Exception:
                 pass
+    # While on the Site Server relay, look for this PC's SDK host this often.
+    LOCAL_PROBE_SECONDS = 10.0
+
     def run(self):
         # On the lane PC, read QY/HVX frames straight from the local SDK host:
         # the Site Service relay drops frames whenever its event loop is busy
         # with a car (measured 8 fps with 0.4-0.7 s gaps vs 9.8 fps / 0.2 s
-        # direct). Anything else, or any failure, uses the MJPEG relay.
+        # direct). Anything else, or any failure, uses the MJPEG relay, and
+        # the relay hands back to the local host as soon as it is there again
+        # (an SDK host restart used to leave the view on the relay for good).
         direct = getattr(self, "_run_from_local_host", None)
-        try:
-            if callable(direct) and direct():
+        while not self._stop:
+            try:
+                if callable(direct) and direct():
+                    return
+            except Exception:
+                if self._stop:
+                    return            # any direct-path failure falls back to the relay
+            if not self._run_relay(probe_local=callable(direct)):
                 return
+
+    def _local_host_back(self):
+        """True when this PC's SDK host can serve this camera again."""
+        ip = _camera_ip(self.camera_id)
+        if not ip:
+            return False
+        try:
+            with httpx.Client(timeout=httpx.Timeout(1.5), trust_env=False) as probe:
+                return local_host_handle(probe, ip) is not None
         except Exception:
-            if self._stop:
-                return            # any direct-path failure falls back to the relay
+            return False
+
+    def _run_relay(self, *, probe_local=False):
+        """Read the Site Server MJPEG relay. True means: try the local host again."""
         client=httpx.Client(timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0))
         self._client=client
         try:
@@ -51,8 +73,13 @@ class MjpegStream(QThread):
                     return
                 buf=b""
                 last_frame=time.monotonic()
+                probe_at=time.monotonic() + self.LOCAL_PROBE_SECONDS
                 chunks=response.iter_bytes()
                 while not self._stop:
+                    if probe_local and time.monotonic() >= probe_at:
+                        probe_at=time.monotonic() + self.LOCAL_PROBE_SECONDS
+                        if self._local_host_back():
+                            return True
                     try:
                         chunk=next(chunks)
                     except StopIteration:
@@ -84,6 +111,7 @@ class MjpegStream(QThread):
                 client.close()
             except Exception:
                 pass
+        return False
 
 
 LOCAL_HOST_URL = "http://127.0.0.1:8765"
@@ -134,6 +162,10 @@ def _mjpeg_stream_run_from_local_host(self) -> bool:
                 time.sleep(0.2)
                 continue
             new_seq = int(response.headers.get("x-frame-seq") or 0)
+            if 0 < new_seq < seq:
+                # The SDK host restarted and counts from 1 again. Asking for
+                # frames after the old number would wait forever.
+                seq = 0 if response.status_code != 200 else new_seq - 1
             if response.status_code == 200 and response.content[:2] == b"\xff\xd8" and new_seq > seq:
                 seq, last_frame, misses = new_seq, time.monotonic(), 0
                 if self.mailbox.offer(response.content, new_seq):
