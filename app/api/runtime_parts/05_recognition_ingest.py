@@ -356,7 +356,12 @@ async def _drain_camera_events(
             local_only = camera_recognition_mode(row) == LOCAL_ONLY
             from app.services.camera_framing import framing_from_profiles
             framing = framing_from_profiles(getattr(row, "stream_profiles", None))
-            _show_camera_read(
+            # Display only, but it decodes and re-encodes the 1920 px still
+            # twice (zone snapshot + crop). On the event loop that stalled
+            # plate events, video and gates on every lane (SERVER01: 726
+            # loop stalls in 31 h, p99 3.7 s). Run it on a worker thread.
+            await asyncio.to_thread(
+                _show_camera_read,
                 camera_id,
                 plate=native_plate if real_native and not local_only else "",
                 confidence=float(native.get("confidence") or 0) if not local_only else 0,
