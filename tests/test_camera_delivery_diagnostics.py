@@ -516,3 +516,42 @@ def test_old_bitmap_is_not_encoded_as_live_when_a_viewer_returns():
     _call_draw(sdk)
     sdk._draw_frame_at[0] -= 10.0  # copied long before the viewer came back
     assert sdk._draw_data_jpeg(0) == b""
+
+
+def test_frames_from_a_decoder_that_could_not_be_stopped_are_dropped():
+    """A forced reconnect leaves the old PlaySdk decoder running on the same handle number.
+
+    Both decoders call the same draw callback; the old one is seconds behind,
+    so the camera clock on screen ran 33, 34, 33, 35, 33. Each video start
+    registers its own token and only the current token's frames are used.
+    """
+    sdk = HVXSDK.__new__(HVXSDK)
+    sdk._lock = threading.Lock()
+    sdk._draw_frames = {}
+    sdk._draw_frame_seq = {}
+    sdk._draw_encoded_seq = {}
+    sdk._last_live_jpeg = {}
+    sdk._live_received_at = {}
+    sdk._video_handles = {0}
+    sdk._live_requested_at = {0: time.monotonic()}
+    sdk._video_diagnostics = {}
+    sdk._draw_callbacks = {}
+    registered = []
+    sdk._FDrawDataOut = lambda fn: fn
+    sdk.dll = SimpleNamespace(Net_SetDrawDataOut=lambda handle, cb, user: registered.append(user.value) or 0)
+
+    sdk._register_draw_data(0)          # first video start (later "stopped" with stop_rc=-1)
+    sdk._register_draw_data(0)          # forced reconnect: same handle number, new decoder
+    old_token, new_token = registered
+    assert old_token != new_token
+
+    dib = ctypes.create_string_buffer(struct.pack("<IiiHHIIiiII", 40, 2, 2, 1, 24, 0, 16, 0, 0, 0, 0))
+    pixels = ctypes.create_string_buffer(bytes((0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 255, 0)))
+    args = (None, ctypes.cast(dib, ctypes.c_void_p), ctypes.cast(pixels, ctypes.POINTER(ctypes.c_ubyte)), 2, 2)
+
+    sdk._on_draw_data(0, *args, old_token)
+    assert sdk._draw_frame_seq.get(0, 0) == 0           # old decoder's picture ignored
+    assert sdk._draw_stale[0] == 1
+    sdk._on_draw_data(0, *args, new_token)
+    assert sdk._draw_frame_seq[0] == 1                  # current decoder's picture used
+    assert sdk._draw_data_jpeg(0).startswith(b"\xff\xd8")

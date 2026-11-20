@@ -415,8 +415,21 @@ class _HVXVideoMixin:
         if callback is None:
             callback = self._FDrawDataOut(self._on_draw_data)
             self._draw_callbacks[handle] = callback
-        rc = int(self.dll.Net_SetDrawDataOut(handle, callback, None))
-        self._note_video(handle, draw_data_rc=rc, draw_data_registered_at=time.monotonic())
+        # Each video start gets its own token in the callback's user argument.
+        # When Net_StopVideo fails (stop_rc=-1) the old PlaySdk decoder keeps
+        # running after the forced reconnect, and the new session reuses the
+        # same handle number: both decoders then feed this handle, a few
+        # seconds apart, and the camera clock on screen jumps back and forth.
+        # Frames whose token is not the current one are dropped.
+        with self._lock:
+            token = int(getattr(self, "_draw_token_seq", 0) or 0) + 1
+            self._draw_token_seq = token
+            tokens = getattr(self, "_draw_tokens", None)
+            if tokens is None:
+                tokens = self._draw_tokens = {}
+            tokens[handle] = token
+        rc = int(self.dll.Net_SetDrawDataOut(handle, callback, ctypes.c_void_p(token)))
+        self._note_video(handle, draw_data_rc=rc, draw_data_registered_at=time.monotonic(), draw_data_token=token)
         return rc
 
     def _get_jpg_buffer(self, handle: int) -> bytes:
@@ -1262,6 +1275,21 @@ class _HVXVideoMixin:
 
     def _on_draw_data_inner(self, handle, hdd, bmi, data, width, height, user, callback_perf_ns) -> None:
         handle = int(handle)
+        if user is not None:
+            current = getattr(self, "_draw_tokens", {}).get(handle)
+            if current is not None and int(user) != int(current):
+                # A decoder from an earlier video start of this handle that
+                # could not be stopped: its pictures are seconds old.
+                stale = getattr(self, "_draw_stale", None)
+                if stale is None:
+                    stale = self._draw_stale = {}
+                stale[handle] = int(stale.get(handle, 0)) + 1
+                HOST_METRICS.incr(f"frames.stale_decoder.{handle}")
+                diagnostics = getattr(self, "_video_diagnostics", {}).get(handle)
+                if diagnostics is not None:
+                    diagnostics["stale_decoder_frames"] = stale[handle]
+                    diagnostics["stale_decoder_last_at"] = time.monotonic()
+                return
         width = int(width or 0)
         height_arg = int(height or 0)
         if width <= 0 or height_arg == 0 or not data:
