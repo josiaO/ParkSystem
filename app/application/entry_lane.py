@@ -107,6 +107,61 @@ def supersede_abandoned_entry(db: Session, plate: str, *, site_id: int, gate: Ga
     return row
 
 
+# Exit-side lifecycle states: an exit camera has already decided on this visit.
+_SEEN_AT_EXIT = frozenset({
+    "EXIT_VEHICLE_DETECTED", "SESSION_RESOLVED", "TARIFF_CALCULATED", "AUTHORIZATION_DECISION",
+    "AUTHORIZED", "DENIED_PAYMENT_REQUIRED", "EXIT_GATE_OPEN_REQUESTED", "EXIT_VEHICLE_PASSED",
+})
+
+
+def close_visit_seen_at_exit(db: Session, plate: str, *, site_id: int, gate: Gate | None) -> ParkingSession | None:
+    """A car is entering again although its last visit was left open at an exit.
+
+    The previous visit reached an exit (allowed, or refused for payment) but
+    never closed: its barrier answer was lost, the car was let out by hand or
+    by another system, and so on. Seeing the same plate *entering* at least
+    STALE_VISIT_SECONDS after that exit decision proves the car left, so that
+    visit is closed with an audit trail (anything unpaid is recorded as
+    written off) and the new arrival gets its own visit.
+
+    On SERVER01 (21 Nov 2026) 86 arriving cars in 3 hours got no visit at all
+    because of such leftovers ("Open visit already exists ... since 18 Nov").
+    Visits never seen at an exit keep the operator check: that may be a
+    missed exit, or two cars with the same plate.
+    """
+    from datetime import datetime, timezone
+
+    from app.services.parking_sessions import active_for_plate, supervised_close
+
+    row = active_for_plate(db, plate, site_id=site_id)
+    if row is None or str(row.lifecycle or "") not in _SEEN_AT_EXIT:
+        return None
+    last = row.updated_at or row.created_at
+    if last is None:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age <= STALE_VISIT_SECONDS:
+        return None
+    try:
+        supersede = supervised_close(
+            db, row, vehicle_left=True,
+            reason=f"seen entering again {int(age // 60)} min after its exit decision ({row.lifecycle}); "
+                   "that exit happened without Zirp",
+        )
+    except Exception:
+        db.rollback()
+        log.warning("could not close visit seen at exit session=%s", row.id, exc_info=True)
+        return None
+    record_access_decision(
+        db, session=row, plate=row.plate, gate=gate, lane_direction="ENTRY", outcome="PREVIOUS_VISIT_CLOSED",
+        reason=f"previous visit was at the exit {int(age // 60)} min ago; written off {supersede.get('written_off')}",
+        parker_kind=row.parker_kind or "CASUAL", barrier_opened=False,
+    )
+    return row
+
+
 def recent_lookalike_session(db: Session, plate: str, gate_id: int | None) -> ParkingSession | None:
     """A session just opened on this gate for a plate one OCR slip away."""
     from datetime import datetime, timezone
@@ -297,6 +352,7 @@ class EntryLaneController:
             }
 
         supersede_abandoned_entry(db, plate, site_id=event_site_id, gate=gate)
+        close_visit_seen_at_exit(db, plate, site_id=event_site_id, gate=gate)
 
         payload = rec.as_dict()
         payload["plate_normalized"] = plate

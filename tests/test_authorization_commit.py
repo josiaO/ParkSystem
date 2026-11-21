@@ -264,3 +264,75 @@ def test_with_gate_control_on_a_failed_barrier_keeps_the_visit_open(Session, mon
         out, _lane = _exit(db, Session, ok=False)
         assert out["reason"] == "gate_unavailable"
         assert db.scalar(select(ParkingSession)).status != "CLOSED"
+
+
+# ------------------------------------------- re-entry after an exit decision
+# SERVER01, 21 Nov: 86 arriving cars in 3 hours got no visit because their
+# previous visit was left open at an exit ("Open visit already exists").
+
+def _age_visit(db, minutes=30):
+    visit = db.scalar(select(ParkingSession).where(ParkingSession.status != "CLOSED"))
+    past = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    visit.updated_at = past
+    visit.created_at = min(visit.created_at or past, past)
+    db.commit()
+    return visit
+
+
+def _enter_again(db, factory, plate="T100AAA"):
+    """A later arrival: a new camera event after the lane emptied."""
+    from app.services import lane_stay
+
+    lane_stay.reset()
+    lane = Barrier(factory)
+    return asyncio.run(EntryLaneController(opener=lane).submit(
+        db, _event(plate, f"in-again-{plate}"), gate=db.get(Gate, 1), camera=db.get(Camera, 100), policy=OPEN_LANE))
+
+
+def test_car_entering_again_after_an_unfinished_exit_gets_a_new_visit(Session, monkeypatch):
+    monkeypatch.setattr("app.services.developer.gate_opening_enabled", lambda db: True)
+    with Session() as db:
+        _enter(db, Session)
+        _exit(db, Session, ok=False)                         # allowed, barrier answer lost
+        old = _age_visit(db)
+        assert old.lifecycle == "AUTHORIZED"
+        out = _enter_again(db, Session)
+        assert out.get("created_session") is True, out
+        visits = db.scalars(select(ParkingSession).order_by(ParkingSession.id)).all()
+        assert [v.status for v in visits][0] == "CLOSED" and len(visits) == 2
+        outcomes = [d.outcome for d in db.scalars(select(AccessDecision).order_by(AccessDecision.id))]
+        assert "PREVIOUS_VISIT_CLOSED" in outcomes
+
+
+def test_a_recent_exit_decision_is_left_alone(Session, monkeypatch):
+    monkeypatch.setattr("app.services.developer.gate_opening_enabled", lambda db: True)
+    with Session() as db:
+        _enter(db, Session)
+        _exit(db, Session, ok=False)
+        out = _enter_again(db, Session)                      # seconds later: same car, still there
+        assert out.get("created_session") is not True
+        assert db.scalar(select(ParkingSession)).status != "CLOSED"
+
+
+def test_a_visit_never_seen_at_an_exit_still_needs_an_operator(Session):
+    with Session() as db:
+        _enter(db, Session)
+        _age_visit(db, minutes=90)
+        out = _enter_again(db, Session)
+        assert out.get("reason") == "duplicate" and out.get("created_session") is not True
+
+
+def test_unpaid_visit_seen_at_exit_is_closed_with_the_amount_written_off(Session, monkeypatch):
+    monkeypatch.setattr("app.services.developer.gate_opening_enabled", lambda db: True)
+    with Session() as db:
+        _enter(db, Session)
+        visit = db.scalar(select(ParkingSession))
+        visit.entry_time = datetime.now(timezone.utc) - timedelta(hours=3)   # past the free period
+        db.commit()
+        out, _lane = _exit(db, Session)
+        assert db.scalar(select(ParkingSession)).lifecycle == "DENIED_PAYMENT_REQUIRED", out
+        _age_visit(db)
+        again = _enter_again(db, Session)
+        assert again.get("created_session") is True
+        closing = db.scalar(select(AccessDecision).where(AccessDecision.outcome == "SUPERVISED_CLOSE"))
+        assert float((closing.extra or {}).get("written_off") or 0) > 0
