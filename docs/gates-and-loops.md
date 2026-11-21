@@ -45,6 +45,31 @@ When a lane has a loop, a visit moves on when the car actually drives over it.
 Without one, Zirp can treat an accepted barrier command as "car passed" or wait
 for a time-out. That's the lane's passage setting.
 
+## When the camera misses a car
+
+Each camera in **Live Gates** has a fallback button:
+
+- **Ticket (F6)** on an entry camera. Zirp takes a picture right away and
+  reads the plate. If you can see the plate, type it; otherwise the camera's
+  read is used. The car then goes through the normal entry: visit, printed
+  ticket and barrier, exactly as if the camera had caught it. If no plate can
+  be read at all, the visit gets a placeholder plate (`UNREAD…`) and the
+  ticket's QR code is how the car is recognised at the exit.
+- **Scan (F7)** on an exit camera. Scan the ticket's QR code to let the car
+  out. Payment is checked as usual, and you're warned if the exit camera
+  read a different plate.
+
+Every use is logged with the picture and the operator's name.
+
+## Running beside another parking system
+
+During a trial Zirp often runs next to the system that already controls the
+barriers. Switch off **gate opening** in the developer settings: Zirp then
+never moves a barrier. An exit it would have allowed is recorded as an exit
+(`EXIT_RECORDED_SHADOW`) and the visit is closed, because the other system let
+the car out. Exits Zirp would have refused for payment stay open, since Zirp
+never sees money paid at the other system.
+
 ## Opening a barrier by hand
 
 Operators can open a barrier from **Live Gates** (*Manual open*, F8) or from a
