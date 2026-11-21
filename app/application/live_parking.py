@@ -121,3 +121,55 @@ async def handle_live_exit(
         source=source,
         confidence=float(getattr(capture, "confidence", 0) or 0),
     )
+
+
+# Placeholder plate for a car whose plate could not be read or typed. The
+# printed ticket (its QR) is then the car's only identity at the exit.
+UNREAD_PLATE_PREFIX = "UNREAD"
+
+
+async def handle_operator_entry(
+    db: Session,
+    *,
+    camera: Camera,
+    gate: Gate | None,
+    plate: str,
+    confidence: float = 1.0,
+    image_ref: str = "",
+    source: str = "operator-fallback",
+) -> dict:
+    """Entry fallback pressed by an operator: the camera missed the car.
+
+    Runs the same entry path as a camera read (session, ticket printing,
+    barrier policy), so a fallback entry behaves exactly like an automatic
+    one. The operator vouches for the car, so the read is not held.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    cfg = parking_settings(db)
+    adapter_name = str(cfg.get("printer_adapter") or settings.printer_adapter or "simulated").strip().lower()
+    policy = policy_from_parking_settings(cfg)
+    printer = receipt_printer_for(adapter_name, str(cfg.get("printer_name") or settings.printer_name or ""))
+    event = NormalizedRecognitionEvent(
+        event_id=f"fallback-{uuid4().hex}",
+        site_id=int(camera.site_id or DEFAULT_SITE_ID),
+        camera_id=int(camera.id),
+        lane_id=camera.lane_id,
+        occurred_at=datetime.now(timezone.utc).isoformat(),
+        provider="OPERATOR",
+        plate_raw=plate,
+        plate_normalized=plate,
+        confidence=float(confidence or 1.0),
+        bbox=None,
+        vehicle_detected=True,
+        image_ref=image_ref or None,
+        plate_crop_ref=None,
+        confidence_class=CONF_HIGH,
+        accepted=True,
+        mode="OPERATOR",
+        presence=True,
+    )
+    return await EntryLaneController(printer=printer).submit(
+        db, event, gate=gate, camera=camera, policy=policy, occupied=True, simulated=False, source=source,
+    )

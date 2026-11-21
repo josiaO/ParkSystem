@@ -28,6 +28,8 @@ _live_executor_lock = threading.Lock()
 _live_clients: dict[tuple[str, int], httpx.Client] = {}
 _live_clients_lock = threading.Lock()
 _poll_clients: dict[tuple[int, str], httpx.AsyncClient] = {}
+# host base URL -> (monotonic time, {camera ip: handle}); see handle_for_ip().
+_handle_maps: dict[str, tuple[float, dict[str, int]]] = {}
 
 
 def _live_pool() -> ThreadPoolExecutor:
@@ -182,6 +184,41 @@ class HVXHostClient:
             return r.json()
         except Exception as exc:
             raise HVXHostUnavailable(str(exc)) from exc
+
+    async def handle_for_ip(self, ip: str, *, max_age: float = 2.0) -> int | None:
+        """This host's handle for a camera IP right now, or None if not connected.
+
+        Handles are numbered by the host in connect order and are reassigned
+        after a host restart or reconnect; ``Camera.sdk_handle`` in the shared
+        database can therefore name another camera's session. On SITE-PC01 (21
+        Nov 2026) 2# Exit's video session kept reading handle 0 after the
+        handles were reassigned: it showed 2# Entry's picture and every entry
+        read was stored twice, once as the exit. The live map by IP is the only
+        safe key. Cached briefly and shared by every camera on this host.
+        """
+        ip = str(ip or "").strip()
+        if not ip:
+            return None
+        key = self.base_url.rstrip("/")
+        now = time.monotonic()
+        cached = _handle_maps.get(key)
+        if cached is None or now - cached[0] > max_age:
+            try:
+                info = await asyncio.wait_for(self.info(), timeout=1.5)
+                rows = info.get("connections") if isinstance(info, dict) else None
+                if isinstance(rows, list):
+                    mapping = {
+                        str(row.get("ip") or ""): int(row["handle"])
+                        for row in rows
+                        if isinstance(row, dict) and row.get("ip") and row.get("handle") is not None
+                    }
+                    cached = (now, mapping)
+                    _handle_maps[key] = cached
+            except Exception:
+                pass   # keep the last known map; callers treat "unknown" as not connected
+        if cached is None:
+            raise HVXHostUnavailable("HVX host connection list unavailable")
+        return cached[1].get(ip)
 
     async def connect(self, *, ip: str, port: int, username: str, password: str) -> dict:
         # ConnCameraEx (3s) then ConnCamera fallback (3s) plus StartVideo — HTTP must outlast that.

@@ -295,6 +295,42 @@ async def _payments_reconcile_loop():
 _hvx_restore_attempts: dict[int, float] = {}
 
 
+async def _live_hvx_specs(specs: list[tuple[int, int]], ips: dict[int, str]) -> list[tuple[int, int]]:
+    """(camera id, handle) with the handle each camera has on this host *now*.
+
+    The stored handle is shared through the database and is reassigned after
+    a host restart; draining it can file one lane's plate events under the
+    other lane's camera. Cameras the host has no session for are skipped.
+    Without a readable connection list the stored handles are used as before.
+    """
+    host = HVXHostClient()
+    resolved: list[tuple[int, int]] = []
+    seen: set[int] = set()
+    for camera_id, stored in specs:
+        try:
+            live = await host.handle_for_ip(ips.get(camera_id, ""))
+        except Exception:
+            live = stored
+        if live is None or int(live) in seen:
+            continue
+        seen.add(int(live))
+        resolved.append((camera_id, int(live)))
+    return resolved
+
+
+def _record_live_sdk_handle(camera_id: int, handle: int) -> None:
+    from app.services.stream_roles import hvx_profiles
+
+    with short_session() as db:
+        row = db.get(Camera, camera_id)
+        if row is None or (row.sdk_handle is not None and int(row.sdk_handle) == handle):
+            return
+        row.sdk_handle = handle
+        row.stream_profiles = hvx_profiles(handle)
+        db.commit()
+    log.info("camera=%s SDK session number is now %s on this host", camera_id, handle)
+
+
 async def _restore_hvx_sessions(info: dict) -> None:
     if not info.get("available") or not isinstance(info.get("connections"), list):
         return
@@ -315,9 +351,18 @@ async def _restore_hvx_sessions(info: dict) -> None:
                 else camera_active_on_this_installation(camera, db=db)
             )
         ]
+    by_ip = {ip: handle for handle, ip in connected.items() if ip}
     for camera in cameras:
-        if connected.get(int(camera.sdk_handle)) == camera.ip_address:
+        live = by_ip.get(str(camera.ip_address or ""))
+        if live is not None:
+            # Connected on this host, possibly under another session number
+            # (the stored one is shared with other PCs and reshuffles on every
+            # reconnect). Logging in again here re-connected all four cameras
+            # about once a minute on SITE-PC01 and dropped their video. Record
+            # the live number instead.
             _hvx_restore_attempts.pop(camera.id, None)
+            if camera.sdk_handle is None or int(camera.sdk_handle) != int(live):
+                _record_live_sdk_handle(int(camera.id), int(live))
             continue
         now = time.monotonic()
         if now - _hvx_restore_attempts.get(camera.id, float("-inf")) < 30.0:
@@ -476,6 +521,7 @@ async def _camera_event_loop():
     rows: list[Camera] = []
     active: list[Camera] = []
     hvx_specs: list[tuple[int, int]] = []
+    hvx_ips: dict[int, str] = {}
     ipcam_ids: list[int] = []
     inactive_ids: set[int] = set()
     while True:
@@ -498,6 +544,7 @@ async def _camera_event_loop():
                         for c in active
                         if c.sdk_handle is not None
                     ]
+                    hvx_ips = {int(c.id): str(c.ip_address or "") for c in active if c.sdk_handle is not None}
                     ipcam_ids = [
                         int(c.id) for c in active
                         if c.sdk_handle is None
@@ -572,7 +619,7 @@ async def _camera_event_loop():
             jobs: list[asyncio.Task] = []
             jobs.extend(
                 asyncio.create_task(service_hvx(camera_id, handle), name=f"hvx-event-{camera_id}")
-                for camera_id, handle in hvx_specs
+                for camera_id, handle in await _live_hvx_specs(hvx_specs, hvx_ips)
             )
             jobs.extend(
                 asyncio.create_task(clear_inactive_camera(camera_id), name=f"camera-idle-{camera_id}")

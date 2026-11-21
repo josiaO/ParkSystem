@@ -218,6 +218,7 @@ def test_historical_capture_does_not_suppress_the_next_coil_read():
              patch("app.api_main.latest_for_camera", side_effect=[old, old, old, fresh]), \
              patch("app.api_main.coil_watch.mark_triggered"), \
              patch("app.api_main.HVXHostClient.snapshot_trigger", new=AsyncMock()), \
+             patch("app.api_main.HVXHostClient.handle_for_ip", new=AsyncMock(return_value=7)), \
              patch("app.api_main.HVXHostClient.live_jpeg", new=AsyncMock(return_value=JPEG)), \
              patch("app.api_main._drain_camera_events", new=AsyncMock()), \
              patch("app.api_main._run_local_alpr", new=AsyncMock()) as recognize:

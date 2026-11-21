@@ -18,6 +18,22 @@ class _GatewayProducersMixin:
         await self._reap_children(row)
         await asyncio.sleep(wait)
 
+    async def _sdk_handle_now(self, row: StreamSession, host) -> int | None:
+        """This camera's handle on this PC's SDK host, looked up by IP.
+
+        Falls back to the stored handle only while the host's connection list
+        cannot be read at all (the read itself will then fail and recover).
+        """
+        spec = row.spec
+        try:
+            live = await host.handle_for_ip(spec.ip)
+        except Exception:
+            return int(spec.sdk_handle) if spec.sdk_handle is not None else None
+        if live is None:
+            row.last_error = f"{spec.ip} is not connected on this PC's camera SDK host"
+            row.state = "DEGRADED"
+        return live
+
     async def _sdk_frames(self, row: StreamSession) -> bool:
         spec = row.spec
         generation = row.generation
@@ -26,13 +42,23 @@ class _GatewayProducersMixin:
             row.state = "DEGRADED"
             return False
         host = HVXHostClient()
+        # The handle this camera has on this PC's host *now*, by IP. The
+        # stored spec.sdk_handle can name another camera after a host restart.
+        handle = await self._sdk_handle_now(row, host)
+        settle_until = time.monotonic() + 10.0 if handle is None else 0.0
+        while handle is None and time.monotonic() < settle_until and (row.wanted() or row.viewers > 0):
+            # Session being (re)established on the host: wait, don't fail.
+            await asyncio.sleep(0.5)
+            handle = await self._sdk_handle_now(row, host)
+        if handle is None:
+            return False
         interval = float(getattr(settings, "live_sdk_interval_seconds", 0.05) or 0.05)
         got = False
         last_jpeg_at = time.monotonic()
         previous_response_jpeg = b""
         initial_sequence_map = getattr(host, "last_live_seq", {})
         previous_response_seq = (
-            int(initial_sequence_map.get(int(spec.sdk_handle), 0) or 0)
+            int(initial_sequence_map.get(int(handle), 0) or 0)
             if isinstance(initial_sequence_map, dict) else 0
         )
         next_diag_at = 0.0
@@ -41,14 +67,32 @@ class _GatewayProducersMixin:
         row.source = "sdk"
         while row.wanted() or row.viewers > 0:
             started = time.monotonic()
+            current_handle = await self._sdk_handle_now(row, host)
+            if current_handle is None:
+                # The camera's session is being re-established on this host.
+                # Wait for it without counting a failure: a growing reconnect
+                # back-off here let the watchdog see a dead camera and reset
+                # the session again (SITE-PC01, rc6: up to 538 resets an hour).
+                if time.monotonic() - last_jpeg_at < silence_limit + 10.0:
+                    await asyncio.sleep(0.5)
+                    continue
+                return False
+            if current_handle != handle:
+                # Same camera, new session number: follow it at once. Reading
+                # the old number could be another camera's picture.
+                log.info("camera=%s sdk handle %s -> %s; following the camera's session",
+                         spec.id, handle, current_handle)
+                handle = int(current_handle)
+                previous_response_seq = 0
+                previous_response_jpeg = b""
+                last_jpeg_at = time.monotonic()
             try:
-                jpeg = await host.live_jpeg(int(spec.sdk_handle))
+                jpeg = await host.live_jpeg(int(handle))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 row.last_error = str(exc)[:300]
                 jpeg = b""
-            handle = int(spec.sdk_handle)
             metadata_map = getattr(host, "last_live_meta", {})
             raw_meta = metadata_map.get(handle) if isinstance(metadata_map, dict) else {}
             meta = dict(raw_meta or {})
@@ -88,7 +132,7 @@ class _GatewayProducersMixin:
                 published = self.publish(
                     spec.id, jpeg,
                     source="sdk",
-                    url=f"sdk://handle/{int(spec.sdk_handle)}",
+                    url=f"sdk://handle/{int(handle)}",
                     source_seq=current_seq or None,
                     generation=generation,
                 )

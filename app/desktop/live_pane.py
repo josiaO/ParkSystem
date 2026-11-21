@@ -90,6 +90,7 @@ class CameraLivePane(QFrame):
         cid=(camera or {}).get("id") if camera else None
         same=self.camera and cid and self.camera.get("id")==cid
         self.camera=camera
+        self._sync_fallback_buttons()
         self.view_title.setText(str((camera or {}).get("name") or f"{self.slot_title} · Choose camera"))
         self._sync_picker()
         if not same:
@@ -532,6 +533,65 @@ class CameraLivePane(QFrame):
         if ok and reason:
             try: QMessageBox.information(self,"Barrier",str(self._runtime_api().post(f"/cameras/{cam['id']}/barrier/open",{"reason":reason,"action":verb}, timeout=20)))
             except Exception as e: QMessageBox.critical(self,"Barrier",str(e))
+
+    def _camera_side(self):
+        cam=self.camera or {}
+        return str(cam.get("lane_direction") or cam.get("side") or "").upper()
+
+    def _sync_fallback_buttons(self):
+        side=self._camera_side()
+        if hasattr(self, "ticket_btn"):
+            self.ticket_btn.setVisible(bool(self.camera) and side in {"ENTRY", "BOTH"} and api.can("sessions.create"))
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.setVisible(bool(self.camera) and side in {"EXIT", "BOTH"})
+
+    def entry_fallback(self):
+        """The entry camera missed this car: read now and print its ticket."""
+        cam=self.camera
+        if not cam or self._camera_side() not in {"ENTRY", "BOTH"}:
+            QMessageBox.information(self,"Print ticket","Choose the entry camera for this lane first."); return
+        typed,ok=QInputDialog.getText(
+            self,"Print ticket",
+            f"{cam.get('name') or 'Entry'}: Zirp takes a picture now and reads the plate.\n"
+            "Type the plate only if you can see it (leave empty to use the camera's read):")
+        if not ok:
+            return
+        try:
+            data=self._runtime_api().post(f"/lanes/{cam['id']}/entry-fallback",{"plate":typed.strip()},timeout=40) or {}
+        except Exception as e:
+            QMessageBox.critical(self,"Print ticket",str(e)); return
+        plate=data.get("plate") or "?"
+        if data.get("placeholder"):
+            how="No plate could be read. The ticket's QR code is this car's only identity at the exit."
+        elif data.get("typed_plate"):
+            how=f"Plate typed by you (camera read: {data.get('read_plate') or 'nothing'})."
+        else:
+            how=f"Plate read by the camera ({float(data.get('read_confidence') or 0):.0%})."
+        QMessageBox.information(self,"Print ticket",f"{plate}\n\n{how}\n\n{data.get('message') or data.get('reason') or ''}")
+        self._tick_alpr()
+
+    def exit_scan(self):
+        """Let a car out by its ticket QR when the exit camera did not read it."""
+        cam=self.camera
+        if not cam or self._camera_side() not in {"EXIT", "BOTH"}:
+            QMessageBox.information(self,"Scan ticket","Choose the exit camera for this lane first."); return
+        raw,ok=QInputDialog.getText(self,"Scan ticket","Scan the ticket's QR code (or type its reference):")
+        if not ok or not raw.strip():
+            return
+        try:
+            result=self._runtime_api().post("/exit/qr-scan",{"gate_id":cam.get("gate_id"),"camera_id":cam.get("id"),"raw_scan":raw.strip()},timeout=20) or {}
+        except Exception as e:
+            QMessageBox.critical(self,"Scan ticket",str(e)); return
+        message=str(result.get("message") or result.get("reason") or "Done.")
+        mismatch=result.get("plate_mismatch")
+        if mismatch:
+            QMessageBox.warning(self,"Scan ticket",
+                f"The exit camera read {mismatch.get('camera_plate')}, but this ticket is for "
+                f"{mismatch.get('session_plate')}. Look at the car before it leaves.\n\n{message}")
+        elif result.get("pay_required"):
+            QMessageBox.warning(self,"Scan ticket",f"Payment needed before this car can leave.\n\n{message}")
+        else:
+            QMessageBox.information(self,"Scan ticket",message)
 
     def correct_plate(self):
         cam=self.camera
