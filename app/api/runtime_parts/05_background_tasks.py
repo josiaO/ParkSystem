@@ -318,6 +318,19 @@ async def _live_hvx_specs(specs: list[tuple[int, int]], ips: dict[int, str]) -> 
     return resolved
 
 
+def _record_live_sdk_handle(camera_id: int, handle: int) -> None:
+    from app.services.stream_roles import hvx_profiles
+
+    with short_session() as db:
+        row = db.get(Camera, camera_id)
+        if row is None or (row.sdk_handle is not None and int(row.sdk_handle) == handle):
+            return
+        row.sdk_handle = handle
+        row.stream_profiles = hvx_profiles(handle)
+        db.commit()
+    log.info("camera=%s SDK session number is now %s on this host", camera_id, handle)
+
+
 async def _restore_hvx_sessions(info: dict) -> None:
     if not info.get("available") or not isinstance(info.get("connections"), list):
         return
@@ -338,9 +351,18 @@ async def _restore_hvx_sessions(info: dict) -> None:
                 else camera_active_on_this_installation(camera, db=db)
             )
         ]
+    by_ip = {ip: handle for handle, ip in connected.items() if ip}
     for camera in cameras:
-        if connected.get(int(camera.sdk_handle)) == camera.ip_address:
+        live = by_ip.get(str(camera.ip_address or ""))
+        if live is not None:
+            # Connected on this host, possibly under another session number
+            # (the stored one is shared with other PCs and reshuffles on every
+            # reconnect). Logging in again here re-connected all four cameras
+            # about once a minute on SITE-PC01 and dropped their video. Record
+            # the live number instead.
             _hvx_restore_attempts.pop(camera.id, None)
+            if camera.sdk_handle is None or int(camera.sdk_handle) != int(live):
+                _record_live_sdk_handle(int(camera.id), int(live))
             continue
         now = time.monotonic()
         if now - _hvx_restore_attempts.get(camera.id, float("-inf")) < 30.0:
