@@ -102,6 +102,24 @@ NSSM, VC++ runtimes, models and wheels) go in `packaging\thirdparty` and
 Build from a clean commit: `BUILD-INFO.json` records the commit and whether
 the tree was dirty.
 
+### The installer ships compiled code
+
+Like the parking systems that came before it, an installed Zirp contains the
+compiled program, not its source. After staging, the build runs
+`packaging/installer/compile_app.py` with the bundled Python:
+
+- the numbered part files of the split modules (the API's `runtime_parts`,
+  the desktop, the media gateway and so on) become `<part>.partc`, loaded by
+  `app/core/parts.py`;
+- every other module becomes a `.pyc` where its `.py` was;
+- only `app/migrations/alembic` stays as source, because Alembic loads it by
+  path. `tools/` (diagnostics) and the camera SDK host are not part of `app`.
+
+The smoke test then imports every service, the desktop and the migration chain
+from the compiled stage, so a build that would not run never becomes an
+installer. `tests/test_compiled_release.py` does the same on every test run.
+For a debugging build that keeps the source, add `-IncludeSource`.
+
 ## Releasing
 
 1. Commit and push.

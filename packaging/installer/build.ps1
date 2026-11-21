@@ -47,6 +47,7 @@ param(
     [string]$TimestampUrl = "http://timestamp.digicert.com",
     [switch]$SkipPortal,
     [switch]$StageOnly,
+    [switch]$IncludeSource,
     [switch]$AllowUnsigned = $true
 )
 
@@ -230,6 +231,18 @@ if (-not $pillow32) { throw "32-bit Pillow wheel missing from wheels32." }
 $zip = Join-Path $Work "pillow32.zip"; Copy-Item $pillow32.FullName $zip
 Expand-Archive -LiteralPath $zip -DestinationPath $site32 -Force; Remove-Item $zip
 
+if (-not $IncludeSource) {
+    # Like the classic parking systems: install compiled code, not the source.
+    # Compiled with the staged runtime so the bytecode matches what loads it.
+    Step "Compiling the application (no readable source in the installer)"
+    $out = & (Join-Path $py64 "python.exe") (Join-Path $PSScriptRoot "compile_app.py") (Join-Path $Stage "app") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Compiling the application failed:`n$($out | Out-String)" }
+    Write-Host ($out | Select-Object -Last 1)
+    $left = @(Get-ChildItem (Join-Path $Stage "app") -Recurse -Filter *.py |
+        Where-Object { $_.FullName -notlike "*\app\migrations\alembic\*" })
+    if ($left.Count) { throw "Source files left in the staged app: $($left.FullName -join ', ')" }
+}
+
 Step "Smoke test of the staged runtime"
 $probe = @'
 import sys, importlib
@@ -241,6 +254,13 @@ import onnxruntime as ort
 assert "CPUExecutionProvider" in ort.get_available_providers()
 import app.api_main  # the whole Site Service imports
 import app.desktop.launch
+# Every split module (source or compiled parts) and the migration chain.
+for m in ["app.site_service", "app.media_service", "app.recognition_worker", "app.services.media_gateway",
+          "app.services.captures", "app.services.alpr", "app.services.simulation", "app.desktop.main",
+          "app.desktop.setup", "app.release_tool", "app.cli"]:
+    importlib.import_module(m)
+from app.migrations.runner import head_revision
+assert head_revision(), "Alembic migrations did not load"
 print("ok", sys.version.split()[0], ort.__version__)
 '@
 $probeFile = Join-Path $Work "probe.py"; Set-Content $probeFile $probe -Encoding UTF8

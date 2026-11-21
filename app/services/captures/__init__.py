@@ -17,7 +17,8 @@ _COMPONENTS = [
 
 for _component in _COMPONENTS:
     _path = _PACKAGE_DIR / _component
-    _code = compile(_path.read_text(encoding="utf-8"), str(_path), "exec")
+    from app.core.parts import part_code as _part_code
+    _code = _part_code(_path)
     exec(_code, globals(), globals())
 
 del _code, _component, _path, _COMPONENTS, _ORIGINAL_FILE, _PACKAGE_DIR, _Path
