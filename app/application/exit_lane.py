@@ -531,6 +531,31 @@ class ExitLaneController:
             # camera's next read, the QR fallback or an operator can retry.
             # Compare-and-clear: never release a claim another attempt owns.
             self._release_exit_claim(db, row, command_uuid)
+            from app.services.developer import gate_opening_enabled
+            if not gate_opening_enabled(db):
+                # Shadow mode: Zirp's barrier control is switched off and the
+                # existing system moves the barriers. An authorized exit read
+                # means the car left; keeping the visit open forever (SERVER01:
+                # no visit closed after 29 Oct, 2,045 left open) hid every
+                # exit and made returning cars "already inside".
+                from app.services.parking_sessions import supervised_close
+
+                finalize_access_decision(
+                    db, decision, outcome="EXIT_RECORDED_SHADOW",
+                    reason="exit authorized; barrier control is off, the existing system opened the barrier",
+                    barrier_opened=False,
+                )
+                closed = supervised_close(
+                    db, row, reason="Exit recorded in shadow mode (Zirp barrier control is off)",
+                    vehicle_left=True,
+                )
+                return {
+                    "ok": True, "action": "EXIT", "reason": "shadow_exit",
+                    "pay_required": False, "barrier_opened": False,
+                    "assistance_required": False, "session": closed["session"],
+                    "financial": financial,
+                    "message": "Exit recorded. Zirp's barrier control is off, so the barrier was not opened by Zirp.",
+                }
             finalize_access_decision(
                 db, decision, outcome="GATE_UNAVAILABLE",
                 reason=getattr(opened, "message", "") or "gate unavailable", barrier_opened=False,

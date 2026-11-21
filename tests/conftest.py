@@ -63,3 +63,19 @@ def _collect_qt_garbage_on_main_thread():
         import gc
 
         gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def _secrets_never_touch_the_site():
+    r"""Keep test credentials out of the real secret store.
+
+    Without this, every Camera(password_secret=...) a test made wrote a DPAPI
+    file into C:\ProgramData\SmartParkEdge\secrets on the site PC (about 150
+    per full run; 4,700 files had piled up on SERVER01). Tests that need a
+    specific store still install their own with set_secret_store().
+    """
+    from app.infrastructure.secrets import MemorySecretStore, set_secret_store
+
+    set_secret_store(MemorySecretStore())
+    yield
+    set_secret_store(None)

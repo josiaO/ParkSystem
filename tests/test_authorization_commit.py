@@ -237,3 +237,30 @@ def test_pulse_gate_commits_the_request_before_touching_hardware(Session):
         assert seen == ["REQUESTED"]
         [command] = _commands(db)
         assert command.state == "ACCEPTED" and command.side == "ENTRY" and command.command_uuid
+
+
+# ---------------------------------------------------------------- shadow mode
+# SERVER01 runs Zirp beside the existing system with developer "gate opening"
+# switched off. Every authorized exit ended as GATE_UNAVAILABLE and the visit
+# stayed open: no visit closed after 29 Oct and the dashboard showed no exits.
+
+def test_shadow_mode_records_an_authorized_exit(Session, monkeypatch):
+    monkeypatch.setattr("app.services.developer.gate_opening_enabled", lambda db: False)
+    with Session() as db:
+        _enter(db, Session)
+        out, _lane = _exit(db, Session, ok=False)
+        assert out["ok"] is True and out["reason"] == "shadow_exit" and out["barrier_opened"] is False
+        visit = db.scalar(select(ParkingSession))
+        assert visit.status == "CLOSED" and visit.exit_time is not None
+        outcomes = [d.outcome for d in db.scalars(select(AccessDecision).where(
+            AccessDecision.lane_direction == "EXIT").order_by(AccessDecision.id))]
+        assert outcomes == ["EXIT_RECORDED_SHADOW", "SUPERVISED_CLOSE"]
+
+
+def test_with_gate_control_on_a_failed_barrier_keeps_the_visit_open(Session, monkeypatch):
+    monkeypatch.setattr("app.services.developer.gate_opening_enabled", lambda db: True)
+    with Session() as db:
+        _enter(db, Session)
+        out, _lane = _exit(db, Session, ok=False)
+        assert out["reason"] == "gate_unavailable"
+        assert db.scalar(select(ParkingSession)).status != "CLOSED"

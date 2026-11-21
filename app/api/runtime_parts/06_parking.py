@@ -276,6 +276,90 @@ def open_session(payload: SessionCreate, db: Session = Depends(get_db), user: Us
     return session_dict(row)
 
 
+@app.post("/lanes/{camera_id}/entry-fallback")
+async def entry_fallback(
+    camera_id: int,
+    payload: dict = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_any("sessions.create", "gates.open")),
+):
+    """Operator fallback at an entry when the camera did not capture the car.
+
+    Takes a picture from the entry camera now and forces a plate read on it.
+    The plate is, in order: what the operator typed, what the read found, or a
+    placeholder (``UNREAD…``) when neither exists, in which case the printed
+    ticket's QR is the car's identity at the exit. The visit then goes through
+    the normal entry path: session, ticket printing and barrier policy are the
+    same as for a camera read. Every use is audited with the picture.
+    """
+    import secrets as _secrets
+    from uuid import uuid4
+
+    from app.application.live_parking import UNREAD_PLATE_PREFIX, handle_operator_entry
+    from app.core.plate import apply_site_plate, normalize_plate
+    from app.services.captures import _write_jpeg
+    from app.services.site_policy import site_policy
+
+    def _prepare():
+        c = _camera_for_node(db, camera_id, action="entry-fallback")
+        if str(c.lane_direction or "ENTRY").upper() == "EXIT":
+            raise HTTPException(409, "This is an exit camera. Use the receipt scanner at the exit.")
+        spec = _live_spec(c)
+        validation = site_policy(db).get("plate_validation", "NONE")
+        release_connection(db)
+        return c, spec, validation
+
+    camera, spec, validation = await run_db(_prepare)
+    touch_live(spec)
+    jpeg = b""
+    try:
+        grabbed = await snapshot_for_camera(
+            spec.id, spec.ip, spec.username, spec.password, spec.rtsp_url,
+            sdk_handle=spec.sdk_handle, adapter_id=spec.adapter_id,
+        )
+        jpeg = (grabbed.get("jpeg") or b"") if grabbed.get("ok") else b""
+    except Exception as exc:
+        log.warning("entry fallback camera=%s: no picture: %s", camera_id, exc)
+    read_plate, read_confidence = "", 0.0
+    if jpeg[:2] == b"\xff\xd8":
+        try:
+            alpr = await _manual_alpr_read(jpeg, camera_label=f"entry-fallback-{camera_id}")
+        except HTTPException:
+            alpr = {}
+        best = (alpr or {}).get("best") or {}
+        raw = normalize_plate(best.get("plate_normalized") or best.get("plate") or "")
+        if raw:
+            read_plate = str(apply_site_plate(raw, validation=validation).get("normalized_plate") or raw)
+            read_confidence = float(best.get("confidence") or 0.0)
+    typed = normalize_plate(str((payload or {}).get("plate") or ""))
+    plate = typed or read_plate or f"{UNREAD_PLATE_PREFIX}{_secrets.token_hex(2).upper()}"
+    image_ref = _write_jpeg("snapshots", f"cam{camera_id}-fallback-{uuid4().hex[:12]}.jpg", jpeg) if jpeg[:2] == b"\xff\xd8" else ""
+
+    def _gate():
+        return db.get(Gate, camera.gate_id) if camera.gate_id else None
+
+    gate = await run_db(_gate)
+    result = await handle_operator_entry(
+        db, camera=camera, gate=gate, plate=plate,
+        confidence=1.0 if typed else max(read_confidence, 0.5),
+        image_ref=image_ref, source="operator-fallback",
+    )
+    write_audit(db, user, "entry.fallback", "camera", str(camera_id),
+                f"plate={plate} typed={typed or '-'} read={read_plate or '-'} ({read_confidence:.2f}) photo={image_ref or '-'}")
+    db.commit()
+    log.warning("ENTRY FALLBACK camera=%s plate=%s typed=%s read=%s operator=%s",
+                camera_id, plate, typed or "-", read_plate or "-", user.username)
+    return {
+        **(result if isinstance(result, dict) else {}),
+        "plate": plate,
+        "typed_plate": typed,
+        "read_plate": read_plate,
+        "read_confidence": read_confidence,
+        "placeholder": plate.startswith(UNREAD_PLATE_PREFIX) and not typed and not read_plate,
+        "snapshot": image_ref,
+    }
+
+
 @app.post("/sessions/{session_id}/exit")
 def close_session(
     session_id: int,

@@ -220,6 +220,10 @@ class MainWindow(DesktopShell):
         menu.addSeparator()
         menu.addAction(add_act("Open gate", "F8", lambda: self._shortcut_barrier("open"), "Open the selected barrier"))
         menu.addAction(add_act("Close gate", "F9", lambda: self._shortcut_barrier("close"), "Close the selected barrier"))
+        menu.addAction(add_act("Read plate and print ticket", "F6", lambda: self._shortcut_fallback("entry_fallback"),
+                               "The entry camera missed a car: read now and print its ticket"))
+        menu.addAction(add_act("Scan ticket to exit", "F7", lambda: self._shortcut_fallback("exit_scan"),
+                               "Let a car out by scanning its ticket QR code"))
         refresh_action=add_act("Refresh", ["F5", "Ctrl+R"], self._shortcut_refresh, "Reload this page")
         menu.addAction(refresh_action)
         menu.addSeparator()
@@ -293,6 +297,18 @@ class MainWindow(DesktopShell):
         if self._text_editing():
             return
         self._call_page(("refresh",))
+    def _shortcut_fallback(self, method):
+        if self._text_editing():
+            return
+        page=self._current_page()
+        if isinstance(page, Cameras) and page._live_visible():
+            pane=page.shortcut_pane()
+            if pane is None:
+                QMessageBox.information(self, "Lane fallback", "Click the live camera of that lane side first, or press 1 / 2.")
+                return
+            getattr(pane, method)()
+            return
+        QMessageBox.information(self, "Lane fallback", "Open Live Gates and select the entry or exit camera.")
     def _shortcut_barrier(self, action):
         if self._text_editing():
             return
@@ -333,6 +349,8 @@ class MainWindow(DesktopShell):
             "Ctrl+Shift+D    Repair / reconfigure deployment\n"
             "F8        Open only the highlighted camera or armed gate side\n"
             "F9        Close only the highlighted camera or armed gate side\n"
+            "F6        Entry camera missed a car: read the plate now and print its ticket\n"
+            "F7        Exit: let a car out by scanning its ticket QR code\n"
             "1 / 2     Select live camera 1 or 2, or gate entry / exit\n"
             "F1        This help",
         )
