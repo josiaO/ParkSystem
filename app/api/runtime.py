@@ -15,9 +15,11 @@ _PARTS_DIR = Path(__file__).resolve().parent / "runtime_parts"
 
 def _load_runtime_parts() -> None:
     namespace = globals()
-    for part in sorted(_PARTS_DIR.glob("*.py")):
-        source = part.read_text(encoding="utf-8")
-        exec(compile(source, str(part), "exec"), namespace, namespace)
+    from app.core.parts import part_code, part_names
+
+    # Source in a checkout; compiled ``.partc`` files in an installed release.
+    for name in part_names(_PARTS_DIR, "*.py"):
+        exec(part_code(_PARTS_DIR / name), namespace, namespace)
 
 
 _load_runtime_parts()
