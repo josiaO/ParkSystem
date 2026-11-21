@@ -234,6 +234,13 @@ Expand-Archive -LiteralPath $zip -DestinationPath $site32 -Force; Remove-Item $z
 if (-not $IncludeSource) {
     # Like the classic parking systems: install compiled code, not the source.
     # Compiled with the staged runtime so the bytecode matches what loads it.
+    # Compiled files cannot be text-scanned, so look for keys in the source first.
+    $srcKeys = @(Get-ChildItem (Join-Path $Stage "app") -Recurse -File -Include *.py |
+        Select-String -Pattern '-----BEGIN [A-Z ]*PRIVATE KEY-----', 'SMARTPARK_[A-Z_]*(SECRET|TOKEN|PASSWORD|API_KEY)\s*=\s*\S{6,}' -List)
+    if ($srcKeys.Count) {
+        $srcKeys | ForEach-Object { Write-Host "  text: $($_.Path):$($_.LineNumber)" -ForegroundColor Red }
+        throw "Secret scan failed: the application source contains a key or credential."
+    }
     Step "Compiling the application (no readable source in the installer)"
     $out = & (Join-Path $py64 "python.exe") (Join-Path $PSScriptRoot "compile_app.py") (Join-Path $Stage "app") 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Compiling the application failed:`n$($out | Out-String)" }
@@ -312,7 +319,7 @@ $bannedExt = @(".pfx", ".p12", ".pem", ".key", ".sqlite", ".sqlite3", ".db", ".b
 $hits = @(Get-ChildItem $Stage -Recurse -Force -File | Where-Object {
     ($bannedNames -contains $_.Name.ToLowerInvariant()) -or
     (($bannedExt -contains $_.Extension.ToLowerInvariant()) -and $_.FullName -notmatch '\\(site-packages|python64|python32|vendor\\ffmpeg|vendor\\mediamtx|models)\\') -or
-    ($_.FullName -match '\\secrets\\' -and $_.Extension -notin @(".py", ".pyi") -and $_.FullName -notmatch '\\site-packages\\')
+    ($_.FullName -match '\\secrets\\' -and $_.Extension -notin @(".py", ".pyi", ".pyc") -and $_.FullName -notmatch '\\site-packages\\')
 })
 $keyText = @(Get-ChildItem (Join-Path $Stage "app"), (Join-Path $Stage "tools"), (Join-Path $Stage "portal") -Recurse -File -Include *.py, *.js, *.json, *.txt, *.ini, *.toml -ErrorAction SilentlyContinue |
     Select-String -Pattern '-----BEGIN [A-Z ]*PRIVATE KEY-----', 'SMARTPARK_[A-Z_]*(SECRET|TOKEN|PASSWORD|API_KEY)\s*=\s*\S{6,}' -List)
