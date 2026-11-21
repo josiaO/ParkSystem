@@ -3,7 +3,7 @@
 Zirp ships as one Windows installer, `Zirp-Setup-<version>.exe`. It carries
 everything it needs: Python, the recognition models, the camera SDK, FFmpeg,
 MediaMTX and the web portal. You don't need Python, Node or Git on the site PC,
-and you don't need internet during installation.
+and you don't need internet during installation. It installs the compiled program, not its source code.
 
 **Download:** grab the latest installer from the
 [Releases page](https://github.com/josiaO/ParkSystem/releases). Each release
