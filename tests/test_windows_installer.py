@@ -185,17 +185,31 @@ class ZirpctlArgumentTests(unittest.TestCase):
         (root / "bin").mkdir()
         shutil.copy(INSTALLER / "bin" / "zirpctl.ps1", root / "bin" / "zirpctl.ps1")
         cmd = f'"{ps}" -NoProfile -ExecutionPolicy Bypass -File "{root / "bin" / "zirpctl.ps1"}" {args} -Root "{root}"'
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, shell=False)
+        # Its transcripts and last-error.txt go under %ProgramData%: never the
+        # PC's real C:\ProgramData\SmartParkEdge\logs\install (where a test
+        # run once left "Run zirpctl from an elevated PowerShell" as the
+        # site's last install error).
+        env = {**os.environ, "ProgramData": str(root / "programdata"), "PROGRAMDATA": str(root / "programdata")}
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, shell=False, env=env)
 
     def test_installer_argument_lines_bind(self):
         iss = _read(INSTALLER / "Zirp.iss")
         self.assertIn("' -HvxHost service'", iss)
         self.assertIn("' -HvxHost task'", iss)
         self.assertNotIn(":$true", iss)
+        # A repair holds the services down with this installer's own zirpctl,
+        # and puts them back if setup is cancelled.
+        self.assertIn("ExtractTemporaryFile('zirpctl.ps1')", iss)
+        self.assertIn("services stop -Hold", iss)
+        self.assertIn("procedure DeinitializeSetup", iss)
+        ctl = _read(INSTALLER / "bin" / "zirpctl.ps1")
+        self.assertIn("start= disabled", ctl)
+        self.assertLess(ctl.index("$SiteService, $HvxService"), ctl.index("function Stop-ZirpServices"))
         lines = [
             'activate -Version "1.0.0-rc1" -Role COMBINED -HvxHost service',
             'activate -Version "1.0.0-rc1" -Role EDGE -HvxHost task',
             'activate -Version "1.0.0-rc1" -Role SERVER',
+            'services stop -Hold',
             'activate -Version "1.0.0-rc1" -Role OPERATOR',
             'activate -Version "1.0.0-rc1" -Role KIOSK -KioskUser "KIOSK01\\kiosk"',
             'services stop',
