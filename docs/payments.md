@@ -40,7 +40,8 @@ the visit reopens and the extra time is charged.
 ## Setting up ClickPesa
 
 Get the client ID, API key and checksum key from your ClickPesa dashboard, then
-enter them under **Settings → Mobile money** in the desktop app, or in
+enter them under **Settings → Mobile money** in the desktop app. Setting up a
+PC by script instead? The same values go in
 `C:\ProgramData\SmartParkEdge\config\zirp.env`:
 
 ```
@@ -67,14 +68,16 @@ anyone by accident. The **Mobile money** tab shows the mode:
 | `LIVE_DISABLED` | Keys saved, real collection still switched off |
 | `LIVE` | Real payments |
 
-To go live, set both of these:
+To go live, tick both boxes in the **Mobile money** tab ("Collect real money
+with ClickPesa" and the confirmation). In `zirp.env` they are:
 
 ```
 SMARTPARK_CLICKPESA_LIVE_ENABLED=true
 SMARTPARK_PAYMENTS_LIVE_PROVIDER_CONFIRMED=true
 ```
 
-Restart the services after changing `zirp.env`.
+Saving the tab applies at once; after editing `zirp.env` by hand, restart the
+services.
 
 ## Testing without real money
 

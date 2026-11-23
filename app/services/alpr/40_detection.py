@@ -11,7 +11,14 @@ def _country_name() -> str:
     explicit = str(getattr(settings, "alpr_country", "") or "").strip().lower()
     if explicit:
         return explicit
-    validation = str(getattr(settings, "plate_validation", "") or "").strip().upper()
+    # Settings -> Site -> Plate validation decides the profile, so the
+    # separate SMARTPARK_ALPR_COUNTRY line is no longer needed.
+    try:
+        from app.services import runtime_settings
+
+        validation = runtime_settings.site_plate_validation()
+    except Exception:
+        validation = str(getattr(settings, "plate_validation", "") or "").strip().upper()
     if validation == "TZ":
         return "tanzania"
     return ""

@@ -28,6 +28,7 @@ async def _infer_camera(
     from app.services.recognition_decoder import iter_jpegs, require_local_mediamtx
     from app.infrastructure.media.registry import get_detect_endpoint
     from app.config import settings
+    from app.services import read_budget
 
     camera_id = int(camera["id"])
     endpoint = await get_detect_endpoint(camera_id)
@@ -247,6 +248,9 @@ async def _infer_camera(
                         confirmed_visit_id = ""
                         stats["ocr_paused"] = False
                         arrival.reset()
+                        # Without a departure detector we can't tell the car
+                        # left, so don't let the read limit freeze the lane.
+                        read_budget.new_car(camera_id)
                     continue
                 probe_failures = 0
                 stats["state"] = "READY"
@@ -270,6 +274,7 @@ async def _infer_camera(
                     stats["last_plate"] = ""
                     stats["ocr_paused"] = False
                     arrival.reset()
+                    read_budget.new_car(camera_id)     # the car left
                 continue
             stats["ocr_paused"] = False
             ticket = runtime.begin_if_idle(camera_id, stale_frame_ms=rec_policy.stale_frame_ms)
@@ -343,6 +348,7 @@ async def _infer_camera(
                 track.reset(now)
                 lane.visit.reset(now)
                 lane.visit.observe(presence=True, now=now)
+                read_budget.new_car(camera_id)
                 confirmed_visit_id = ""
                 stats["last_plate"] = ""
                 stats["ocr_paused"] = False
@@ -360,6 +366,7 @@ async def _infer_camera(
                 if lane.visit.state == "IDLE":
                     stats["last_plate"] = ""
                     arrival.reset()
+                    read_budget.new_car(camera_id)     # the car left
                 stats["recognition_inflight"] = False
                 await asyncio.sleep(interval)
                 continue
@@ -370,13 +377,27 @@ async def _infer_camera(
                 stats["last_inference_at"] = time.time()
                 await asyncio.sleep(interval)
                 continue
+            if not read_budget.allow(camera_id):
+                # The Site Service (or this worker) already read this car
+                # confidently or twice: no third read of the same car.
+                runtime.finish(ticket, plate="")
+                arrival.note_ocr(published=True)
+                stats["recognition_inflight"] = False
+                stats["arrival"] = "already-read"
+                await asyncio.sleep(interval)
+                continue
             selected = arrival.selected
             calibration.note_selected(camera_id, selected)
             stats["calibration"] = calibration.live_state(camera_id)
             # OCR the best eligible frame of this passage, not merely the
             # frame that closed the selection window.
             ocr_jpeg = selected.jpeg if selected is not None and selected.jpeg[:2] == b"\xff\xd8" else ticket.jpeg
-            ocr_boxes = selected.boxes if selected is not None else boxes
+            # Read only plates this camera's calibration accepts: the chosen
+            # plate first, never another lane's car on the same picture.
+            if selected is not None:
+                ocr_boxes = [selected.box]
+            else:
+                ocr_boxes, _ = calibration.plates_to_read(camera_id, ocr_jpeg, boxes)
             same_frame = ocr_jpeg is ticket.jpeg
             started = time.monotonic()
             timeline = stats.get("timeline", {})
@@ -502,6 +523,7 @@ async def _infer_camera(
                 stats["published"] = int(stats.get("published") or 0) + 1
                 lane.note_published()
                 lane.visit.mark_published(decision.plate)
+                read_budget.settle(camera_id, decision.plate, decision.confidence)
                 confirmed_visit_id = lane.visit.visit_id
                 arrival.note_ocr(published=True)
             except Exception as exc:

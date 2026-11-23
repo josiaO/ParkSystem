@@ -256,6 +256,11 @@ async def _run_local_alpr(
     runtime.offer_frame(int(camera.id), jpeg, source="site-alpr")
     if not force and not event_still and not _local_alpr_ready(camera.id):
         return None
+    from app.services import read_budget
+    if not force and not read_budget.allow(int(camera.id), hint_plate=_trigger_plate_hint(native)):
+        # This car was already read (confidently, or twice). Another picture
+        # of it can only add a chance of a misread.
+        return read_budget.skipped_result(read_budget.current(int(camera.id)))
     from app.domain.recognition_engine import policy_from_settings
     stale_frame_ms = EVENT_STILL_MAX_AGE_MS if event_still else policy_from_settings().stale_frame_ms
     ticket = runtime.begin_if_idle(int(camera.id), stale_frame_ms=stale_frame_ms)
@@ -310,6 +315,35 @@ async def _run_local_alpr(
 
 
 EVENT_STILL_MAX_AGE_MS = 120_000.0
+
+
+def _trigger_plate_hint(native: dict | None) -> str:
+    """Plate text the camera sent with its trigger, when it looks like a real read."""
+    from app.core.plate import is_empty_scene_ocr, normalize_plate
+
+    native = native or {}
+    plate = normalize_plate(native.get("plate") or "")
+    confidence = float(native.get("confidence") or 0)
+    if not plate or confidence < 0.5 or is_empty_scene_ocr(plate, confidence=confidence):
+        return ""
+    return plate
+
+
+def _count_read(db, camera: Camera, local: dict) -> None:
+    """Count one automatic read toward this car's two-read limit."""
+    from app.core.plate import validate_plate
+    from app.services import read_budget
+
+    plate = str((local or {}).get("plate") or "")
+    try:
+        policy = site_policy(db).get("plate_validation", "NONE")
+    except Exception:
+        policy = "NONE"
+    valid = bool(plate) and validate_plate(plate, policy).get("ok", False)
+    try:
+        read_budget.record(int(camera.id), plate, float((local or {}).get("confidence") or 0), valid=valid)
+    except Exception:
+        log.debug("read budget not updated", exc_info=True)
 
 
 def _correct_site_plate(db, alpr: dict | None) -> dict | None:
@@ -454,10 +488,38 @@ async def _run_local_alpr_locked(
             src_w=int(native.get("image_width") or 0),
             src_h=int(native.get("image_height") or 0),
         )
+    # Only plates inside this camera's calibration are read (see
+    # capture_calibration.plates_to_read). Find the plates first, drop the
+    # ones outside the calibration, and read the best one left.
+    refused_all = None
+    from app.services import capture_calibration as calibration_rules
+    if calibration_rules.for_camera(int(camera.id)).get("enabled"):
+        if not boxes:
+            from app.services.alpr import locate_plate_boxes
+            found, located = await run_inference(
+                locate_plate_boxes, jpeg, detect_roi=effective_roi, detect_zoom=framing["detect_zoom"],
+            )
+            boxes = found if located.get("available") else None
+        if not boxes and native_box:
+            boxes = [native_box]
+        if boxes:
+            kept, refused = calibration_rules.plates_to_read(int(camera.id), jpeg, boxes)
+            if kept:
+                boxes = kept
+            else:
+                refused_all = refused
+    if refused_all is not None:
+        first = refused_all[0] if refused_all else None
+        calibration_rules.note_rejected(
+            int(camera.id), plate="", reasons=list(first.reasons) if first else ["outside capture calibration"],
+            candidate=first, jpeg=jpeg,
+        )
+        alpr = {"ok": True, "backend": "fastalpr", "plates": [], "best": None,
+                "detail": "no plate inside this camera's calibration", "calibration_refused": True}
     # A native usLpBox is a useful fallback, but it is not trusted as the
     # primary FastALPR crop.  The panorama detector runs inside this one
     # recognition call and only uses the native box if it finds no current box.
-    if boxes:
+    elif boxes:
         alpr = await run_inference(
             recognize_arrival_bytes, jpeg,
             camera_label=f"cam-{camera.id}-{camera.ip_address}",
@@ -474,7 +536,7 @@ async def _run_local_alpr_locked(
             detect_zoom=framing["detect_zoom"],
             fallback_box=native_box,
         )
-    if not (alpr or {}).get("best") and plate_crop[:2] == b"\xff\xd8":
+    if refused_all is None and not (alpr or {}).get("best") and plate_crop[:2] == b"\xff\xd8":
         # The SDK vehicle-picture buffer is a last-resort source only when the
         # full panorama detector is unavailable; never prefer it over the
         # current full panorama.
@@ -505,6 +567,8 @@ async def _run_local_alpr_locked(
         if not accepted:
             runtime.lane(int(camera.id)).last_error = "Recognition result expired; retrying a fresh frame."
             return {**(alpr or {}), "persist_skipped": "stale recognition result"}
+    if not force and alpr.get("ok") is not False:
+        _count_read(db, camera, local)
     if plate:
         runtime.lane(int(camera.id)).visit.observe(presence=True, plate=plate, native_event=bool(native.get("plate")))
     else:

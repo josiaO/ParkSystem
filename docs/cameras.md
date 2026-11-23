@@ -72,26 +72,47 @@ barrier.
 
 ### Tanzanian plates
 
-Turn on the Tanzania profile in `C:\ProgramData\SmartParkEdge\config\zirp.env`:
+Pick **Tanzania** for "Number plates on this site" in the setup wizard, or set
+**Settings → Site → Plate validation** to `TZ` later. That one choice does two
+things, with no restart:
 
-```
-SMARTPARK_ALPR_COUNTRY=tanzania
-```
+It turns on the Tanzania recognition profile, which fixes the usual OCR
+mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`, `B`/`8` in the right
+positions, and a leading `T` hidden by a bolt that gets read as `7`. (Older
+installs set `SMARTPARK_ALPR_COUNTRY=tanzania` in `zirp.env`; that still works
+but isn't needed.)
 
-It fixes the usual OCR mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`,
-`B`/`8` in the right positions, and a leading `T` hidden by a bolt that gets
-read as `7`. Restart the services afterwards (`zirpctl services restart`).
-
-Also set **Settings → Site → Plate validation** to `TZ`. Then only real
+And only real
 Tanzanian formats open a visit on their own: `T123ABC`, motorcycles
 `MC123ABC`, and government, police, army and diplomatic plates (`STK…`, `PT…`,
 `JWTZ…`, `CD…`). Anything else, like a badge read as `TQYOTA` or a glare read
 like `T70DMT`, waits for an operator instead of opening a session.
 
-### When a car is read more than once
+### Two reads per car, at most
 
-Most cars are read several times: from the live video and from the camera's
-own snapshots. Zirp keeps one capture per car, and **the best read wins**. A
+A camera sends several pictures per car (its own triggers, the loop, Zirp's
+video gate), and every extra read is another chance of a misread. So Zirp
+reads a car **once**, and only if that read is unsure (below 0.90, or not a
+valid plate for the site) does it read **one more** picture. After a
+confident read, or after the second read, the other pictures of that car are
+skipped. They show as `skipped_already_read` in the event log.
+
+"The same car" means triggers on one camera until the lane has been quiet for
+4 seconds, or 20 seconds at most. A loop going high, the Recognition Worker
+seeing the lane empty, or the camera reporting a clearly different plate
+starts a new car straight away, so a queue is never skipped. Pictures with no
+plate in them don't count. Operator reads are never limited.
+
+Change these under **Settings → Recognition** ("Read each car at most twice",
+"A read is final from", "Car has left after", "Read a waiting car again
+after"). Saved values apply on every Zirp PC within a few seconds.
+
+The count lives in the shared cache (see [operations.md](operations.md)), so
+the Site Service and the Recognition Worker agree on it.
+
+### When a car is read twice
+
+Zirp keeps one capture per car, and **the best read wins**. A
 weak read that's waiting for review is replaced by a more confident read of
 the same car, and two frames that agree exactly are enough to go ahead even
 when each is below the 0.92 confidence bar. A read that has already been
@@ -131,26 +152,40 @@ headlights make plates bright, so for example "brightness to" can't go below
 creating visits or opening the barrier. Use it after every calibration change.
 
 Calibration applies to every way a car can be read: the camera's own trigger,
-Zirp's video reader and the recognition worker. All of them go through the
-same check before a visit is created.
+Zirp's video reader and the recognition worker. It's applied **before**
+reading. Zirp finds every plate on the picture, drops the ones the calibration
+refuses, and reads only the best plate that's left. A parked car or the next
+lane's car outside your zone is never read, even when its plate is clearer
+than the car in the lane. If no plate passes, nothing is read and the live view
+shows **NOT STORED** with the reason. The same check runs again before a visit
+is created.
+
+How the zone and the lines share the work:
+
+- A plate **off to the side** of the zone (another lane) is refused by the
+  **capture zone** rule.
+- A plate **in the lane but not yet at the zone** (still approaching) is
+  governed by the **start line** switch. Switch the start line off and early
+  reads are stored.
+- A plate **in the lane but already past the zone** is governed by the **end
+  line** switch.
+
+So switching the start line off really does store reads taken before the line,
+even when the zone's top edge is drawn close to it.
 
 ### Start and end lines with the camera's own trigger
 
-With `SMARTPARK_CAPTURE_TRIGGER=external`, the camera decides when to take its
+With **Settings → Recognition → Who triggers the pictures** set to "The camera
+or another parking system", the camera decides when to take its
 snapshot, and it sends one or two stills per car. The lines can only accept or
 refuse those stills; they can't make the camera wait. On our first site,
 43% of one entry camera's snapshots were taken before the plate reached the
 drawn start line, so switching that line on would have refused those cars.
 
-If you want the start line to **start** the read, let Zirp trigger the camera:
-
-```
-SMARTPARK_CAPTURE_TRIGGER=zirp
-```
-
-Zirp then watches the live video and asks the camera for its full-resolution
+If you want the start line to **start** the read, choose "Zirp triggers the
+camera" there instead. Zirp then watches the live video and asks the camera for its full-resolution
 snapshot when the plate crosses the start line. Try it on one lane with test
-mode first. `both` keeps the camera's trigger as well.
+mode first. "Both" keeps the camera's trigger as well.
 
 ## Troubleshooting
 

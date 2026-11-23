@@ -29,7 +29,9 @@ HIDDEN_NOTE = "The entry photo is not shown on the public receipt. If the plate 
 
 
 def public_photo_mode() -> str:
-    mode = str(getattr(settings, "public_receipt_photo", PHOTO_OFF) or PHOTO_OFF).strip().lower()
+    from app.services import runtime_settings
+
+    mode = str(runtime_settings.get("public_receipt_photo") or PHOTO_OFF).strip().lower()
     return mode if mode in _MODES else PHOTO_OFF
 
 

@@ -200,6 +200,17 @@ class Settings(BaseSettings):
     camera_tcp_probe_seconds: float = 1.0
     rtsp_probe_timeout_seconds: float = 5.0
     alpr_timeout_seconds: float = 15.0
+    # Shared fast cache (a local Redis service installed with Zirp). Empty
+    # means "use this process's memory only". PostgreSQL stays the truth.
+    redis_url: str = ""
+    # Reads per car: one read, and a second only when the first was unread
+    # or below ``read_budget_confident``. A car is the stream of camera
+    # triggers on one lane until it has been quiet for ``read_budget_quiet_seconds``
+    # (or ``read_budget_max_seconds`` have passed).
+    read_budget_enabled: bool = True
+    read_budget_confident: float = 0.90
+    read_budget_quiet_seconds: float = 4.0
+    read_budget_max_seconds: float = 20.0
     alpr_country: str = ""
     alpr_csf: float = 0.918
     alpr_detector_confidence: float = 0.26

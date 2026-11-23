@@ -79,3 +79,20 @@ def _secrets_never_touch_the_site():
     set_secret_store(MemorySecretStore())
     yield
     set_secret_store(None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_read_counts(monkeypatch):
+    """Every test starts with no car read yet, in memory, never the site's Redis."""
+    from app.services import read_budget
+    from app.services.shared_cache import SharedCache
+
+    monkeypatch.setattr(read_budget, "cache", SharedCache(url=""))
+    # Settings -> Recognition values: zirp.env defaults only, never the PC's
+    # own database. tests/test_runtime_settings.py turns the reader back on.
+    from app.services import runtime_settings
+
+    monkeypatch.setattr(runtime_settings, "_read_stored", lambda: ({}, None))
+    runtime_settings.invalidate()
+    yield
+    runtime_settings.invalidate()

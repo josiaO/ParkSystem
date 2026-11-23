@@ -690,6 +690,11 @@ def _note_arrival_result(camera_id: int, alpr: dict | None) -> bool:
     if alpr is None:
         gate_for(int(camera_id)).rearm()
         return False
+    from app.services import read_budget
+    if read_budget.is_skipped(alpr):
+        # The car was already read: wait for it to leave, don't keep retrying.
+        gate_for(int(camera_id)).hold()
+        return True
     best = (alpr or {}).get("best") or {}
     plate = str(best.get("plate_normalized") or best.get("plate") or "")
     kept = bool(plate) and not alpr.get("persist_skipped")
@@ -792,7 +797,8 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             )
             gate.hold()
             return
-        if str(getattr(settings, "capture_trigger", "zirp")) in {"zirp", "both"} and handle is not None:
+        from app.services import runtime_settings
+        if str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"} and handle is not None:
             # Zirp's own trigger: command the camera's full-resolution
             # snapshot now (the image a loop-triggered camera would send) and
             # read it through the normal event path, falling back to this

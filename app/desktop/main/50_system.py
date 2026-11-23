@@ -517,6 +517,7 @@ class SettingsPage(QWidget):
         if api.can("cameras.view") or api.can("cameras.manage"):
             self._build_calibration()
         if manage:
+            self._build_recognition()
             self._build_payments()
             self._build_alerts()
             self._build_developer()
@@ -760,6 +761,49 @@ class SettingsPage(QWidget):
         v.addStretch()
         self.tabs.addTab(self._scroll(page), "Alerts")
 
+    # --------------------------------------------------------- recognition --
+    def _build_recognition(self):
+        """Settings that used to be lines in zirp.env. Saved in the site database."""
+        from PySide6.QtWidgets import QDoubleSpinBox
+
+        page=QWidget(); v=QVBoxLayout(page)
+        v.addWidget(self._note("How the lanes take and read plate pictures. Changes apply within a few seconds "
+                               "on every Zirp PC; no restart. The site's plate country is under Site → Plate validation."))
+        self.rec_trigger=QComboBox()
+        for value, label in (("external", "The camera or another parking system triggers the pictures (Zirp only reads)"),
+                             ("zirp", "Zirp triggers the camera when its video sees a car"),
+                             ("both", "Both: Zirp triggers, and also reads the camera's own pictures")):
+            self.rec_trigger.addItem(label, value)
+        self.rec_limit=QCheckBox("Read each car at most twice")
+        self.rec_limit.setToolTip("Read once; read a second picture only when the first read is unsure. "
+                                  "Fewer reads means fewer chances of a misread.")
+        self.rec_confident=QDoubleSpinBox(); self.rec_confident.setRange(0.50, 0.99); self.rec_confident.setSingleStep(0.01); self.rec_confident.setDecimals(2)
+        self.rec_confident.setToolTip("A read at or above this is final. Below it, Zirp reads one more picture of the car.")
+        self.rec_quiet=QDoubleSpinBox(); self.rec_quiet.setRange(1, 30); self.rec_quiet.setSingleStep(0.5); self.rec_quiet.setDecimals(1); self.rec_quiet.setSuffix(" s")
+        self.rec_quiet.setToolTip("After this long without a camera trigger the car has gone; the next trigger is a new car.")
+        self.rec_max=QDoubleSpinBox(); self.rec_max.setRange(5, 120); self.rec_max.setSingleStep(5); self.rec_max.setDecimals(0); self.rec_max.setSuffix(" s")
+        self.rec_max.setToolTip("A car waiting at the barrier longer than this is read again.")
+        self.rec_photo=QComboBox()
+        for value, label in (("off", "Don't show the entry photo"), ("blurred", "Show it blurred"), ("full", "Show it as taken")):
+            self.rec_photo.addItem(label, value)
+        form=QFormLayout()
+        form.addRow("Who triggers the pictures", self.rec_trigger)
+        form.addRow("", self.rec_limit)
+        form.addRow("A read is final from", self.rec_confident)
+        form.addRow("Car has left after", self.rec_quiet)
+        form.addRow("Read a waiting car again after", self.rec_max)
+        form.addRow("Photo on the driver's receipt page", self.rec_photo)
+        v.addLayout(form)
+        self.rec_limit.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.rec_confident, self.rec_quiet, self.rec_max)])
+        v.addWidget(self._note("A loop going high, or the camera reporting a different plate, always starts a new car, "
+                               "so a queue is never skipped. Operator reads are never limited."))
+        row=QHBoxLayout()
+        self.rec_save=QPushButton("Save recognition settings"); self.rec_save.clicked.connect(self.save_recognition)
+        row.addWidget(self.rec_save); row.addStretch(); v.addLayout(row)
+        self.rec_status=self._status_label(); v.addWidget(self.rec_status)
+        v.addStretch()
+        self.tabs.addTab(self._scroll(page), "Recognition")
+
     # ----------------------------------------------------------- developer --
     def _build_developer(self):
         page=QWidget(); v=QVBoxLayout(page)
@@ -808,6 +852,8 @@ class SettingsPage(QWidget):
                 self.load_payments()
             if hasattr(self, "al_save"):
                 self.load_alerts()
+            if hasattr(self, "rec_save"):
+                self.load_recognition()
             if hasattr(self, "dev_save"):
                 self.load_developer()
             if hasattr(self, "cal_table"):
@@ -1001,6 +1047,34 @@ class SettingsPage(QWidget):
                  on_error=lambda message, _e: self.pay_status.setText(message))
 
     # -------------------------------------------------------------- alerts --
+    def load_recognition(self):
+        self.rec_status.setText("Loading…")
+        run_task(self, lambda: api.get("/settings/recognition"), self._show_recognition,
+                 on_error=lambda message, _e: self.rec_status.setText(message))
+    def _show_recognition(self, data):
+        data=data or {}
+        self._set_combo(self.rec_trigger, data.get("capture_trigger") or "zirp")
+        self.rec_limit.setChecked(bool(data.get("read_budget_enabled", True)))
+        self.rec_confident.setValue(float(data.get("read_budget_confident") or 0.90))
+        self.rec_quiet.setValue(float(data.get("read_budget_quiet_seconds") or 4.0))
+        self.rec_max.setValue(float(data.get("read_budget_max_seconds") or 20.0))
+        self._set_combo(self.rec_photo, data.get("public_receipt_photo") or "off")
+        for w in (self.rec_confident, self.rec_quiet, self.rec_max):
+            w.setEnabled(self.rec_limit.isChecked())
+        self.rec_status.setText("")
+    def save_recognition(self):
+        payload={"capture_trigger": self.rec_trigger.currentData(),
+                 "read_budget_enabled": self.rec_limit.isChecked(),
+                 "read_budget_confident": round(self.rec_confident.value(), 2),
+                 "read_budget_quiet_seconds": self.rec_quiet.value(),
+                 "read_budget_max_seconds": self.rec_max.value(),
+                 "public_receipt_photo": self.rec_photo.currentData()}
+        self.rec_status.setText("Saving…")
+        def done(data):
+            self._show_recognition(data)
+            show_status(self, "Recognition settings saved.")
+        run_task(self, lambda: api.patch("/settings/recognition", payload), done, buttons=self.rec_save, busy_text="Saving…",
+                 on_error=lambda message, _e: self.rec_status.setText(message))
     def load_alerts(self):
         self.al_status.setText("Loading alerts…")
         run_task(self, lambda: api.get("/settings/alerts"), self._show_alerts,

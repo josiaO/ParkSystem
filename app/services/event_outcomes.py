@@ -37,6 +37,8 @@ def classify(result: dict | None) -> str:
     """Outcome of one ``_run_event_alpr`` result."""
     if result is None:
         return "not_run"
+    if result.get("read_budget") == "skipped":
+        return "skipped_already_read"
     if result.get("persist_skipped"):
         return "rejected:" + str(result["persist_skipped"])[:40]
     if result.get("ok") is False:

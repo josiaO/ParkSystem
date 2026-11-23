@@ -62,7 +62,13 @@ $MediaService = "SmartParkMediaService"
 $WorkerService = "SmartParkRecognitionWorker"
 $HvxService = "SmartParkHvxHost"
 $PortalService = "SmartParkPortal"
-$AllServices = @($PortalService, $WorkerService, $MediaService, $HvxService, $SiteService)
+$CacheService = "SmartParkCache"
+# Stopped in this order; the shared cache goes last because the others use it.
+$AllServices = @($PortalService, $WorkerService, $MediaService, $HvxService, $SiteService, $CacheService)
+# Local Redis for short-lived lane state shared by the Zirp services. Loopback
+# only, nothing written to disk (PostgreSQL holds every record). A port away
+# from 6379 so it never clashes with another Redis on the PC.
+$CachePort = 6391
 $HvxTask = "SmartPark HVX Host"
 $KioskTask = "Zirp Kiosk"
 $LegacyTasks = @("SmartPark Site Service", "SmartPark Recognition Worker", "SmartPark HVX Host", "SmartPark Media Service")
@@ -311,7 +317,36 @@ function Get-PythonEnvironment([string]$NodeRole) {
     )
     $mediamtx = Join-Path $Current "vendor\mediamtx\mediamtx.exe"
     if (Test-Path $mediamtx) { $vars += "SMARTPARK_MEDIAMTX_BIN=$mediamtx" }
+    if (Test-Path (Get-RedisExe)) { $vars += "SMARTPARK_REDIS_URL=redis://127.0.0.1:$CachePort/0" }
     return $vars
+}
+
+function Get-RedisExe { return (Join-Path $Current "vendor\redis\redis-server.exe") }
+
+function Register-CacheService {
+    # Returns $true when the shared cache service was registered.
+    $exe = Get-RedisExe
+    if (-not (Test-Path $exe)) {
+        Write-Host "No bundled Redis in this release; Zirp keeps lane state in memory."
+        return $false
+    }
+    $conf = Join-Path $ConfigDir "redis.conf"
+    $lines = @(
+        "# Written by zirpctl on every install: Zirp's shared lane cache.",
+        "bind 127.0.0.1",
+        "protected-mode yes",
+        "port $CachePort",
+        'save ""',
+        "appendonly no",
+        "maxmemory 64mb",
+        "maxmemory-policy allkeys-lru",
+        "databases 4",
+        "loglevel notice"
+    )
+    Set-Content -Path $conf -Value $lines -Encoding ascii
+    Register-ZirpService -Name $CacheService -DisplayName "Zirp Shared Cache (Redis)" -Exe $exe `
+        -Arguments @($conf) -WorkDir (Split-Path $exe)
+    return $true
 }
 
 function Get-PortalEnvironment([int]$ApiPort) {
@@ -366,6 +401,10 @@ function Install-RoleServices([string]$R, [bool]$HvxSvc) {
     New-Item -ItemType Directory -Force -Path $ServiceLogDir | Out-Null
     & icacls.exe (Join-Path $DataDir "logs") /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q | Out-Null
     $py64 = Join-Path $Current "python64\python.exe"
+    # Roles with cameras run the Site Service and the Recognition Worker side
+    # by side; the cache lets them count the same car. Not a dependency: if
+    # it's stopped, Zirp falls back to memory.
+    if ($info.Cameras) { Register-CacheService | Out-Null }
     $nodeRole = "SERVER"   # the persisted deployment role decides; CLIENT here would disable local runtime
     $pyEnv = Get-PythonEnvironment $nodeRole
     $siteDepends = @()
@@ -405,7 +444,7 @@ function Install-RoleServices([string]$R, [bool]$HvxSvc) {
 
 function Start-ZirpServices {
     # sc.exe returns at once; Start-Service waited for every service in turn.
-    foreach ($name in @($SiteService, $MediaService, $WorkerService, $HvxService, $PortalService)) {
+    foreach ($name in @($CacheService, $SiteService, $MediaService, $WorkerService, $HvxService, $PortalService)) {
         if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
             & sc.exe start $name | Out-Null
             Write-Host "Starting $name"

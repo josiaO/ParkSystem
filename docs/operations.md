@@ -13,6 +13,14 @@ Windows, run with nobody signed in, and restart on their own if they crash
 | `SmartParkRecognitionWorker` | Plate recognition (FastALPR) | — |
 | `SmartParkHvxHost` | 32-bit QY/HVX camera SDK host (or a sign-in task) | 127.0.0.1:8765 |
 | `SmartParkPortal` | Back office and driver pay page | TCP 3000 |
+| `SmartParkCache` | Shared cache (Redis), camera PCs only, when the release bundles it | 127.0.0.1:6391 |
+
+The shared cache holds short-lived lane state that the Site Service and the
+Recognition Worker both need, such as how many times the car at each camera
+has been read. It keeps nothing on disk and is not a record: PostgreSQL is.
+If it's stopped, Zirp carries on with each process's own memory and picks the
+cache up again a few seconds after it's back. Its settings file is
+`config\redis.conf`, rewritten on every install.
 
 Ground-loop boards talk to the Site Service on UDP 8000. The installer opens
 the LAN firewall ports for the local subnet only.
@@ -61,9 +69,25 @@ and `RUNTIME` (heartbeat).
 
 ## Changing settings
 
-Site settings live in `C:\ProgramData\SmartParkEdge\config\zirp.env`. Each
-setting starts with `SMARTPARK_`. Editing the file needs an administrator.
-After a change, restart the services:
+Most settings are on screen in the desktop app, under **Settings**, and apply
+without a restart:
+
+| Tab | What's there |
+|---|---|
+| Site | Name, currency, timezone, plate validation (also the recognition country), public address |
+| Parking rules | Receipts, exit payment, grace times, printer |
+| Recognition | Who triggers the camera pictures, the two-reads-per-car limit, the photo on the driver's receipt page |
+| Camera calibration | Each camera's zone, lines and minimum confidence |
+| Mobile money | ClickPesa keys and switching on real money |
+| Alerts | Who is told about manual openings and failed gate commands |
+
+Values saved on screen are kept in the site database and override `zirp.env`.
+
+The rest (database connection, ports, low-level tuning) live in
+`C:\ProgramData\SmartParkEdge\config\zirp.env`, where `zirp.env` also gives
+the starting value for the on-screen settings. Each setting starts with
+`SMARTPARK_`. Editing the file needs an administrator. After a change, restart
+the services:
 
 ```powershell
 & "C:\Program Files\Zirp\bin\zirpctl.ps1" services restart
