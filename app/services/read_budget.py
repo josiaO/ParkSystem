@@ -52,26 +52,28 @@ class CarReads:
     skipped: int = 0
 
 
-def _settings():
-    from app.config import settings
+def _setting(name: str, default):
+    """Settings -> Recognition on screen, else the zirp.env default."""
+    from app.services import runtime_settings
 
-    return settings
+    value = runtime_settings.get(name)
+    return default if value is None else value
 
 
 def enabled() -> bool:
-    return bool(getattr(_settings(), "read_budget_enabled", True))
+    return bool(_setting("read_budget_enabled", True))
 
 
 def _confident_at() -> float:
-    return float(getattr(_settings(), "read_budget_confident", 0.90) or 0.90)
+    return float(_setting("read_budget_confident", 0.90) or 0.90)
 
 
 def _quiet() -> float:
-    return max(0.5, float(getattr(_settings(), "read_budget_quiet_seconds", 4.0) or 4.0))
+    return max(0.5, float(_setting("read_budget_quiet_seconds", 4.0) or 4.0))
 
 
 def _max_age() -> float:
-    return max(_quiet(), float(getattr(_settings(), "read_budget_max_seconds", 20.0) or 20.0))
+    return max(_quiet(), float(_setting("read_budget_max_seconds", 20.0) or 20.0))
 
 
 def _key(camera_id: int) -> str:

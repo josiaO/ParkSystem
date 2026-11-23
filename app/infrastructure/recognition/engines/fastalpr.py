@@ -35,7 +35,7 @@ class FastALPRPlateEngine:
             "loaded": bool(info.get("loaded")),
             "retrainable": True,
             "replaceable": True,
-            "country": settings.alpr_country or "",
+            "country": _site_alpr_country(),
             "contrast_sensitivity": float(settings.alpr_csf or 0.918),
             "pipeline": "arrival_crop_ocr",
             "flow": [
@@ -76,3 +76,10 @@ class FastALPRPlateEngine:
         result["engine_id"] = self.id
         result["engine_version"] = self.version
         return result
+
+
+def _site_alpr_country() -> str:
+    """Recognition country profile, from Settings -> Site -> Plate validation."""
+    from app.services.alpr import _country_name
+
+    return _country_name()

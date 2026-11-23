@@ -250,14 +250,22 @@ class _SetupValidationMixin:
         from app.services.site_policy import save_site_policy
 
         chosen = self.site_timezone.currentText().strip()
+        country_box = getattr(self, "site_plate_country", None)
+        country = str(country_box.currentData() or "") if country_box is not None else ""
         engine = _wizard_engine(database_url(db_config, password=self.pg_password.text() or None))
         try:
             with Session(engine) as db:
                 row = db.get(SiteSetting, "site")
-                stored = str((row.value or {}).get("timezone") or "") if row is not None and isinstance(row.value, dict) else ""
-                if stored and chosen == self._initial_site_timezone:
-                    return
-                save_site_policy(db, {"timezone": chosen})
+                value = row.value if row is not None and isinstance(row.value, dict) else {}
+                changes = {}
+                if not (value.get("timezone") and chosen == self._initial_site_timezone):
+                    changes["timezone"] = chosen
+                # Same rule for the plate country: keep what the site saved
+                # unless the technician changed the picker.
+                if country and not (value.get("plate_validation") and country == getattr(self, "_initial_plate_country", None)):
+                    changes["plate_validation"] = country
+                if changes:
+                    save_site_policy(db, changes)
         finally:
             engine.dispose()
 

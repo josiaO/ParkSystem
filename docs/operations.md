@@ -69,9 +69,25 @@ and `RUNTIME` (heartbeat).
 
 ## Changing settings
 
-Site settings live in `C:\ProgramData\SmartParkEdge\config\zirp.env`. Each
-setting starts with `SMARTPARK_`. Editing the file needs an administrator.
-After a change, restart the services:
+Most settings are on screen in the desktop app, under **Settings**, and apply
+without a restart:
+
+| Tab | What's there |
+|---|---|
+| Site | Name, currency, timezone, plate validation (also the recognition country), public address |
+| Parking rules | Receipts, exit payment, grace times, printer |
+| Recognition | Who triggers the camera pictures, the two-reads-per-car limit, the photo on the driver's receipt page |
+| Camera calibration | Each camera's zone, lines and minimum confidence |
+| Mobile money | ClickPesa keys and switching on real money |
+| Alerts | Who is told about manual openings and failed gate commands |
+
+Values saved on screen are kept in the site database and override `zirp.env`.
+
+The rest (database connection, ports, low-level tuning) live in
+`C:\ProgramData\SmartParkEdge\config\zirp.env`, where `zirp.env` also gives
+the starting value for the on-screen settings. Each setting starts with
+`SMARTPARK_`. Editing the file needs an administrator. After a change, restart
+the services:
 
 ```powershell
 & "C:\Program Files\Zirp\bin\zirpctl.ps1" services restart
