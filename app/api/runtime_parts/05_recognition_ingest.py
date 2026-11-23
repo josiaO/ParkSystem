@@ -690,6 +690,11 @@ def _note_arrival_result(camera_id: int, alpr: dict | None) -> bool:
     if alpr is None:
         gate_for(int(camera_id)).rearm()
         return False
+    from app.services import read_budget
+    if read_budget.is_skipped(alpr):
+        # The car was already read: wait for it to leave, don't keep retrying.
+        gate_for(int(camera_id)).hold()
+        return True
     best = (alpr or {}).get("best") or {}
     plate = str(best.get("plate_normalized") or best.get("plate") or "")
     kept = bool(plate) and not alpr.get("persist_skipped")

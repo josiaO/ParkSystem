@@ -137,6 +137,13 @@ Need (Join-Path $ThirdPartyDir "vendor\NetSDK.dll") "QY camera SDK"
 Need (Join-Path $ThirdPartyDir "vendor\nssm\nssm.exe") "NSSM"
 Need (Join-Path $ThirdPartyDir "vendor\ffmpeg\bin\ffmpeg.exe") "FFmpeg (vendor\ffmpeg\bin\ffmpeg.exe)"
 Need (Join-Path $ThirdPartyDir "vendor\mediamtx\mediamtx.exe") "MediaMTX (vendor\mediamtx\mediamtx.exe)"
+# Redis for Windows is optional: with it, camera PCs get the "Zirp Shared Cache"
+# service; without it Zirp keeps lane state in each process's memory.
+if (Test-Path (Join-Path $ThirdPartyDir "vendor\redis\redis-server.exe")) {
+    Write-Host "  Redis: bundled (vendor\redis)"
+} else {
+    Write-Host "  Redis: not bundled (put redis-server.exe and its DLLs in vendor\redis to include it)" -ForegroundColor Yellow
+}
 Need (Join-Path $ThirdPartyDir "models\fastalpr\detector\yolo-v9-t-384-license-plates-end2end.onnx") "FastALPR detector model"
 Need (Join-Path $ThirdPartyDir "wheels") "Offline wheel bundle"
 Need (Join-Path $CacheDir "python-$PyVer-embed-amd64.zip") "Embedded Python x64"

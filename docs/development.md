@@ -88,7 +88,10 @@ powershell -ExecutionPolicy Bypass -File packaging\installer\build.ps1 -Version 
 
 Third-party files that can't live in git (camera SDK DLLs, FFmpeg, MediaMTX,
 NSSM, VC++ runtimes, models and wheels) go in `packaging\thirdparty` and
-`packaging\cache`. The build:
+`packaging\cache`. Redis for Windows is optional: put `redis-server.exe` and
+its DLLs in `packaging\thirdparty\vendor\redis` and camera PCs get the
+`SmartParkCache` service. Zirp talks to it with its own small client
+(`app/services/shared_cache.py`), so no extra Python package is needed. The build:
 
 1. stages the app, models and an embedded Python with every package installed,
 2. checks the camera SDK against its hash manifest,

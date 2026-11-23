@@ -72,7 +72,7 @@ class PresenceWatch:
             self._occupied[slot] = bool(occupied)
             rising = bool(occupied) and index is None
             if rising:
-                self._fired_at[camera_id] = now
+                self._note_rising(camera_id, now)
             if index is None:
                 self._occupied[camera_id] = bool(occupied)
             return CoilEdge(
@@ -96,7 +96,7 @@ class PresenceWatch:
         rising = current and not previous
         falling = previous and not current
         if rising:
-            self._fired_at[camera_id] = now
+            self._note_rising(camera_id, now)
             if index is not None:
                 self._learned[camera_id] = int(index)
         if index is None or self._learned.get(camera_id) == index:
@@ -128,9 +128,19 @@ class PresenceWatch:
         self._raw_at[camera_id] = now
         rising, falling = current and not previous, previous and not current
         if rising:
-            self._fired_at[camera_id] = now
+            self._note_rising(camera_id, now)
         return CoilEdge(camera_id=camera_id, occupied=current, rising=rising, falling=falling,
                         source=source, index=index, value=value, at=now)
+
+    def _note_rising(self, camera_id: int, now: float) -> None:
+        """A car arrived on the loop: it gets its own two plate reads."""
+        self._fired_at[camera_id] = now
+        try:
+            from app.services import read_budget
+
+            read_budget.new_car(int(camera_id))
+        except Exception:
+            pass
 
     def occupied(self, camera_id: int) -> bool:
         return bool(self._occupied.get(camera_id, False))

@@ -13,6 +13,14 @@ Windows, run with nobody signed in, and restart on their own if they crash
 | `SmartParkRecognitionWorker` | Plate recognition (FastALPR) | — |
 | `SmartParkHvxHost` | 32-bit QY/HVX camera SDK host (or a sign-in task) | 127.0.0.1:8765 |
 | `SmartParkPortal` | Back office and driver pay page | TCP 3000 |
+| `SmartParkCache` | Shared cache (Redis), camera PCs only, when the release bundles it | 127.0.0.1:6391 |
+
+The shared cache holds short-lived lane state that the Site Service and the
+Recognition Worker both need, such as how many times the car at each camera
+has been read. It keeps nothing on disk and is not a record: PostgreSQL is.
+If it's stopped, Zirp carries on with each process's own memory and picks the
+cache up again a few seconds after it's back. Its settings file is
+`config\redis.conf`, rewritten on every install.
 
 Ground-loop boards talk to the Site Service on UDP 8000. The installer opens
 the LAN firewall ports for the local subnet only.
