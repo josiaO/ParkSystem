@@ -79,3 +79,13 @@ def _secrets_never_touch_the_site():
     set_secret_store(MemorySecretStore())
     yield
     set_secret_store(None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_read_counts(monkeypatch):
+    """Every test starts with no car read yet, in memory, never the site's Redis."""
+    from app.services import read_budget
+    from app.services.shared_cache import SharedCache
+
+    monkeypatch.setattr(read_budget, "cache", SharedCache(url=""))
+    yield

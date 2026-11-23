@@ -88,10 +88,35 @@ Tanzanian formats open a visit on their own: `T123ABC`, motorcycles
 `JWTZ…`, `CD…`). Anything else, like a badge read as `TQYOTA` or a glare read
 like `T70DMT`, waits for an operator instead of opening a session.
 
-### When a car is read more than once
+### Two reads per car, at most
 
-Most cars are read several times: from the live video and from the camera's
-own snapshots. Zirp keeps one capture per car, and **the best read wins**. A
+A camera sends several pictures per car (its own triggers, the loop, Zirp's
+video gate), and every extra read is another chance of a misread. So Zirp
+reads a car **once**, and only if that read is unsure (below 0.90, or not a
+valid plate for the site) does it read **one more** picture. After a
+confident read, or after the second read, the other pictures of that car are
+skipped. They show as `skipped_already_read` in the event log.
+
+"The same car" means triggers on one camera until the lane has been quiet for
+4 seconds, or 20 seconds at most. A loop going high, the Recognition Worker
+seeing the lane empty, or the camera reporting a clearly different plate
+starts a new car straight away, so a queue is never skipped. Pictures with no
+plate in them don't count. Operator reads are never limited. Settings in
+`zirp.env`:
+
+```
+SMARTPARK_READ_BUDGET_ENABLED=true
+SMARTPARK_READ_BUDGET_CONFIDENT=0.90
+SMARTPARK_READ_BUDGET_QUIET_SECONDS=4
+SMARTPARK_READ_BUDGET_MAX_SECONDS=20
+```
+
+The count lives in the shared cache (see [operations.md](operations.md)), so
+the Site Service and the Recognition Worker agree on it.
+
+### When a car is read twice
+
+Zirp keeps one capture per car, and **the best read wins**. A
 weak read that's waiting for review is replaced by a more confident read of
 the same car, and two frames that agree exactly are enough to go ahead even
 when each is below the 0.92 confidence bar. A read that has already been
