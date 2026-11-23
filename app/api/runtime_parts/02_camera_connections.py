@@ -435,6 +435,33 @@ async def apply_video_connect(camera: Camera, db: Session, user: User, *, raise_
         return {**camera_dict(camera), "sdk_result": {"connected": False, "error": str(exc)}}
 
 
+async def _sdk_handle_conflict(camera: Camera, handle) -> str:
+    """Why a reported SDK session can't be this camera's, or "" when it is.
+
+    The host numbers sessions itself and reuses numbers. A "connected" answer
+    whose number the host lists under another camera's address would make
+    this camera read that camera's pictures, or stay off while the database
+    says it is connected.
+    """
+    if handle is None:
+        return ""
+    try:
+        sessions = await asyncio.wait_for(HVXHostClient().info(), timeout=2.0)
+        rows = sessions.get("connections") if isinstance(sessions, dict) else None
+    except Exception:
+        return ""                       # host busy: keep the old behaviour
+    if not isinstance(rows, list):
+        return ""
+    owner = next((str(row.get("ip") or "") for row in rows
+                  if isinstance(row, dict) and row.get("handle") is not None and int(row["handle"]) == int(handle)), "")
+    if owner and owner != str(camera.ip_address or ""):
+        log.warning("camera=%s SDK host answered with session %s, which belongs to %s; not recording it",
+                    camera.id, handle, owner)
+        return (f"The camera SDK host answered with session {handle}, which belongs to {owner}. "
+                "Retrying the login.")
+    return ""
+
+
 async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on_host_error: bool = True) -> dict:
     adapter = camera_adapter_for(camera)
     caps = await adapter.capabilities(camera)
@@ -461,6 +488,10 @@ async def apply_sdk_connect(camera: Camera, db: Session, user: User, *, raise_on
     _commit_camera(db, camera)
     try:
         result = await adapter.connect(camera)
+        if result.get("connected") and adapter.id == "hvx":
+            conflict = await _sdk_handle_conflict(camera, result.get("handle"))
+            if conflict:
+                result = {**result, "connected": False, "error": conflict}
         if result.get("connected"):
             camera.status = CameraStatus.SDK_CONNECTED.value
             camera.sdk_handle = result.get("handle")

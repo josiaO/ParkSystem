@@ -423,6 +423,31 @@ def point_in_polygon(x: float, y: float, points) -> bool:
     return inside
 
 
+def _side_of_zone(x: float, y: float, points) -> str:
+    """Where a point outside the zone lies: "above", "below" or "side".
+
+    "above"/"below" means the zone is straight up or down from the point (the
+    car is in its lane but hasn't reached the zone, or has passed it).
+    """
+    hits: list[float] = []
+    n = len(points or [])
+    for i in range(n):
+        (x1, y1), (x2, y2) = points[i], points[(i + 1) % n]
+        if x1 == x2:
+            if abs(x - x1) < 1e-9:
+                hits.extend([y1, y2])
+            continue
+        if min(x1, x2) <= x <= max(x1, x2):
+            hits.append(y1 + (y2 - y1) * (x - x1) / (x2 - x1))
+    if not hits:
+        return "side"
+    if y < min(hits):
+        return "above"
+    if y > max(hits):
+        return "below"
+    return "side"
+
+
 def _box_numbers(box: dict) -> tuple[float, float, float, float, float, float] | None:
     try:
         x1, y1, x2, y2 = (float(box[k]) for k in ("x1", "y1", "x2", "y2"))
@@ -542,20 +567,34 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
             (reasons if rules.get(rule, True) else advisory).append(text)
 
         in_zone = True if not (calibrated and zone) else point_in_polygon(cx, cy, zone)
-        if not in_zone:
-            fail("zone", "outside capture zone")
+        end = config.get("end_line") if calibrated else None
+        travel_down = (line or {}).get("side", "below") == "below"
         past_line = True
         if line:
-            past_line = cy >= float(line["y"]) if line.get("side", "below") == "below" else cy <= float(line["y"])
-            if not past_line:
-                fail("start_line", "not past trigger line")
-        end = config.get("end_line") if calibrated else None
-        if end:
+            past_line = cy >= float(line["y"]) if travel_down else cy <= float(line["y"])
+        beyond = bool(end) and (cy > float(end["y"]) if travel_down else cy < float(end["y"]))
+        if not in_zone:
+            # Outside the zone only because the car hasn't reached it yet (or
+            # has already driven through it) is a start/end-line question, so
+            # those switches decide. Before this, "store reads before the
+            # start line" did nothing: the zone's top edge sits just above the
+            # start line, and every early read was refused as outside the zone.
+            # Off to the side (another lane, a parked car) stays a zone refusal.
+            side = _side_of_zone(cx, cy, zone)
+            approach, departed = ("above", "below") if travel_down else ("below", "above")
+            if side == approach and line:
+                if past_line:
+                    fail("start_line", "before the capture zone")
+            elif side == departed and end:
+                if not beyond:
+                    fail("end_line", "past the capture zone")
+            else:
+                fail("zone", "outside capture zone")
+        if line and not past_line:
+            fail("start_line", "not past trigger line")
+        if beyond:
             # Reading ends here: a car moving out past the end line is not read again.
-            travel_down = (line or {}).get("side", "below") == "below"
-            beyond = cy > float(end["y"]) if travel_down else cy < float(end["y"])
-            if beyond:
-                fail("end_line", "past end line")
+            fail("end_line", "past end line")
         if calibrated:
             if width < float(config.get("min_plate_width_px") or 0):
                 fail("plate_size", f"plate {width:.0f}px wide < {float(config['min_plate_width_px']):.0f}px")
@@ -596,6 +635,24 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
         candidate.score = frame_score(candidate)
         out.append(candidate)
     return out
+
+
+def plates_to_read(camera_id: int, jpeg: bytes, boxes: list[dict] | None) -> tuple[list[dict], list[Candidate]]:
+    """The plate boxes on this picture that this camera may read, best first.
+
+    Called before OCR. A plate outside the calibration (another lane, a parked
+    car) is never read: reading the most confident plate anywhere on the
+    picture and checking the zone afterwards read the wrong car and then
+    refused it, so the car inside the zone was never read at all.
+    Uncalibrated cameras get every box back unchanged.
+    """
+    config = for_camera(camera_id)
+    if not config.get("enabled") or not boxes:
+        return list(boxes or []), []
+    candidates = evaluate_frame(jpeg, list(boxes), config)
+    kept = sorted((c for c in candidates if c.eligible), key=lambda c: c.score, reverse=True)
+    refused = [c for c in candidates if not c.eligible]
+    return [c.box for c in kept], refused
 
 
 def check_capture(camera_id: int, box: dict | None, jpeg: bytes = b"", *, plate: str = "",
