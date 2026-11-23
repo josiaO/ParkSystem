@@ -152,8 +152,26 @@ headlights make plates bright, so for example "brightness to" can't go below
 creating visits or opening the barrier. Use it after every calibration change.
 
 Calibration applies to every way a car can be read: the camera's own trigger,
-Zirp's video reader and the recognition worker. All of them go through the
-same check before a visit is created.
+Zirp's video reader and the recognition worker. It's applied **before**
+reading. Zirp finds every plate on the picture, drops the ones the calibration
+refuses, and reads only the best plate that's left. A parked car or the next
+lane's car outside your zone is never read, even when its plate is clearer
+than the car in the lane. If no plate passes, nothing is read and the live view
+shows **NOT STORED** with the reason. The same check runs again before a visit
+is created.
+
+How the zone and the lines share the work:
+
+- A plate **off to the side** of the zone (another lane) is refused by the
+  **capture zone** rule.
+- A plate **in the lane but not yet at the zone** (still approaching) is
+  governed by the **start line** switch. Switch the start line off and early
+  reads are stored.
+- A plate **in the lane but already past the zone** is governed by the **end
+  line** switch.
+
+So switching the start line off really does store reads taken before the line,
+even when the zone's top edge is drawn close to it.
 
 ### Start and end lines with the camera's own trigger
 

@@ -392,7 +392,12 @@ async def _infer_camera(
             # OCR the best eligible frame of this passage, not merely the
             # frame that closed the selection window.
             ocr_jpeg = selected.jpeg if selected is not None and selected.jpeg[:2] == b"\xff\xd8" else ticket.jpeg
-            ocr_boxes = selected.boxes if selected is not None else boxes
+            # Read only plates this camera's calibration accepts: the chosen
+            # plate first, never another lane's car on the same picture.
+            if selected is not None:
+                ocr_boxes = [selected.box]
+            else:
+                ocr_boxes, _ = calibration.plates_to_read(camera_id, ocr_jpeg, boxes)
             same_frame = ocr_jpeg is ticket.jpeg
             started = time.monotonic()
             timeline = stats.get("timeline", {})

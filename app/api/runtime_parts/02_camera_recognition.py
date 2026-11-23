@@ -488,10 +488,38 @@ async def _run_local_alpr_locked(
             src_w=int(native.get("image_width") or 0),
             src_h=int(native.get("image_height") or 0),
         )
+    # Only plates inside this camera's calibration are read (see
+    # capture_calibration.plates_to_read). Find the plates first, drop the
+    # ones outside the calibration, and read the best one left.
+    refused_all = None
+    from app.services import capture_calibration as calibration_rules
+    if calibration_rules.for_camera(int(camera.id)).get("enabled"):
+        if not boxes:
+            from app.services.alpr import locate_plate_boxes
+            found, located = await run_inference(
+                locate_plate_boxes, jpeg, detect_roi=effective_roi, detect_zoom=framing["detect_zoom"],
+            )
+            boxes = found if located.get("available") else None
+        if not boxes and native_box:
+            boxes = [native_box]
+        if boxes:
+            kept, refused = calibration_rules.plates_to_read(int(camera.id), jpeg, boxes)
+            if kept:
+                boxes = kept
+            else:
+                refused_all = refused
+    if refused_all is not None:
+        first = refused_all[0] if refused_all else None
+        calibration_rules.note_rejected(
+            int(camera.id), plate="", reasons=list(first.reasons) if first else ["outside capture calibration"],
+            candidate=first, jpeg=jpeg,
+        )
+        alpr = {"ok": True, "backend": "fastalpr", "plates": [], "best": None,
+                "detail": "no plate inside this camera's calibration", "calibration_refused": True}
     # A native usLpBox is a useful fallback, but it is not trusted as the
     # primary FastALPR crop.  The panorama detector runs inside this one
     # recognition call and only uses the native box if it finds no current box.
-    if boxes:
+    elif boxes:
         alpr = await run_inference(
             recognize_arrival_bytes, jpeg,
             camera_label=f"cam-{camera.id}-{camera.ip_address}",
@@ -508,7 +536,7 @@ async def _run_local_alpr_locked(
             detect_zoom=framing["detect_zoom"],
             fallback_box=native_box,
         )
-    if not (alpr or {}).get("best") and plate_crop[:2] == b"\xff\xd8":
+    if refused_all is None and not (alpr or {}).get("best") and plate_crop[:2] == b"\xff\xd8":
         # The SDK vehicle-picture buffer is a last-resort source only when the
         # full panorama detector is unavailable; never prefer it over the
         # current full panorama.

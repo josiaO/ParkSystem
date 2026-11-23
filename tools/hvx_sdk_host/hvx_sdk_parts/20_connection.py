@@ -580,15 +580,26 @@ class _HVXConnectionMixin:
         with connection_lock:
             previous = self._connection_results.get(ip)
             if previous is not None:
+                old_handle = int(previous["result"]["handle"])
+                owner = self._handle_owner(old_handle)
+                if owner is not None and owner != ip:
+                    # The SDK has since given this session number to another
+                    # camera. Answering "already connected" here kept
+                    # 192.168.10.50 off for 20 minutes on SITE-PC01 while its
+                    # number belonged to 192.168.10.144. Forget it, and never
+                    # disconnect the other camera's live session.
+                    self._connection_results.pop(ip, None)
+                    previous = None
+            if previous is not None:
                 try:
-                    state = int(self.dll.Net_QueryConnState(previous["result"]["handle"]))
-                    if previous["signature"] == signature and state in {
+                    state = int(self.dll.Net_QueryConnState(old_handle))
+                    if previous["signature"] == signature and owner in (None, ip) and state in {
                         *CONN_STATE_CONNECTED_VALUES, CONN_STATE_TRYING,
                     }:
                         return {**previous["result"], "reused": True}
                 except Exception:
                     pass
-                self.disconnect(int(previous["result"]["handle"]), force=True)
+                self.disconnect(old_handle, force=True)
             result = self._add_and_connect(ip, port, timeout, username, password)
             video_step = next(
                 (row for row in result.get("steps", []) if row.get("api") == "Net_StartVideo"),
@@ -606,8 +617,20 @@ class _HVXConnectionMixin:
                 result.get("image_recv_rc"),
             )
             if result.get("connected"):
+                handle = int(result.get("handle"))
+                # This number now belongs to ``ip``: no other address may
+                # keep claiming it.
+                for other, connection in list(self._connection_results.items()):
+                    if other != ip and int(connection["result"]["handle"]) == handle:
+                        self._connection_results.pop(other, None)
                 self._connection_results[ip] = {"signature": signature, "result": dict(result)}
             return result
+
+    def _handle_owner(self, handle: int) -> str | None:
+        """The camera address the host's own session record gives this number."""
+        with self._lock:
+            session = getattr(self, "_recognition_sessions", {}).get(int(handle))
+        return str(session.get("ip") or "") or None if session else None
 
     def query_function_list(self, handle: int) -> dict:
         """Read the same stream capability record that OcxConfig reads.
