@@ -568,7 +568,14 @@ class Settings(BaseSettings):
             if url.get_backend_name() == "sqlite" and filename and filename != ":memory:" and not filename.startswith("file:"):
                 path = Path(filename)
                 if not path.is_absolute():
-                    return url.set(database=(install_directory() / path).as_posix()).render_as_string(hide_password=False)
+                    # Built by hand: SQLAlchemy 2.1 (what the installer ships)
+                    # percent-encodes the drive colon ("C%3A/..."), which
+                    # Alembic's config parser then trips over.
+                    from urllib.parse import urlencode
+
+                    query = urlencode(dict(url.query), doseq=True)
+                    absolute = (install_directory() / path).as_posix()
+                    return f"{url.drivername}:///{absolute}" + (f"?{query}" if query else "")
             return self.database_url
         return f"sqlite:///{(self.data_dir / 'smartpark.db').as_posix()}"
 

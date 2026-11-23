@@ -84,7 +84,9 @@ jobs:
             tests/test_parking_exit.py `
             tests/test_parking_tariff.py `
             tests/test_windows_ready.py `
-            tests/test_windows_packaging.py `
+            tests/test_windows_installer.py `
+            tests/test_compiled_release.py `
+            tests/test_platform_migrations_secrets.py `
             tests/test_windows_service_recovery.py
 
   lint:
