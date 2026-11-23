@@ -503,7 +503,9 @@ async def _run_local_alpr_locked(
         if not boxes and native_box:
             boxes = [native_box]
         if boxes:
-            kept, refused = calibration_rules.plates_to_read(int(camera.id), jpeg, boxes)
+            # Measuring plate sharpness decodes the full-size still: keep it
+            # off the event loop that also serves live video.
+            kept, refused = await asyncio.to_thread(calibration_rules.plates_to_read, int(camera.id), jpeg, boxes)
             if kept:
                 boxes = kept
             else:

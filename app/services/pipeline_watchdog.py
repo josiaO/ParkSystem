@@ -58,10 +58,15 @@ class PipelineWatchdog:
     frame_stale_seconds: float = 10.0
     restart_cooldown_seconds: float = 120.0
     hvx_failures_before_restart: int = 2
+    # A session that has just connected has no video yet. Resetting it then
+    # broke the login in progress: after every restart on SITE-PC01 (23 Nov
+    # 2026) the watchdog reset cameras 0.4 s into their reconnect.
+    startup_grace_seconds: float = 30.0
     clock: Callable[[], float] = time.monotonic
     _last_bytes: dict[int, int] = field(default_factory=dict)
     _last_restart: dict[str, float] = field(default_factory=dict)
     _hvx_failures: int = 0
+    _session_seen: dict[tuple[int, int], float] = field(default_factory=dict)
     last_report: dict = field(default_factory=dict)
 
     def _cooled(self, key: str) -> bool:
@@ -118,16 +123,30 @@ class PipelineWatchdog:
                 if not hvx.get("ok"):
                     row.update(ok=False, reason="hvx host down")
                 else:
-                    status = await deps.hvx_video_status(int(cam["sdk_handle"]))
+                    # The host numbers sessions itself and reuses numbers; the
+                    # number stored on the camera row is often another
+                    # camera's after a restart. Look the session up by IP.
+                    handle = _live_handle(info, cam)
+                    if handle is None:
+                        row.update(ok=False, reason="not connected on this PC's camera SDK host")
+                        frames.append(row)
+                        problems.append({"component": f"camera:{cid}", "detail": row["reason"]})
+                        continue
+                    row["sdk_handle"] = handle
+                    first_seen = self._session_seen.setdefault((cid, handle), self.clock())
+                    status = await deps.hvx_video_status(handle)
                     age_ms = status.get("callback_age_ms")
                     row["frame_age_ms"] = age_ms
                     fresh = age_ms is not None and float(age_ms) <= self.frame_stale_seconds * 1000
                     row["ok"] = fresh
-                    if not fresh:
+                    if age_ms is None and self.clock() - first_seen < self.startup_grace_seconds:
+                        row["reason"] = "camera session starting"
+                    elif not fresh:
                         row["reason"] = "no SDK video callback" if age_ms is None else "SDK video frozen"
                         if self._cooled(f"camera:{cid}"):
                             try:
-                                await deps.hvx_disconnect(int(cam["sdk_handle"]))
+                                await deps.hvx_disconnect(handle)
+                                self._session_seen.pop((cid, handle), None)
                                 row["action"] = "sdk session reset; HVX watch loop reconnects"
                             except Exception as exc:
                                 row["action"] = f"sdk reset failed: {str(exc)[:120]}"
@@ -164,6 +183,23 @@ class PipelineWatchdog:
         return report
 
 
+def _live_handle(info: dict, cam: dict) -> int | None:
+    """This camera's session on the SDK host now, found by its IP address.
+
+    Falls back to the stored number only when the host doesn't list
+    addresses (an older host build).
+    """
+    rows = info.get("connections") if isinstance(info, dict) else None
+    ip = str(cam.get("ip") or "")
+    if isinstance(rows, list) and ip:
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("ip") or "") == ip and row.get("handle") is not None:
+                return int(row["handle"])
+        return None
+    stored = cam.get("sdk_handle")
+    return int(stored) if stored is not None else None
+
+
 # Real dependencies ------------------------------------------------------------
 
 def _check_database() -> float:
@@ -190,7 +226,8 @@ def _list_cameras() -> list[dict]:
             if not camera_active_on_this_installation(cam, db=db):
                 continue
             sdk = cam.sdk_handle is not None and str(cam.adapter_id or "hvx").lower() in {"hvx", "qy", "native"}
-            rows.append({"id": cam.id, "name": cam.name, "sdk": sdk, "sdk_handle": cam.sdk_handle})
+            rows.append({"id": cam.id, "name": cam.name, "sdk": sdk, "sdk_handle": cam.sdk_handle,
+                         "ip": str(cam.ip_address or "")})
     return rows
 
 

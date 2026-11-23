@@ -191,3 +191,21 @@ def test_host_still_reuses_its_own_live_session():
     sdk.add_and_connect("192.168.10.49", 30000, 3, "admin", "pw")
     assert sdk.add_and_connect("192.168.10.49", 30000, 3, "admin", "pw")["reused"]
     assert calls == ["192.168.10.49"]
+
+
+def test_detector_minimum_above_080_is_not_applied():
+    """Gate 2 had 0.90 saved; good plates score 0.85-0.89, so it refused most cars."""
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError, match="0.80 or less"):
+        cc.validate({**_config(), "min_detection_confidence": 0.9})
+
+    class _Db:
+        def get(self, model, key):
+            return SimpleNamespace(value={**_config(), "min_detection_confidence": 0.9})
+
+    camera = SimpleNamespace(id=3, name="2# Entry", site_id=1, gate_id=2, lane_id=None, lane_direction="ENTRY")
+    loaded = cc.load(_Db(), camera)
+    assert loaded["min_detection_confidence"] == 0.0
+    assert any("0.80 or less" in message for message in loaded["ignored"])
+    assert cc.evaluate_frame(b"", [_box(0.5, 0.55, confidence=0.87)], loaded)[0].eligible

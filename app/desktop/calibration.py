@@ -280,7 +280,7 @@ class CalibrationWindow(QDialog):
         # refuses them too, and ignores any saved before these limits).
         self.min_w = QSpinBox(); self.min_w.setRange(0, 160); self.min_w.setSuffix(" px")
         self.min_h = QSpinBox(); self.min_h.setRange(0, 40); self.min_h.setSuffix(" px")
-        self.min_det = QDoubleSpinBox(); self.min_det.setRange(0, 0.9); self.min_det.setSingleStep(0.05); self.min_det.setDecimals(2)
+        self.min_det = QDoubleSpinBox(); self.min_det.setRange(0, 0.8); self.min_det.setSingleStep(0.05); self.min_det.setDecimals(2)
         self.min_ocr = QDoubleSpinBox(); self.min_ocr.setRange(0, 0.9); self.min_ocr.setSingleStep(0.05); self.min_ocr.setDecimals(2)
         self.min_sharp = QDoubleSpinBox(); self.min_sharp.setRange(0, 5000); self.min_sharp.setSingleStep(10); self.min_sharp.setDecimals(0)
         self.min_bright = QSpinBox(); self.min_bright.setRange(0, 100)
