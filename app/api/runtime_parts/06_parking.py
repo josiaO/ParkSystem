@@ -567,6 +567,32 @@ def patch_migration_flags(payload: MigrationFlagsUpdate, db: Session = Depends(g
     return saved
 
 
+@app.get("/settings/recognition")
+def get_recognition_settings(_: User = Depends(require_any("settings.manage", "cameras.manage"))):
+    """Settings -> Recognition: camera trigger, two-read limit, receipt photo."""
+    from app.services import runtime_settings
+    return runtime_settings.all_values()
+
+
+@app.patch("/settings/recognition")
+def patch_recognition_settings(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(require("settings.manage")),
+):
+    from app.services import runtime_settings
+    try:
+        changed = runtime_settings.save(db, payload or {})
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from exc
+    write_audit(db, user, "settings.recognition", "site", "recognition",
+                ", ".join(f"{k}={v}" for k, v in sorted(changed.items())))
+    db.commit()
+    runtime_settings.invalidate()
+    return runtime_settings.all_values()
+
+
 @app.get("/developer/settings")
 def get_developer_settings(db: Session = Depends(get_db), _: User = Depends(require("settings.manage"))):
     from app.services.developer import developer_settings

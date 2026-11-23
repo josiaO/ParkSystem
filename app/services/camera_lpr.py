@@ -332,7 +332,7 @@ def camera_contract() -> dict:
         "local_engine": {
             "name": "fastalpr",
             "vendor_independent": True,
-            "country": settings.alpr_country or None,
+            "country": (_site_alpr_country() or None),
             "csf": ALPR_CSF,
             "confidence": "0-1",
             "trigger": "coil rising edge, native JPEG with no plate, or operator FastALPR",
@@ -357,3 +357,10 @@ def camera_contract() -> dict:
             "has no native plate or the native plate is empty."
         ),
     }
+
+
+def _site_alpr_country() -> str:
+    """Recognition country profile, from Settings -> Site -> Plate validation."""
+    from app.services.alpr import _country_name
+
+    return _country_name()

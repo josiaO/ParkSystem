@@ -65,6 +65,18 @@ class _SetupPagesMixin:
         body.addWidget(_label("Site timezone (IANA name)"))
         body.addWidget(self.site_timezone)
         body.addWidget(self.timezone_status)
+        # Which country's plates the lanes read. Drives plate validation and
+        # the recognition country profile (no SMARTPARK_ALPR_COUNTRY needed).
+        self.site_plate_country = QComboBox()
+        for code, label in (("TZ", "Tanzania"), ("KE", "Kenya"), ("ZA", "South Africa"),
+                            ("AE", "United Arab Emirates"), ("NONE", "Any (no plate format check)")):
+            self.site_plate_country.addItem(label, code)
+        initial_country = str(getattr(settings, "plate_validation", "") or "TZ").upper()
+        index = self.site_plate_country.findData(initial_country)
+        self.site_plate_country.setCurrentIndex(index if index >= 0 else 0)
+        self._initial_plate_country = self.site_plate_country.currentData()
+        body.addWidget(_label("Number plates on this site"))
+        body.addWidget(self.site_plate_country)
         body.addWidget(_label("Required from Operator Workstations: TCP 8760. For WebRTC live video: TCP 8889 and UDP/TCP 8189. PostgreSQL remains local to the Site Server."))
         body.addStretch()
         return page

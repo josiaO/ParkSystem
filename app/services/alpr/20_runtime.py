@@ -158,7 +158,7 @@ def status() -> dict:
         "available": ready,
         "ready": ready,
         "models": models,
-        "country": settings.alpr_country or None,
+        "country": _country_name() or None,
         "csf": settings.alpr_csf,
         "native_engine": "qy_Net_RegImageRecvEx",
         "local_engine": "fastalpr" if installed else "none",

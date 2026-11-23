@@ -797,7 +797,8 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             )
             gate.hold()
             return
-        if str(getattr(settings, "capture_trigger", "zirp")) in {"zirp", "both"} and handle is not None:
+        from app.services import runtime_settings
+        if str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"} and handle is not None:
             # Zirp's own trigger: command the camera's full-resolution
             # snapshot now (the image a loop-triggered camera would send) and
             # read it through the normal event path, falling back to this

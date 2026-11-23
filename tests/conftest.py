@@ -88,4 +88,11 @@ def _fresh_read_counts(monkeypatch):
     from app.services.shared_cache import SharedCache
 
     monkeypatch.setattr(read_budget, "cache", SharedCache(url=""))
+    # Settings -> Recognition values: zirp.env defaults only, never the PC's
+    # own database. tests/test_runtime_settings.py turns the reader back on.
+    from app.services import runtime_settings
+
+    monkeypatch.setattr(runtime_settings, "_read_stored", lambda: ({}, None))
+    runtime_settings.invalidate()
     yield
+    runtime_settings.invalidate()

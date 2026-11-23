@@ -72,17 +72,17 @@ barrier.
 
 ### Tanzanian plates
 
-Turn on the Tanzania profile in `C:\ProgramData\SmartParkEdge\config\zirp.env`:
+Pick **Tanzania** for "Number plates on this site" in the setup wizard, or set
+**Settings → Site → Plate validation** to `TZ` later. That one choice does two
+things, with no restart:
 
-```
-SMARTPARK_ALPR_COUNTRY=tanzania
-```
+It turns on the Tanzania recognition profile, which fixes the usual OCR
+mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`, `B`/`8` in the right
+positions, and a leading `T` hidden by a bolt that gets read as `7`. (Older
+installs set `SMARTPARK_ALPR_COUNTRY=tanzania` in `zirp.env`; that still works
+but isn't needed.)
 
-It fixes the usual OCR mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`,
-`B`/`8` in the right positions, and a leading `T` hidden by a bolt that gets
-read as `7`. Restart the services afterwards (`zirpctl services restart`).
-
-Also set **Settings → Site → Plate validation** to `TZ`. Then only real
+And only real
 Tanzanian formats open a visit on their own: `T123ABC`, motorcycles
 `MC123ABC`, and government, police, army and diplomatic plates (`STK…`, `PT…`,
 `JWTZ…`, `CD…`). Anything else, like a badge read as `TQYOTA` or a glare read
@@ -101,15 +101,11 @@ skipped. They show as `skipped_already_read` in the event log.
 4 seconds, or 20 seconds at most. A loop going high, the Recognition Worker
 seeing the lane empty, or the camera reporting a clearly different plate
 starts a new car straight away, so a queue is never skipped. Pictures with no
-plate in them don't count. Operator reads are never limited. Settings in
-`zirp.env`:
+plate in them don't count. Operator reads are never limited.
 
-```
-SMARTPARK_READ_BUDGET_ENABLED=true
-SMARTPARK_READ_BUDGET_CONFIDENT=0.90
-SMARTPARK_READ_BUDGET_QUIET_SECONDS=4
-SMARTPARK_READ_BUDGET_MAX_SECONDS=20
-```
+Change these under **Settings → Recognition** ("Read each car at most twice",
+"A read is final from", "Car has left after", "Read a waiting car again
+after"). Saved values apply on every Zirp PC within a few seconds.
 
 The count lives in the shared cache (see [operations.md](operations.md)), so
 the Site Service and the Recognition Worker agree on it.
@@ -161,21 +157,17 @@ same check before a visit is created.
 
 ### Start and end lines with the camera's own trigger
 
-With `SMARTPARK_CAPTURE_TRIGGER=external`, the camera decides when to take its
+With **Settings → Recognition → Who triggers the pictures** set to "The camera
+or another parking system", the camera decides when to take its
 snapshot, and it sends one or two stills per car. The lines can only accept or
 refuse those stills; they can't make the camera wait. On our first site,
 43% of one entry camera's snapshots were taken before the plate reached the
 drawn start line, so switching that line on would have refused those cars.
 
-If you want the start line to **start** the read, let Zirp trigger the camera:
-
-```
-SMARTPARK_CAPTURE_TRIGGER=zirp
-```
-
-Zirp then watches the live video and asks the camera for its full-resolution
+If you want the start line to **start** the read, choose "Zirp triggers the
+camera" there instead. Zirp then watches the live video and asks the camera for its full-resolution
 snapshot when the plate crosses the start line. Try it on one lane with test
-mode first. `both` keeps the camera's trigger as well.
+mode first. "Both" keeps the camera's trigger as well.
 
 ## Troubleshooting
 
