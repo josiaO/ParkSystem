@@ -147,8 +147,14 @@ def _set_busy(widgets, busy, busy_text):
 
 def show_status(owner, text, ms=8000):
     """Show a short result in the main window's status bar, if there is one."""
+    # Settings and Camera calibration keep the main window in ``self.window``,
+    # which hides QWidget.window(). Calling it raised "'MainWindow' object is
+    # not callable" after every save there and closed the desktop app, so
+    # the setting was saved but the app crashed before it could say so.
+    window = getattr(owner, "window", None)
     try:
-        window = owner.window() if hasattr(owner, "window") else None
+        if callable(window) and not hasattr(window, "statusBar"):
+            window = window()
     except RuntimeError:
         return
     bar = getattr(window, "statusBar", None)

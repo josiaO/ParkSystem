@@ -59,7 +59,7 @@ MIN_FASTALPR_CONF = 0.35
 
 MIN_FASTALPR_CONF_TZ = 0.22
 
-MIN_PLATE_ASPECT = 1.4  # plate boxes are wider than tall
+MIN_PLATE_ASPECT = 1.0  # two-line (square) plates are ~1.1 wide per 1 tall; see alpr MIN_PLATE_ASPECT
 
 MAX_PLATE_ASPECT = 8.0
 

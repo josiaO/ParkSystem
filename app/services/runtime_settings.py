@@ -35,6 +35,7 @@ FIELDS: dict[str, tuple[str, str, Any]] = {
     "read_budget_confident": ("read_budget_confident", "float", (0.50, 0.99)),
     "read_budget_quiet_seconds": ("read_budget_quiet_seconds", "float", (1.0, 30.0)),
     "read_budget_max_seconds": ("read_budget_max_seconds", "float", (5.0, 120.0)),
+    "camera_region_search": ("camera_region_search", "bool", None),
 }
 
 _lock = threading.Lock()

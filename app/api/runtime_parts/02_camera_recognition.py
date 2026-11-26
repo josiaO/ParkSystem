@@ -462,18 +462,20 @@ async def _run_local_alpr_locked(
     from app.services.alpr import recognize_arrival_bytes, recognize_plate_crop_bytes
     from app.services.camera_framing import framing_from_profiles, native_plate_region_to_roi
     framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-    # ParkWatch/OcxConfig's polygon is the camera-side plate zone. ZIRP has no
-    # search zone of its own any more (framing always reports "off"), so the
-    # camera's region, when it sent one, is where this still is searched. The
-    # old ``framing["detect_roi"] or native_roi`` never reached the camera's
-    # region because "off" is a non-empty string. No region (or one that does
-    # not fit the picture) is the whole picture; the capture calibration still
-    # decides which plates are read.
-    native_roi = native_plate_region_to_roi(
-        native.get("plate_region"),
-        image_width=int(native.get("image_width") or 0),
-        image_height=int(native.get("image_height") or 0),
-    )
+    # ParkWatch/OcxConfig's polygon is the camera-side plate zone. Searching
+    # only inside it is a site choice (Settings -> Recognition, off by
+    # default): the camera's area usually ends above a close car's plate, and
+    # turned on it dropped readable plates at the bottom of the picture. Off,
+    # or with no region (or one that does not fit the picture), the whole
+    # picture is searched; the capture calibration decides which plates are read.
+    from app.services import runtime_settings
+    native_roi = ""
+    if runtime_settings.get("camera_region_search"):
+        native_roi = native_plate_region_to_roi(
+            native.get("plate_region"),
+            image_width=int(native.get("image_width") or 0),
+            image_height=int(native.get("image_height") or 0),
+        )
     effective_roi = native_roi or None
     from app.services.capture_calibration import gate_for
     prepared = gate_for(int(camera.id)).prepared

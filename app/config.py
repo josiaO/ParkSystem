@@ -211,6 +211,12 @@ class Settings(BaseSettings):
     read_budget_confident: float = 0.90
     read_budget_quiet_seconds: float = 4.0
     read_budget_max_seconds: float = 20.0
+    # Search a camera event picture only inside the camera's own plate
+    # region (OcxConfig's recognition area, padded). Off by default: the
+    # camera's area usually ends above a close car's plate, and on one site
+    # it dropped readable plates. The capture calibration still decides
+    # which plates are read. Settings -> Recognition can switch it on.
+    camera_region_search: bool = False
     alpr_country: str = ""
     alpr_csf: float = 0.918
     alpr_detector_confidence: float = 0.26

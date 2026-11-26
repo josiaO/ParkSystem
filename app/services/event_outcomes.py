@@ -9,6 +9,8 @@ dropped before it was even counted. Every event now ends in one outcome:
     no_plate_box    the detector found no plate in the event image
     unread          a plate box was found but no text could be read
     rejected:<why>  read, but not saved (duplicate, policy, stale ...)
+    calibration_refused  a plate was found, but the camera's calibration
+                    refused it before reading
     not_run         no read happened (camera busy, scope, worker-owned)
 
 Counts per camera go into the runtime heartbeat; the trace gets one
@@ -28,7 +30,7 @@ from pathlib import Path
 log = logging.getLogger("smartpark")
 
 KEEP_MISSES = 300
-KEEP_IMAGE_FOR = {"no_plate_box", "unread", "not_run"}
+KEEP_IMAGE_FOR = {"no_plate_box", "unread", "not_run", "calibration_refused"}
 _lock = threading.Lock()
 _counts: dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
 
@@ -43,6 +45,12 @@ def classify(result: dict | None) -> str:
         return "rejected:" + str(result["persist_skipped"])[:40]
     if result.get("ok") is False:
         return "not_run" if result.get("error") in {"busy", "timeout"} else "unread"
+    if result.get("calibration_refused"):
+        # A plate was found but the camera's calibration refused it. Its
+        # detail says "no plate inside this camera's calibration", which was
+        # counted as no_plate_box and hid calibration refusals among empty
+        # pictures (29 of 44 camera-4 "no plate" pictures one morning).
+        return "calibration_refused"
     if not result.get("best"):
         return "no_plate_box" if "no plate" in str(result.get("detail") or "") else "unread"
     return "read"

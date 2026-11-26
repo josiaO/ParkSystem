@@ -313,7 +313,15 @@ def _searched_roi(native):
     return searched
 
 
-def test_camera_event_is_searched_inside_the_cameras_own_plate_region():
+def test_camera_region_search_is_off_by_default():
+    """The camera's area usually ends above a close car's plate: whole picture unless switched on."""
+    assert _searched_roi({"plate_region": REGION, "image_width": 704, "image_height": 576}) == [None]
+
+
+def test_camera_event_is_searched_inside_the_cameras_own_plate_region(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "camera_region_search", True)
     searched = _searched_roi({"plate_region": REGION, "image_width": 704, "image_height": 576})
     assert len(searched) == 1 and searched[0]
     x1, y1, x2, y2 = (float(v) for v in searched[0].split(","))
@@ -321,7 +329,10 @@ def test_camera_event_is_searched_inside_the_cameras_own_plate_region():
     assert x1 > 0.05 and y1 > 0.2        # the region, padded, not the whole picture
 
 
-def test_no_camera_region_searches_the_whole_picture():
+def test_no_camera_region_searches_the_whole_picture(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "camera_region_search", True)
     assert _searched_roi({}) == [None]
 
 
