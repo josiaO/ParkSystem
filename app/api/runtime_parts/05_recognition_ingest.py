@@ -78,6 +78,54 @@ def _note_event_result(camera_id: int, capture: dict, jpeg: bytes, result: dict 
         camera_id, outcome, visit_id=str((capture or {}).get("visit_id") or ""), jpeg=jpeg,
         detail=plate or str((result or {}).get("detail") or (result or {}).get("error") or ""),
     )
+    if (capture or {}).get("zirp_requested") and outcome in ZIRP_SNAPSHOT_MISSES:
+        _zirp_snapshot_missed(camera_id, outcome)
+
+
+# Outcomes of a Zirp-commanded snapshot that mean it did not catch the plate
+# inside the calibration (taken too early or too late, or unreadable).
+ZIRP_SNAPSHOT_MISSES = {"no_plate_box", "calibration_refused", "unread", "not_run"}
+
+
+def _zirp_snapshot_missed(camera_id: int, why: str) -> None:
+    """Zirp's snapshot missed the plate: read the last in-zone live frame instead.
+
+    The live frame is the camera's sub-stream (704 px), so its crop is smaller
+    than the snapshot's, but its plate was inside the calibration. With no
+    such frame the gate may fire once more (it allows two tries per car).
+    """
+    from app.services import capture_calibration, zirp_trigger
+
+    gate = capture_calibration.gate_for(int(camera_id))
+    fallback = gate.last_eligible
+    fresh = (fallback is not None and fallback.jpeg[:2] == b"\xff\xd8"
+             and time.monotonic() - fallback.selected_at <= 3.0)
+    zirp_trigger._emit("zirp.snapshot_missed", camera=int(camera_id), why=why, fallback=bool(fresh))
+    if not fresh:
+        gate.note_ocr(published=False)
+        return
+    gate.last_eligible = None
+    task = asyncio.create_task(_read_fallback_frame(int(camera_id), fallback), name=f"zirp-fallback-{camera_id}")
+    task.add_done_callback(_consume_background_task)
+
+
+async def _read_fallback_frame(camera_id: int, fallback) -> None:
+    from app.services import capture_calibration
+
+    try:
+        with short_session() as db:
+            camera = db.get(Camera, camera_id)
+            if camera is None:
+                return
+            release_connection(db)
+            capture_calibration.gate_for(camera_id).prepared = (hash(fallback.jpeg), list(fallback.boxes), 1.0)
+            alpr = await _run_local_alpr(db, camera, fallback.jpeg, presence=True)
+            _note_arrival_result(camera_id, alpr)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from app.services.health import note_worker_failure
+        note_worker_failure("zirp-fallback-read", str(exc))
 
 
 async def _native_fallback_if_unread(
@@ -216,10 +264,13 @@ async def _drain_camera_events(
         return 0
     processed = len(events)
     from app.core import latency_trace
+    from app.services import zirp_trigger
     for capture in events:
         image_id = int(capture.get("image_id") or 0)
         plate = str(capture.get("plate") or "")
         drained_age_ms = _native_event_age_ms(capture)
+        if zirp_trigger.claim(camera_id, capture.get("captured_perf_ns")):
+            capture = {**capture, "zirp_requested": True}
         from app.services.dedup import native_callbacks
         if native_callbacks.seen(
             camera_id=camera_id,
@@ -280,22 +331,32 @@ async def _drain_camera_events(
                     camera_id, "no_plate_box" if located.get("available") else "not_run",
                     jpeg=jpeg, detail=str(located.get("detail") or located.get("reason") or ""),
                 )
+                if capture.get("zirp_requested"):
+                    _zirp_snapshot_missed(camera_id, "no_plate_box")
                 continue
-            box = found[0]
             # The event read below would run the detector on this same still
             # again (~70-120 ms on CPU); hand it these full-frame (1x) boxes.
-            from app.services.capture_calibration import gate_for
-            gate_for(int(camera_id)).prepared = (hash(jpeg), found, 1.0)
+            from app.services import capture_calibration
+            capture_calibration.gate_for(int(camera_id)).prepared = (hash(jpeg), found, 1.0)
+            # Show only a plate this camera's calibration lets Zirp read. The
+            # first box anywhere on the picture used to be boxed and cropped
+            # on the live view, so a plate still above the zone looked read.
+            # Uncalibrated cameras get every box back, best first.
+            readable, _refused = await asyncio.to_thread(
+                capture_calibration.plates_to_read, int(camera_id), jpeg, found,
+            )
+            box = readable[0] if readable else None
             native = {
                 **native,
                 "bbox": box,
                 "have_vehicle": True,
-                "image_width": int(box.get("image_width") or 0),
-                "image_height": int(box.get("image_height") or 0),
+                "image_width": int(found[0].get("image_width") or 0),
+                "image_height": int(found[0].get("image_height") or 0),
             }
-            from app.services.captures import _crop_from_bbox
-            # Full-size snapshot decode/crop/encode: keep it off the event loop.
-            crop = await asyncio.to_thread(_crop_from_bbox, jpeg, box) or b""
+            if box is not None:
+                from app.services.captures import _crop_from_bbox
+                # Full-size snapshot decode/crop/encode: keep it off the event loop.
+                crop = await asyncio.to_thread(_crop_from_bbox, jpeg, box) or b""
         plate_overlay = choose_overlay_box(native)
         if plate_overlay:
             remember_plate_box(camera_id, plate_overlay)
@@ -619,7 +680,7 @@ async def _complete_passage_from_sensor(camera_id: int) -> None:
 
 
 
-async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
+async def _video_arrival_ready(camera, jpeg: bytes, *, lead_seconds: float = 0.0) -> bool:
     """True when the best frame of this passage should be cropped and read.
 
     The detector runs on every sampled frame (far plates included). The
@@ -657,7 +718,10 @@ async def _video_arrival_ready(camera, jpeg: bytes) -> bool:
         boxes = [b for b in boxes if (float(b.get("x2", 0)) - float(b.get("x1", 0))) <= max_fraction * frame_width]
     gate.prepared = (hash(jpeg), boxes, 1.0)
     candidates = await run_inference(calibration.evaluate_frame, jpeg, boxes, config)
-    phase = gate.observe(candidates, boxes, jpeg, time.monotonic())
+    # lead_seconds > 0 when the read will be a camera snapshot taken that
+    # long after firing: the gate fires early enough for the snapshot to
+    # find the plate inside the calibration (see CaptureGate.observe).
+    phase = gate.observe(candidates, boxes, jpeg, time.monotonic(), lead_seconds=lead_seconds)
     calibration.note_frame(int(camera.id), candidates, phase, config)
     # Latency/trace record keeps measuring every plate seen (early detection),
     # whether or not it is eligible yet.
@@ -768,10 +832,17 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             or runtime.lane(camera_id).visit.vehicle_present
             or (software_ocr_enabled(camera) and not adapter_has_native_plates(camera))
         )
-        if not await _video_arrival_ready(camera, jpeg):
+        from app.services import capture_calibration as calibration
+        from app.services import runtime_settings, zirp_trigger
+
+        snapshot_mode = (
+            str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"}
+            and handle is not None and not calibration.in_test_mode(camera_id)
+        )
+        lead = zirp_trigger.lead_seconds(camera_id) if snapshot_mode else 0.0
+        if not await _video_arrival_ready(camera, jpeg, lead_seconds=lead):
             gateway.note_ai_sample(camera_id, dropped=True)
             return
-        from app.services import capture_calibration as calibration
 
         gate = calibration.gate_for(int(camera_id))
         from app.services.recognition_runtime import runtime as _runtime
@@ -797,17 +868,16 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             )
             gate.hold()
             return
-        from app.services import runtime_settings
-        if str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"} and handle is not None:
+        if snapshot_mode:
             # Zirp's own trigger: command the camera's full-resolution
-            # snapshot now (the image a loop-triggered camera would send) and
-            # read it through the normal event path, falling back to this
-            # live frame if no snapshot arrives.
-            from app.services import zirp_trigger
-
-            zirp_trigger.fired(camera_id, mode="snapshot")
+            # snapshot now. The gate fired early by the camera's snapshot
+            # delay, so the picture is taken with the plate inside the
+            # calibration; it is read through the normal event path. If it
+            # misses the plate, the last in-zone live frame is read instead
+            # (_zirp_snapshot_missed).
+            zirp_trigger.fired(camera_id, mode="snapshot", predicted=gate.fired_on_prediction)
             task = asyncio.create_task(
-                _read_presence_now(camera_id, int(handle), background=True),
+                _read_presence_now(camera_id, int(handle), background=True, zirp=True),
                 name=f"zirp-trigger-{camera_id}",
             )
             task.add_done_callback(_consume_background_task)

@@ -154,3 +154,65 @@ def site_plate_validation() -> str:
     """The site's plate rule (Settings -> Site -> Plate validation)."""
     _refresh()
     return str(_cache.get("plate_validation") or getattr(settings, "plate_validation", "") or "").upper()
+
+
+# zirp.env lines for values that now belong to the screens. ``SMARTPARK_ALPR_
+# COUNTRY`` maps to Settings -> Site -> Plate validation.
+_SITE_COUNTRY_KEY = "alpr_country"
+
+
+def adopt_env_file(db, *, env_path=None) -> dict[str, Any]:
+    """Move screen-managed settings out of zirp.env into the site database.
+
+    A value in zirp.env looked like the setting, but the screen's value won
+    (Recognition) or the file's value won (the plate country), depending on
+    the setting. Now every such value has one home: the site database. A line
+    in zirp.env is copied in only when nothing was saved on screen yet, then
+    the line is removed (zirp.env.bak keeps the old file). The database is
+    committed before the file is touched, so a failed commit loses nothing.
+    """
+    from app.env_tool import env_file_path, env_key, read_env, write_env
+    from app.models import SiteSetting
+
+    path = env_file_path(env_path)
+    found = read_env(path)
+    adopted: dict[str, Any] = {}
+    remove: dict[str, None] = {}
+    row = db.get(SiteSetting, KEY)
+    stored = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
+    for name, (attr, _kind, _rule) in FIELDS.items():
+        key = env_key(attr)
+        if key not in found:
+            continue
+        remove[key] = None
+        if name in stored:
+            continue                                  # the screen already decided
+        try:
+            stored[name] = clean(name, found[key])
+            adopted[name] = stored[name]
+        except ValueError:
+            pass                                      # an invalid line is just dropped
+    if adopted:
+        if row is None:
+            db.add(SiteSetting(key=KEY, value=stored))
+        else:
+            row.value = stored
+    country_key = env_key(_SITE_COUNTRY_KEY)
+    if country_key in found:
+        remove[country_key] = None
+        if str(found[country_key]).strip().lower() in {"tanzania", "tz"}:
+            site = db.get(SiteSetting, "site")
+            body = dict(site.value) if site is not None and isinstance(site.value, dict) else {}
+            if not str(body.get("plate_validation") or "").strip():
+                body["plate_validation"] = "TZ"
+                adopted["plate_validation"] = "TZ"
+                if site is None:
+                    db.add(SiteSetting(key="site", value=body))
+                else:
+                    site.value = body
+    if not remove:
+        return {"adopted": adopted, "removed": []}
+    db.commit()
+    write_env(path, remove)
+    invalidate()
+    return {"adopted": adopted, "removed": sorted(remove)}

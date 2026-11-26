@@ -404,6 +404,18 @@ async def lifespan(app: FastAPI):
                 migrate_plaintext_secrets(db)
             except Exception as exc:  # a secret-store problem must not stop parking
                 log.warning("secrets migration skipped: %s", exc)
+            # Settings shown on screen live in the site database only; lines
+            # for them left in zirp.env are moved there and removed.
+            from app.services import runtime_settings
+
+            try:
+                moved = runtime_settings.adopt_env_file(db)
+                if moved["removed"]:
+                    log.info("zirp.env settings moved to the site settings: %s (saved: %s)",
+                             ", ".join(moved["removed"]), moved["adopted"] or "screen values kept")
+            except Exception as exc:  # a settings move must not stop parking
+                db.rollback()
+                log.warning("zirp.env settings move skipped: %s", exc)
         else:
             log.info("Processing Node startup is read-only for central bootstrap, schema, modules, tariffs, and topology")
             from app.services.node_scope import ensure_processing_node_registry

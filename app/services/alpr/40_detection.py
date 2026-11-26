@@ -7,21 +7,27 @@ def _ocr_result_text(ocr) -> tuple[str, float]:
         conf = float(statistics.mean(conf)) if conf else 0.0
     return text, float(conf or 0)
 
-def _country_name() -> str:
-    explicit = str(getattr(settings, "alpr_country", "") or "").strip().lower()
-    if explicit:
-        return explicit
-    # Settings -> Site -> Plate validation decides the profile, so the
-    # separate SMARTPARK_ALPR_COUNTRY line is no longer needed.
+def _site_plate_validation() -> str:
+    """Settings -> Site -> Plate validation, the one place the plate rule is set."""
     try:
         from app.services import runtime_settings
 
-        validation = runtime_settings.site_plate_validation()
+        return str(runtime_settings.site_plate_validation() or "").strip().upper()
     except Exception:
-        validation = str(getattr(settings, "plate_validation", "") or "").strip().upper()
+        return str(getattr(settings, "plate_validation", "") or "").strip().upper()
+
+
+def _country_name() -> str:
+    # Settings -> Site -> Plate validation decides the profile. A
+    # SMARTPARK_ALPR_COUNTRY line in zirp.env used to win over the screen; it
+    # is now used only when the site has no plate rule at all, and the Site
+    # Service moves it into the site settings at startup.
+    validation = _site_plate_validation()
     if validation == "TZ":
         return "tanzania"
-    return ""
+    if validation:
+        return ""
+    return str(getattr(settings, "alpr_country", "") or "").strip().lower()
 
 def _apply_country_profile(text: str, confidence: float) -> tuple[str, float]:
     """Apply a country profile only when the site selected one.
@@ -124,7 +130,8 @@ def accept_ocr_plate(text: str, confidence: float, *, bbox=None, image_size: tup
         return False
     if is_empty_scene_ocr(plate, confidence=confidence):
         return False
-    assessed = assess_plate(plate, str(getattr(settings, "plate_validation", "") or "NONE"), confidence=confidence)
+    # The site's plate rule from the screen, not zirp.env's install default.
+    assessed = assess_plate(plate, _site_plate_validation() or "NONE", confidence=confidence)
     if not assessed.get("likely"):
         return False
     floor = float(getattr(settings, "alpr_min_ocr_confidence", 0.40) or 0.40)

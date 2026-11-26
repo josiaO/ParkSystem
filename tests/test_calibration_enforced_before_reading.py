@@ -41,12 +41,29 @@ def _judge(box, **enforce):
     return cc.evaluate_frame(b"", [box], _config(**enforce))[0]
 
 
-def test_plate_still_approaching_follows_the_start_line_switch():
+def test_plate_not_yet_in_the_zone_is_not_read_whatever_the_start_line_switch():
+    """A plate above the zone used to be read when the start line was off."""
     approaching = _box(0.45, 0.35)                     # above the zone, in the lane
-    assert _judge(approaching, start_line=False).eligible
-    refused = _judge(approaching, start_line=True)
-    assert not refused.eligible
-    assert all("capture zone" not in reason or "before" in reason for reason in refused.reasons)
+    for start_line in (False, True):
+        verdict = _judge(approaching, start_line=start_line, end_line=False)
+        assert not verdict.eligible
+        assert "before the capture zone" in verdict.reasons
+    # Only switching the zone rule itself off lets it through.
+    assert _judge(approaching, zone=False, start_line=False, end_line=False).eligible
+
+
+def test_start_line_switch_decides_a_plate_inside_the_zone_before_the_line():
+    entering = _box(0.45, 0.44)                        # inside the zone, above the start line
+    assert cc.point_in_polygon(0.45, 0.44, ZONE)
+    assert _judge(entering, start_line=False).eligible
+    assert not _judge(entering, start_line=True).eligible
+
+
+def test_plate_that_has_driven_out_of_the_zone_is_not_read():
+    out = _box(0.55, 0.99)                             # below the zone
+    assert not cc.point_in_polygon(0.55, 0.99, ZONE)
+    verdict = _judge(out, end_line=False)
+    assert not verdict.eligible and "past the capture zone" in verdict.reasons
 
 
 def test_plate_off_to_the_side_is_always_a_zone_refusal():
