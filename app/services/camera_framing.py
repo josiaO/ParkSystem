@@ -79,7 +79,8 @@ def native_plate_region_to_roi(
     """Convert OcxConfig's camera polygon into FastALPR's normalized ROI.
 
     This is the camera's own (vendor-side) plate region, read-only. It is not
-    a ZIRP setting.
+    a ZIRP setting. Camera event reads search only inside it (padded); an
+    empty, tiny or off-picture region means the whole picture.
     """
     try:
         width = int(image_width or 0)
@@ -100,6 +101,17 @@ def native_plate_region_to_roi(
         if math.isfinite(x) and math.isfinite(y):
             points.append((x, y))
     if len(points) < 3:
+        return ""
+    # A point off the picture means the region is not in this picture's pixel
+    # space; cropping by it would search the wrong part of the frame.
+    if any(not (0 <= x <= width and 0 <= y <= height) for x, y in points):
+        return ""
+    # Judge the region the camera sent, not the padded one: an unconfigured
+    # region (every point 0,0) padded to exactly 8% passed the size check and
+    # would have searched only the picture's top-left corner.
+    span_x = (max(x for x, _ in points) - min(x for x, _ in points)) / width
+    span_y = (max(y for _, y in points) - min(y for _, y in points)) / height
+    if span_x < 0.08 or span_y < 0.08:
         return ""
     x1 = max(0.0, min(x for x, _ in points) / width - float(padding))
     y1 = max(0.0, min(y for _, y in points) / height - float(padding))

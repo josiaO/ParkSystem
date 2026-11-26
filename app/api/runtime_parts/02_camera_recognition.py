@@ -462,15 +462,19 @@ async def _run_local_alpr_locked(
     from app.services.alpr import recognize_arrival_bytes, recognize_plate_crop_bytes
     from app.services.camera_framing import framing_from_profiles, native_plate_region_to_roi
     framing = framing_from_profiles(getattr(camera, "stream_profiles", None))
-    # ParkWatch/OcxConfig's polygon is the camera-side zone.  Use it only when
-    # the operator has not explicitly saved an application ROI; this keeps the
-    # native camera configuration useful without silently overriding settings.
+    # ParkWatch/OcxConfig's polygon is the camera-side plate zone. ZIRP has no
+    # search zone of its own any more (framing always reports "off"), so the
+    # camera's region, when it sent one, is where this still is searched. The
+    # old ``framing["detect_roi"] or native_roi`` never reached the camera's
+    # region because "off" is a non-empty string. No region (or one that does
+    # not fit the picture) is the whole picture; the capture calibration still
+    # decides which plates are read.
     native_roi = native_plate_region_to_roi(
         native.get("plate_region"),
         image_width=int(native.get("image_width") or 0),
         image_height=int(native.get("image_height") or 0),
     )
-    effective_roi = framing["detect_roi"] or native_roi or None
+    effective_roi = native_roi or None
     from app.services.capture_calibration import gate_for
     prepared = gate_for(int(camera.id)).prepared
     # Boxes already found on this exact still are reused when they were
@@ -488,10 +492,22 @@ async def _run_local_alpr_locked(
             src_w=int(native.get("image_width") or 0),
             src_h=int(native.get("image_height") or 0),
         )
+        if native_box:
+            # The camera's own rectangle has no detector score. Without one it
+            # scored 0: the calibration's detector rule refused it and the
+            # crop reader's detector floor skipped it, so this fallback never
+            # read a plate. check_capture already judges it as 1.0. It also
+            # had no picture size, so the calibration could not place it and
+            # refused it as outside the zone.
+            from app.services.camera_lpr import jpeg_pixel_size
+            frame_w, frame_h = jpeg_pixel_size(jpeg)
+            native_box = {**native_box, "confidence": 1.0, "source": "camera",
+                          "image_width": frame_w, "image_height": frame_h}
     # Only plates inside this camera's calibration are read (see
     # capture_calibration.plates_to_read). Find the plates first, drop the
     # ones outside the calibration, and read the best one left.
     refused_all = None
+    searched_empty = False
     from app.services import capture_calibration as calibration_rules
     if calibration_rules.for_camera(int(camera.id)).get("enabled"):
         if not boxes:
@@ -500,6 +516,9 @@ async def _run_local_alpr_locked(
                 locate_plate_boxes, jpeg, detect_roi=effective_roi, detect_zoom=framing["detect_zoom"],
             )
             boxes = found if located.get("available") else None
+        # The detector searched this still and found no plate: running it
+        # again on the same picture below finds nothing new and doubles CPU.
+        searched_empty = boxes is not None and not boxes and not native_box
         if not boxes and native_box:
             boxes = [native_box]
         if boxes:
@@ -518,6 +537,9 @@ async def _run_local_alpr_locked(
         )
         alpr = {"ok": True, "backend": "fastalpr", "plates": [], "best": None,
                 "detail": "no plate inside this camera's calibration", "calibration_refused": True}
+    elif searched_empty:
+        alpr = {"ok": True, "backend": "fastalpr", "pipeline": "arrival_crop_ocr", "plates": [],
+                "count": 0, "best": None, "detail": "no plate in the detection zone"}
     # A native usLpBox is a useful fallback, but it is not trusted as the
     # primary FastALPR crop.  The panorama detector runs inside this one
     # recognition call and only uses the native box if it finds no current box.
