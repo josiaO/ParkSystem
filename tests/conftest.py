@@ -10,6 +10,16 @@ import pytest
 os.environ.setdefault("SMARTPARK_LATENCY_TRACE", "0")
 os.environ.setdefault("SMARTPARK_LOOP_BOARD_ENABLED", "false")  # never bind the live board port (UDP 8000)
 
+# Never read this PC's installed settings (%ProgramData%\SmartParkEdge\config\
+# zirp.env): on a site PC it sets things like SMARTPARK_ALPR_COUNTRY and the
+# live database, and tests then behave differently from a clean checkout.
+if not os.environ.get("SMARTPARK_ENV_FILE"):
+    import tempfile
+
+    _empty_env = os.path.join(tempfile.mkdtemp(prefix="zirp-tests-"), "zirp.env")
+    open(_empty_env, "w").close()
+    os.environ["SMARTPARK_ENV_FILE"] = _empty_env
+
 
 @pytest.fixture(autouse=True)
 def _reset_lane_stays():
