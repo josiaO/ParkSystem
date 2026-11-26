@@ -74,7 +74,7 @@ class AccessReceiptTests(unittest.TestCase):
         self.assertEqual(plans.status_code, 200, plans.text)
         vip = next(row for row in plans.json() if row["kind"] == "VIP")
         created = self.client.post("/vehicles", headers=self.headers, json={
-            "plate": "T 453 ETH", "owner_name": "Tenant", "plan_id": vip["id"],
+            "plate": "T 754 ETH", "owner_name": "Tenant", "plan_id": vip["id"],
         })
         self.assertEqual(created.status_code, 200, created.text)
         self.assertEqual(created.json()["plate"], "T754ETH")

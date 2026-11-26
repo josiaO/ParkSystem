@@ -36,13 +36,13 @@ from app.services.alpr import (
 
 class PlateFusionTests(unittest.TestCase):
     def test_tanzania_plates_from_camera_logs(self):
-        self.assertEqual(normalize_plate("T 285 DQP"), "T385DQP")
-        self.assertEqual(normalize_plate("T 349 DLG"), "T472DLG")
+        self.assertEqual(normalize_plate("T 385 DQP"), "T385DQP")
+        self.assertEqual(normalize_plate("T 472 DLG"), "T472DLG")
         self.assertEqual(csf_from_contrast(918), 0.918)
         self.assertEqual(native_confidence(91), 0.91)
         self.assertEqual(native_confidence(0.91), 0.91)
         hit = native_from_sdk_capture({
-            "plate": "T 285 DQP", "score": 91, "plate_box": [807, 303, 866, 354],
+            "plate": "T 385 DQP", "score": 91, "plate_box": [807, 303, 866, 354],
             "image_width": 1280, "image_height": 720,
         })
         self.assertEqual(hit["plate"], "T385DQP")
@@ -280,7 +280,7 @@ class PlateFusionTests(unittest.TestCase):
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         bbox = SimpleNamespace(x1=100, y1=200, x2=220, y2=240)
         detection = SimpleNamespace(bounding_box=bbox, confidence=0.95)
-        ocr = SimpleNamespace(text="T285DQP____", confidence=0.91)
+        ocr = SimpleNamespace(text="T385DQP____", confidence=0.91)
         seen = {}
 
         class FakeOcr:
@@ -316,7 +316,7 @@ class PlateFusionTests(unittest.TestCase):
         class FakeOcr:
             def predict(self, crop):
                 seen["shape"] = tuple(crop.shape[:2])
-                return SimpleNamespace(text="T285DQP____", confidence=[0.95] * 7)
+                return SimpleNamespace(text="T385DQP____", confidence=[0.95] * 7)
 
         fake_engine = SimpleNamespace(ocr=FakeOcr())
         with patch.object(alpr_mod, "fastalpr_installed", return_value=True), \
@@ -329,9 +329,9 @@ class PlateFusionTests(unittest.TestCase):
         self.assertGreaterEqual(seen["shape"][1], 300)
 
     def test_clean_ocr_strips_fast_plate_padding(self):
-        self.assertEqual(clean_ocr_text("T285DQP____"), "T385DQP")
-        self.assertEqual(normalize_plate(clean_ocr_text("T_285_DQP")), "T385DQP")
-        self.assertEqual(clean_ocr_text("T 349 DLG"), "T472DLG")
+        self.assertEqual(clean_ocr_text("T385DQP____"), "T385DQP")
+        self.assertEqual(normalize_plate(clean_ocr_text("T_385_DQP")), "T385DQP")
+        self.assertEqual(clean_ocr_text("T 472 DLG"), "T472DLG")
 
     def test_decode_alpr_image_does_not_upscale_entire_small_frame(self):
         from io import BytesIO

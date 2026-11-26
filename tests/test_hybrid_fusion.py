@@ -104,7 +104,7 @@ class FusionCoordinatorTests(unittest.TestCase):
         dup = self.coord.offer(1, Candidate(SOURCE_LOCAL, "T385DQP", 0.9, 12.0), now=12.0, counterpart_available=False)
         self.assertEqual(len(dup), 1)
         self.assertTrue(dup[0].suppressed)
-        near = self.coord.offer(1, Candidate(SOURCE_NATIVE, "T285D0P", 0.7, 13.0), now=13.0, counterpart_available=False)
+        near = self.coord.offer(1, Candidate(SOURCE_NATIVE, "T385D0P", 0.7, 13.0), now=13.0, counterpart_available=False)
         self.assertTrue(near[0].suppressed, "near-identical plate is the same physical vehicle")
         self.assertEqual(self.coord.flush(30.0), [])
 
@@ -218,7 +218,7 @@ class HybridFusionServiceTests(unittest.TestCase):
         hybrid_fusion.reset()
 
     def test_native_and_worker_candidate_persist_one_fused_capture(self):
-        native = {"plate": "T385DQP", "plate_raw": "T 285 DQP", "confidence": 0.9, "image_id": 77, "source": "qy_Net_RegImageRecvEx"}
+        native = {"plate": "T385DQP", "plate_raw": "T 385 DQP", "confidence": 0.9, "image_id": 77, "source": "qy_Net_RegImageRecvEx"}
         recognized = recognition_from_outbox({
             "kind": "PlateRecognized",
             "payload": from_recognition_dict({

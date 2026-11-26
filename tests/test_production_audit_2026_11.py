@@ -179,7 +179,7 @@ def test_opted_out_event_is_never_swept(Session):
 @pytest.mark.parametrize("ocr, expected", [
     ("7843ADF", "T843ADF"),   # TestingData/I0105082026002824.jpg: bolt over the T
     ("T843ADF", "T843ADF"),
-    ("T8B2ADF", "T883ADF"),   # digit position B -> 8 (pre-existing rule)
+    ("T8B3ADF", "T883ADF"),   # digit position B -> 8 (pre-existing rule)
     ("78321ADF", "78321ADF"),  # not the TZ shape: left alone
     ("7832AD", "7832AD"),
 ])

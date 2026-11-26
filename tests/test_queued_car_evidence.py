@@ -30,7 +30,7 @@ from app.services.lane_stay import different_vehicle  # noqa: E402
 def test_different_vehicle_ignores_ocr_slips_and_truncation():
     assert different_vehicle("T461DMR", "T927ETV")
     assert not different_vehicle("T940OWQ", "T940DWQ")       # one slip
-    assert not different_vehicle("SM15174", "15143")         # truncated read
+    assert not different_vehicle("SM15174", "15174")         # truncated read
     assert not different_vehicle("T461DMR", "")               # no plate yet
     assert not different_vehicle("T461DMR", "T461DMR")
 
