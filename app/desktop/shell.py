@@ -16,6 +16,7 @@ PAGE_DESCRIPTIONS = {
     "Dashboard": "Site overview, lane condition, and items needing attention.",
     "Live Gates": "Monitor cameras and inspect a vehicle. Manual commands apply to one selected side only.",
     "Sessions": "Find a visit, review its evidence, and manage the operator workflow.",
+    "Parking Sessions": "Find a visit, review its evidence, and manage the operator workflow.",
     "Vehicles": "Maintain the site's registered vehicle directory.",
     "Reports": "Review activity, export records, and manage backups.",
     "Settings": "Local appearance and site configuration. Display preferences stay on this computer.",

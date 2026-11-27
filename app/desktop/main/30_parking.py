@@ -288,6 +288,7 @@ class Sessions(QWidget):
         self.kiosk_stay=QLabel("Scan a receipt or pick a session.")
         self.kiosk_stay.setWordWrap(True)
         self.kiosk_due=QLabel(""); self.kiosk_due.setStyleSheet("font-size:18px;font-weight:700")
+        self.kiosk_due.setWordWrap(True)          # long messages were cut off in the narrow column
         self.kiosk_note=QLabel(""); self.kiosk_note.setWordWrap(True)
         self.correct=QLineEdit(); self.correct.setPlaceholderText("Correct plate")
         actions=QVBoxLayout()
@@ -763,6 +764,8 @@ class Payments(QWidget):
         today=QDate.currentDate()
         self.date_from=QDateEdit(today.addDays(-6)); self.date_from.setCalendarPopup(True); self.date_from.setDisplayFormat("yyyy-MM-dd")
         self.date_to=QDateEdit(today); self.date_to.setCalendarPopup(True); self.date_to.setDisplayFormat("yyyy-MM-dd")
+        for field in (self.date_from, self.date_to):
+            field.setMinimumWidth(field.fontMetrics().horizontalAdvance("2026-12-31") + 48)
         self.method=QComboBox(); self.method.addItem("All methods", "")
         # The method codes the ledger records (simulated ones on test sites).
         for code, label in (("KIOSK_CASH", "Cash"), ("MOBILE_MONEY", "Mobile Money"),

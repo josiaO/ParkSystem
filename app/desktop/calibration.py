@@ -278,7 +278,9 @@ class CalibrationWindow(QDialog):
         self.canvas = CalibrationCanvas()
         self.canvas.on_changed = self._geometry_changed
         lv.addWidget(self.canvas, 1)
-        tools = QHBoxLayout()
+        # Two rows (zone, then lines): in one row the eight tools made the
+        # window wider than a 1920 px screen at 125% scaling.
+        tools = QVBoxLayout(); zone_tools = QHBoxLayout(); line_tools = QHBoxLayout()
         self.rect_btn = QPushButton("Draw rectangle"); self.rect_btn.clicked.connect(lambda: self._tool("rect"))
         self.poly_btn = QPushButton("Draw polygon"); self.poly_btn.clicked.connect(lambda: self._tool("polygon"))
         self.poly_done = QPushButton("Finish polygon"); self.poly_done.clicked.connect(lambda: self._tool("idle"))
@@ -287,12 +289,16 @@ class CalibrationWindow(QDialog):
         self.end_btn.setToolTip("Reading stops past this line, so a car moving out is not read again.")
         self.clear_end = QPushButton("Remove end line"); self.clear_end.clicked.connect(self._remove_end_line)
         self.line_side = QComboBox(); self.line_side.addItem("Read below the line", "below"); self.line_side.addItem("Read above the line", "above")
+        self.line_side.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.line_side.currentIndexChanged.connect(self._side_changed)
         self.clear_line = QPushButton("Remove line"); self.clear_line.clicked.connect(self._remove_line)
-        for w in (self.rect_btn, self.poly_btn, self.poly_done, self.line_btn, self.line_side, self.clear_line,
-                  self.end_btn, self.clear_end):
-            tools.addWidget(w)
-        tools.addStretch()
+        for w in (self.rect_btn, self.poly_btn, self.poly_done):
+            zone_tools.addWidget(w)
+        zone_tools.addStretch()
+        for w in (self.line_btn, self.line_side, self.clear_line, self.end_btn, self.clear_end):
+            line_tools.addWidget(w)
+        line_tools.addStretch()
+        tools.addLayout(zone_tools); tools.addLayout(line_tools)
         lv.addLayout(tools)
         self.tool_hint = QLabel("Drag a corner to move it, drag inside the zone to move it all.")
         self.tool_hint.setObjectName("muted")

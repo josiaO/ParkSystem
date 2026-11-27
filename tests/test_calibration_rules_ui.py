@@ -108,3 +108,19 @@ def test_escape_asks_before_dropping_unsaved_changes(monkeypatch):
     window._dirty = False
     window.close()
     assert not window.isVisible()
+
+
+def test_calibration_window_fits_a_scaled_full_hd_screen(monkeypatch):
+    """1920 x 1080 at 125% is 1536 logical pixels wide; the window was wider."""
+    _quiet_window(monkeypatch)
+    window = calibration.CalibrationWindow(None, cameras=[])
+    try:
+        # Pixel widths depend on the fonts installed, so check the layout:
+        # zone tools and line tools are on separate rows.
+        window.resize(1400, 800); window.show(); _APP.processEvents()
+        assert window.rect_btn.y() != window.line_btn.y()
+        assert window.line_btn.y() == window.end_btn.y()
+        assert window.line_side.sizeAdjustPolicy() == calibration.QComboBox.SizeAdjustPolicy.AdjustToContents
+    finally:
+        window._dirty = False
+        window.close()

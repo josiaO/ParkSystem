@@ -28,11 +28,45 @@ park.
   <img src="docs/images/lane-flow.svg" alt="A car's trip through a Zirp site" width="900">
 </p>
 
+## See it at work
+
+<p align="center">
+  <img src="docs/images/live-gates.jpg" alt="Live Gates: the entry and exit cameras side by side, each with a car inside its capture zone" width="900">
+</p>
+
+**Live Gates.** The entry and exit cameras of one lane, side by side. The yellow
+shape is where that camera reads plates, the blue and red lines where reading
+starts and stops, and the green box the plate being read. Under each picture
+are the plate it read, the plate crop and the last snapshot, and **Open** /
+**Close** buttons that move that one barrier only.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/calibration-settings.jpg" alt="Calibration settings for one camera: the capture zone and lines drawn on the live picture, with limits and rules beside it"></td>
+    <td width="50%"><img src="docs/images/parking-sessions.jpg" alt="Parking sessions: the list of visits beside the selected visit's photo, plate crop and stay"></td>
+  </tr>
+  <tr>
+    <td><b>Calibration settings</b>, opened from a camera's ⋮ menu. Draw where plates are read, set size and confidence limits, switch each rule on or off, and use test mode to try it without opening a barrier.</td>
+    <td><b>Parking sessions.</b> Every visit beside the selected one's photo, plate crop and time on site, with plate corrections, payments and receipts in one place.</td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/images/dashboard.jpg" alt="Dashboard: today's figures in one row and each lane's camera, video, recognition and barrier status" width="900">
+</p>
+
+**Dashboard.** Today's figures at a glance, and every lane's camera, live
+video, plate recognition and barrier in one table.
+
+<sub>Screenshots from a live site. Plates, camera addresses and people are blurred.</sub>
+
 ## What you get
 
 - **Plate recognition built for Tanzanian plates.** Works with the camera's
   own plate reader, Zirp's on-board model (FastALPR), or both. Fixes the
-  usual `0/O`, `1/I`, `8/B` mix-ups on `T123ABC` plates.
+  usual `0/O`, `1/I`, `8/B` mix-ups on `T123ABC` plates, reads two-line
+  plates, and reads a car at most twice, only inside the zone you draw for
+  that camera.
 - **Barriers that do the right thing.** A barrier lifts only after the decision
   is saved. A power cut can't open it for a car we have no record of, and one
   decision lifts it once.
@@ -89,6 +123,7 @@ detailed version is in [docs/architecture.md](docs/architecture.md).
 |---|---|
 | Install, update, roll back or uninstall | [Installing and updating](docs/install.md) |
 | **Connect a camera**, fix a black picture, calibrate where cars are read | [Connecting cameras](docs/cameras.md) |
+| See how a car goes from camera picture to plate read to barrier, and why | [Recognition decision flow](docs/recognition-decision-flow.md) |
 | Wire barriers and ground loops, open a barrier by hand, set up owner alerts | [Barriers and loops](docs/gates-and-loops.md) · [loop board protocol](docs/loop-boards.md) |
 | Take cash, kiosk or mobile-money payments | [Payments](docs/payments.md) |
 | Manage company fleets, family cars and visitor passes | [Linked vehicles](docs/vehicle-groups.md) |

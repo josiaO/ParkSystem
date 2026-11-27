@@ -196,6 +196,7 @@ class ReportsPage(QWidget):
         for field in (self.start, self.end):
             field.setCalendarPopup(True)
             field.setDisplayFormat("yyyy-MM-dd")
+            field.setMinimumWidth(field.fontMetrics().horizontalAdvance("2026-12-31") + 48)
         show = QPushButton("Show report")
         show.clicked.connect(self.show_report)
         print_one = QPushButton("Print this report")
