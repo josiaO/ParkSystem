@@ -320,9 +320,23 @@ def record_succeeded_payment(
     return {"session": row, "transaction": txn, "intent": intent, "duplicate": False}
 
 
-def list_transactions(db: Session, *, limit: int = 100) -> list[PaymentTransaction]:
-    return list(
-        db.scalars(
-            select(PaymentTransaction).order_by(PaymentTransaction.id.desc()).limit(limit)
-        ).all()
-    )
+def list_transactions(
+    db: Session,
+    *,
+    limit: int = 100,
+    start_at=None,
+    end_at=None,
+    method: str | None = None,
+    status: str | None = None,
+) -> list[PaymentTransaction]:
+    """Newest first; optionally within [start_at, end_at) and by method / status."""
+    query = select(PaymentTransaction)
+    if start_at is not None:
+        query = query.where(PaymentTransaction.created_at >= start_at)
+    if end_at is not None:
+        query = query.where(PaymentTransaction.created_at < end_at)
+    if method:
+        query = query.where(PaymentTransaction.method == str(method).upper())
+    if status:
+        query = query.where(PaymentTransaction.status == str(status).upper())
+    return list(db.scalars(query.order_by(PaymentTransaction.id.desc()).limit(limit)).all())

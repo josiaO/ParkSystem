@@ -9,7 +9,7 @@ from __future__ import annotations
 from PySide6.QtCore import QDate
 from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QComboBox, QDateEdit, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -190,8 +190,12 @@ class ReportsPage(QWidget):
         self.kind = QComboBox()
         for key, label in REPORTS:
             self.kind.addItem(label, key)
-        self.start = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
-        self.end = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
+        # Date pickers sized to a date: the text boxes used to stretch across
+        # the whole window. ``.text()`` still gives "yyyy-MM-dd".
+        self.start = QDateEdit(QDate.currentDate()); self.end = QDateEdit(QDate.currentDate())
+        for field in (self.start, self.end):
+            field.setCalendarPopup(True)
+            field.setDisplayFormat("yyyy-MM-dd")
         show = QPushButton("Show report")
         show.clicked.connect(self.show_report)
         print_one = QPushButton("Print this report")
@@ -204,12 +208,14 @@ class ReportsPage(QWidget):
             label_for("&Report", self.kind), self.kind,
             label_for("&From", self.start), self.start,
             label_for("&To", self.end), self.end,
+            show,
         ):
             row.addWidget(widget)
+        row.addStretch()
         layout.addLayout(row)
         report_actions = QHBoxLayout()
         self.show_btn, self.download_btn = show, download
-        for widget in (show, print_one, print_all, download):
+        for widget in (print_one, print_all, download):
             report_actions.addWidget(widget)
         report_actions.addStretch()
         layout.addLayout(report_actions)

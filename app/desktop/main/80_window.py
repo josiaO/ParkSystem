@@ -8,28 +8,28 @@ class MainWindow(DesktopShell):
         self.setWindowTitle(f"{PRODUCT_NAME}  ·  {system}")
         self.pages=[]
         self._makers=[]
-        if api.nav_page("dashboard"):
-            self.add_page(api.nav_label("dashboard", "Dashboard"), Dashboard)
-        if api.nav_page("health"):
-            self.add_page(api.nav_label("health", "System Health"), SystemHealth)
+        # Ordered by how often a gate operator needs them; the technician
+        # pages come last, where a narrow screen scrolls the page bar.
         if api.nav_page("cameras"):
             self.add_page(api.nav_label("cameras", "Live Gates"), Cameras)
+        if api.nav_page("sessions"):
+            self.add_page(api.nav_label("sessions", "Sessions"), Sessions)
+        if api.nav_page("payments"):
+            self.add_page(api.nav_label("payments", "Payments"), Payments)
+        if api.nav_page("vehicles"):
+            self.add_page(api.nav_label("vehicles", "Vehicles"), Vehicles)
+        if api.nav_page("dashboard"):
+            self.add_page(api.nav_label("dashboard", "Dashboard"), Dashboard)
         if api.nav_page("plates"):
             self.add_page(api.nav_label("plates", "Detections"), PlateEnginePage)
+        if api.nav_page("reports"):
+            self.add_page(api.nav_label("reports", "Reports"), ReportsPage)
         if api.nav_page("onboarding") or (
             api.can("settings.manage") and not (api.modules or {}).get("onboarding_completed", True)
         ):
             self.add_page(api.nav_label("onboarding", "Setup Wizard"), OnboardingWizard)
-        if api.nav_page("sessions"):
-            self.add_page(api.nav_label("sessions", "Sessions"), Sessions)
-        if api.nav_page("vehicles"):
-            self.add_page(api.nav_label("vehicles", "Vehicles"), Vehicles)
-        if api.nav_page("payments"):
-            self.add_page(api.nav_label("payments", "Payments"), Payments)
         if api.nav_page("fees"):
             pass  # Tariffs & Schedules is a tab in Settings.
-        if api.nav_page("reports"):
-            self.add_page(api.nav_label("reports", "Reports"), ReportsPage)
         if api.nav_page("gates"):
             self.add_page(api.nav_label("gates", "Gates"), Gates)
         if api.nav_page("users"):
@@ -40,6 +40,8 @@ class MainWindow(DesktopShell):
             # Edge Node (Processing Node account): no site settings, but its
             # cameras are calibrated here, where their live picture is.
             self.add_page("Camera calibration", lambda: CalibrationPage(self))
+        if api.nav_page("health"):
+            self.add_page(api.nav_label("health", "System Health"), SystemHealth)
         if api.nav_page("hardware"):
             self.add_page(api.nav_label("hardware", "Hardware Lab"), Hardware)
         if api.nav_page("sim"):

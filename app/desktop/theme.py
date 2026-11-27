@@ -32,7 +32,6 @@ QWidget {{ color:{colors.text}; }}
 QMainWindow, QDialog, QWidget#workspace {{ background:{colors.workspace}; }}
 QFrame#sidebar, QFrame#pageHeader, QFrame#card {{ background:{colors.surface}; border:1px solid {colors.border}; }}
 QFrame#card {{ border-radius:4px; }}
-QFrame#plateEvidence {{ background:#111b27; border:1px solid #8a9aaa; }}
 QPushButton[compact="true"] {{ padding:2px 6px; border-radius:1px; }}
 QLabel#brand {{ font-weight:700; }}
 QLabel#muted, QLabel#pageDescription {{ color:{colors.muted}; }}

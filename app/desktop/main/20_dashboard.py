@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+# Lane states arrive as codes ("states") and are worded here, in the
+# desktop's language; the words the server sends follow the site language.
+LANE_STATE_WORDS = {
+    "online": "Online", "offline": "Offline", "ready": "Ready", "degraded": "Degraded",
+    "unknown": "Not set", "unassigned": "Not assigned", "other_gate": "Other gate",
+}
+LANE_STATE_COLOURS = {"online": "#1a7f37", "ready": "#1a7f37", "degraded": "#b54708", "offline": "#b42318"}
+
+
 class Dashboard(QWidget):
     def __init__(self):
         super().__init__(); self.layout=QVBoxLayout(self)
         title=QLabel("Overview"); title.setStyleSheet("font-size:24px;font-weight:700")
         self.layout.addWidget(title)
-        self.grid=QGridLayout(); self.layout.addLayout(self.grid)
+        # The figures in one row, then the lanes as a table: the figures used
+        # to be tall cards three to a row with the lanes as text cards below,
+        # mostly empty space.
+        self.grid=QGridLayout(); self.grid.setSpacing(8); self.layout.addLayout(self.grid)
+        self.lanes=QTableWidget(0, 6)
+        self.lanes.setHorizontalHeaderLabels(["Lane", "Camera", "Live video", "Plate recognition", "Barrier", "Last plate"])
+        configure_table(self.lanes)
+        self.lanes.setAccessibleName("Lane status")
+        self.layout.addWidget(self.lanes, 1)
         self.alert=QLabel(""); self.alert.setWordWrap(True); self.layout.addWidget(self.alert)
         self.backup=QLabel(""); self.backup.setWordWrap(True); self.layout.addWidget(self.backup)
         backup_row=QHBoxLayout()
@@ -13,7 +30,6 @@ class Dashboard(QWidget):
         self.snooze_backup=QPushButton("Remind me tomorrow"); self.snooze_backup.clicked.connect(self._snooze_backup); self.snooze_backup.setVisible(False)
         backup_row.addWidget(self.open_reports); backup_row.addWidget(self.snooze_backup); backup_row.addStretch()
         self.layout.addLayout(backup_row)
-        self.layout.addStretch()
         self._cards=[]
         self._workers=[]
         QTimer.singleShot(0, self.refresh)
@@ -22,8 +38,8 @@ class Dashboard(QWidget):
         worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
     def _card(self, label, value):
         frame=QFrame(); frame.setObjectName("card")
-        box=QVBoxLayout(frame)
-        val=QLabel(str(value)); val.setStyleSheet("font-size:28px;font-weight:700")
+        box=QVBoxLayout(frame); box.setContentsMargins(12, 8, 12, 8); box.setSpacing(0)
+        val=QLabel(str(value)); val.setStyleSheet("font-size:22px;font-weight:700")
         cap=QLabel(label); cap.setObjectName("muted")
         box.addWidget(val); box.addWidget(cap)
         prepare_page(frame, label)
@@ -43,20 +59,23 @@ class Dashboard(QWidget):
                 w.deleteLater()
         for i,(label,value) in enumerate(stats):
             frame,_=self._card(label, value)
-            self.grid.addWidget(frame, i//3, i%3)
-        for i,lane in enumerate(data.get("lanes") or []):
-            text=(
-                f"{lane.get('label') or lane.get('name') or ''}\n"
-                f"Camera: {lane.get('camera')}\n"
-                f"Live Video: {lane.get('live_video')}\n"
-                f"Plate Recognition: {lane.get('plate_recognition')}\n"
-                f"Barrier: {lane.get('barrier')}"
-            )
-            frame=QFrame(); frame.setObjectName("card")
-            box=QVBoxLayout(frame)
-            cap=QLabel(text); cap.setWordWrap(True)
-            box.addWidget(cap)
-            self.grid.addWidget(frame, 2 + i//2, i%2)
+            self.grid.addWidget(frame, 0, i)
+        lanes=data.get("lanes") or []
+        self.lanes.setRowCount(len(lanes))
+        for r,lane in enumerate(lanes):
+            states=lane.get("states") or {}
+            cells=[lane.get("label") or lane.get("name") or ""]
+            for key in ("camera", "live_video", "plate_recognition", "barrier"):
+                code=states.get(key)
+                cells.append(LANE_STATE_WORDS.get(code, str(code)) if code else str(lane.get(key) or ""))
+            cells.append(lane.get("last_plate") or "—")
+            for c,value in enumerate(cells):
+                item=QTableWidgetItem(str(value))
+                code=states.get(("camera", "live_video", "plate_recognition", "barrier")[c-1]) if 1 <= c <= 4 else None
+                if code in LANE_STATE_COLOURS:
+                    item.setForeground(QColor(LANE_STATE_COLOURS[code]))
+                self.lanes.setItem(r,c,item)
+        self.lanes.setVisible(bool(lanes))
         alerts=data.get("alerts") or []
         self.alert.setText("  ·  ".join(alerts) if alerts else "No hardware alerts.")
         self._load_backup()

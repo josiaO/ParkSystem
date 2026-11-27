@@ -52,6 +52,10 @@ def camera_operator_status(
         recog_mode = "NATIVE_ONLY"
     else:
         recog_mode = "HYBRID"
+    # Each status also as a language-neutral code ("states"), so a screen in
+    # another language than the site's words it itself; the desktop showed
+    # Swahili lane states in an English window.
+    recog_state = "ready" if camera_ok else "offline"
     if camera_ok:
         recog = _label(language, "status.ready", "Ready")
     else:
@@ -60,14 +64,19 @@ def camera_operator_status(
     if not camera_active_on_this_installation(camera, db=db):
         scope = describe_recognition_scope(db)
         recog = "NODE NOT ASSIGNED TO GATE" if scope["mode"] == "unassigned" else "OTHER GATE"
+        recog_state = "unassigned" if scope["mode"] == "unassigned" else "other_gate"
+    barrier_state = "ready" if camera.gate and camera.gate.enabled else "unknown"
     barrier = _label(language, "status.ready", "Ready") if camera.gate and camera.gate.enabled else _label(language, "status.unknown", "Unknown")
     live_state = media.state if media else "DISCONNECTED"
     if live_state == "DEGRADED":
         live_text = _label(language, "status.degraded", "Degraded")
+        live_state_code = "degraded"
     elif live_ok:
         live_text = _label(language, "status.online", "Online")
+        live_state_code = "online"
     else:
         live_text = _label(language, "status.offline", "Offline")
+        live_state_code = "offline"
     last_plate = ""
     pending = False
     if db is not None and latest is None:
@@ -87,6 +96,12 @@ def camera_operator_status(
         "live_video": live_text,
         "plate_recognition": recog,
         "barrier": barrier,
+        "states": {
+            "camera": "online" if camera_ok else "offline",
+            "live_video": live_state_code,
+            "plate_recognition": recog_state,
+            "barrier": barrier_state,
+        },
         "adapter_id": camera_adapter_id(camera),
         "recognition_mode": recog_mode,
         "recognition_contract": recognition,

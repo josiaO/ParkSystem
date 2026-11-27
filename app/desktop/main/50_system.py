@@ -72,27 +72,109 @@ class SystemHealth(QWidget):
         self.info.setVisible(show)
         self.details_btn.setText("Hide technical details" if show else "Show technical details")
 
+def hardware_summary(data, *, limit=60):
+    """Readable rows (item, value) from a technician check's JSON answer.
+
+    Yes/no answers in words, lists as counts, a list of records (cameras,
+    connections) as one row each with its main values, one level of nesting
+    as "parent › key". The raw JSON stays one click away.
+    """
+    rows=[]
+    def word(value):
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if value is None or value == "":
+            return "—"
+        return str(value)
+    def record(item):
+        if not isinstance(item, dict):
+            return word(item)
+        bits=[f"{k}: {word(v)}" for k, v in item.items() if not isinstance(v, (dict, list))][:5]
+        return ", ".join(bits) or f"{len(item)} values"
+    def add(name, value, depth):
+        if len(rows) >= limit:
+            return
+        if isinstance(value, dict):
+            if depth >= 1:
+                rows.append((name, f"{len(value)} values"))
+                return
+            for key, inner in value.items():
+                add(f"{name} › {key}" if name else str(key), inner, depth + 1)
+            return
+        if isinstance(value, list):
+            if value and all(isinstance(item, dict) for item in value) and len(value) <= 12:
+                for index, item in enumerate(value, 1):
+                    rows.append((f"{name} {index}", record(item)))
+            else:
+                rows.append((name, f"{len(value)} items" if value else "none"))
+            return
+        rows.append((name, word(value)))
+    if isinstance(data, dict):
+        for key, value in data.items():
+            add(str(key), value, 0)
+    else:
+        rows.append(("Answer", word(data)))
+    def label(name):
+        # "python_bits" -> "Python bits"; file names like "NetSDK.dll" stay as they are.
+        parts=[part if "." in part else part.replace("_", " ") for part in name.split(" › ")]
+        text=" › ".join(parts)
+        return text[:1].upper() + text[1:]
+    return [(label(name), value) for name, value in rows]
+
+
 class Hardware(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Hardware Lab"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        warn=QLabel("Technician tools: camera connection, media streaming, recognition, gate I/O, and logs."); warn.setWordWrap(True); l.addWidget(warn)
-        self.info=QPlainTextEdit(); self.info.setReadOnly(True); self.info.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        l.addWidget(self.info, 1)
+        # Checks on top, a readable summary below, and the raw JSON (all the
+        # page used to show) behind "Show raw data".
         row=QHBoxLayout()
         b=QPushButton("Check HVX SDK Host"); b.clicked.connect(self.check)
         a=QPushButton("Check recognition"); a.clicked.connect(self.check_alpr)
         m=QPushButton("Check media gateway"); m.clicked.connect(self.check_media)
         d=QPushButton("Check decode path"); d.clicked.connect(self.check_decode)
         self._buttons={"/hardware/hvx/info": b, "/alpr/status": a, "/media/gateway": m, "/hardware/decode": d}
-        row.addWidget(b); row.addWidget(a); row.addWidget(m); row.addWidget(d); row.addStretch(); l.addLayout(row)
+        self.raw_toggle=QPushButton("Show raw data"); self.raw_toggle.setObjectName("secondary"); self.raw_toggle.setCheckable(True)
+        row.addWidget(b); row.addWidget(a); row.addWidget(m); row.addWidget(d); row.addStretch(); row.addWidget(self.raw_toggle)
+        l.addLayout(row)
+        self.heading=QLabel("Technician tools: camera connection, media streaming, recognition, gate I/O, and logs.")
+        self.heading.setWordWrap(True); self.heading.setObjectName("muted")
+        l.addWidget(self.heading)
+        self.summary=QTableWidget(0, 2); self.summary.setHorizontalHeaderLabels(["Item", "Value"])
+        configure_table(self.summary)
+        self.summary.horizontalHeader().setDefaultSectionSize(320)
+        l.addWidget(self.summary, 1)
+        self.info=QPlainTextEdit(); self.info.setReadOnly(True); self.info.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.info.setVisible(False)
+        l.addWidget(self.info, 1)
+        self.raw_toggle.toggled.connect(self.info.setVisible)
+        self.raw_toggle.toggled.connect(lambda on: self.raw_toggle.setText("Hide raw data" if on else "Show raw data"))
+    def _show(self, path, data):
+        self.info.setPlainText(json.dumps(data, indent=2, default=str))
+        names={"/hardware/hvx/info": "Camera SDK host", "/alpr/status": "Recognition",
+               "/media/gateway": "Media gateway", "/hardware/decode": "Decode path"}
+        self.heading.setText(names.get(path, path))
+        rows=hardware_summary(data)
+        self.summary.setRowCount(len(rows))
+        for r, (item, value) in enumerate(rows):
+            cell=QTableWidgetItem(value)
+            if value=="Yes":
+                cell.setForeground(QColor("#1a7f37"))
+            elif value=="No":
+                cell.setForeground(QColor("#b42318"))
+            self.summary.setItem(r, 0, QTableWidgetItem(item))
+            self.summary.setItem(r, 1, cell)
     def _check(self, path):
         self.info.setPlainText("Checking…")
+        self.summary.setRowCount(0)
+        def failed(message, _e):
+            self.info.setPlainText(message)
+            self.heading.setText(message)
         run_task(self, lambda: api.get(path, timeout=15),
-                 lambda data: self.info.setPlainText(json.dumps(data, indent=2, default=str)),
+                 lambda data: self._show(path, data),
                  buttons=getattr(self, "_buttons", {}).get(path), busy_text="Checking…",
-                 on_error=lambda message, _e: self.info.setPlainText(message))
+                 on_error=failed)
     def check_alpr(self): self._check("/alpr/status")
     def check_media(self): self._check("/media/gateway")
     def check_decode(self): self._check("/hardware/decode")
@@ -404,11 +486,21 @@ class PlateEnginePage(QWidget):
         self.card = QLabel("")
         self.card.setWordWrap(True)
         self.card.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.card.setVisible(is_technician())
+        # Engine files and model folders are for technicians, folded away by
+        # default: shown, they took half the page from the list of reads.
+        self.card.setVisible(False)
         root.addWidget(self.card)
         row = QHBoxLayout()
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.load); self.refresh_btn = refresh
+        self.details_toggle = QPushButton("Show engine details")
+        self.details_toggle.setObjectName("secondary")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.toggled.connect(self.card.setVisible)
+        self.details_toggle.toggled.connect(
+            lambda on: self.details_toggle.setText("Hide engine details" if on else "Show engine details"))
+        self.details_toggle.setVisible(is_technician())
+        row.addWidget(self.details_toggle)
         pack = QPushButton("Apply model pack…"); self.pack_btn = pack
         pack.setObjectName("secondary")
         pack.clicked.connect(self.apply_pack)
@@ -560,10 +652,15 @@ class SettingsPage(QWidget):
         self.timezone=QLineEdit(); self.timezone.setPlaceholderText("Africa/Dar_es_Salaam")
         self.currency=QLineEdit(); self.currency.setPlaceholderText("TZS"); self.currency.setMaxLength(8)
         self.currency_precision=QSpinBox(); self.currency_precision.setRange(0, 4)
-        self.language=QComboBox(); self.language.addItems(["en","sw","ar","fr","pt"])
+        # Names on screen, the same codes saved.
+        self.language=QComboBox()
+        for code, name in (("en", "English"), ("sw", "Swahili"), ("ar", "Arabic"), ("fr", "French"), ("pt", "Portuguese")):
+            self.language.addItem(f"{name} ({code})", code)
         self.date_format=QComboBox(); self.date_format.setEditable(True); self.date_format.addItems(["YYYY-MM-DD","DD/MM/YYYY","MM/DD/YYYY"])
         self.time_format=QComboBox(); self.time_format.setEditable(True); self.time_format.addItems(["HH:mm:ss","HH:mm","hh:mm a"])
-        self.plate_validation=QComboBox(); self.plate_validation.addItems(["NONE","TZ","KE","ZA","AE"])
+        self.plate_validation=QComboBox()
+        for code, name in (("NONE", "Any plate"), ("TZ", "Tanzania"), ("KE", "Kenya"), ("ZA", "South Africa"), ("AE", "United Arab Emirates")):
+            self.plate_validation.addItem(f"{code} · {name}", code)
         self.public_base_url=QLineEdit(); self.public_base_url.setPlaceholderText("http://smartpark-server:8760")
         self.support_contacts=QLineEdit(); self.support_contacts.setPlaceholderText("Phone or e-mail shown on receipts")
         form.addRow("Site name", self.site_name)
@@ -702,12 +799,9 @@ class SettingsPage(QWidget):
         if not cams:
             self.cal_status.setText("No cameras yet."); return
         cam=cams[row] if 0 <= row < len(cams) else cams[0]
-        from app.desktop.calibration import CalibrationWindow
-        window=CalibrationWindow(cam, cameras=cams, parent=self.window)
-        window.finished.connect(lambda *_: self.load_calibration())
-        window.destroyed.connect(lambda *_: None)
-        self._cal_window=window
-        window.show()
+        from app.desktop.calibration import open_calibration
+        self._cal_window=open_calibration(cam.get("id"), cameras=cams, parent=self.window,
+                                          on_closed=self.load_calibration)
 
     # ------------------------------------------------------------ payments --
     def _build_payments(self):
@@ -885,9 +979,9 @@ class SettingsPage(QWidget):
         self.timezone.setText(str(data.get("timezone") or _settings.site_timezone))
         self.currency.setText(str(data.get("currency") or ""))
         self.public_base_url.setText(str(data.get("public_base_url") or ""))
-        idx=self.language.findText(str(data.get("language") or "en"))
+        idx=self.language.findData(str(data.get("language") or "en"))
         if idx>=0: self.language.setCurrentIndex(idx)
-        idx=self.plate_validation.findText(str(data.get("plate_validation") or "NONE"))
+        idx=self.plate_validation.findData(str(data.get("plate_validation") or "NONE").upper())
         if idx>=0: self.plate_validation.setCurrentIndex(idx)
         if getattr(self, "currency_precision", None) is not None and data.get("currency_precision") is not None:
             try: self.currency_precision.setValue(int(data.get("currency_precision") or 0))
@@ -907,12 +1001,12 @@ class SettingsPage(QWidget):
         from app.config import settings as _settings
         payload={
             "timezone": self.timezone.text().strip() or _settings.site_timezone,
-            "language": self.language.currentText(),
+            "language": self.language.currentData() or "en",
         }
         if self.currency.isEnabled():
             payload.update({
                 "currency": self.currency.text().strip().upper(),
-                "plate_validation": self.plate_validation.currentText(),
+                "plate_validation": self.plate_validation.currentData() or "NONE",
                 "public_base_url": self.public_base_url.text().strip().rstrip("/"),
             })
             if getattr(self, "site_name", None) is not None and self.site_name.text().strip():

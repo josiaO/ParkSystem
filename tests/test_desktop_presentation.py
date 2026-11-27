@@ -347,14 +347,19 @@ def test_camera_evidence_positions_and_compact_manual_controls(application, fixt
     assert pane.last_snap.isVisible()
     assert pane.last_snap.mapTo(pane, pane.last_snap.rect().topLeft()).y() > pane.video.geometry().bottom()
     assert pane.crop.isVisible()
-    assert pane.crop_panel.parentWidget() is pane.video
-    assert pane.crop_panel.geometry().right() >= pane.video.width()-10
-    assert pane.crop_panel.geometry().bottom() >= pane.video.height()-10
+    # The plate crop is in the strip under the video (it used to cover the
+    # video's corner, hiding the zone and the end line), beside the snapshot.
+    assert pane.crop_panel.parentWidget() is not pane.video
+    crop_top = pane.crop.mapTo(pane, pane.crop.rect().topLeft())
+    assert crop_top.y() > pane.video.geometry().bottom()
+    assert crop_top.x() < pane.last_snap.mapTo(pane, pane.last_snap.rect().topLeft()).x()
     assert pane.video.height() > pane.height()*0.65
     # The old detection-zone editor (zone, zoom, capture distance) was replaced
     # by the per-camera calibration window, opened from the pane's menu.
     assert not hasattr(pane, "zoom")
     assert pane.overlays_toggle.text() == "Show capture calibration" and pane.overlays_toggle.isChecked()
+    assert pane.calibrate_action.text() == "Calibrate this camera…"
+    assert not pane.calibrate_action.isEnabled()          # no camera chosen yet
     assert not pane._snap_timer.isActive()
     assert not pane._alpr_timer.isActive()
     assert not fixture_ui[0].requests

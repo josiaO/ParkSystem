@@ -1,4 +1,8 @@
-"""Compact live pane: persistent manual actions, corner crop, and bottom snapshot."""
+"""Compact live pane: persistent manual actions, video, and a strip below with
+the read, the plate crop and the last snapshot.
+
+The plate crop used to sit in the video's bottom-right corner, where it hid
+part of the capture zone and the end line; it is now in the strip."""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -62,9 +66,16 @@ def build_live_pane(self, slot_title):
     self.overlays_toggle.setCheckable(True)
     self.overlays_toggle.setChecked(True)
     self.overlays_toggle.setToolTip("Capture zone, trigger line and plate boxes (green = will be read). "
-                                    "Change them in Settings → Camera calibration.")
+                                    "Change them with Calibrate this camera… in this menu.")
     options.addAction(self.fill_toggle)
     options.addAction(self.overlays_toggle)
+    options.addSeparator()
+    self.calibrate_action = QAction("Calibrate this camera…", options)
+    self.calibrate_action.setToolTip("Open this camera's calibration settings in their own window, "
+                                     "beside the live picture")
+    self.calibrate_action.setEnabled(False)
+    self.calibrate_action.triggered.connect(self.open_calibration)
+    options.addAction(self.calibrate_action)
     self.video_options.setMenu(options)
     heading.addWidget(self.video_options)
     outer.addLayout(heading)
@@ -80,20 +91,24 @@ def build_live_pane(self, slot_title):
     outer.addWidget(self.video, 1)
 
     self.crop_panel = QFrame()
-    self.crop_panel.setObjectName("plateEvidence")
+    # Plain strip column now (the dark "plateEvidence" style was for the overlay
+    # on the video and made the caption unreadable here).
+    self.crop_panel.setObjectName("plateCropColumn")
     crop_layout = QVBoxLayout(self.crop_panel)
-    crop_layout.setContentsMargins(3, 2, 3, 3)
+    crop_layout.setContentsMargins(0, 0, 0, 0)
     crop_layout.setSpacing(1)
     crop_caption = QLabel("PLATE CROP")
-    crop_caption.setStyleSheet("color:#dce6ef;font-weight:600;font-size:10px")
+    crop_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
     crop_layout.addWidget(crop_caption)
     self.crop = VideoCanvas("Waiting for plate")
     self.crop.setObjectName("video")
     self.crop.setAccessibleName(f"{slot_title} last plate crop")
     self.crop.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    crop_layout.addWidget(self.crop, 1)
-    self.video.set_corner_widget(self.crop_panel)
+    self.crop.setFixedHeight(72)
+    self.crop.setMinimumWidth(100)
+    self.crop.setMaximumWidth(220)
+    crop_layout.addWidget(self.crop)
 
     footer = QHBoxLayout()
     footer.setSpacing(6)
@@ -110,6 +125,7 @@ def build_live_pane(self, slot_title):
     self.decision.setWordWrap(True)
     reading.addWidget(self.decision)
     footer.addLayout(reading, 1)
+    footer.addWidget(self.crop_panel, 1)
     snapshot_column = QVBoxLayout()
     snapshot_column.setSpacing(1)
     snapshot_caption = QLabel("LAST SNAPSHOT")

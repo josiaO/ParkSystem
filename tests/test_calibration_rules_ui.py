@@ -49,3 +49,62 @@ def test_desktop_rule_list_matches_the_site_server():
 
     assert [rule for rule, _ in calibration.RULE_LABELS] == list(cc.RULES)
     assert calibration.DEFAULT_RULES == cc.DEFAULT_ENFORCE
+
+
+def _quiet_window(monkeypatch):
+    monkeypatch.setattr(calibration.api, "can", lambda permission: True, raising=False)
+    monkeypatch.setattr(calibration.CalibrationWindow, "load", lambda self: None)
+    monkeypatch.setattr(calibration.CalibrationWindow, "_start_stream", lambda self: None)
+
+
+def test_calibration_settings_open_in_their_own_minimizable_window(monkeypatch):
+    from PySide6.QtCore import Qt
+
+    _quiet_window(monkeypatch)
+    window = calibration.CalibrationWindow(None, cameras=[])
+    try:
+        flags = window.windowFlags()
+        assert flags & Qt.WindowType.WindowMinimizeButtonHint
+        assert flags & Qt.WindowType.WindowMaximizeButtonHint
+        assert not window.isModal()
+        # Save stays in view: it is not inside the scrolling settings column.
+        from PySide6.QtWidgets import QScrollArea
+        scroll = window.findChild(QScrollArea)
+        assert not scroll.widget().isAncestorOf(window.save_btn)
+        # Short rule names, the full explanation on pointing.
+        assert window.rule_checks["zone_before"].text() == "Not in the zone yet"
+        assert "start line" in window.rule_checks["zone_before"].toolTip()
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_one_calibration_window_is_shared_and_switches_camera(monkeypatch):
+    _quiet_window(monkeypatch)
+    cameras = [{"id": 1, "name": "1# Entry", "lane_direction": "ENTRY"},
+               {"id": 2, "name": "1# Exit", "lane_direction": "EXIT"}]
+    calibration._open_window = None
+    first = calibration.open_calibration(1, cameras=cameras)
+    try:
+        assert first.camera_id() == 1
+        again = calibration.open_calibration(2, cameras=cameras)     # e.g. from the other Live Gates tile
+        assert again is first and first.camera_id() == 2
+    finally:
+        first._dirty = False
+        first.close()
+        calibration._open_window = None
+
+
+def test_escape_asks_before_dropping_unsaved_changes(monkeypatch):
+    _quiet_window(monkeypatch)
+    asked = []
+    monkeypatch.setattr(calibration.QMessageBox, "question",
+                        lambda *a, **k: asked.append(1) or calibration.QMessageBox.StandardButton.No)
+    window = calibration.CalibrationWindow(None, cameras=[])
+    window.show()
+    window._dirty = True
+    window.reject()                                   # Escape
+    assert asked and window.isVisible()
+    window._dirty = False
+    window.close()
+    assert not window.isVisible()

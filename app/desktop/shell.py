@@ -83,6 +83,7 @@ class DesktopShell(QMainWindow):
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         navigation.addWidget(self.nav, 1)
+        self._navigation_row = navigation
         self.navigation_result = QLabel()
         self.navigation_result.setObjectName("muted")
         self.navigation_result.setWordWrap(True)
@@ -93,19 +94,23 @@ class DesktopShell(QMainWindow):
         content = QVBoxLayout(workspace)
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
+        # One line: the page name and what it is for. Two lines plus padding
+        # took ~70 px of height on every page, on top of the page bar that
+        # already shows the page name.
         header = QFrame()
         self.page_header = header
         header.setObjectName("pageHeader")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(18, 14, 18, 14)
-        header_layout.setSpacing(4)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 6, 16, 6)
+        header_layout.setSpacing(12)
         self.page_title = QLabel("Workspace")
         self.page_title.setObjectName("pageTitle")
         self.page_description = QLabel("Choose a page from Navigate.")
         self.page_description.setObjectName("pageDescription")
-        self.page_description.setWordWrap(True)
+        self.page_description.setWordWrap(False)
+        self.page_description.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.page_title)
-        header_layout.addWidget(self.page_description)
+        header_layout.addWidget(self.page_description, 1)
         content.addWidget(header)
         self.stack = QStackedWidget()
         self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -174,6 +179,9 @@ class DesktopShell(QMainWindow):
             action.setShortcuts([QKeySequence(key) for key in keys])
             action.triggered.connect(lambda checked=False, delta=change: self._set_text_size(self.text_size + delta if delta else 10))
             view.addAction(action)
+        # Refresh and Keyboard shortcuts sit at the end of the page bar. They
+        # used to fill a toolbar row of their own, with a second "Find a page"
+        # next to the page bar's own search box.
         toolbar = QToolBar("Workspace commands", self)
         toolbar.setObjectName("workspaceCommands")
         toolbar.setMovable(False)
@@ -181,13 +189,14 @@ class DesktopShell(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         refresh_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         toolbar.addAction(refresh_action)
-        toolbar.addSeparator()
-        toolbar.addAction(find_page)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
+        help_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion))
         toolbar.addAction(help_action)
-        self.addToolBar(toolbar)
+        for action in (refresh_action, help_action):
+            button = toolbar.widgetForAction(action)
+            if button is not None:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                button.setToolTip(action.text() + (f" ({action.shortcut().toString()})" if not action.shortcut().isEmpty() else ""))
+        self._navigation_row.addWidget(toolbar)
         self.workspace_toolbar = toolbar
 
     def _set_focus_view(self, enabled):

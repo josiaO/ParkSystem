@@ -45,8 +45,26 @@ log = logging.getLogger("smartpark")
 router = APIRouter()
 
 
-def list_payments(db: Session = Depends(get_db), _: User = Depends(require_any("payments.view", "fees.view"))):
-    return [_rt.transaction_dict(row) for row in _rt.list_transactions(db)]
+def list_payments(
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    method: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_any("payments.view", "fees.view")),
+):
+    """Payments, newest first. With ``date_from`` / ``date_to`` (site-local
+    days, the end day included), ``method`` or ``status`` only those."""
+    start_at = end_at = None
+    if date_from is not None or date_to is not None:
+        from app.services.reports_desk import parse_range
+        from app.services.site_policy import site_policy
+
+        start_at, end_at = parse_range(date_from, date_to, site_policy(db))
+    rows = _rt.list_transactions(db, limit=max(1, min(int(limit or 100), 1000)), start_at=start_at, end_at=end_at,
+                                 method=method or None, status=status or None)
+    return [_rt.transaction_dict(row) for row in rows]
 
 
 async def mobile_money_webhook(request: Request, db: Session = Depends(get_db)):
