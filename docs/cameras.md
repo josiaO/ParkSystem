@@ -143,6 +143,8 @@ picture and plate boxes. You can set:
 | Rule | What it does | On by default |
 |---|---|---|
 | Capture zone | The plate must be inside the polygon you draw | Yes |
+| Zone refuses plates not there yet | A plate still approaching the zone is refused (off: the start line decides) | Yes |
+| Zone refuses plates already through | A plate that has driven past the zone is refused (off: the end line decides) | Yes |
 | Start line | The plate must have crossed this line | No |
 | End line | The plate must not be past this line yet | No |
 | Minimum plate size | Plates that are too small (too far away) are ignored | Yes |
@@ -172,18 +174,22 @@ is created.
 
 How the zone and the lines share the work:
 
-- A plate **outside the zone** is refused by the **capture zone** rule, on
-  every side: off to the side (another lane), still approaching, or already
-  driven through. Only switching the capture zone rule off reads it.
-- A plate **inside the zone but not yet past the start line** is governed by
-  the **start line** switch. Switch it off and reads start as soon as the plate
-  is inside the zone.
-- A plate **inside the zone but past the end line** is governed by the **end
-  line** switch.
+- A plate **off to the side** of the zone (another lane, a parked car) is
+  refused by the **capture zone** rule.
+- A plate **in the lane but not yet at the zone** is refused while **Zone
+  refuses plates not there yet** is on (the default). Switch it off and the
+  **start line** switch decides instead: with the start line off too, early
+  reads are stored.
+- A plate **in the lane but already past the zone** is refused while **Zone
+  refuses plates already through** is on (the default). Switch it off and the
+  **end line** switch decides.
+- Inside the zone, the start and end line switches decide where reading
+  starts and stops.
 
-Draw the zone over the part of the lane where you want plates read. Earlier
-versions read a plate that was still above the zone whenever the start line
-was switched off; on one entry lane that was most of the stored reads.
+With both zone switches on, draw the zone over the part of the lane where you
+want plates read. To store early reads above the zone when the start line is
+off, as rc12 did, switch **Zone refuses plates not there yet** off for that
+camera.
 
 ### Start and end lines with the camera's own trigger
 
@@ -194,8 +200,8 @@ refuse those stills; they can't make the camera wait. On our first site,
 43% of one entry camera's snapshots were taken before the plate reached the
 drawn start line, so switching that line on would have refused those cars.
 
-The same holds for the capture zone: a still taken before the plate reaches
-the zone is not read. If every still of a car is taken before the zone, that
+The same holds for the capture zone while **Zone refuses plates not there
+yet** is on: a still taken before the plate reaches the zone is not read. If every still of a car is taken before the zone, that
 car is not read at all, so with the camera's or another system's trigger draw
 the zone where those stills show the plate.
 

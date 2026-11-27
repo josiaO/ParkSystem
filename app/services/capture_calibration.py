@@ -61,6 +61,8 @@ DEFAULTS: dict[str, Any] = {
 # is never left unstored because of it.
 RULES: dict[str, str] = {
     "zone": "Capture zone",
+    "zone_before": "Capture zone: plate not there yet",
+    "zone_after": "Capture zone: plate already through",
     "start_line": "Start line",
     "end_line": "End line",
     "plate_size": "Minimum plate size",
@@ -70,6 +72,11 @@ RULES: dict[str, str] = {
 }
 DEFAULT_ENFORCE: dict[str, bool] = {
     "zone": True,
+    # On: a plate before (above) or after (below) the zone is refused by the
+    # capture zone. Off: the start / end line switch decides it instead, so
+    # with the start line off a plate still approaching the zone is read.
+    "zone_before": True,
+    "zone_after": True,
     "start_line": False,
     "end_line": False,
     "plate_size": True,
@@ -577,18 +584,30 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
             past_line = cy >= float(line["y"]) if travel_down else cy <= float(line["y"])
         beyond = bool(end) and (cy > float(end["y"]) if travel_down else cy < float(end["y"]))
         if not in_zone:
-            # Outside the zone is a zone refusal on every side. It used to be
-            # a start/end-line question when the plate was only "not there
-            # yet" or "already through", so with those lines switched off a
-            # plate still above the zone was read: on one entry lane 74 of 113
-            # stored reads had the plate above the zone. The lines now only
-            # decide where, inside the zone, reading starts and stops.
+            # Off to the side (another lane, a parked car) is always a zone
+            # refusal. A plate in the lane that is not there yet, or already
+            # through, is a zone refusal while "zone_before" / "zone_after" is
+            # on (the default: on one entry lane 74 of 113 stored reads had the
+            # plate above the zone). Switched off, the start / end line switch
+            # decides it, so with the start line off early reads are stored.
             side = _side_of_zone(cx, cy, zone)
             approach, departed = ("above", "below") if travel_down else ("below", "above")
             if side == approach:
-                fail("zone", "before the capture zone")
+                if rules.get("zone_before", True):
+                    fail("zone", "before the capture zone")
+                elif line:
+                    if past_line:
+                        fail("start_line", "before the capture zone")
+                else:
+                    fail("zone", "outside capture zone")
             elif side == departed:
-                fail("zone", "past the capture zone")
+                if rules.get("zone_after", True):
+                    fail("zone", "past the capture zone")
+                elif end:
+                    if not beyond:
+                        fail("end_line", "past the capture zone")
+                else:
+                    fail("zone", "outside capture zone")
             else:
                 fail("zone", "outside capture zone")
         if line and not past_line:

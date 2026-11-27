@@ -32,8 +32,13 @@ def test_rule_switches_follow_the_saved_calibration_and_are_sent_on_save(monkeyp
         assert window.rule_checks["start_line"].isChecked() is True
         window.rule_checks["picture_quality"].setChecked(False)
         rules = window._payload()["enforce"]
-        assert rules == {"zone": False, "start_line": True, "end_line": False, "plate_size": True,
+        assert rules == {"zone": False, "zone_before": True, "zone_after": True, "start_line": True,
+                         "end_line": False, "plate_size": True,
                          "detector": True, "picture_quality": False, "recognition": True}
+        # The zone before / after switches come from the saved calibration too.
+        window._show_config({"calibration": {"enabled": True, "version": 5, "enforce": {"zone_before": False}}})
+        assert window.rule_checks["zone_before"].isChecked() is False
+        assert window.rule_checks["zone_after"].isChecked() is True
     finally:
         window._dirty = False          # closing would otherwise ask to discard changes
         window.close()

@@ -27,6 +27,8 @@ from .video import VideoCanvas
 # desktop does not import server code).
 RULE_LABELS = (
     ("zone", "Capture zone (plate outside the drawn area)"),
+    ("zone_before", "Zone refuses plates not there yet (off: the start line decides)"),
+    ("zone_after", "Zone refuses plates already through (off: the end line decides)"),
     ("start_line", "Start line (plate not yet past it)"),
     ("end_line", "End line (plate already past it)"),
     ("plate_size", "Minimum plate width / height"),
@@ -34,7 +36,7 @@ RULE_LABELS = (
     ("picture_quality", "Sharpness, brightness and glare"),
     ("recognition", "Minimum recognition confidence"),
 )
-DEFAULT_RULES = {"zone": True, "start_line": False, "end_line": False, "plate_size": True,
+DEFAULT_RULES = {"zone": True, "zone_before": True, "zone_after": True, "start_line": False, "end_line": False, "plate_size": True,
                  "detector": True, "picture_quality": True, "recognition": True}
 
 ZONE_COLOR = QColor(255, 196, 0)

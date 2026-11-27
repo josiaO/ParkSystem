@@ -360,3 +360,36 @@ def test_region_outside_the_picture_is_not_used():
     assert native_plate_region_to_roi(off, image_width=1920, image_height=1080) == ""
     zeros = [{"x": 0, "y": 0}] * 4
     assert native_plate_region_to_roi(zeros, image_width=1920, image_height=1080) == ""
+
+
+# ------------------------------------------------ zone before / after switches
+
+
+def test_zone_before_switch_off_lets_the_start_line_decide_an_approaching_plate():
+    """Off: the 23 Nov behaviour. With the start line off, early reads are stored."""
+    approaching = _box(0.45, 0.35)                     # above the zone, in the lane
+    assert _judge(approaching, zone_before=False, start_line=False).eligible
+    refused = _judge(approaching, zone_before=False, start_line=True)
+    assert not refused.eligible
+    assert all("capture zone" not in reason or "before" in reason for reason in refused.reasons)
+    # On (default): the zone refuses it whatever the start line says.
+    assert not _judge(approaching, start_line=False).eligible
+
+
+def test_zone_after_switch_off_lets_the_end_line_decide_a_plate_that_drove_through():
+    out = _box(0.55, 0.99)                             # below the zone
+    assert _judge(out, zone_after=False, end_line=False).eligible
+    assert not _judge(out, zone_after=False, end_line=True).eligible
+    assert not _judge(out, end_line=False).eligible    # on (default): zone refuses
+
+
+def test_plate_off_to_the_side_is_refused_whatever_the_before_after_switches():
+    beside = _box(0.03, 0.80)
+    verdict = _judge(beside, zone_before=False, zone_after=False, start_line=False, end_line=False)
+    assert not verdict.eligible and verdict.reasons == ["outside capture zone"]
+
+
+def test_zone_switches_default_on_and_are_saved():
+    assert cc.DEFAULT_ENFORCE["zone_before"] and cc.DEFAULT_ENFORCE["zone_after"]
+    saved = cc.validate({"enabled": True, "zone": ZONE, "enforce": {"zone_before": False}})
+    assert saved["enforce"]["zone_before"] is False and saved["enforce"]["zone_after"] is True

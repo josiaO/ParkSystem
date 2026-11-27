@@ -92,7 +92,9 @@ storing (`check_capture`):
 
 | Rule | A plate is refused when… |
 |---|---|
-| Capture zone | its centre is outside the zone, on any side (not there yet, already through, another lane) |
+| Capture zone | its centre is outside the zone, off to the side (another lane, a parked car) |
+| Zone: not there yet | it is still approaching the zone (off: the start line decides) |
+| Zone: already through | it has driven past the zone (off: the end line decides) |
 | Start line | it is inside the zone but not yet past the start line |
 | End line | it is inside the zone but past the end line |
 | Minimum plate size | it is narrower or shorter than set (on the calibrated picture's scale) |
@@ -100,10 +102,11 @@ storing (`check_capture`):
 | Picture quality | the crop is too blurred, dark, bright or clipped |
 | Recognition confidence | the OCR result is less sure than set (after reading) |
 
-A rule that is switched off never refuses, but still ranks frames. Until this
-version a plate still **above** the zone was a start-line question, so with
-the start line off it was read; on one entry lane 74 of 113 stored reads had
-the plate above the zone.
+A rule that is switched off never refuses, but still ranks frames. Before the
+two zone switches existed, a plate still **above** the zone was always a
+start-line question, so with the start line off it was read; on one entry
+lane 74 of 113 stored reads had the plate above the zone. Both switches are on
+by default; switching "not there yet" off brings that behaviour back.
 
 If every plate is refused, nothing is read: outcome `calibration_refused`,
 and Live Gates shows **NOT STORED** with the reason.
@@ -157,7 +160,7 @@ far, blurred, cut off, or not there), not from the crop.
 
 | Finding | Effect | Status |
 |---|---|---|
-| Plates above the zone were read | early reads, wrong frame | fixed: zone refuses every side |
+| Plates above the zone were read | early reads, wrong frame | fixed: zone refuses them (per-camera switch, on by default) |
 | Two-line plates dropped as "not plate-shaped" | readable plates missed | fixed |
 | Camera-area search (when on) dropped plates of close cars | readable plates missed | off by default, a setting |
 | Calibration refusals counted as "no plate" | refusals hidden | fixed: `calibration_refused` |
