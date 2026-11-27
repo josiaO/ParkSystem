@@ -79,8 +79,9 @@ things, with no restart:
 It turns on the Tanzania recognition profile, which fixes the usual OCR
 mix-ups for `T123ABC` plates: `O`/`0`, `I`/`1`, `S`/`5`, `B`/`8` in the right
 positions, and a leading `T` hidden by a bolt that gets read as `7`. (Older
-installs set `SMARTPARK_ALPR_COUNTRY=tanzania` in `zirp.env`; that still works
-but isn't needed.)
+installs set `SMARTPARK_ALPR_COUNTRY=tanzania` in `zirp.env`. The Site Service
+now moves that line into Plate validation at startup and removes it; the
+screen's choice always wins.)
 
 And only real
 Tanzanian formats open a visit on their own: `T123ABC`, motorcycles
@@ -142,6 +143,8 @@ picture and plate boxes. You can set:
 | Rule | What it does | On by default |
 |---|---|---|
 | Capture zone | The plate must be inside the polygon you draw | Yes |
+| Zone refuses plates not there yet | A plate still approaching the zone is refused (off: the start line decides) | Yes |
+| Zone refuses plates already through | A plate that has driven past the zone is refused (off: the end line decides) | Yes |
 | Start line | The plate must have crossed this line | No |
 | End line | The plate must not be past this line yet | No |
 | Minimum plate size | Plates that are too small (too far away) are ignored | Yes |
@@ -171,16 +174,22 @@ is created.
 
 How the zone and the lines share the work:
 
-- A plate **off to the side** of the zone (another lane) is refused by the
-  **capture zone** rule.
-- A plate **in the lane but not yet at the zone** (still approaching) is
-  governed by the **start line** switch. Switch the start line off and early
+- A plate **off to the side** of the zone (another lane, a parked car) is
+  refused by the **capture zone** rule.
+- A plate **in the lane but not yet at the zone** is refused while **Zone
+  refuses plates not there yet** is on (the default). Switch it off and the
+  **start line** switch decides instead: with the start line off too, early
   reads are stored.
-- A plate **in the lane but already past the zone** is governed by the **end
-  line** switch.
+- A plate **in the lane but already past the zone** is refused while **Zone
+  refuses plates already through** is on (the default). Switch it off and the
+  **end line** switch decides.
+- Inside the zone, the start and end line switches decide where reading
+  starts and stops.
 
-So switching the start line off really does store reads taken before the line,
-even when the zone's top edge is drawn close to it.
+With both zone switches on, draw the zone over the part of the lane where you
+want plates read. To store early reads above the zone when the start line is
+off, as rc12 did, switch **Zone refuses plates not there yet** off for that
+camera.
 
 ### Start and end lines with the camera's own trigger
 
@@ -190,6 +199,11 @@ snapshot, and it sends one or two stills per car. The lines can only accept or
 refuse those stills; they can't make the camera wait. On our first site,
 43% of one entry camera's snapshots were taken before the plate reached the
 drawn start line, so switching that line on would have refused those cars.
+
+The same holds for the capture zone while **Zone refuses plates not there
+yet** is on: a still taken before the plate reaches the zone is not read. If every still of a car is taken before the zone, that
+car is not read at all, so with the camera's or another system's trigger draw
+the zone where those stills show the plate.
 
 If you want the start line to **start** the read, choose "Zirp triggers the
 camera" there instead. Zirp then watches the live video and asks the camera for its full-resolution

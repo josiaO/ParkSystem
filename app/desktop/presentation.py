@@ -47,9 +47,22 @@ def prepare_page(page: QWidget, title: str):
         heading = first.widget() if first else None
         if isinstance(heading, QLabel) and "font-size:24px" in heading.styleSheet():
             heading.hide()
+    # Form fields grow to a readable width, not the whole window (a site name
+    # box 1,100 px wide on a wide screen), and drop-downs fit their longest
+    # choice ("YYYY-MM-DD" was cut off).
+    from PySide6.QtGui import QFontMetrics
+
+    field_width = max(320, QFontMetrics(QApplication.font()).averageCharWidth() * 56)
     for form in page.findChildren(QFormLayout):
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+            field = item.widget() if item else None
+            if isinstance(field, QComboBox):
+                field.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            if isinstance(field, (QLineEdit, QComboBox)) and field.maximumWidth() >= 16777215:
+                field.setMaximumWidth(field_width)
         for row in range(form.rowCount()):
             field_item = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
             label_item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)

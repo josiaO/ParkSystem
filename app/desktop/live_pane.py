@@ -86,10 +86,21 @@ class CameraLivePane(QFrame):
         worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
     def camera_id(self):
         return None if not self.camera else self.camera.get("id")
+    def open_calibration(self):
+        """This camera's calibration settings, in their own window beside Live Gates."""
+        cid=self.camera_id()
+        if cid is None:
+            return
+        from .calibration import open_calibration
+        try:
+            open_calibration(cid, cameras=self._all or [self.camera], parent=self.window())
+        except Exception as exc:
+            self.status.setText(f"Calibration could not open: {exc}")
     def set_camera(self, camera):
         cid=(camera or {}).get("id") if camera else None
         same=self.camera and cid and self.camera.get("id")==cid
         self.camera=camera
+        self.calibrate_action.setEnabled(bool(camera))
         self._sync_fallback_buttons()
         self.view_title.setText(str((camera or {}).get("name") or f"{self.slot_title} · Choose camera"))
         self._sync_picker()

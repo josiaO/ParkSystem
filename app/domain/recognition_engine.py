@@ -85,6 +85,19 @@ def classify_confidence(confidence: float, policy: RecognitionPolicy) -> str:
     return CONF_LOW
 
 
+def _site_plate_validation() -> str:
+    """Settings -> Site -> Plate validation; zirp.env only if the site row can't be read."""
+    from app.config import settings
+
+    try:
+        from app.services import runtime_settings
+
+        value = str(runtime_settings.site_plate_validation() or "").strip().upper()
+    except Exception:
+        value = ""
+    return value or str(getattr(settings, "plate_validation", "NONE") or "NONE")
+
+
 def policy_from_settings() -> RecognitionPolicy:
     from app.config import settings
 
@@ -102,7 +115,7 @@ def policy_from_settings() -> RecognitionPolicy:
             getattr(settings, "recognition_absence_reset_seconds", 0.6) or 0.6
         ),
         plate_normalization=str(getattr(settings, "plate_normalization", "ALNUM_UPPER") or "ALNUM_UPPER"),
-        plate_validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"),
+        plate_validation=_site_plate_validation(),
     )
 
 

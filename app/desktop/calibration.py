@@ -26,15 +26,29 @@ from .video import VideoCanvas
 # Same rules as app/services/capture_calibration.RULES (kept here so the
 # desktop does not import server code).
 RULE_LABELS = (
-    ("zone", "Capture zone (plate outside the drawn area)"),
-    ("start_line", "Start line (plate not yet past it)"),
-    ("end_line", "End line (plate already past it)"),
-    ("plate_size", "Minimum plate width / height"),
-    ("detector", "Minimum detector confidence"),
-    ("picture_quality", "Sharpness, brightness and glare"),
-    ("recognition", "Minimum recognition confidence"),
+    ("zone", "Outside the zone"),
+    ("zone_before", "Not in the zone yet"),
+    ("zone_after", "Already past the zone"),
+    ("start_line", "Before the start line"),
+    ("end_line", "Past the end line"),
+    ("plate_size", "Plate too small"),
+    ("detector", "Detector unsure"),
+    ("picture_quality", "Blurred, dark or glare"),
+    ("recognition", "Recognition unsure"),
 )
-DEFAULT_RULES = {"zone": True, "start_line": False, "end_line": False, "plate_size": True,
+# Shown when pointing at a rule: the short label above is what fits.
+RULE_HELP = {
+    "zone": "A plate off to the side of the drawn zone (another lane, a parked car).",
+    "zone_before": "A plate still approaching the zone. Off: the start line switch decides it instead.",
+    "zone_after": "A plate that has driven past the zone. Off: the end line switch decides it instead.",
+    "start_line": "A plate inside the zone that has not crossed the start line yet.",
+    "end_line": "A plate inside the zone that is past the end line.",
+    "plate_size": "Narrower or shorter than the minimum plate width / height.",
+    "detector": "Below the minimum detector confidence.",
+    "picture_quality": "Below the minimum sharpness, outside the brightness range, or too much glare.",
+    "recognition": "Read with less than the minimum recognition confidence.",
+}
+DEFAULT_RULES = {"zone": True, "zone_before": True, "zone_after": True, "start_line": False, "end_line": False, "plate_size": True,
                  "detector": True, "picture_quality": True, "recognition": True}
 
 ZONE_COLOR = QColor(255, 196, 0)
@@ -213,10 +227,25 @@ class CalibrationCanvas(VideoCanvas):
 
 
 class CalibrationWindow(QDialog):
+    """Calibration settings for one camera at a time, in its own window.
+
+    A normal window (minimize, maximize, close) that does not block the rest
+    of the app, so it can sit beside Live Gates while a car drives through.
+    Opened from Settings -> Camera calibration or a camera's menu on Live
+    Gates (``open_calibration``); one window is shared.
+    """
+
     def __init__(self, camera=None, cameras=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Capture calibration")
-        self.resize(1280, 760)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setModal(False)
+        self.setWindowTitle("Calibration settings")
+        self._place_window()
         self.cameras = list(cameras or [])
         self.camera = camera
         self.config = {}
@@ -249,7 +278,9 @@ class CalibrationWindow(QDialog):
         self.canvas = CalibrationCanvas()
         self.canvas.on_changed = self._geometry_changed
         lv.addWidget(self.canvas, 1)
-        tools = QHBoxLayout()
+        # Two rows (zone, then lines): in one row the eight tools made the
+        # window wider than a 1920 px screen at 125% scaling.
+        tools = QVBoxLayout(); zone_tools = QHBoxLayout(); line_tools = QHBoxLayout()
         self.rect_btn = QPushButton("Draw rectangle"); self.rect_btn.clicked.connect(lambda: self._tool("rect"))
         self.poly_btn = QPushButton("Draw polygon"); self.poly_btn.clicked.connect(lambda: self._tool("polygon"))
         self.poly_done = QPushButton("Finish polygon"); self.poly_done.clicked.connect(lambda: self._tool("idle"))
@@ -258,12 +289,16 @@ class CalibrationWindow(QDialog):
         self.end_btn.setToolTip("Reading stops past this line, so a car moving out is not read again.")
         self.clear_end = QPushButton("Remove end line"); self.clear_end.clicked.connect(self._remove_end_line)
         self.line_side = QComboBox(); self.line_side.addItem("Read below the line", "below"); self.line_side.addItem("Read above the line", "above")
+        self.line_side.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.line_side.currentIndexChanged.connect(self._side_changed)
         self.clear_line = QPushButton("Remove line"); self.clear_line.clicked.connect(self._remove_line)
-        for w in (self.rect_btn, self.poly_btn, self.poly_done, self.line_btn, self.line_side, self.clear_line,
-                  self.end_btn, self.clear_end):
-            tools.addWidget(w)
-        tools.addStretch()
+        for w in (self.rect_btn, self.poly_btn, self.poly_done):
+            zone_tools.addWidget(w)
+        zone_tools.addStretch()
+        for w in (self.line_btn, self.line_side, self.clear_line, self.end_btn, self.clear_end):
+            line_tools.addWidget(w)
+        line_tools.addStretch()
+        tools.addLayout(zone_tools); tools.addLayout(line_tools)
         lv.addLayout(tools)
         self.tool_hint = QLabel("Drag a corner to move it, drag inside the zone to move it all.")
         self.tool_hint.setObjectName("muted")
@@ -313,8 +348,9 @@ class CalibrationWindow(QDialog):
         self.rule_checks = {}
         for rule, label in RULE_LABELS:
             check = QCheckBox(label)
-            check.setToolTip("Ticked: a read that breaks this rule is not stored (no session, no barrier).\n"
-                             "Not ticked: the rule only helps choose the best picture; the car is always stored.")
+            check.setToolTip(RULE_HELP.get(rule, "") + "\n\nTicked: a read that breaks this rule is not stored "
+                             "(no session, no barrier).\nNot ticked: the rule only helps choose the best picture; "
+                             "the car is always stored.")
             check.toggled.connect(self._mark_dirty)
             rules_form.addWidget(check)
             self.rule_checks[rule] = check
@@ -322,13 +358,14 @@ class CalibrationWindow(QDialog):
         hint.setObjectName("muted"); hint.setWordWrap(True)
         rules_form.addWidget(hint)
         rv.addWidget(rules_box)
+        # Save stays in view while the settings scroll (see the footer below).
         buttons = QHBoxLayout()
         self.save_btn = QPushButton("Save for this camera"); self.save_btn.clicked.connect(self.save)
         self.revert_btn = QPushButton("Revert"); self.revert_btn.setObjectName("secondary"); self.revert_btn.clicked.connect(self.load)
         self.reset_btn = QPushButton("Reset to uncalibrated"); self.reset_btn.setObjectName("secondary"); self.reset_btn.clicked.connect(self.reset_calibration)
         for w in (self.save_btn, self.revert_btn, self.reset_btn):
             buttons.addWidget(w)
-        rv.addLayout(buttons)
+        buttons.addStretch()
 
         test_box = QGroupBox("Test")
         tv = QVBoxLayout(test_box)
@@ -360,7 +397,11 @@ class CalibrationWindow(QDialog):
         lb.addWidget(self.read_text)
         rv.addWidget(live_box, 1)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(right)
-        split.addWidget(scroll)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_column = QWidget(); rc = QVBoxLayout(right_column); rc.setContentsMargins(0, 0, 0, 0)
+        rc.addWidget(scroll, 1)
+        rc.addLayout(buttons)
+        split.addWidget(right_column)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
         root.addWidget(split, 1)
@@ -604,7 +645,7 @@ class CalibrationWindow(QDialog):
     # -------------------------------------------------------------- live --
     def _poll_live(self):
         cid = self.camera_id()
-        if cid is None or self._live_busy or not self.isVisible():
+        if cid is None or self._live_busy or not self.isVisible() or self.isMinimized():
             return
         self._live_busy = True
         worker = Worker(lambda: runtime_api().get(f"/cameras/{cid}/calibration/live", timeout=5))
@@ -667,12 +708,94 @@ class CalibrationWindow(QDialog):
             self.snapshot.setPixmap(pix.scaled(self.snapshot.width() or 320, 180, Qt.AspectRatioMode.KeepAspectRatio,
                                                Qt.TransformationMode.SmoothTransformation))
 
-    def closeEvent(self, event):
+    def _place_window(self):
+        """Last size and place, or most of the screen the first time."""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtGui import QGuiApplication
+
+        saved = QSettings("SmartPark", "OperatorDesktop").value("calibrationGeometry")
+        if saved and self.restoreGeometry(saved):
+            return
+        screen = QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen is not None else None
+        if area is None or area.width() <= 0:
+            self.resize(1280, 760)
+            return
+        self.resize(int(area.width() * 0.8), int(area.height() * 0.85))
+        self.move(area.x() + (area.width() - self.width()) // 2, area.y() + (area.height() - self.height()) // 2)
+
+    def select_camera(self, camera_id) -> None:
+        """Show another camera in this window (asks first if changes are unsaved)."""
+        index = self.picker.findData(camera_id)
+        if index >= 0 and index != self.picker.currentIndex():
+            self.picker.setCurrentIndex(index)
+
+    def _may_close(self) -> bool:
         if self._dirty and self.can_edit:
             if QMessageBox.question(self, "Capture calibration", "Close without saving this camera's changes?") != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
+                return False
+        self._dirty = False                      # asked once; Qt may call both paths
+        return True
+
+    def _teardown(self):
         self._poll.stop()
         _stop_thread(self._stream)
         self._stream = None
+        from PySide6.QtCore import QSettings
+
+        QSettings("SmartPark", "OperatorDesktop").setValue("calibrationGeometry", self.saveGeometry())
+
+    def reject(self):
+        # Escape calls reject(), which used to close without the
+        # unsaved-changes question that the close button asks.
+        if not self._may_close():
+            return
+        self._teardown()
+        super().reject()
+
+    def closeEvent(self, event):
+        if not self._may_close():
+            event.ignore()
+            return
+        self._teardown()
         super().closeEvent(event)
+
+
+_open_window: CalibrationWindow | None = None
+
+
+def open_calibration(camera_id=None, *, cameras=None, parent=None, on_closed=None) -> CalibrationWindow:
+    """Open (or bring forward) the calibration settings window on a camera.
+
+    One window is shared: asking again from Live Gates or Settings shows the
+    requested camera in the open window instead of opening a second one.
+    ``cameras`` are the camera rows for the picker; fetched when not given.
+    """
+    global _open_window
+    window = _open_window
+    alive = window is not None
+    if alive:
+        try:
+            window.isVisible()
+        except RuntimeError:                  # the Qt object was deleted
+            alive = False
+    if alive and window.isVisible():
+        if camera_id is not None:
+            window.select_camera(camera_id)
+        if window.isMinimized():
+            window.showNormal()
+        window.raise_()
+        window.activateWindow()
+        return window
+    if cameras is None:
+        cameras = runtime_api().get("/cameras") or []
+    cameras = list(cameras)
+    camera = next((c for c in cameras if c.get("id") == camera_id), cameras[0] if cameras else None)
+    window = CalibrationWindow(camera, cameras=cameras, parent=parent)
+    if on_closed is not None:
+        window.finished.connect(lambda *_: on_closed())
+    _open_window = window
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    return window

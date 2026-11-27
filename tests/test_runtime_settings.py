@@ -123,3 +123,75 @@ def test_camera_region_search_is_off_until_switched_on_screen(site):
     assert runtime_settings.get("camera_region_search") is True
     saved = client.patch("/settings/recognition", headers=headers, json={"camera_region_search": False})
     assert runtime_settings.get("camera_region_search") is False
+
+
+@pytest.fixture()
+def blank_db():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    yield Session
+    engine.dispose()
+
+
+def test_zirp_env_settings_move_into_the_site_settings(blank_db, tmp_path):
+    """A zirp.env line for an on-screen setting is moved, then removed from the file."""
+    from app.models import SiteSetting
+
+    env = tmp_path / "zirp.env"
+    env.write_text("SMARTPARK_PAYMENTS_MOBILE_PROVIDER=clickpesa\n"
+                   "SMARTPARK_CAPTURE_TRIGGER=external\n"
+                   "SMARTPARK_PUBLIC_RECEIPT_PHOTO=blurred\n"
+                   "SMARTPARK_ALPR_COUNTRY=tanzania\n", encoding="utf-8")
+    with blank_db() as db:
+        moved = runtime_settings.adopt_env_file(db, env_path=env)
+        assert moved["adopted"] == {"capture_trigger": "external", "public_receipt_photo": "blurred",
+                                    "plate_validation": "TZ"}
+        assert db.get(SiteSetting, "recognition").value["capture_trigger"] == "external"
+        assert db.get(SiteSetting, "site").value["plate_validation"] == "TZ"
+    text = env.read_text(encoding="utf-8")
+    assert "CAPTURE_TRIGGER" not in text and "ALPR_COUNTRY" not in text and "RECEIPT_PHOTO" not in text
+    assert "SMARTPARK_PAYMENTS_MOBILE_PROVIDER=clickpesa" in text       # other lines are kept
+    assert (tmp_path / "zirp.env.bak").exists()
+
+
+def test_a_value_saved_on_screen_is_not_replaced_by_zirp_env(blank_db, tmp_path):
+    from app.models import SiteSetting
+
+    env = tmp_path / "zirp.env"
+    env.write_text("SMARTPARK_CAPTURE_TRIGGER=external\nSMARTPARK_ALPR_COUNTRY=tanzania\n", encoding="utf-8")
+    with blank_db() as db:
+        db.add(SiteSetting(key="recognition", value={"capture_trigger": "zirp"}))
+        db.add(SiteSetting(key="site", value={"plate_validation": "NONE"}))
+        db.commit()
+        moved = runtime_settings.adopt_env_file(db, env_path=env)
+        assert moved["adopted"] == {}
+        assert db.get(SiteSetting, "recognition").value["capture_trigger"] == "zirp"
+        assert db.get(SiteSetting, "site").value["plate_validation"] == "NONE"
+    assert "CAPTURE_TRIGGER" not in env.read_text(encoding="utf-8")
+
+
+def test_site_plate_rule_wins_over_zirp_env_country(monkeypatch):
+    from app.services import alpr
+
+    monkeypatch.setattr(settings, "alpr_country", "tanzania")
+    monkeypatch.setattr(runtime_settings, "site_plate_validation", lambda: "NONE")
+    assert alpr._country_name() == ""
+    monkeypatch.setattr(runtime_settings, "site_plate_validation", lambda: "TZ")
+    monkeypatch.setattr(settings, "alpr_country", "")
+    assert alpr._country_name() == "tanzania"
+
+
+def test_ocr_acceptance_uses_the_site_plate_rule(monkeypatch):
+    """The screen's plate rule is what accepts or holds a read, not zirp.env."""
+    from app.services import alpr
+
+    seen = []
+    import app.services.alpr as module
+    real = module.accept_ocr_plate.__globals__["assess_plate"]
+    monkeypatch.setitem(module.accept_ocr_plate.__globals__, "assess_plate",
+                        lambda plate, rule, **kw: seen.append(rule) or real(plate, rule, **kw))
+    monkeypatch.setattr(settings, "plate_validation", "NONE")
+    monkeypatch.setattr(runtime_settings, "site_plate_validation", lambda: "TZ")
+    alpr.accept_ocr_plate("T123ABC", 0.95)
+    assert seen == ["TZ"]

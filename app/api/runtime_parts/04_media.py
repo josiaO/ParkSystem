@@ -450,7 +450,7 @@ async def correct_camera_plate(
         chosen = normalize_plate(payload.plate) if payload.plate else normalize_plate(row.plate)
         if not chosen:
             raise HTTPException(400, "Corrected plate is empty")
-        assessed = apply_site_plate(chosen, validation=str(getattr(settings, "plate_validation", "NONE") or "NONE"))
+        assessed = apply_site_plate(chosen, validation=str(site_policy(db).get("plate_validation") or "NONE"))
         apply_operator_plate_correction(row, chosen)
         write_audit(
             db, user, "plate.correct", "vehicle_capture", str(row.id),
@@ -546,7 +546,7 @@ async def post_camera_presence(
     return {**edge.as_dict(), "last_car": get_state(c.id).last_car or None}
 
 
-async def _read_presence_now(camera_id: int, handle: int, *, background: bool = False) -> None:
+async def _read_presence_now(camera_id: int, handle: int, *, background: bool = False, zirp: bool = False) -> None:
     coil_watch.mark_triggered(camera_id)
     with short_session() as db:
         previous = latest_for_camera(db, camera_id)
@@ -581,6 +581,14 @@ async def _read_presence_now(camera_id: int, handle: int, *, background: bool = 
         if time.monotonic() >= wait_until:
             break
         await asyncio.sleep(0.05)
+    if zirp:
+        # Zirp asked for this snapshot and none came: read the last live frame
+        # whose plate was inside the calibration, not whatever is live now.
+        from app.services import zirp_trigger
+
+        if zirp_trigger.expire(camera_id):
+            _zirp_snapshot_missed(camera_id, "no_snapshot")
+        return
     with short_session() as db:
         camera = db.get(Camera, camera_id)
         if camera is None:

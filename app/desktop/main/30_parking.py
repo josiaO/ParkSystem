@@ -19,21 +19,43 @@ class Gates(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Gates"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Manual commands apply to one selected camera side, never both barriers. Select a configured gate, press 1 for entry or 2 for exit, then F8 / F9.")
-        note.setWordWrap(True); l.addWidget(note)
-        self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["ID","Lane","Mode","Enabled","Sides (camera / controller / display)","Action"])
-        configure_table(self.table); l.addWidget(self.table, 1)
-        self.shortcut_hint=QLabel("Select a lane, then 1 = entry, 2 = exit. F8 / F9 pulse that side only.")
-        self.shortcut_hint.setWordWrap(True); l.addWidget(self.shortcut_hint)
+        # Setup above the list; barrier commands in their own box below, for
+        # the selected lane. Each row used to carry four Open/Close buttons
+        # beside the setup columns (and Live Gates has them per camera).
+        self.table=QTableWidget(0,5); self.table.setHorizontalHeaderLabels(["ID","Lane","Mode","Enabled","Sides (camera / controller / display)"])
+        configure_table(self.table)
         self._armed_side=None
         row=QHBoxLayout()
         add=QPushButton(action_label("Add Gate", "Ctrl+N")); add.clicked.connect(self.add_gate); add.setVisible(api.can("gates.manage")); add.setToolTip("Add Gate (Ctrl+N)")
         edit=QPushButton(action_label("Edit", "Ctrl+E")); edit.clicked.connect(self.edit_gate); edit.setVisible(api.can("gates.manage")); edit.setToolTip("Edit (Ctrl+E)")
         delete=QPushButton(action_label("Delete", "Del")); delete.clicked.connect(self.delete_gate); delete.setVisible(api.can("gates.manage")); delete.setToolTip("Delete (Del)")
-        led=QPushButton("LED text"); led.clicked.connect(self.write_led); led.setVisible(api.can("gates.open"))
+        led=QPushButton("LED text"); led.clicked.connect(self.write_led)
         self.refresh_btn=QPushButton(action_label("Refresh", "F5")); self.refresh_btn.clicked.connect(self.refresh)
         self.status=QLabel(""); self.status.setWordWrap(True)
-        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(led); row.addWidget(self.refresh_btn); row.addStretch(); l.addLayout(row); l.addWidget(self.status); self.rows=[]
+        row.addWidget(add); row.addWidget(edit); row.addWidget(delete); row.addWidget(self.refresh_btn); row.addStretch(); l.addLayout(row)
+        l.addWidget(self.table, 1)
+        control=QGroupBox("Barrier control (selected lane)")
+        control_l=QVBoxLayout(control)
+        buttons=QHBoxLayout()
+        self.side_buttons={}
+        for side, action, text in (("ENTRY", "open", "Open entry"), ("ENTRY", "close", "Close entry"),
+                                   ("EXIT", "open", "Open exit"), ("EXIT", "close", "Close exit")):
+            button=QPushButton(text)
+            button.clicked.connect(lambda _=False, s=side, a=action: self._command_selected(s, a))
+            buttons.addWidget(button)
+            self.side_buttons[(side, action)]=button
+        buttons.addWidget(led); buttons.addStretch()
+        control_l.addLayout(buttons)
+        self.shortcut_hint=QLabel("Manual commands apply to one side only, never both barriers. "
+                                  "Select a lane, then 1 = entry, 2 = exit; F8 opens it, F9 closes it.")
+        self.shortcut_hint.setWordWrap(True); self.shortcut_hint.setObjectName("muted")
+        control_l.addWidget(self.shortcut_hint)
+        control.setVisible(api.can("gates.open"))
+        self.control_box=control
+        l.addWidget(control)
+        l.addWidget(self.status); self.rows=[]
+        self.table.itemSelectionChanged.connect(self._sync_side_buttons)
+        self._sync_side_buttons()
         self._loaded=False
         sc1=QShortcut(QKeySequence("1"), self); sc1.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc1.activated.connect(lambda: self.arm_side("ENTRY"))
         sc2=QShortcut(QKeySequence("2"), self); sc2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); sc2.activated.connect(lambda: self.arm_side("EXIT"))
@@ -60,20 +82,9 @@ class Gates(QWidget):
                 for row in cams
             ) or "—"
             for c,v in enumerate([g["id"],g["name"],g["mode"],"Yes" if g["enabled"] else "No", summary]): self.table.setItem(r,c,QTableWidgetItem(str(v)))
-            cell=QWidget(); hl=QHBoxLayout(cell); hl.setContentsMargins(0,0,0,0)
-            seen=set()
-            for cam in cams:
-                side=(cam.get("lane_direction") or cam.get("side") or "").upper()
-                if side not in {"ENTRY","EXIT"} or side in seen:
-                    continue
-                seen.add(side)
-                b=QPushButton("Open entry" if side=="ENTRY" else "Open exit")
-                b.clicked.connect(lambda _,gid=g["id"],s=side: self._open_and_arm(gid,s,"open"))
-                hl.addWidget(b)
-                cbtn=QPushButton("Close entry" if side=="ENTRY" else "Close exit")
-                cbtn.clicked.connect(lambda _,gid=g["id"],s=side: self._open_and_arm(gid,s,"close"))
-                hl.addWidget(cbtn)
-            self.table.setCellWidget(r,5,cell)
+        if rows and self.table.currentRow()<0:
+            self.table.selectRow(0)
+        self._sync_side_buttons()
     def selected_gate(self):
         row=self.table.currentRow()
         if row<0 or row>=len(self.rows): return None
@@ -99,6 +110,27 @@ class Gates(QWidget):
         if len(sides)==1:
             return gate, sides[0]
         return gate, None
+    def _gate_sides(self, gate):
+        sides=set()
+        for cam in ((gate or {}).get("cameras") or []):
+            side=(cam.get("lane_direction") or cam.get("side") or "").upper()
+            if side in {"ENTRY","EXIT"}:
+                sides.add(side)
+        return sides
+    def _sync_side_buttons(self):
+        gate=self.selected_gate()
+        sides=self._gate_sides(gate)
+        for (side, _action), button in getattr(self, "side_buttons", {}).items():
+            button.setVisible(side in sides or gate is None)
+            button.setEnabled(side in sides)
+        if hasattr(self, "control_box"):
+            name=(gate or {}).get("name")
+            self.control_box.setTitle(f"Barrier control · {name}" if name else "Barrier control (select a lane)")
+    def _command_selected(self, side, action):
+        gate=self.selected_gate()
+        if not gate:
+            QMessageBox.information(self, "Barrier control", "Select a lane first."); return
+        self._open_and_arm(gate["id"], side, action)
     def _open_and_arm(self, gid, side, action):
         self._armed_side=side
         self.arm_side(side)
@@ -225,16 +257,28 @@ class Sessions(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Parking sessions"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Find a visit by scanning the receipt QR or typing the plate. Compare the photo and the time inside before taking money. Payment stays off when nothing is owed.")
-        note.setWordWrap(True); l.addWidget(note)
+        # The instructions are the find box's hover text: as a paragraph they
+        # took a band of the screen above the list every operator scans.
+        note_text=("Find a visit by scanning the receipt QR or typing the plate. Compare the photo and the time "
+                   "inside before taking money. Payment stays off when nothing is owed.")
         find=QHBoxLayout()
         self.query=QLineEdit(); self.query.setPlaceholderText("Scan QR, paste the receipt link, or type the plate")
+        self.query.setToolTip(note_text)
         self.query.returnPressed.connect(self.lookup)
         self.find_btn=QPushButton("Find visit"); self.find_btn.clicked.connect(self.lookup)
         find.addWidget(label_for("&Find visit", self.query)); find.addWidget(self.query, 1); find.addWidget(self.find_btn); l.addLayout(find)
-        card=QFrame(); card.setObjectName("card"); card_l=QHBoxLayout(card)
+        # Visits list on the left, the selected visit on the right: the list
+        # used to sit below the photo card, out of sight on a normal screen.
+        # Staff browse visits; a kiosk only sees the visit it looked up, so a
+        # kiosk keeps the wide card (photo beside the details).
+        self.can_browse=api.can("sessions.view") or api.can("fees.view")
+        card=QFrame(); card.setObjectName("card")
+        card_l=QVBoxLayout(card) if self.can_browse else QHBoxLayout(card)
+        if self.can_browse:
+            card.setMinimumWidth(320); card.setMaximumWidth(460)
         photos=QVBoxLayout()
         self.photo=QLabel("No entry photo stored."); self.photo.setMinimumSize(200, 140); self.photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.photo.setMaximumHeight(240)
         self.photo.setObjectName("video"); self.photo.setAccessibleName("Selected visit entry photograph")
         self.crop=QLabel(""); self.crop.setMinimumHeight(80); self.crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.crop.setObjectName("video"); self.crop.setAccessibleName("Selected visit plate crop")
@@ -244,6 +288,7 @@ class Sessions(QWidget):
         self.kiosk_stay=QLabel("Scan a receipt or pick a session.")
         self.kiosk_stay.setWordWrap(True)
         self.kiosk_due=QLabel(""); self.kiosk_due.setStyleSheet("font-size:18px;font-weight:700")
+        self.kiosk_due.setWordWrap(True)          # long messages were cut off in the narrow column
         self.kiosk_note=QLabel(""); self.kiosk_note.setWordWrap(True)
         self.correct=QLineEdit(); self.correct.setPlaceholderText("Correct plate")
         actions=QVBoxLayout()
@@ -261,12 +306,19 @@ class Sessions(QWidget):
         actions.addWidget(save_plate); actions.addWidget(self.pay_btn); actions.addWidget(self.mobile_btn); actions.addWidget(self.exit_btn)
         detail.addWidget(self.kiosk_plate); detail.addWidget(self.kiosk_stay); detail.addWidget(self.kiosk_due); detail.addWidget(self.kiosk_note)
         detail.addWidget(label_for("&Correct plate", self.correct)); detail.addWidget(self.correct); detail.addLayout(actions)
-        card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
-        l.addWidget(card)
-        # Staff browse visits; a kiosk only sees the visit it looked up.
-        self.can_browse=api.can("sessions.view") or api.can("fees.view")
+        if self.can_browse:
+            card_l.addLayout(photos); card_l.addLayout(detail); card_l.addStretch(1)
+        else:
+            card_l.addLayout(photos, 1); card_l.addLayout(detail, 2)
         self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Kind","Status","Receipt","Entry","Due","Paid","Gate"])
-        configure_table(self.table); l.addWidget(self.table, 1)
+        configure_table(self.table)
+        list_side=QWidget(); list_l=QVBoxLayout(list_side); list_l.setContentsMargins(0, 0, 0, 0)
+        list_l.addWidget(self.table, 1)
+        split=QSplitter(Qt.Orientation.Horizontal); split.setChildrenCollapsible(False)
+        split.addWidget(list_side); split.addWidget(card)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 1)
+        l.addWidget(split, 1)
+        list_side.setVisible(self.can_browse)
         self.table.setVisible(self.can_browse)
         self.table.itemSelectionChanged.connect(self._on_row)
         row=QHBoxLayout()
@@ -283,7 +335,8 @@ class Sessions(QWidget):
         confirm_exit.setToolTip("The camera missed an exit or the boom was opened by hand: confirm the car left, with a reason.")
         waiting=QPushButton("Linked cars inside / exits waiting…"); waiting.clicked.connect(self.exits_waiting)
         waiting.setVisible(api.can("exits.confirm"))
-        row.addWidget(receipt); row.addWidget(admit); row.addWidget(confirm_exit); row.addWidget(waiting); row.addWidget(refresh); row.addStretch(); l.addLayout(row)
+        row.addWidget(receipt); row.addWidget(admit); row.addWidget(confirm_exit); row.addWidget(waiting); row.addWidget(refresh); row.addStretch()
+        list_l.addLayout(row) if self.can_browse else l.addLayout(row)
         self.rows=[]; self.visit=None; self._loaded=False
         # Payments arrive from phones, kiosks and other desks: while this page
         # is on screen it re-reads the list and the shown visit by itself.
@@ -705,13 +758,34 @@ class Payments(QWidget):
     def __init__(self):
         super().__init__(); l=QVBoxLayout(self)
         title=QLabel("Payments"); title.setStyleSheet("font-size:24px;font-weight:700"); l.addWidget(title)
-        note=QLabel("Kiosk and mobile payments share one ledger. A phone success screen is not paid until a verified transaction exists.")
-        note.setWordWrap(True); l.addWidget(note)
+        # Filters on top and the total of what was paid: the page used to be
+        # the newest 100 payments with neither.
+        filters=QHBoxLayout()
+        today=QDate.currentDate()
+        self.date_from=QDateEdit(today.addDays(-6)); self.date_from.setCalendarPopup(True); self.date_from.setDisplayFormat("yyyy-MM-dd")
+        self.date_to=QDateEdit(today); self.date_to.setCalendarPopup(True); self.date_to.setDisplayFormat("yyyy-MM-dd")
+        for field in (self.date_from, self.date_to):
+            field.setMinimumWidth(field.fontMetrics().horizontalAdvance("2026-12-31") + 48)
+        self.method=QComboBox(); self.method.addItem("All methods", "")
+        # The method codes the ledger records (simulated ones on test sites).
+        for code, label in (("KIOSK_CASH", "Cash"), ("MOBILE_MONEY", "Mobile Money"),
+                            ("MOBILE_SIMULATED", "Mobile (simulated)"), ("CARD_SIMULATED", "Card (simulated)")):
+            self.method.addItem(label, code)
+        self.pay_status=QComboBox(); self.pay_status.addItem("All statuses", "")
+        for code, label in (("SUCCEEDED", "Succeeded"), ("PENDING", "Pending"), ("FAILED", "Failed"), ("CANCELLED", "Cancelled")):
+            self.pay_status.addItem(label, code)
+        for label, field in (("From", self.date_from), ("To", self.date_to), ("Method", self.method), ("Status", self.pay_status)):
+            filters.addWidget(label_for(label, field)); filters.addWidget(field)
+        self.refresh_btn=QPushButton("Show"); self.refresh_btn.clicked.connect(self.refresh)
+        filters.addWidget(self.refresh_btn); filters.addStretch()
+        l.addLayout(filters)
         self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(["When","Session","Method","Amount","Status","Provider"])
+        self.table.setToolTip("Kiosk and mobile payments share one ledger. A phone success screen is not paid "
+                              "until a verified transaction exists.")
         configure_table(self.table); l.addWidget(self.table, 1)
-        self.refresh_btn=QPushButton("Refresh"); self.refresh_btn.clicked.connect(self.refresh)
+        self.total=QLabel(""); self.total.setStyleSheet("font-weight:700")
         self.status=QLabel(""); self.status.setWordWrap(True)
-        row=QHBoxLayout(); row.addWidget(self.refresh_btn); row.addWidget(self.status, 1); l.addLayout(row)
+        row=QHBoxLayout(); row.addWidget(self.total); row.addWidget(self.status, 1); l.addLayout(row)
         self._loaded=False
     def showEvent(self, event):
         super().showEvent(event)
@@ -720,11 +794,25 @@ class Payments(QWidget):
             self.refresh()
     def refresh(self):
         self.status.setText("Loading payments…")
-        run_task(self, lambda: api.get("/payments"), self._fill, buttons=self.refresh_btn, busy_text="Refreshing…",
+        from urllib.parse import urlencode
+        query={"date_from": self.date_from.date().toString("yyyy-MM-dd"),
+               "date_to": self.date_to.date().toString("yyyy-MM-dd"), "limit": 1000}
+        if self.method.currentData():
+            query["method"]=self.method.currentData()
+        if self.pay_status.currentData():
+            query["status"]=self.pay_status.currentData()
+        path="/payments?"+urlencode(query)
+        run_task(self, lambda: api.get(path), self._fill, buttons=self.refresh_btn, busy_text="Loading…",
                  on_error=lambda message, _e: self.status.setText(message))
     def _fill(self, rows):
         rows=rows or []
-        self.status.setText(f"{len(rows)} payments." if rows else "No payments yet.")
+        self.status.setText(f"{len(rows)} payments." if rows else "No payments in this range.")
+        totals={}
+        for p in rows:
+            if str(p.get("status") or "").upper()=="SUCCEEDED":
+                currency=p.get("currency") or ""
+                totals[currency]=totals.get(currency, 0)+float(p.get("amount") or 0)
+        self.total.setText("Paid: " + ", ".join(money_label(v, c) for c, v in sorted(totals.items())) if totals else "Paid: 0")
         self.table.setRowCount(len(rows))
         for r,p in enumerate(rows):
             vals=[
@@ -746,11 +834,15 @@ class Vehicles(QWidget):
         note.setWordWrap(True); l.addWidget(note)
         self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(["Plate","Owner","Belongs to","Plan","Auto-open","Enabled","From","Until"])
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        configure_table(self.table); l.addWidget(self.table, 1)
+        configure_table(self.table)
+        # Buttons above the list (they were cut off at the right below it),
+        # and the bulk box folded behind "Register many…" until needed.
+        self.bulk_box=QWidget(); bulk_l=QVBoxLayout(self.bulk_box); bulk_l.setContentsMargins(0, 0, 0, 0)
         bulk_note=QLabel("Register many, one plate per line: plate, owner, start date, end date")
-        l.addWidget(bulk_note)
+        bulk_l.addWidget(bulk_note)
         self.bulk=QPlainTextEdit(); self.bulk.setPlaceholderText("ABC1234, Owner, 2026-09-01, 2026-10-01"); self.bulk.setMaximumHeight(90)
-        l.addWidget(self.bulk)
+        bulk_l.addWidget(self.bulk)
+        self.bulk_box.setVisible(False)
         row=QHBoxLayout()
         manage=api.can("subscribers.manage")
         add=QPushButton(action_label("Register plate", "Ctrl+N")); add.clicked.connect(self.add); add.setVisible(manage); add.setToolTip("Register plate (Ctrl+N)")
@@ -765,8 +857,14 @@ class Vehicles(QWidget):
         visitors.setVisible(api.can("visitors.manage") or manage)
         self.refresh_btn=refresh; self.add_btn=add; self.bulk_btn=bulk; self.edit_btn=edit
         self.status=QLabel(""); self.status.setWordWrap(True)
-        row.addWidget(add); row.addWidget(bulk); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh)
-        row.addWidget(groups); row.addWidget(visitors); row.addStretch(); l.addLayout(row)
+        self.bulk_toggle=QPushButton("Register many…"); self.bulk_toggle.setObjectName("secondary"); self.bulk_toggle.setCheckable(True)
+        self.bulk_toggle.setVisible(manage)
+        self.bulk_toggle.toggled.connect(self.bulk_box.setVisible)
+        bulk_l.addWidget(bulk, 0, Qt.AlignmentFlag.AlignLeft)
+        row.addWidget(add); row.addWidget(self.bulk_toggle); row.addWidget(edit); row.addWidget(delete); row.addWidget(delete_many); row.addWidget(refresh)
+        row.addStretch(); row.addWidget(groups); row.addWidget(visitors); l.addLayout(row)
+        l.addWidget(self.bulk_box)
+        l.addWidget(self.table, 1)
         l.addWidget(self.status)
         self.rows=[]; self._loaded=False
     def showEvent(self, event):

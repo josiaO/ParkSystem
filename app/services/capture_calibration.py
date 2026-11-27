@@ -61,6 +61,8 @@ DEFAULTS: dict[str, Any] = {
 # is never left unstored because of it.
 RULES: dict[str, str] = {
     "zone": "Capture zone",
+    "zone_before": "Capture zone: plate not there yet",
+    "zone_after": "Capture zone: plate already through",
     "start_line": "Start line",
     "end_line": "End line",
     "plate_size": "Minimum plate size",
@@ -70,6 +72,11 @@ RULES: dict[str, str] = {
 }
 DEFAULT_ENFORCE: dict[str, bool] = {
     "zone": True,
+    # On: a plate before (above) or after (below) the zone is refused by the
+    # capture zone. Off: the start / end line switch decides it instead, so
+    # with the start line off a plate still approaching the zone is read.
+    "zone_before": True,
+    "zone_after": True,
     "start_line": False,
     "end_line": False,
     "plate_size": True,
@@ -577,20 +584,30 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
             past_line = cy >= float(line["y"]) if travel_down else cy <= float(line["y"])
         beyond = bool(end) and (cy > float(end["y"]) if travel_down else cy < float(end["y"]))
         if not in_zone:
-            # Outside the zone only because the car hasn't reached it yet (or
-            # has already driven through it) is a start/end-line question, so
-            # those switches decide. Before this, "store reads before the
-            # start line" did nothing: the zone's top edge sits just above the
-            # start line, and every early read was refused as outside the zone.
-            # Off to the side (another lane, a parked car) stays a zone refusal.
+            # Off to the side (another lane, a parked car) is always a zone
+            # refusal. A plate in the lane that is not there yet, or already
+            # through, is a zone refusal while "zone_before" / "zone_after" is
+            # on (the default: on one entry lane 74 of 113 stored reads had the
+            # plate above the zone). Switched off, the start / end line switch
+            # decides it, so with the start line off early reads are stored.
             side = _side_of_zone(cx, cy, zone)
             approach, departed = ("above", "below") if travel_down else ("below", "above")
-            if side == approach and line:
-                if past_line:
-                    fail("start_line", "before the capture zone")
-            elif side == departed and end:
-                if not beyond:
-                    fail("end_line", "past the capture zone")
+            if side == approach:
+                if rules.get("zone_before", True):
+                    fail("zone", "before the capture zone")
+                elif line:
+                    if past_line:
+                        fail("start_line", "before the capture zone")
+                else:
+                    fail("zone", "outside capture zone")
+            elif side == departed:
+                if rules.get("zone_after", True):
+                    fail("zone", "past the capture zone")
+                elif end:
+                    if not beyond:
+                        fail("end_line", "past the capture zone")
+                else:
+                    fail("zone", "outside capture zone")
             else:
                 fail("zone", "outside capture zone")
         if line and not past_line:
@@ -800,12 +817,70 @@ class CaptureGate:
         self._fired_width = 0.0
         self.selected: Selected | None = None
         self.best_width = 0.0
+        # Where the nearest plate was on recent frames: (time, centre x, centre y)
+        # as fractions of the picture, for predicting where it will be.
+        self._track: list[tuple[float, float, float]] = []
+        # The most recent frame whose plate this calibration accepts: what is
+        # read if the camera's snapshot misses the plate.
+        self.last_eligible: Selected | None = None
+        self.fired_on_prediction = False
+
+    # -- where the plate is going -------------------------------------
+    TRACK_SECONDS = 1.0
+    # The camera's snapshot delay varies (0.32-0.75 s around a 0.57 s median
+    # on one site). Aim for the plate to be inside the zone even if the
+    # snapshot comes this much sooner than usual.
+    SNAPSHOT_MARGIN_SECONDS = 0.2
+
+    def _note_track(self, seen: list[Candidate], now: float) -> None:
+        nearest = max(seen, key=lambda c: c.width_px)
+        numbers = _box_numbers(nearest.box)
+        if numbers is None:
+            return
+        x1, y1, x2, y2, fw, fh = numbers
+        self._track.append((now, (x1 + x2) / 2.0 / fw, (y1 + y2) / 2.0 / fh))
+        self._track = [p for p in self._track if now - p[0] <= self.TRACK_SECONDS]
+
+    def velocity(self) -> tuple[float, float] | None:
+        """Plate speed in picture fractions per second, from recent frames."""
+        if len(self._track) < 2:
+            return None
+        t0, x0, y0 = self._track[0]
+        t1, x1, y1 = self._track[-1]
+        if t1 - t0 < 0.15:
+            return None
+        return (x1 - x0) / (t1 - t0), (y1 - y0) / (t1 - t0)
+
+    def _predicted(self, candidate: Candidate, lead_seconds: float) -> Candidate | None:
+        """The candidate as it will be ``lead_seconds`` from now, judged by this calibration."""
+        speed = self.velocity()
+        numbers = _box_numbers(candidate.box)
+        if speed is None or numbers is None:
+            return None
+        x1, y1, x2, y2, fw, fh = numbers
+        dx, dy = speed[0] * lead_seconds * fw, speed[1] * lead_seconds * fh
+        moved = {**candidate.box, "x1": x1 + dx, "x2": x2 + dx, "y1": y1 + dy, "y2": y2 + dy}
+        # Position, size and detector rules only: the picture quality of a
+        # frame that has not been taken yet can't be measured.
+        judged = evaluate_frame(b"", [moved], self.config)
+        return judged[0] if judged else None
 
     # -- the decision -------------------------------------------------
-    def observe(self, candidates: list[Candidate], boxes: list[dict], jpeg: bytes, now: float) -> str:
+    def observe(self, candidates: list[Candidate], boxes: list[dict], jpeg: bytes, now: float,
+                *, lead_seconds: float = 0.0) -> str:
+        """``lead_seconds`` > 0: the read is a camera snapshot taken that long
+        after firing. The gate then fires as soon as the plate will be inside
+        the calibration when the snapshot is taken (or already is), instead of
+        collecting live frames that are never read."""
         now = float(now)
         seen = [c for c in candidates or []]
         eligible = [c for c in seen if c.eligible]
+        if seen:
+            self._note_track(seen, now)
+        if eligible:
+            best_now = max(eligible, key=lambda c: c.score)
+            self.last_eligible = Selected(jpeg=jpeg, box=best_now.box, boxes=list(boxes or []), candidate=best_now,
+                                          frames_considered=1, selected_at=now)
         if not seen:
             if not self._seen_any:
                 self.reset()
@@ -831,6 +906,19 @@ class CaptureGate:
                 self.reset()
                 return "new_vehicle"
             return "held"
+        if lead_seconds > 0:
+            # Snapshot mode: fire now if the plate is, or by the time the
+            # camera takes its picture will be, inside the calibration.
+            if eligible:
+                self._window = [self.last_eligible]
+                return self._fire(now)
+            nearest = max(seen, key=lambda c: c.width_px)
+            ahead = self._predicted(nearest, max(0.0, float(lead_seconds) - self.SNAPSHOT_MARGIN_SECONDS))
+            if ahead is not None and ahead.eligible:
+                self._window = [Selected(jpeg=jpeg, box=nearest.box, boxes=list(boxes or []), candidate=nearest,
+                                         frames_considered=1, selected_at=now)]
+                return self._fire(now, predicted=True)
+            return "far"
         if not eligible:
             if self._window:
                 return self._fire(now)                  # left the eligible area: best of the window
@@ -846,12 +934,13 @@ class CaptureGate:
             return self._fire(now)
         return "collecting"
 
-    def _fire(self, now: float) -> str:
+    def _fire(self, now: float, *, predicted: bool = False) -> str:
         if self._ocr_count >= self.max_ocr:
             self._held = True
             self._window = []
             self._window_started = None
             return "held"
+        self.fired_on_prediction = bool(predicted)
         best = max(self._window, key=lambda s: s.candidate.score)
         best.frames_considered = len(self._window)
         best.selected_at = now
