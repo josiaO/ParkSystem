@@ -697,11 +697,18 @@ async def _video_arrival_ready(camera, jpeg: bytes, *, lead_seconds: float = 0.0
 
     if not _detect_due(int(camera.id)):
         return False
-    _mark_detect(int(camera.id))
+    from app.services import motion_gate
+
+    # A still picture with no plate seen lately has nothing new to find; the
+    # detector (~80-90 ms of CPU a frame) runs only when the picture moves.
     config = calibration.for_camera(int(camera.id))
+    if not motion_gate.should_detect(int(camera.id), jpeg, region=motion_gate.watch_region(config)):
+        return False
+    _mark_detect(int(camera.id))
     # Whole picture: a far plate is detected and tracked; the calibration,
     # not a crop, decides when it is close enough to read.
     boxes, located = await run_inference(locate_plate_boxes, jpeg, detect_roi="off", detect_zoom=1.0)
+    motion_gate.note_result(int(camera.id), plate_seen=bool(boxes))
     gate = calibration.gate_for(int(camera.id))
     gate.configure(config)
     if not located.get("available"):
@@ -780,6 +787,32 @@ def _current_recognition_jpeg(camera_id: int) -> bytes:
     return b""
 
 
+_WATCH_CAMERA_SECONDS = 2.0
+_watch_cameras: dict[int, tuple[float, Camera | None]] = {}
+
+
+def _watch_camera(camera_id: int) -> Camera | None:
+    """The camera row for the per-frame checks, read at most every 2 s.
+
+    A detached copy: only its columns are used here. Anything that reads or
+    stores a plate opens a session and loads the camera fresh.
+    """
+    now = time.monotonic()
+    hit = _watch_cameras.get(int(camera_id))
+    if hit is not None and now - hit[0] < _WATCH_CAMERA_SECONDS:
+        return hit[1]
+    with short_session() as db:
+        camera = db.get(Camera, camera_id)
+        expunge = getattr(db, "expunge", None)
+        if camera is not None and callable(expunge):
+            try:
+                expunge(camera)
+            except Exception:
+                pass                          # not session-bound (tests, a stub row)
+    _watch_cameras[int(camera_id)] = (now, camera)
+    return camera
+
+
 async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
     """FastALPR samples the latest detect JPEG from the shared camera mailbox.
 
@@ -792,10 +825,13 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
         from app.services.mediamtx_detect import stop_detect_consumer
         stop_detect_consumer(camera_id)
         return
-    with short_session() as db:
-        camera = db.get(Camera, camera_id)
-        if camera is None or not software_ocr_enabled(camera):
-            return
+    # Every tick (four a second per camera) used to open two database
+    # sessions and ask the camera host for its last plate. The camera row is
+    # now cached for a couple of seconds, and the session and the host call
+    # wait until the gate says the plate is ready.
+    camera = _watch_camera(camera_id)
+    if camera is None or not software_ocr_enabled(camera):
+        return
     from app.services.media_gateway import gateway
     jpeg = _current_recognition_jpeg(camera_id)
     if jpeg[:2] != b"\xff\xd8":
@@ -818,31 +854,23 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             _mark_local_alpr(camera_id)
         gateway.note_ai_sample(camera_id, dropped=True)
         return
+    from app.services import capture_calibration as calibration
+    from app.services import runtime_settings, zirp_trigger
+
+    snapshot_mode = (
+        str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"}
+        and handle is not None and not calibration.in_test_mode(camera_id)
+    )
+    lead = zirp_trigger.lead_seconds(camera_id) if snapshot_mode else 0.0
+    if not await _video_arrival_ready(camera, jpeg, lead_seconds=lead):
+        gateway.note_ai_sample(camera_id, dropped=True)
+        return
     with short_session() as db:
         camera = db.get(Camera, camera_id)
         if camera is None or not software_ocr_enabled(camera):
             return
         from app.services.ocr_policy import LOCAL_ONLY, camera_recognition_mode
         release_connection(db)
-        native = {} if camera_recognition_mode(camera) == LOCAL_ONLY else await _native_capture_for_camera(camera)
-        from app.services.recognition_runtime import runtime
-        # HVX last_capture plate text is not presence. Coil/visit/generic IP are.
-        presence = bool(
-            coil_watch.occupied(camera_id)
-            or runtime.lane(camera_id).visit.vehicle_present
-            or (software_ocr_enabled(camera) and not adapter_has_native_plates(camera))
-        )
-        from app.services import capture_calibration as calibration
-        from app.services import runtime_settings, zirp_trigger
-
-        snapshot_mode = (
-            str(runtime_settings.get("capture_trigger") or "zirp") in {"zirp", "both"}
-            and handle is not None and not calibration.in_test_mode(camera_id)
-        )
-        lead = zirp_trigger.lead_seconds(camera_id) if snapshot_mode else 0.0
-        if not await _video_arrival_ready(camera, jpeg, lead_seconds=lead):
-            gateway.note_ai_sample(camera_id, dropped=True)
-            return
 
         gate = calibration.gate_for(int(camera_id))
         from app.services.recognition_runtime import runtime as _runtime
@@ -884,6 +912,7 @@ async def _maybe_watch_local_alpr(camera_id: int, handle: int) -> None:
             return
         # The zone already saw a still plate. Read that crop even if the coil
         # has not pulsed; a moving frame never reaches this call.
+        native = {} if camera_recognition_mode(camera) == LOCAL_ONLY else await _native_capture_for_camera(camera)
         alpr = await _run_local_alpr(db, camera, jpeg, native=native, presence=True)
         from app.services import zirp_trigger
 

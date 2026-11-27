@@ -786,6 +786,10 @@ class SettingsPage(QWidget):
         self.rec_photo=QComboBox()
         for value, label in (("off", "Don't show the entry photo"), ("blurred", "Show it blurred"), ("full", "Show it as taken")):
             self.rec_photo.addItem(label, value)
+        self.rec_motion=QCheckBox("Look for plates only when the picture moves (saves CPU)")
+        self.rec_motion.setToolTip("While a lane's picture is still and no plate was seen in the last few seconds, "
+                                   "Zirp skips the plate search (it still looks every 2 seconds). "
+                                   "Switch off to search every frame.")
         self.rec_region=QCheckBox("Look for plates only inside the camera's own recognition area")
         self.rec_region.setToolTip("Uses the plate area drawn in the camera's configuration tool (OcxConfig). "
                                    "Leave off unless that area covers where cars stop: a close car's plate "
@@ -798,6 +802,7 @@ class SettingsPage(QWidget):
         form.addRow("Read a waiting car again after", self.rec_max)
         form.addRow("Photo on the driver's receipt page", self.rec_photo)
         form.addRow("", self.rec_region)
+        form.addRow("", self.rec_motion)
         v.addLayout(form)
         self.rec_limit.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.rec_confident, self.rec_quiet, self.rec_max)])
         v.addWidget(self._note("A loop going high, or the camera reporting a different plate, always starts a new car, "
@@ -1065,6 +1070,7 @@ class SettingsPage(QWidget):
         self.rec_max.setValue(float(data.get("read_budget_max_seconds") or 20.0))
         self._set_combo(self.rec_photo, data.get("public_receipt_photo") or "off")
         self.rec_region.setChecked(bool(data.get("camera_region_search", False)))
+        self.rec_motion.setChecked(bool(data.get("motion_gate", True)))
         for w in (self.rec_confident, self.rec_quiet, self.rec_max):
             w.setEnabled(self.rec_limit.isChecked())
         self.rec_status.setText("")
@@ -1075,7 +1081,8 @@ class SettingsPage(QWidget):
                  "read_budget_quiet_seconds": self.rec_quiet.value(),
                  "read_budget_max_seconds": self.rec_max.value(),
                  "public_receipt_photo": self.rec_photo.currentData(),
-                 "camera_region_search": self.rec_region.isChecked()}
+                 "camera_region_search": self.rec_region.isChecked(),
+                 "motion_gate": self.rec_motion.isChecked()}
         self.rec_status.setText("Saving…")
         def done(data):
             self._show_recognition(data)

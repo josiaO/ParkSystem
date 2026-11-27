@@ -236,6 +236,10 @@ class Settings(BaseSettings):
     virtual_loop_enabled: bool = True
     capture_trigger: Literal["zirp", "external", "both"] = "zirp"
     virtual_loop_detect_seconds: float = 0.25
+    # Run the plate detector only when the live picture moves (or a plate was
+    # seen in the last few seconds, or 2 s passed). See app/services/motion_gate.py.
+    # Settings -> Recognition switches it.
+    virtual_loop_motion_gate: bool = True
     virtual_loop_max_plate_fraction: float = 0.40
     alpr_capture_far_fallback_seconds: float = 0.0
     # Legacy site-wide recognition zone, the same for every camera. Removed:

@@ -44,7 +44,12 @@ Settings → Recognition → **Who triggers the pictures**:
 **Zirp's trigger** (`_video_arrival_ready`, `05_recognition_ingest.py`;
 `CaptureGate.observe`, `capture_calibration.py`):
 
-1. Every sampled live frame: the plate detector runs on the whole picture,
+1. Every sampled live frame (4 a second per camera): a tiny thumbnail of
+   the lane (the calibration zone, extended towards where cars come from) is
+   compared with the previous one (`motion_gate.py`). The plate detector
+   (~80-90 ms of CPU) runs only when the lane moved, a plate was seen in the
+   last 3 s, or 2 s passed; Settings → Recognition can switch this off.
+   When it runs, it searches the whole picture,
    and each plate box is judged against the camera's calibration
    (`capture_calibration.evaluate_frame`). The gate tracks where the nearest
    plate is from frame to frame, and keeps the last frame whose plate the
@@ -167,6 +172,8 @@ far, blurred, cut off, or not there), not from the crop.
 | Zirp's snapshot arrives ~0.57 s after firing, after a 0.8 s window | picture taken after the plate moved | fixed: fires early by the learned delay; falls back to the in-zone live frame |
 | Waiting car re-read when the 4 s quiet window ends | ~2 stored reads per car | open |
 | Database work on the event loop (up to 2.5 s) | live video hitches | open |
+| Detector ran 16 times a second on empty lanes (~1.4 cores) | Site Service ~1.7 cores | fixed: runs only when the lane moves (~30% of samples measured) |
+| Two database reads and a camera-host call every 0.25 s per camera | load on the LAN database and the host | fixed: cached camera row; read only when the gate fires |
 
 ## Settings: one place each
 

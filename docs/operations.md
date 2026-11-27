@@ -76,7 +76,7 @@ without a restart:
 |---|---|
 | Site | Name, currency, timezone, plate validation (also the recognition country), public address |
 | Parking rules | Receipts, exit payment, grace times, printer |
-| Recognition | Who triggers the camera pictures, the two-reads-per-car limit, the photo on the driver's receipt page, searching only inside the camera's own recognition area (off by default) |
+| Recognition | Who triggers the camera pictures, the two-reads-per-car limit, the photo on the driver's receipt page, searching only inside the camera's own recognition area (off by default), looking for plates only when the picture moves (on by default; saves CPU) |
 | Camera calibration | Each camera's zone, lines and minimum confidence |
 | Mobile money | ClickPesa keys and switching on real money |
 | Alerts | Who is told about manual openings and failed gate commands |
