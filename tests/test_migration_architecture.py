@@ -44,7 +44,7 @@ def _cam(**overrides):
 
 class PlatePolicyTests(unittest.TestCase):
     def test_default_normalisation_is_country_neutral(self):
-        self.assertEqual(normalize_plate("T 285 DQP"), "T385DQP")
+        self.assertEqual(normalize_plate("T 385 DQP"), "T385DQP")
         self.assertEqual(normalize_plate("abc-12"), "ABC12")
         none = validate_plate("ABC12", "NONE")
         self.assertTrue(none["ok"])
@@ -83,7 +83,7 @@ class RecognitionWrapTests(unittest.TestCase):
     def test_providers_are_registered(self):
         self.assertIn("hvx_native", list_recognition_providers())
         self.assertIn("fastalpr", list_recognition_providers())
-        event = normalize_event(camera_id=1, plate="T 285 DQP", plate_raw="T 285 DQP", source="HVX_NATIVE", confidence=0.9)
+        event = normalize_event(camera_id=1, plate="T 385 DQP", plate_raw="T 385 DQP", source="HVX_NATIVE", confidence=0.9)
         self.assertEqual(event["normalized_plate"], "T385DQP")
         self.assertEqual(event["source"], "HVX_NATIVE")
         self.assertTrue(event["event_id"])
@@ -92,7 +92,7 @@ class RecognitionWrapTests(unittest.TestCase):
         provider = recognition_provider_for("hvx_native")
         result = asyncio.run(provider.process({
             "camera_id": 4,
-            "capture": {"plate": "T 349 DLG", "score": 91},
+            "capture": {"plate": "T 472 DLG", "score": 91},
         }))
         self.assertEqual(result["normalized_plate"], "T472DLG")
         self.assertEqual(result["source"], "HVX_NATIVE")

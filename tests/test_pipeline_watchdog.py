@@ -123,3 +123,52 @@ def test_watchdog_snapshot_feeds_health_details():
         dog.last_report = {}
     source = open(health.__file__, encoding="utf-8").read()
     assert '"watchdog": _watchdog_status()' in source
+
+
+# SITE-PC01, 23 Nov 2026: after every restart the watchdog reset cameras 0.4 s
+# into their reconnect, by the session numbers stored before the restart.
+# That broke logins in progress, reshuffled the numbers and once kept 2# Exit
+# disconnected for 20 minutes.
+
+def _sdk_camera_deps(connections, status_by_handle):
+    async def hvx_info():
+        return {"available": True, "connections": connections}
+
+    async def video_status(handle):
+        return status_by_handle.get(handle, {})
+
+    return _deps(
+        list_cameras=lambda: [{"id": 4, "name": "2# Exit", "sdk": True, "sdk_handle": 1, "ip": "192.168.10.50"}],
+        hvx_info=hvx_info,
+        hvx_video_status=video_status,
+    )
+
+
+def test_watchdog_checks_and_resets_the_session_that_belongs_to_the_camera_ip():
+    # Stored number 1 now belongs to 192.168.10.144; this camera's session is 3.
+    deps, events, disconnects, _ = _sdk_camera_deps(
+        [{"handle": 1, "ip": "192.168.10.144"}, {"handle": 3, "ip": "192.168.10.50"}],
+        {1: {"callback_age_ms": 50}, 3: {"callback_age_ms": 45000}},
+    )
+    report = asyncio.run(PipelineWatchdog(clock=_Clock()).run_once(deps))
+    assert disconnects == [3]                    # never camera 1's session
+    assert report["cameras"][0]["sdk_handle"] == 3
+
+
+def test_watchdog_leaves_a_camera_that_is_still_connecting_alone():
+    clock = _Clock()
+    deps, events, disconnects, _ = _sdk_camera_deps([{"handle": 2, "ip": "192.168.10.50"}], {2: {}})
+    dog = PipelineWatchdog(clock=clock)
+    first = asyncio.run(dog.run_once(deps))
+    assert disconnects == [] and first["cameras"][0]["reason"] == "camera session starting"
+    clock.now += dog.startup_grace_seconds + 1     # still no video after the grace: reset it
+    asyncio.run(dog.run_once(deps))
+    assert disconnects == [2]
+
+
+def test_watchdog_does_not_reset_by_number_when_the_camera_is_not_connected():
+    deps, events, disconnects, _ = _sdk_camera_deps([{"handle": 1, "ip": "192.168.10.144"}],
+                                                    {1: {"callback_age_ms": 45000}})
+    report = asyncio.run(PipelineWatchdog(clock=_Clock()).run_once(deps))
+    assert disconnects == []                     # the restore loop logs it in
+    assert report["cameras"][0]["reason"] == "not connected on this PC's camera SDK host"

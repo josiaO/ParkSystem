@@ -1,6 +1,6 @@
 # Ground-loop I/O boards: protocol and Zirp wiring
 
-Each lane side has a small network I/O board. On SITE-PC01 these are:
+Each lane side has a small network I/O board. A two-lane site looks like this (example addresses):
 
 | Board | IP | Lane side | Camera |
 |---|---|---|---|

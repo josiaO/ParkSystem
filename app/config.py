@@ -211,6 +211,12 @@ class Settings(BaseSettings):
     read_budget_confident: float = 0.90
     read_budget_quiet_seconds: float = 4.0
     read_budget_max_seconds: float = 20.0
+    # Search a camera event picture only inside the camera's own plate
+    # region (OcxConfig's recognition area, padded). Off by default: the
+    # camera's area usually ends above a close car's plate, and on one site
+    # it dropped readable plates. The capture calibration still decides
+    # which plates are read. Settings -> Recognition can switch it on.
+    camera_region_search: bool = False
     alpr_country: str = ""
     alpr_csf: float = 0.918
     alpr_detector_confidence: float = 0.26
@@ -568,7 +574,14 @@ class Settings(BaseSettings):
             if url.get_backend_name() == "sqlite" and filename and filename != ":memory:" and not filename.startswith("file:"):
                 path = Path(filename)
                 if not path.is_absolute():
-                    return url.set(database=(install_directory() / path).as_posix()).render_as_string(hide_password=False)
+                    # Built by hand: SQLAlchemy 2.1 (what the installer ships)
+                    # percent-encodes the drive colon ("C%3A/..."), which
+                    # Alembic's config parser then trips over.
+                    from urllib.parse import urlencode
+
+                    query = urlencode(dict(url.query), doseq=True)
+                    absolute = (install_directory() / path).as_posix()
+                    return f"{url.drivername}:///{absolute}" + (f"?{query}" if query else "")
             return self.database_url
         return f"sqlite:///{(self.data_dir / 'smartpark.db').as_posix()}"
 

@@ -66,7 +66,12 @@ OCR_CONFIG = "cct_xs_v2_global_plate_config.yaml"
 
 MIN_PLATE_CHARS = 5
 
-MIN_PLATE_ASPECT = 1.35
+# Two-line (square) Tanzanian plates on pickups and trucks are about 1.1 wide
+# per 1 tall. 1.35 dropped every one of them before reading: 18 of the
+# 271 "no plate" pictures on one site in a morning were such plates, and the
+# reader reads them at 0.93-1.00. Door handles and vents that get through are
+# not read as plates and are dropped by the OCR checks.
+MIN_PLATE_ASPECT = 1.0
 
 MAX_PLATE_ASPECT = 8.0
 

@@ -59,8 +59,11 @@ def cleaned(profiles):
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if "cameras" not in sa.inspect(bind).get_table_names():
+    inspector = sa.inspect(bind)
+    if "cameras" not in inspector.get_table_names():
         return
+    if "stream_profiles" not in {column["name"] for column in inspector.get_columns("cameras")}:
+        return                      # nothing saved, so no old zones to clear
     cameras = sa.table("cameras", sa.column("id", sa.Integer), sa.column("stream_profiles", sa.JSON))
     rows = bind.execute(sa.select(cameras.c.id, cameras.c.stream_profiles)).fetchall()
     for camera_id, profiles in rows:

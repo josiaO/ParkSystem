@@ -111,3 +111,15 @@ def test_a_database_outage_keeps_the_last_values(monkeypatch):
     runtime_settings.invalidate()
     with patch("app.db.SessionLocal", side_effect=RuntimeError("database down")):
         assert runtime_settings.get("read_budget_enabled") is settings.read_budget_enabled
+
+
+def test_camera_region_search_is_off_until_switched_on_screen(site):
+    client, headers = site
+    body = client.get("/settings/recognition", headers=headers).json()
+    assert body["camera_region_search"] is False
+    saved = client.patch("/settings/recognition", headers=headers, json={"camera_region_search": True})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["camera_region_search"] is True
+    assert runtime_settings.get("camera_region_search") is True
+    saved = client.patch("/settings/recognition", headers=headers, json={"camera_region_search": False})
+    assert runtime_settings.get("camera_region_search") is False

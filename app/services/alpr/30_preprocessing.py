@@ -242,7 +242,11 @@ def _save_crop_bgr(crop_bgr) -> str | None:
         return None
 
 def parse_detect_roi(value: str | None = None) -> tuple[float, float, float, float] | None:
-    raw = str(value if value is not None else getattr(settings, "alpr_detect_roi", "") or "").strip()
+    # None is the whole picture. The site-wide SMARTPARK_ALPR_DETECT_ROI was
+    # retired with the detection zone (migration 0020); a value left in
+    # zirp.env still cropped commissioning and upload reads while the live
+    # worker read the whole picture, so the two disagreed.
+    raw = str(value or "").strip()
     if raw.lower() in {"", "off", "none", "full"}:
         return None
     try:
@@ -264,13 +268,14 @@ def _roi_crop(bgr, detect_roi: str | None = None, detect_zoom: float | None = No
     """Crop to the recognition zone, then apply digital zoom. Returns (view, x_off, y_off).
 
     ``detect_roi`` is a per-camera override (``x1,y1,x2,y2`` or ``off``).
-    None uses the site-wide ``alpr_detect_roi`` setting. ``off`` is the full frame.
+    None or ``off`` is the full frame; the capture zone lives in the camera's
+    calibration (``app.services.capture_calibration``).
     ``detect_zoom`` above 1 keeps the center of that zone (2 keeps the middle half).
     Boxes found in the crop are shifted back by the returned offsets.
     """
     from app.services.camera_framing import parse_detect_zoom
 
-    roi = parse_detect_roi(detect_roi) if detect_roi is not None else parse_detect_roi()
+    roi = parse_detect_roi(detect_roi)
     if bgr is None or getattr(bgr, "size", 0) == 0:
         return bgr, 0, 0
     if roi is None:

@@ -169,7 +169,7 @@ def test_bundled_models_crop_and_read_real_vehicle_stills(tmp_path, monkeypatch)
         assert all(shape[0] < height and shape[1] < width for shape in ocr_shapes[count:])
         assert result["best"]["bbox"]["crop"]
     async def route_stopped_vehicle():
-        from app.services.camera_framing import gate_for
+        from app.services.capture_calibration import gate_for
         from app.services.recognition_runtime import runtime
         camera=Camera(id=9902, name="Entry", ip_address="10.1.0.3", adapter_id="hvx",
                       recognition_mode="FASTALPR_ONLY", sdk_handle=7, stream_profiles={})

@@ -786,6 +786,10 @@ class SettingsPage(QWidget):
         self.rec_photo=QComboBox()
         for value, label in (("off", "Don't show the entry photo"), ("blurred", "Show it blurred"), ("full", "Show it as taken")):
             self.rec_photo.addItem(label, value)
+        self.rec_region=QCheckBox("Look for plates only inside the camera's own recognition area")
+        self.rec_region.setToolTip("Uses the plate area drawn in the camera's configuration tool (OcxConfig). "
+                                   "Leave off unless that area covers where cars stop: a close car's plate "
+                                   "below it is not read. The camera calibration in Zirp still applies either way.")
         form=QFormLayout()
         form.addRow("Who triggers the pictures", self.rec_trigger)
         form.addRow("", self.rec_limit)
@@ -793,6 +797,7 @@ class SettingsPage(QWidget):
         form.addRow("Car has left after", self.rec_quiet)
         form.addRow("Read a waiting car again after", self.rec_max)
         form.addRow("Photo on the driver's receipt page", self.rec_photo)
+        form.addRow("", self.rec_region)
         v.addLayout(form)
         self.rec_limit.toggled.connect(lambda on: [w.setEnabled(on) for w in (self.rec_confident, self.rec_quiet, self.rec_max)])
         v.addWidget(self._note("A loop going high, or the camera reporting a different plate, always starts a new car, "
@@ -1059,6 +1064,7 @@ class SettingsPage(QWidget):
         self.rec_quiet.setValue(float(data.get("read_budget_quiet_seconds") or 4.0))
         self.rec_max.setValue(float(data.get("read_budget_max_seconds") or 20.0))
         self._set_combo(self.rec_photo, data.get("public_receipt_photo") or "off")
+        self.rec_region.setChecked(bool(data.get("camera_region_search", False)))
         for w in (self.rec_confident, self.rec_quiet, self.rec_max):
             w.setEnabled(self.rec_limit.isChecked())
         self.rec_status.setText("")
@@ -1068,7 +1074,8 @@ class SettingsPage(QWidget):
                  "read_budget_confident": round(self.rec_confident.value(), 2),
                  "read_budget_quiet_seconds": self.rec_quiet.value(),
                  "read_budget_max_seconds": self.rec_max.value(),
-                 "public_receipt_photo": self.rec_photo.currentData()}
+                 "public_receipt_photo": self.rec_photo.currentData(),
+                 "camera_region_search": self.rec_region.isChecked()}
         self.rec_status.setText("Saving…")
         def done(data):
             self._show_recognition(data)

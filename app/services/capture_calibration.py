@@ -110,7 +110,10 @@ SAFE = {
     "max_brightness": (150.0, 255.0, "Brightness to must be at least 150 (0-255); lower refuses plates lit by headlights."),
     "min_brightness": (0.0, 100.0, "Brightness from must be 100 or less (0-255); higher refuses plates at night."),
     "max_clipped_fraction": (0.2, 1.0, "Most glare/black allowed must be at least 0.20; lower refuses ordinary plates."),
-    "min_detection_confidence": (0.0, 0.9, "Minimum detector confidence must be 0.90 or less; higher refuses most plates."),
+    # Good plates score 0.85-0.89 on the plate detector. 0.90 (allowed until
+    # 23 Nov 2026) refused 71 of gate 2's pictures in 15 minutes once the
+    # rule was applied before reading.
+    "min_detection_confidence": (0.0, 0.8, "Minimum detector confidence must be 0.80 or less; good plates score 0.85-0.89, so higher refuses most cars."),
     "min_ocr_confidence": (0.0, 0.9, "Minimum recognition confidence must be 0.90 or less; higher refuses most reads."),
     "min_plate_height_px": (0, 40, "Minimum plate height must be 40 px or less on the live picture; plates are rarely taller."),
     "min_plate_width_px": (0, 160, "Minimum plate width must be 160 px or less on the live picture; plates are rarely wider."),
@@ -605,7 +608,7 @@ def evaluate_frame(jpeg: bytes, boxes: list[dict] | None, config: dict[str, Any]
         except (TypeError, ValueError):
             confidence = 0.0
         if calibrated and confidence < float(config.get("min_detection_confidence") or 0.0):
-            fail("detector", f"detector {confidence:.2f} < {float(config['min_detection_confidence']):.2f}")
+            fail("detector", f"detector {confidence:.3f} < {float(config['min_detection_confidence']):.2f}")
         quality: dict[str, float] = {}
         if not reasons and jpeg[:2] == b"\xff\xd8":
             try:

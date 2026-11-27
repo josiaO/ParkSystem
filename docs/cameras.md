@@ -110,6 +110,15 @@ after"). Saved values apply on every Zirp PC within a few seconds.
 The count lives in the shared cache (see [operations.md](operations.md)), so
 the Site Service and the Recognition Worker agree on it.
 
+### The camera's own recognition area
+
+The plate area drawn in the camera's configuration tool (OcxConfig) is read by
+Zirp, but by default Zirp searches the whole picture: that area usually ends
+above the plate of a car that pulls up close, and those plates were not read.
+To search only inside it, tick **Settings → Recognition → "Look for plates
+only inside the camera's own recognition area"**. The camera calibration in
+Zirp applies either way.
+
 ### When a car is read twice
 
 Zirp keeps one capture per car, and **the best read wins**. A

@@ -68,12 +68,22 @@ LEGACY_SQL = [
 class AlembicRunnerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self._engines = []
 
     def tearDown(self):
+        # Windows can't delete a database file that still has a pooled
+        # connection open; close every engine first.
+        for engine in self._engines:
+            engine.dispose()
+        import gc
+
+        gc.collect()
         self.tmp.cleanup()
 
     def _engine(self, name: str):
-        return create_engine(f"sqlite:///{Path(self.tmp.name) / name}")
+        engine = create_engine(f"sqlite:///{Path(self.tmp.name) / name}")
+        self._engines.append(engine)
+        return engine
 
     def test_fresh_database_is_created_and_stamped_at_head(self):
         engine = self._engine("fresh.db")
@@ -93,6 +103,7 @@ class AlembicRunnerTests(unittest.TestCase):
         self.assertEqual(cfg.get_main_option("sqlalchemy.url"), encoded)
 
         file_engine = create_engine(f"sqlite:///{Path(self.tmp.name) / 'C%3A_drive.db'}")
+        self._engines.append(file_engine)
         summary = upgrade_to_head(file_engine)
         self.assertEqual(summary["mode"], "fresh")
         self.assertEqual(current_revision(file_engine), head_revision())

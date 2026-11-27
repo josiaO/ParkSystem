@@ -569,7 +569,7 @@ def patch_migration_flags(payload: MigrationFlagsUpdate, db: Session = Depends(g
 
 @app.get("/settings/recognition")
 def get_recognition_settings(_: User = Depends(require_any("settings.manage", "cameras.manage"))):
-    """Settings -> Recognition: camera trigger, two-read limit, receipt photo."""
+    """Settings -> Recognition: camera trigger, two-read limit, receipt photo, camera-area search."""
     from app.services import runtime_settings
     return runtime_settings.all_values()
 

@@ -109,7 +109,7 @@ var
   KioskPage: TInputQueryWizardPage;
   OptionsPage: TInputOptionWizardPage;
   PreviousRole, PreviousKioskUser, PreviousHvx, InstalledVersion: String;
-  IsUpgrade, Reconfigure, ActivationSucceeded: Boolean;
+  IsUpgrade, Reconfigure, ActivationSucceeded, HeldForReinstall: Boolean;
 
 function RoleKey(Index: Integer): String;
 begin
@@ -293,9 +293,21 @@ var
   ResultCode: Integer;
 begin
   Result := '';
-  // Reinstalling the version that is running: stop it so its files can be replaced.
-  if FileExists(ExpandConstant('{app}\bin\zirpctl.ps1')) and DirExists(ExpandConstant('{app}\versions\{#AppVersion}')) then
-    ZirpCtl('services stop', ResultCode);
+  // Reinstalling (repairing) the version that is running: stop it and keep
+  // it stopped so its files can be replaced. Without the hold, the Site
+  // Service watchdog or an open desktop started Zirp again mid-copy and
+  // setup failed with "DeleteFile failed; code 5" on python32 files.
+  // This runs the new zirpctl from this installer: the installed copy may
+  // be older and not know -Hold.
+  if DirExists(ExpandConstant('{app}\versions\{#AppVersion}')) then
+  begin
+    ExtractTemporaryFile('zirpctl.ps1');
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\zirpctl.ps1') +
+      '" services stop -Hold -Root "' + ExpandConstant('{app}') + '"',
+      ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    HeldForReinstall := True;
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -336,6 +348,19 @@ begin
         'Reason: ' + String(Reason) + #13#10#13#10 +
         'Details: C:\ProgramData\SmartParkEdge\logs\install', mbError, MB_OK);
   end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  // Setup cancelled or failed after holding the services: put them back.
+  if HeldForReinstall and not ActivationSucceeded then
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -Command "Get-Service SmartPark* | Set-Service -StartupType Automatic; ' +
+      'if (Test-Path ''' + ExpandConstant('{app}\bin\zirpctl.ps1') + ''') { & ''' +
+      ExpandConstant('{app}\bin\zirpctl.ps1') + ''' services start }"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 var

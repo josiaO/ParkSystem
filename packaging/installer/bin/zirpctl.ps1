@@ -39,6 +39,8 @@ param(
     # which a switch cannot bind (the installer calls us that way).
     [ValidateSet("", "service", "task")][string]$HvxHost = "",
     [switch]$RestoreDatabase,
+    # services stop -Hold: keep every Zirp service from starting again (installer file copy).
+    [switch]$Hold,
     [switch]$Force,
     [string]$Label = "manual",
     [string]$Root = "",
@@ -443,6 +445,8 @@ function Install-RoleServices([string]$R, [bool]$HvxSvc) {
 }
 
 function Start-ZirpServices {
+    # Undo a held stop (installer cancelled, or "services stop -Hold").
+    Enable-ZirpServices
     # sc.exe returns at once; Start-Service waited for every service in turn.
     foreach ($name in @($CacheService, $SiteService, $MediaService, $WorkerService, $HvxService, $PortalService)) {
         if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
@@ -455,8 +459,31 @@ function Start-ZirpServices {
     }
 }
 
-function Stop-ZirpServices {
-    foreach ($name in $AllServices) {
+# Dependents first. The Site Service goes before the camera SDK host because
+# its watchdog starts the SDK host again when it sees it stopped.
+$StopOrder = @($PortalService, $WorkerService, $MediaService, $SiteService, $HvxService, $CacheService)
+
+function Get-ZirpProcesses {
+    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $p = [string]$_.ExecutablePath; $p -and ($p -like "$Root\*")
+    })
+}
+
+function Stop-ZirpServices([switch]$Hold) {
+    # -Hold (used by the installer): nothing may start Zirp again until the
+    # files are replaced. A reinstall of the same version failed with
+    # "DeleteFile failed; code 5" on python32\libcrypto-3.dll because the
+    # Site Service watchdog, or an open desktop, restarted the services while
+    # the installer was copying. Start-ZirpServices / activate turn them back on.
+    if ($Hold) {
+        foreach ($name in $AllServices) {
+            if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
+                & sc.exe config $name start= disabled 2>$null | Out-Null
+            }
+        }
+        Disable-ScheduledTask -TaskName $HvxTask -ErrorAction SilentlyContinue | Out-Null
+    }
+    foreach ($name in $StopOrder) {
         if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
             & sc.exe stop $name 2>$null | Out-Null
         }
@@ -468,10 +495,27 @@ function Stop-ZirpServices {
         if (-not $running.Count) { break }
         Start-Sleep -Milliseconds 500
     }
-    # Anything still running from this installation (desktop, stray workers).
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $p = [string]$_.ExecutablePath; $p -and ($p -like "$Root\*")
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # Anything still running from this installation (desktop, the 32-bit SDK
+    # host, stray workers), until nothing is left holding a file.
+    for ($pass = 0; $pass -lt 10; $pass++) {
+        $left = Get-ZirpProcesses
+        if (-not $left.Count) { break }
+        $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+    }
+    $left = Get-ZirpProcesses
+    if ($left.Count) {
+        Write-Warning ("Still running from Zirp: " + (($left | ForEach-Object { "$($_.Name) ($($_.ProcessId))" }) -join ", "))
+    }
+}
+
+function Enable-ZirpServices {
+    foreach ($name in $AllServices) {
+        if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
+            & sc.exe config $name start= auto 2>$null | Out-Null
+        }
+    }
+    Enable-ScheduledTask -TaskName $HvxTask -ErrorAction SilentlyContinue | Out-Null
 }
 
 function Get-SiteServiceError {
@@ -797,7 +841,7 @@ try {
             $state = Get-State
             switch ($Action.ToLowerInvariant()) {
                 "start" { Start-ZirpServices }
-                "stop" { Stop-ZirpServices }
+                "stop" { Stop-ZirpServices -Hold:$Hold }
                 "restart" { Stop-ZirpServices; Start-ZirpServices }
                 "install" { Install-RoleServices $(if ($state.Role) { $state.Role } else { "COMBINED" }) ($state.HvxAsService -eq "1") }
                 "remove" { Stop-ZirpServices; foreach ($n in $AllServices) { Remove-ZirpService $n } }

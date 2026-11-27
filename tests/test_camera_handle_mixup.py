@@ -110,22 +110,22 @@ def test_event_poller_drains_each_camera_on_its_own_handle(monkeypatch):
 def test_weaker_reread_of_the_same_car_keeps_the_good_plate_on_screen():
     from app.services.preview import keeps_displayed_plate
 
-    good = {"plate": "T690DCB", "confidence": 0.99}
-    assert keeps_displayed_plate(good, 2.0, {"plate": "T390DCB", "confidence": 0.97})
+    good = {"plate": "T790DCB", "confidence": 0.99}
+    assert keeps_displayed_plate(good, 2.0, {"plate": "T290DCB", "confidence": 0.97})
     assert keeps_displayed_plate(good, 2.0, {"plate": "T760DC8", "confidence": 0.995, "pending_confirmation": True})
 
 
 def test_a_better_read_or_a_different_car_replaces_the_display():
     from app.services.preview import keeps_displayed_plate
 
-    good = {"plate": "T690DCB", "confidence": 0.95}
-    assert not keeps_displayed_plate(good, 2.0, {"plate": "T690DCB", "confidence": 0.80})   # same plate: refresh
-    assert not keeps_displayed_plate(good, 2.0, {"plate": "T690DCE", "confidence": 0.99})   # better read
+    good = {"plate": "T790DCB", "confidence": 0.95}
+    assert not keeps_displayed_plate(good, 2.0, {"plate": "T790DCB", "confidence": 0.80})   # same plate: refresh
+    assert not keeps_displayed_plate(good, 2.0, {"plate": "T790DCE", "confidence": 0.99})   # better read
     assert not keeps_displayed_plate(good, 2.0, {"plate": "T120ENN", "confidence": 0.50,
                                                  "pending_confirmation": True})             # next car
-    assert not keeps_displayed_plate(good, 30.0, {"plate": "T390DCB", "confidence": 0.90})  # old display
+    assert not keeps_displayed_plate(good, 30.0, {"plate": "T290DCB", "confidence": 0.90})  # old display
     held = {"plate": "T760DC8", "confidence": 0.99, "pending_confirmation": True}
-    assert not keeps_displayed_plate(held, 2.0, {"plate": "T690DCB", "confidence": 0.95})   # decided beats held
+    assert not keeps_displayed_plate(held, 2.0, {"plate": "T790DCB", "confidence": 0.95})   # decided beats held
 
 
 # --------------------------------------------------- restore loop (rc6 churn)
